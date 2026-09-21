@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASPLE Predictor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="offline-banner" class="offline-banner hidden">API desconectada - mostrando los ultimos datos en cache</div>
+  <header class="topbar"><a class="brand" href="#dashboard"><span class="brand-mark">A</span><span>ASPLE <b>PREDICTOR</b></span></a><nav class="tabs"><a href="#dashboard" data-route="dashboard">Dashboard</a><a href="#battle" data-route="battle">Battle de Modelos</a><a href="#grid" data-route="grid">Grid Advisor</a></nav><div id="api-chip" class="status-chip offline"><i></i><span>API Offline</span></div></header>
+  <main class="app-shell">
+    <section id="screen-dashboard" class="screen"><div class="page-heading"><div><p class="eyebrow">MERCADO EN TIEMPO REAL</p><h1>Dashboard</h1></div><span id="dashboard-updated" class="muted mono">-</span></div><div class="dashboard-grid"><div class="main-column"><div class="toolbar card"><label>Simbolo<select id="dashboard-symbol"><option value="XRPUSDT">XRP/USDT</option><option value="BTCUSDT">BTC/USDT</option><option value="ETHUSDT">ETH/USDT</option><option value="SOLUSDT">SOL/USDT</option></select></label><label>Timeframe<select id="dashboard-interval"><option value="1h">1H</option><option value="4h" selected>4H</option><option value="12h">12H</option><option value="1d">1D</option><option value="1w">1W</option></select></label><button id="refresh-dashboard" class="button secondary">Actualizar</button></div><div class="card chart-card"><div class="card-title"><div><h2>Precio y consenso</h2><span id="chart-caption" class="muted">Cargando datos registrados...</span></div><span id="chart-signal" class="signal neutral">NEUTRAL</span></div><div id="price-chart" class="price-chart"></div><div class="indicator-strip"><div><span>RSI</span><b id="indicator-rsi">-</b></div><div><span>MACD</span><b id="indicator-macd">-</b></div><div><span>ATR</span><b id="indicator-atr">-</b></div></div></div></div><aside class="model-sidebar"><div id="model-cards"></div><div id="consensus-card" class="card consensus-card"></div><div class="card"><div class="card-title"><h2>Ultimas predicciones</h2><span class="muted">10</span></div><div id="recent-predictions" class="prediction-list"></div></div></aside></div></section>
+    <section id="screen-battle" class="screen hidden"><div class="page-heading"><div><p class="eyebrow">EVIDENCIA COMPARATIVA</p><h1>Battle de Modelos</h1></div><span class="muted">Rendimiento de los ultimos 30 dias</span></div><div id="battle-content"></div></section>
+    <section id="screen-grid" class="screen hidden"><div class="page-heading"><div><p class="eyebrow">ESTRATEGIA ESTADISTICA</p><h1>Grid Advisor</h1></div><span class="muted">Validar antes de operar</span></div><div class="grid-layout"><form id="grid-form" class="card grid-form"><h2>Configurar analisis</h2><label>Simbolo<select id="grid-symbol"><option value="XRPUSDT">XRP/USDT</option><option value="BTCUSDT">BTC/USDT</option><option value="ETHUSDT">ETH/USDT</option><option value="SOLUSDT">SOL/USDT</option></select></label><label>Capital disponible <span class="input-prefix">$<input id="grid-capital" type="number" min="1" step="1" value="1000"></span></label><label>Tolerancia al riesgo<select id="grid-risk"><option value="low">Conservador</option><option value="medium" selected>Moderado</option><option value="high">Agresivo</option></select></label><label>Dias de analisis<select id="grid-days"><option>30</option><option>60</option><option selected>90</option></select></label><button class="button primary" type="submit">ANALIZAR <span>-&gt;</span></button></form><div id="grid-result" class="grid-result card empty-state"><div class="empty-icon">~</div><h2>Configura tu grid</h2><p>El analisis calculara soportes, resistencias, ATR y niveles sugeridos con datos reales.</p></div></div></section>
+  </main><div id="toast" class="toast hidden"></div><script src="app.js"></script>
+</body>
+</html>
