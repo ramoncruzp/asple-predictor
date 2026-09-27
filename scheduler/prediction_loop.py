@@ -52,6 +52,9 @@ class PredictionLoop:
                                 "Startup prediction already exists for %s %s since %s",
                                 symbol, interval, last_closed_close,
                             )
+                            self.latest[(symbol, interval)] = self.ensemble.predict(
+                                symbol, interval, df.tail(200)
+                            )
                             continue
                     df = df.tail(200)
                     result = self.ensemble.predict_and_save(symbol, interval, df)

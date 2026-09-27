@@ -16,7 +16,7 @@ class FakeClient:
             end=datetime.now(timezone.utc), periods=300, freq="1h", tz="UTC"
         )
         close = 100 + np.cumsum(rng.normal(0, 0.2, size=300))
-        return pd.DataFrame(
+        self.frame = pd.DataFrame(
             {
                 "timestamp": timestamps,
                 "open": close - 0.05,
@@ -24,17 +24,21 @@ class FakeClient:
                 "low": close - 0.2,
                 "close": close,
                 "volume": rng.uniform(10, 100, size=300),
+                "close_time": timestamps + pd.Timedelta(hours=1),
             }
         )
+        return self.frame
 
 
 class FakeEnsemble:
     def __init__(self):
         self.predict_calls = 0
         self.predict_and_save_calls = 0
+        self.prediction_frames = []
 
     def predict(self, symbol, interval, df):
         self.predict_calls += 1
+        self.prediction_frames.append(df.copy())
         return {
             "consensus_signal": "ALCISTA",
             "consensus_probability_up": 0.7,
@@ -142,3 +146,15 @@ def test_consensus_for_inactive_pair_does_not_call_predictor():
     assert response["persisted"] is False
     assert app.state.ensemble.predict_calls == 0
     assert app.state.ensemble.predict_and_save_calls == 0
+
+
+def test_consensus_predicts_without_open_candle_but_returns_it_for_chart():
+    app = make_client()
+
+    response = get(app, "/api/predictions/consensus")
+
+    original = app.state.client.frame
+    predicted = app.state.ensemble.prediction_frames[0]
+    assert predicted.iloc[-1]["timestamp"] == original.iloc[-2]["timestamp"]
+    assert response["candles"][-1]["time"] == int(original.iloc[-1]["timestamp"].timestamp())
+    assert len(response["candles"]) == 200

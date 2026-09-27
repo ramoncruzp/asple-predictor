@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Request
 from data.feature_engineer import FeatureEngineer
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL
+from datetime import datetime, timezone
 router = APIRouter()
 
 @router.get("/latest")
@@ -12,8 +13,23 @@ def consensus(request: Request, symbol: str = ACTIVE_SYMBOL, interval: str = ACT
     symbol = symbol.strip().upper().replace("/", "")
     interval = interval.strip().lower()
     lookback_days = {"1h": 30, "4h": 90, "12h": 180, "1d": 365, "1w": 2200}.get(interval, 90)
-    df = request.app.state.client.get_historical_klines(symbol, interval, lookback_days=lookback_days).tail(200)
+    candle_df = request.app.state.client.get_historical_klines(
+        symbol, interval, lookback_days=lookback_days
+    )
     active = symbol == ACTIVE_SYMBOL and interval == ACTIVE_INTERVAL
+    prediction_df = candle_df
+    if active and not prediction_df.empty:
+        close_time = prediction_df.iloc[-1].get("close_time")
+        if close_time is not None:
+            if hasattr(close_time, "to_pydatetime"):
+                close_time = close_time.to_pydatetime()
+            if close_time.tzinfo is None:
+                close_time = close_time.replace(tzinfo=timezone.utc)
+            else:
+                close_time = close_time.astimezone(timezone.utc)
+            if close_time > datetime.now(timezone.utc):
+                prediction_df = prediction_df.iloc[:-1]
+    prediction_df = prediction_df.tail(200)
     if not active:
         result = {"symbol": symbol, "interval": interval, "consensus_signal": None,
                   "consensus_probability_up": None, "consensus_confidence": None,
@@ -24,12 +40,12 @@ def consensus(request: Request, symbol: str = ACTIVE_SYMBOL, interval: str = ACT
             result = dict(cached)
             result["persisted"] = True
         else:
-            result = dict(request.app.state.ensemble.predict(symbol, interval, df))
+            result = dict(request.app.state.ensemble.predict(symbol, interval, prediction_df))
             result["persisted"] = False
         result["model_available"] = True
-    features = FeatureEngineer().compute_features(df)
+    features = FeatureEngineer().compute_features(prediction_df)
     latest = features.iloc[-1]
-    result["candles"] = [{"time": int(row.timestamp.timestamp()), "open": float(row.open), "high": float(row.high), "low": float(row.low), "close": float(row.close)} for row in df.itertuples()]
+    result["candles"] = [{"time": int(row.timestamp.timestamp()), "open": float(row.open), "high": float(row.high), "low": float(row.low), "close": float(row.close)} for row in candle_df.tail(200).itertuples()]
     result["indicators"] = {"rsi_14": float(latest["rsi_14"]), "macd": float(latest["macd"]), "atr_14": float(latest["atr_14"])}
     return result
 

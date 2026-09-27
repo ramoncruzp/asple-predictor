@@ -37,6 +37,11 @@ class FakeEnsemble:
 
     def __init__(self):
         self.frames = []
+        self.prediction_frames = []
+
+    def predict(self, symbol, interval, df):
+        self.prediction_frames.append(df.copy())
+        return {"consensus_signal": "NEUTRAL", "source": "predict"}
 
     def predict_and_save(self, symbol, interval, df):
         self.frames.append(df.copy())
@@ -110,6 +115,8 @@ def test_startup_cycle_skips_existing_prediction_for_latest_closed_candle(db):
     loop.run_startup_cycle()
 
     assert ensemble.frames == []
+    assert len(ensemble.prediction_frames) == 1
+    assert loop.latest[("XRPUSDT", "1h")] == {"consensus_signal": "NEUTRAL", "source": "predict"}
 
 
 def test_startup_cycle_does_not_skip_for_prediction_before_latest_candle_close(db):

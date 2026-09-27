@@ -14,14 +14,14 @@ MODEL_DISPLAY_NAMES = {
 def status(request: Request):
     db, items = request.app.state.db, []
     loaded_models = request.app.state.models
-    for name in MODEL_DISPLAY_NAMES:
-        model = loaded_models.get(name)
-        info = model.get_model_info() if model is not None else {}
+    for name, model in loaded_models.items():
+        display_name = MODEL_DISPLAY_NAMES.get(name, name)
+        info = model.get_model_info()
         stats = db.get_battle_stats(name)
         items.append({
             **stats,
-            "display_name": MODEL_DISPLAY_NAMES[name],
-            "nombre": info.get("nombre", MODEL_DISPLAY_NAMES[name]),
+            "display_name": display_name,
+            "nombre": info.get("nombre", display_name),
             "accuracy_30d": stats["accuracy"],
             "verified_predictions": stats["verified_count"],
             "last_trained": info.get("ultima_actualizacion"),
