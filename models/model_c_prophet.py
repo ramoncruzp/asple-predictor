@@ -40,6 +40,7 @@ class ModelC(BaseModel):
         self.last_updated: str | None = None
         self.cumulative_accuracy: float | None = None
         self.metrics_: dict[str, Any] = {}
+        self.evaluation_: dict[str, Any] | None = None
 
     def _train_prophet(self, df: pd.DataFrame) -> tuple[Prophet, pd.DataFrame]:
         """Fit Prophet and return its fitted historical forecast."""
@@ -166,6 +167,16 @@ class ModelC(BaseModel):
             self.xgb_model.set_params(early_stopping_rounds=50)
         self.xgb_model.fit(X_train, y_train, **fit_kwargs)
         probabilities = self.xgb_model.predict_proba(X_test)[:, 1]
+        self.evaluation_ = {
+            "val_proba": self.xgb_model.predict_proba(X_val)[:, 1],
+            "test_proba": probabilities,
+            "val_rows": prepared.iloc[val_slice][
+                ["timestamp", "close", "future_return", "target"]
+            ].reset_index(drop=True),
+            "test_rows": prepared.iloc[test_slice][
+                ["timestamp", "close", "future_return", "target"]
+            ].reset_index(drop=True),
+        }
         best_iteration = int(getattr(self.xgb_model, "best_iteration", self.xgb_model.n_estimators - 1))
         predictions = (probabilities >= 0.5).astype("int8")
         signal_mask = (probabilities > 0.55) | (probabilities < 0.45)

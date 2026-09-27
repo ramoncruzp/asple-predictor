@@ -60,7 +60,7 @@ if TORCH_AVAILABLE:
                               batch_first=True, dropout=dropout, bidirectional=False)
             self.classifier = nn.Sequential(
                 nn.Linear(hidden_size, 64), nn.ReLU(), nn.Dropout(0.2),
-                nn.Linear(64, 1), nn.Sigmoid()
+                nn.Linear(64, 1)
             )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -76,7 +76,7 @@ class ModelB(BaseModel):
     """GRU model for the four-candle, 0.5% upward target."""
 
     MODEL_NAME = "model_b"
-    MODEL_VERSION = "1.0"
+    MODEL_VERSION = "1.1"
     SEQUENCE_LEN = 24
     HIDDEN_SIZE = 128
     NUM_LAYERS = 2
@@ -98,6 +98,7 @@ class ModelB(BaseModel):
         self.last_updated: str | None = None
         self.cumulative_accuracy: float | None = None
         self.metrics_: dict[str, Any] = {}
+        self.evaluation_: dict[str, Any] | None = None
 
     def _prepare_sequences(self, df: pd.DataFrame, scaler: MinMaxScaler | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Build 24-candle sequences and binary labels as CPU tensors."""
@@ -162,7 +163,14 @@ class ModelB(BaseModel):
         loader = DataLoader(TensorDataset(X_train, y_train), batch_size=self.BATCH_SIZE, shuffle=False)
         self.model = self._make_model()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.LEARNING_RATE, weight_decay=self.WEIGHT_DECAY)
-        loss_function = nn.BCELoss()
+        train_positives = int((y_train == 1).sum().item())
+        train_negatives = int((y_train == 0).sum().item())
+        pos_weight = torch.tensor(
+            [train_negatives / train_positives if train_positives else 1.0],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         best_state: dict[str, torch.Tensor] | None = None
         best_val_loss = float("inf")
         best_epoch = 0
@@ -199,7 +207,19 @@ class ModelB(BaseModel):
             self.model.load_state_dict(best_state)
         self.model.eval()
         with torch.no_grad():
-            probabilities = self.model(X_test.to(self.device)).squeeze(1).cpu().numpy()
+            val_logits = self.model(X_val.to(self.device)).squeeze(1)
+            test_logits = self.model(X_test.to(self.device)).squeeze(1)
+            val_probabilities = torch.sigmoid(val_logits).cpu().numpy()
+            probabilities = torch.sigmoid(test_logits).cpu().numpy()
+        val_target_indices = range(max(val_slice.start, self.SEQUENCE_LEN - 1), val_slice.stop)
+        test_target_indices = range(max(test_slice.start, self.SEQUENCE_LEN - 1), test_slice.stop)
+        evaluation_columns = ["timestamp", "close", "future_return", "target"]
+        self.evaluation_ = {
+            "val_proba": val_probabilities,
+            "test_proba": probabilities,
+            "val_rows": prepared.iloc[list(val_target_indices)][evaluation_columns].reset_index(drop=True),
+            "test_rows": prepared.iloc[list(test_target_indices)][evaluation_columns].reset_index(drop=True),
+        }
         actual = y_test.squeeze(1).numpy().astype("int8")
         predictions = (probabilities >= 0.5).astype("int8")
         signal_mask = (probabilities > 0.55) | (probabilities < 0.45)
@@ -273,7 +293,7 @@ class ModelB(BaseModel):
         sequence = torch.tensor(values[-self.SEQUENCE_LEN:][None, ...], dtype=torch.float32).to(self.device)
         self.model.eval()
         with torch.no_grad():
-            probability_up = float(self.model(sequence).item())
+            probability_up = float(torch.sigmoid(self.model(sequence)).item())
         probability_down = float(1.0 - probability_up)
         if 0.45 <= probability_up <= 0.55:
             signal = "NEUTRAL"
@@ -299,6 +319,7 @@ class ModelB(BaseModel):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model_state": self.model.state_dict(), "scaler": self.scaler, "config": {
+            "model_version": self.MODEL_VERSION,
             "feature_names": self.feature_names, "sequence_len": self.SEQUENCE_LEN,
             "feature_set_version": self.feature_engineer.FEATURE_SET_VERSION,
             "hidden_size": self.HIDDEN_SIZE, "num_layers": self.NUM_LAYERS,
@@ -315,6 +336,12 @@ class ModelB(BaseModel):
             return False
         artifact = torch.load(path, map_location="cpu", weights_only=False)
         config = artifact.get("config", {})
+        artifact_model_version = config.get("model_version")
+        if artifact_model_version != self.MODEL_VERSION:
+            raise ValueError(
+                f"Model B artifact version mismatch: {artifact_model_version!r}; "
+                f"expected {self.MODEL_VERSION!r}"
+            )
         version = config.get("feature_set_version")
         if version != self.feature_engineer.FEATURE_SET_VERSION:
             raise ValueError(

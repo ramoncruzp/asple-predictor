@@ -1,4 +1,4 @@
-"""Measure Model A's bullish-signal precision on validation and held-out test data."""
+"""Measure model bullish-signal precision on validation and held-out test data."""
 
 from __future__ import annotations
 
@@ -17,9 +17,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.models_config import TARGET_HORIZON_CANDLES
-from models.model_a_xgboost import ModelA
 
 THRESHOLDS = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
+MODEL_CHOICES = ("a", "b", "c")
+
+
+def resolve_model_class(model: str):
+    """Return the requested model class without instantiating or training it."""
+    if model == "a":
+        from models.model_a_xgboost import ModelA
+        return ModelA
+    if model == "b":
+        from models.model_b_gru import ModelB
+        return ModelB
+    if model == "c":
+        from models.model_c_prophet import ModelC
+        return ModelC
+    raise ValueError(f"Invalid model: {model!r}; opciones: {', '.join(MODEL_CHOICES)}")
 FEES_RETURN_THRESHOLD = 0.002
 
 
@@ -115,17 +129,18 @@ def _monthly_test(rows: pd.DataFrame, probabilities, threshold: float) -> list[d
     return months
 
 
-def analyze(candles_path: Path, out_path: Path) -> dict[str, Any]:
+def analyze(candles_path: Path, out_path: Path, model_key: str = "a") -> dict[str, Any]:
     frame = pd.read_csv(candles_path)
     for column in ("timestamp", "close_time"):
         if column in frame.columns:
             frame[column] = pd.to_datetime(frame[column], utc=True)
 
-    model = ModelA()
+    model_class = resolve_model_class(model_key)
+    model = model_class()
     training_metrics = model.train(frame)
     evaluation = model.evaluation_
     if evaluation is None:
-        raise RuntimeError("ModelA.train no expuso evaluation_")
+        raise RuntimeError(f"Model{model_key.upper()}.train no expuso evaluation_")
 
     val_results = [
         evaluate_threshold(evaluation["val_rows"], evaluation["val_proba"], threshold)
@@ -225,19 +240,21 @@ def _print_report(result: dict[str, Any]) -> None:
     print(f"\nverdict: {json.dumps(result['verdict'], sort_keys=True)}")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candles", type=Path, required=True)
+    parser.add_argument("--model", choices=MODEL_CHOICES, default="a")
     parser.add_argument(
         "--out", type=Path,
-        default=Path("models/saved/analysis_model_a_xrp_1h.json"),
+        default=None,
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
     args = parse_args()
-    analyze(args.candles, args.out)
+    out_path = args.out or Path(f"models/saved/analysis_model_{args.model}_xrp_1h.json")
+    analyze(args.candles, out_path, args.model)
     return 0
 
 

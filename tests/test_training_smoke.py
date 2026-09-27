@@ -46,6 +46,13 @@ def _assert_metrics(metrics):
     assert metrics["final_fit_rows"] > 0
 
 
+def _assert_evaluation(model):
+    evaluation = model.evaluation_
+    assert evaluation is not None
+    assert len(evaluation["val_proba"]) == len(evaluation["val_rows"]) > 0
+    assert len(evaluation["test_proba"]) == len(evaluation["test_rows"]) > 0
+
+
 def test_model_a_train_save_load_predict_and_artifact_version(tmp_path):
     frame = synthetic_ohlcv()
     model = ModelA()
@@ -55,6 +62,7 @@ def test_model_a_train_save_load_predict_and_artifact_version(tmp_path):
     )
     metrics = model.train(frame)
     _assert_metrics(metrics)
+    _assert_evaluation(model)
     artifact = tmp_path / "model_a.joblib"
     model.save(str(artifact))
 
@@ -79,6 +87,7 @@ def test_model_c_train_save_load_predict(monkeypatch, tmp_path):
     )
     metrics = model.train(frame)
     _assert_metrics(metrics)
+    _assert_evaluation(model)
     assert metrics["evaluation_note"] == (
         "prophet residuals in-sample on train, out-of-sample on val/test"
     )
@@ -104,6 +113,13 @@ def test_model_b_train_save_load_predict(tmp_path):
     frame = synthetic_ohlcv()
     metrics = model.train(frame)
     _assert_metrics(metrics)
+    _assert_evaluation(model)
+    # Seed 41027 yields an approximately 75/25 negative/positive train split.
+    prepared = model.feature_engineer.prepare_for_model(frame)
+    train_end = int(len(prepared) * 0.70)
+    positive_fraction = float(prepared["target"].iloc[:train_end].mean())
+    assert 0.23 <= positive_fraction <= 0.27
+    assert np.any(model.evaluation_["test_proba"] >= 0.5)
     artifact = tmp_path / "model_b.pt"
     model.save(str(artifact))
 
@@ -113,3 +129,15 @@ def test_model_b_train_save_load_predict(tmp_path):
     loaded.load(str(artifact))
     prediction = loaded.predict(frame.tail(300).reset_index(drop=True))
     assert prediction["signal"] in {"ALCISTA", "BAJISTA", "NEUTRAL"}
+
+
+def test_model_b_rejects_artifact_without_new_architecture_version(tmp_path):
+    pytest.importorskip("torch")
+    import torch
+
+    from models.model_b_gru import ModelB
+
+    artifact = tmp_path / "old_model_b.pt"
+    torch.save({"config": {"feature_set_version": "rel_v1"}}, artifact)
+    with pytest.raises(ValueError, match="Model B artifact version mismatch"):
+        ModelB().load(str(artifact))
