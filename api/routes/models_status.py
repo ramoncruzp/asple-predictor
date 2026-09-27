@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, Request
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_MODEL_NAME
 router = APIRouter()
 
 MODEL_DISPLAY_NAMES = {
@@ -32,3 +33,7 @@ def status(request: Request):
 @router.get("/accuracy-by-condition")
 def accuracy_by_condition(request: Request, model: str = Query(...)):
     return request.app.state.db.get_accuracy_by_condition(model)
+
+@router.get("/shadow-status")
+def shadow_status(request: Request):
+    return request.app.state.db.get_shadow_stats(SHADOW_MODEL_NAME, ACTIVE_SYMBOL, ACTIVE_INTERVAL)

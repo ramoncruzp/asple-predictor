@@ -8,6 +8,11 @@ from typing import Any
 
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, exists, func, select, text
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
+from config.models_config import (
+    SHADOW_KILL_MIN_LIFT_PTS,
+    SHADOW_KILL_MIN_MEAN_RETURN,
+    SHADOW_KILL_MIN_SIGNALS,
+)
 
 
 class DBManager:
@@ -199,3 +204,85 @@ class DBManager:
                 item["was_correct"] = item.get("was_correct") if item["is_verified"] else None
                 rows.append(item)
             return rows
+
+    def get_shadow_stats(self, model_name: str, symbol: str, interval: str) -> dict:
+        stmt = select(
+            self.predictions.c.predicted_at,
+            self.predictions.c.signal,
+            self.outcomes.c.was_correct,
+            self.outcomes.c.actual_direction,
+            self.outcomes.c.price_change_pct,
+        ).select_from(
+            self.predictions.join(
+                self.outcomes,
+                self.predictions.c.prediction_id == self.outcomes.c.prediction_id,
+            )
+        ).where(
+            self.predictions.c.model_name == model_name,
+            self.predictions.c.symbol == symbol,
+            self.predictions.c.interval == interval,
+        ).order_by(self.predictions.c.predicted_at)
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+
+        verified = list(rows)
+        all_returns = [float(row["price_change_pct"]) / 100 for row in verified]
+        base_rate = (
+            sum(row["actual_direction"] == "UP" for row in verified) / len(verified)
+            if verified else None
+        )
+        signals = [row for row in verified if row["signal"] == "ALCISTA"]
+        nonoverlap = []
+        last_selected_at = None
+        try:
+            interval_hours = int(interval[:-1]) if interval.endswith("h") else 24
+        except (TypeError, ValueError):
+            interval_hours = 24
+        separation = timedelta(hours=TARGET_HORIZON_CANDLES * interval_hours)
+        for row in signals:
+            predicted_at = row["predicted_at"]
+            if predicted_at.tzinfo is None:
+                predicted_at = predicted_at.replace(tzinfo=timezone.utc)
+            else:
+                predicted_at = predicted_at.astimezone(timezone.utc)
+            if last_selected_at is None or predicted_at >= last_selected_at + separation:
+                nonoverlap.append(row)
+                last_selected_at = predicted_at
+
+        def mean_return(items):
+            return (sum(float(row["price_change_pct"]) / 100 for row in items) / len(items)) if items else None
+
+        def precision(items):
+            evaluated = [row for row in items if row["was_correct"] is not None]
+            return (sum(int(row["was_correct"]) for row in evaluated) / len(evaluated)) if evaluated else None
+
+        nonoverlap_count = len(nonoverlap)
+        if nonoverlap_count < SHADOW_KILL_MIN_SIGNALS:
+            kill_status = "pending"
+        elif (
+            base_rate is None
+            or (precision(nonoverlap) or 0.0) < base_rate + SHADOW_KILL_MIN_LIFT_PTS
+            or (mean_return(nonoverlap) or 0.0) < SHADOW_KILL_MIN_MEAN_RETURN
+        ):
+            kill_status = "fail"
+        else:
+            kill_status = "pass"
+
+        return {
+            "model_name": model_name,
+            "symbol": symbol,
+            "interval": interval,
+            "n_verified_total": len(verified),
+            "base_rate": base_rate,
+            "mean_return_all": sum(all_returns) / len(all_returns) if all_returns else None,
+            "n_signals": len(signals),
+            "precision": precision(signals),
+            "mean_return": mean_return(signals),
+            "n_nonoverlap": nonoverlap_count,
+            "precision_nonoverlap": precision(nonoverlap),
+            "mean_return_nonoverlap": mean_return(nonoverlap),
+            "kill_status": kill_status,
+            "kill_min_signals": SHADOW_KILL_MIN_SIGNALS,
+            "kill_min_lift_pts": SHADOW_KILL_MIN_LIFT_PTS,
+            "kill_min_mean_return": SHADOW_KILL_MIN_MEAN_RETURN,
+        }

@@ -13,7 +13,7 @@ class FakeClient:
     def get_historical_klines(self, symbol, interval, lookback_days):
         rng = np.random.default_rng(7341)
         timestamps = pd.date_range(
-            end=datetime.now(timezone.utc), periods=300, freq="4h", tz="UTC"
+            end=datetime.now(timezone.utc), periods=300, freq="1h", tz="UTC"
         )
         close = 100 + np.cumsum(rng.normal(0, 0.2, size=300))
         return pd.DataFrame(
@@ -61,7 +61,7 @@ def make_client(latest=None):
     return app
 
 
-def get(app, path):
+def get(app, path, query_string=b""):
     async def request():
         messages = []
         request_sent = False
@@ -85,7 +85,7 @@ def get(app, path):
                 "scheme": "http",
                 "path": path,
                 "raw_path": path.encode(),
-                "query_string": b"",
+                "query_string": query_string,
                 "root_path": "",
                 "headers": [],
                 "client": ("testclient", 50000),
@@ -119,7 +119,7 @@ def test_consensus_uses_cached_result_without_mutating_it():
         "agreement_count": 2,
         "weights": {"model_a": 0.5, "model_b": 0.5},
     }
-    app = make_client({("XRPUSDT", "4h"): cached})
+    app = make_client({("XRPUSDT", "1h"): cached})
 
     response = get(app, "/api/predictions/consensus")
 
@@ -127,5 +127,18 @@ def test_consensus_uses_cached_result_without_mutating_it():
     assert "candles" not in cached
     assert "indicators" not in cached
     assert "persisted" not in cached
+    assert app.state.ensemble.predict_calls == 0
+    assert app.state.ensemble.predict_and_save_calls == 0
+
+
+def test_consensus_for_inactive_pair_does_not_call_predictor():
+    app = make_client()
+
+    response = get(app, "/api/predictions/consensus", b"symbol=BTCUSDT&interval=1h")
+
+    assert response["model_available"] is False
+    assert response["consensus_signal"] is None
+    assert response["consensus_probability_up"] is None
+    assert response["persisted"] is False
     assert app.state.ensemble.predict_calls == 0
     assert app.state.ensemble.predict_and_save_calls == 0

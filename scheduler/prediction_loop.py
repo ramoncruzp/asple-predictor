@@ -4,11 +4,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL
 
 
 class PredictionLoop:
-    SYMBOLS_TO_MONITOR = ["XRPUSDT"]
-    INTERVALS = ["4h"]
+    SYMBOLS_TO_MONITOR = [ACTIVE_SYMBOL]
+    INTERVALS = [ACTIVE_INTERVAL]
 
     def __init__(self, binance_client, ensemble, scheduler=None, db_manager=None):
         self.binance_client = binance_client
@@ -31,7 +32,7 @@ class PredictionLoop:
             for interval in self.INTERVALS:
                 try:
                     df = self.binance_client.get_historical_klines(
-                        symbol, interval, lookback_days=60
+                        symbol, interval, lookback_days=30
                     )
                     if df.empty:
                         continue
@@ -42,7 +43,10 @@ class PredictionLoop:
                     if startup and self.db_manager is not None:
                         last_closed_close = self._utc_datetime(df.iloc[-1]["close_time"])
                         if self.db_manager.has_prediction_since(
-                            symbol, interval, "ensemble", last_closed_close
+                            symbol,
+                            interval,
+                            getattr(self.ensemble, "primary_model_name", "ensemble"),
+                            last_closed_close,
                         ):
                             self.logger.info(
                                 "Startup prediction already exists for %s %s since %s",
@@ -68,7 +72,7 @@ class PredictionLoop:
         self.scheduler.add_job(
             self.run_prediction_cycle,
             "cron",
-            hour="0,4,8,12,16,20",
+            hour="*",
             minute=1,
             timezone="UTC",
             id="prediction_cycle",

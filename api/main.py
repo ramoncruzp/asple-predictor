@@ -13,15 +13,9 @@ from config.settings import Settings
 from data.binance_client import BinanceClient
 from database.db_manager import DBManager
 from database.learning_engine import LearningEngine
-from models.model_b_gru import ModelB
 from models.model_a_xgboost import ModelA
-from models.model_c_prophet import ModelC
-from models.ensemble import EnsemblePredictor
-try:
-    from models.model_d_tft import ModelD
-except (ImportError, OSError, Exception) as e:
-    print(f"[API] Model D no disponible: {e}")
-    ModelD = None
+from models.shadow_predictor import ShadowPredictor
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
 from api.routes import grid_advisor, models_status, predictions
@@ -33,20 +27,19 @@ async def lifespan(app: FastAPI):
     key = "" if settings.binance_api_key.startswith("tu_") else settings.binance_api_key
     secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client, db = BinanceClient(key, secret), DBManager(settings.database_url)
-    models = [ModelA(), ModelB(), ModelC()]
-    for model, filename in zip(models, ("model_a_xrp_4h.joblib", "model_b_xrp_4h.pt", "model_c_xrp_4h.joblib")):
-        model.load(str(Path("models/saved") / filename))
-    model_d = None
-    model_d_path = Path("models/saved/model_d_xrp_4h.pt")
-    if ModelD is not None and model_d_path.exists():
-        model_d = ModelD()
-        model_d.load(str(model_d_path))
-    ensemble = EnsemblePredictor(*models, db, model_d=model_d)
+    model_a = ModelA()
+    artifact = Path(SHADOW_ARTIFACT)
+    try:
+        if not artifact.is_file():
+            raise FileNotFoundError(f"No existe el artefacto activo de modo sombra: {artifact}")
+        model_a.load(str(artifact))
+    except Exception:
+        logging.getLogger(__name__).exception("No se pudo cargar el modelo sombra Model A desde %s", artifact)
+        raise
+    ensemble = ShadowPredictor(model_a, db)
     prediction_loop, verification_loop = PredictionLoop(client, ensemble, db_manager=db), VerificationLoop(LearningEngine(db, client))
     app.state.settings, app.state.db, app.state.client = settings, db, client
-    app.state.models, app.state.ensemble = dict(zip(("model_a", "model_b", "model_c"), models)), ensemble
-    if model_d is not None:
-        app.state.models["model_d"] = model_d
+    app.state.models, app.state.ensemble = {"model_a": model_a}, ensemble
     app.state.prediction_loop, app.state.verification_loop = prediction_loop, verification_loop
     app.state.started_at = time.monotonic()
     prediction_loop.start()
@@ -63,7 +56,7 @@ app.include_router(models_status.router, prefix="/api/models", tags=["models"])
 app.include_router(grid_advisor.router, prefix="/api/grid", tags=["grid"])
 
 @app.get("/api/candles")
-def candles(symbol: str = "XRPUSDT", interval: str = "4h"):
+def candles(symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):
     normalized_symbol = symbol.strip().upper().replace("/", "")
     normalized_interval = interval.strip().lower()
     if not normalized_symbol.endswith("USDT"):

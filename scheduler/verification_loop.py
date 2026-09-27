@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
+from config.models_config import SHADOW_MODEL_NAME
 
 
 class VerificationLoop:
-    MODELS = ["model_a", "model_b", "model_c"]
+    MODELS = [SHADOW_MODEL_NAME]
 
     def __init__(self, learning_engine, scheduler=None):
         self.learning_engine = learning_engine
@@ -27,7 +28,7 @@ class VerificationLoop:
                 self.logger.info("REENTRENAMIENTO RECOMENDADO para %s", model_name)
 
     def start(self):
-        self.scheduler.add_job(self.run_verification_cycle, "interval", minutes=30, id="verification_cycle", replace_existing=True)
+        self.scheduler.add_job(self.run_verification_cycle, "cron", hour="*", minute=2, timezone="UTC", id="verification_cycle", replace_existing=True)
         self.scheduler.start()
 
     def stop(self):

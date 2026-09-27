@@ -1,15 +1,14 @@
-"""Run one real XRP/USDT ensemble prediction and persist it."""
+"""Run one real XRP/USDT Model A shadow prediction and persist it."""
 
 import json
-from pathlib import Path
+from datetime import datetime, timezone
 
 from config.settings import Settings
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT
 from data.binance_client import BinanceClient
 from database.db_manager import DBManager
-from models.ensemble import EnsemblePredictor
 from models.model_a_xgboost import ModelA
-from models.model_b_gru import ModelB
-from models.model_c_prophet import ModelC
+from models.shadow_predictor import ShadowPredictor
 
 
 def main() -> None:
@@ -18,11 +17,13 @@ def main() -> None:
     api_secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client = BinanceClient(api_key, api_secret)
     db = DBManager(settings.database_url)
-    models = (ModelA(), ModelB(), ModelC())
-    for model, filename in zip(models, ("model_a_xrp_4h.joblib", "model_b_xrp_4h.pt", "model_c_xrp_4h.joblib")):
-        model.load(str(Path("models/saved") / filename))
-    df = client.get_historical_klines("XRPUSDT", "4h", lookback_days=60).tail(200)
-    result = EnsemblePredictor(*models, db).predict_and_save("XRPUSDT", "4h", df)
+    model_a = ModelA()
+    model_a.load(SHADOW_ARTIFACT)
+    df = client.get_historical_klines(ACTIVE_SYMBOL, ACTIVE_INTERVAL, lookback_days=30)
+    if not df.empty and df.iloc[-1]["close_time"] > datetime.now(timezone.utc):
+        df = df.iloc[:-1]
+    df = df.tail(200)
+    result = ShadowPredictor(model_a, db).predict_and_save(ACTIVE_SYMBOL, ACTIVE_INTERVAL, df)
     print(json.dumps(result, indent=2, default=str))
     print("Guardado en DB: OK")
 

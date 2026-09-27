@@ -1,6 +1,7 @@
 from __future__ import annotations
 from fastapi import APIRouter, Query, Request
 import numpy as np
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL
 router = APIRouter()
 
 def _level(values, current):
@@ -30,8 +31,9 @@ def _level(values, current):
     return level, touches
 
 @router.get("/recommend")
-def recommend(request: Request, symbol: str = "XRPUSDT", capital: float = Query(1000, gt=0), risk: str = Query("medium", pattern="^(low|medium|high)$"), days: int = Query(90, ge=1, le=365)):
-    df = request.app.state.client.get_historical_klines(symbol, "4h", lookback_days=days)
+def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Query(1000, gt=0), risk: str = Query("medium", pattern="^(low|medium|high)$"), days: int = Query(90, ge=1, le=365)):
+    symbol = symbol.strip().upper().replace("/", "")
+    df = request.app.state.client.get_historical_klines(symbol, ACTIVE_INTERVAL, lookback_days=days)
     close, high, low = df["close"], df["high"], df["low"]
     current = float(close.iloc[-1])
     support, support_touches = _level(low.rename("low"), current); resistance, resistance_touches = _level(high.rename("high"), current)
@@ -39,5 +41,5 @@ def recommend(request: Request, symbol: str = "XRPUSDT", capital: float = Query(
     atr = float(tr.rolling(14).mean().iloc[-1]); floor = support - {"low": 1.5, "medium": 2.0, "high": 3.0}[risk] * atr; ceiling = resistance + 0.5 * atr
     range_pct = max(0.0, (ceiling - floor) / floor * 100)
     grids = max(5, min(20, round(range_pct / 2.5)))
-    consensus = request.app.state.ensemble.predict(symbol, "4h", df.tail(200))
-    return {"symbol": symbol, "current_price": current, "recommended_floor": floor, "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids, "capital_per_grid": capital / grids, "spacing_pct": range_pct / grids, "confidence": consensus["consensus_confidence"], "analysis": {"main_support": support, "main_resistance": resistance, "atr": atr, "support_touches": support_touches, "resistance_touches": resistance_touches}, "prediction_signal": consensus, "disclaimer": "Análisis estadístico. Validar antes de operar."}
+    prediction = request.app.state.prediction_loop.latest.get((symbol, ACTIVE_INTERVAL))
+    return {"symbol": symbol, "current_price": current, "recommended_floor": floor, "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids, "capital_per_grid": capital / grids, "spacing_pct": range_pct / grids, "confidence": prediction.get("consensus_confidence") if prediction else None, "analysis": {"main_support": support, "main_resistance": resistance, "atr": atr, "support_touches": support_touches, "resistance_touches": resistance_touches}, "prediction_signal": prediction, "disclaimer": "Análisis estadístico. Validar antes de operar."}
