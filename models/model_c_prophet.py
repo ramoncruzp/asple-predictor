@@ -17,7 +17,9 @@ from prophet import Prophet
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from xgboost import XGBClassifier
 
+from config.models_config import TARGET_HORIZON_CANDLES
 from data.feature_engineer import FeatureEngineer
+from data.splits import chronological_split
 from models.base_model import BaseModel
 
 
@@ -26,7 +28,7 @@ class ModelC(BaseModel):
 
     MODEL_NAME = "model_c"
     MODEL_VERSION = "1.0"
-    RESIDUAL_FEATURES = ["residual", "residual_rolling_5", "prophet_trend"]
+    RESIDUAL_FEATURES = ["residual_pct", "residual_pct_rolling_5", "prophet_trend_rel"]
 
     def __init__(self) -> None:
         self.feature_engineer = FeatureEngineer()
@@ -96,9 +98,10 @@ class ModelC(BaseModel):
         result = df.copy(deep=True)
         prophet_data = self._prophet_frame(result)
         forecast = prophet_model.predict(prophet_data[["ds"]])
-        result["residual"] = result["close"].astype(float).to_numpy() - forecast["yhat"].to_numpy()
-        result["residual_rolling_5"] = result["residual"].rolling(5).mean()
-        result["prophet_trend"] = forecast["trend"].to_numpy()
+        close = result["close"].astype(float)
+        result["residual_pct"] = (close.to_numpy() - forecast["yhat"].to_numpy()) / close.to_numpy()
+        result["residual_pct_rolling_5"] = result["residual_pct"].rolling(5).mean()
+        result["prophet_trend_rel"] = forecast["trend"].to_numpy() / close.to_numpy() - 1.0
         return result
 
     def _prepare_hybrid_data(
@@ -132,47 +135,87 @@ class ModelC(BaseModel):
         return XGBClassifier(**params)
 
     def train(self, df: pd.DataFrame) -> dict:
-        """Fit Prophet on all history, then train temporal XGBoost on hybrid features."""
-        self.prophet_model, _forecast = self._train_prophet(df)
-        residual_df = self._compute_residuals(df, self.prophet_model)
-        self.prophet_rmse = float(np.sqrt(np.mean(np.square(residual_df["residual"].dropna()))))
+        """Fit Prophet on train only, select by validation, report test metrics."""
+        base_prepared = self.feature_engineer.prepare_for_model(df)
+        train_slice, val_slice, test_slice = chronological_split(len(base_prepared))
+        prophet_train = base_prepared.iloc[train_slice]
+        self.prophet_model, _forecast = self._train_prophet(prophet_train)
+        train_residuals = self._compute_residuals(prophet_train, self.prophet_model)
+        self.prophet_rmse = float(
+            np.sqrt(np.mean(np.square(train_residuals["residual_pct"].dropna())))
+        )
+
         prepared = self._prepare_hybrid_data(df, self.prophet_model, require_target=True)
-        if len(prepared) < 10:
-            raise ValueError("Se requieren al menos 10 filas limpias para entrenar ModelC")
+        if not prepared.index.equals(base_prepared.index):
+            raise ValueError("El conjunto hibrido no coincide con las filas etiquetadas")
         X = prepared[self.feature_names].astype(float)
         y = prepared["target"].astype("int8")
-        split_at = int(len(prepared) * 0.8)
-        X_train, X_test = X.iloc[:split_at], X.iloc[split_at:]
-        y_train, y_test = y.iloc[:split_at], y.iloc[split_at:]
-        if y_train.nunique() < 2 or y_test.nunique() < 2:
-            raise ValueError("Cada tramo temporal debe contener ambas clases")
+        X_train, X_val, X_test = X.iloc[train_slice], X.iloc[val_slice], X.iloc[test_slice]
+        y_train, y_val, y_test = y.iloc[train_slice], y.iloc[val_slice], y.iloc[test_slice]
+        if y_train.nunique() < 2:
+            raise ValueError("El tramo de entrenamiento contiene una sola clase")
+        if y_test.nunique() < 2:
+            raise ValueError("El tramo test contiene una sola clase")
         positives = int((y_train == 1).sum())
         negatives = int((y_train == 0).sum())
         self.xgb_model = self._new_xgb(negatives / positives if positives else 1.0)
-        fit_kwargs: dict[str, Any] = {"eval_set": [(X_test, y_test)], "verbose": False}
+        fit_kwargs: dict[str, Any] = {"eval_set": [(X_val, y_val)], "verbose": False}
         if "early_stopping_rounds" in inspect.signature(self.xgb_model.fit).parameters:
             fit_kwargs["early_stopping_rounds"] = 50
         else:
             self.xgb_model.set_params(early_stopping_rounds=50)
         self.xgb_model.fit(X_train, y_train, **fit_kwargs)
         probabilities = self.xgb_model.predict_proba(X_test)[:, 1]
+        best_iteration = int(getattr(self.xgb_model, "best_iteration", self.xgb_model.n_estimators - 1))
         predictions = (probabilities >= 0.5).astype("int8")
+        signal_mask = (probabilities > 0.55) | (probabilities < 0.45)
+        signal_predictions = (probabilities[signal_mask] > 0.55).astype("int8")
+        positive_rate_test = float(y_test.mean())
         trained_at = datetime.now(timezone.utc).isoformat()
         metrics = {
             "accuracy": float(accuracy_score(y_test, predictions)),
-            "f1": float(f1_score(y_test, predictions, zero_division=0)),
-            "roc_auc": float(roc_auc_score(y_test, probabilities)),
             "precision": float(precision_score(y_test, predictions, zero_division=0)),
             "recall": float(recall_score(y_test, predictions, zero_division=0)),
+            "f1": float(f1_score(y_test, predictions, zero_division=0)),
+            "roc_auc": float(roc_auc_score(y_test, probabilities)),
+            "positive_rate_test": positive_rate_test,
+            "baseline_accuracy": max(positive_rate_test, 1.0 - positive_rate_test),
+            "signal_coverage": float(signal_mask.mean()),
+            "signal_accuracy": (
+                float(accuracy_score(y_test.to_numpy()[signal_mask], signal_predictions))
+                if signal_mask.any() else None
+            ),
+            "n_train": len(y_train),
+            "n_val": len(y_val),
+            "n_test": len(y_test),
             "prophet_rmse": self.prophet_rmse,
+            "best_iteration": best_iteration,
+            "final_fit_rows": len(base_prepared),
+            "evaluation_note": "prophet residuals in-sample on train, out-of-sample on val/test",
             "trained_at": trained_at,
         }
+        self.last_updated = trained_at
+        metrics["cumulative_accuracy_source"] = (
+            "signal_accuracy" if metrics["signal_accuracy"] is not None else "accuracy"
+        )
+        self.cumulative_accuracy = metrics[metrics["cumulative_accuracy_source"]]
+
+        # Preserve the chronological evaluation metrics, then fit the saved
+        # artifact on every labeled row without early stopping.
+        self.prophet_model, _final_forecast = self._train_prophet(base_prepared)
+        final_prepared = self._prepare_hybrid_data(df, self.prophet_model, require_target=True)
+        if not final_prepared.index.equals(base_prepared.index):
+            raise ValueError("El conjunto hibrido final no coincide con las filas etiquetadas")
+        final_positives = int((y == 1).sum())
+        final_negatives = int((y == 0).sum())
+        final_scale_pos_weight = final_negatives / final_positives if final_positives else 1.0
+        self.xgb_model = self._new_xgb(final_scale_pos_weight)
+        self.xgb_model.set_params(n_estimators=best_iteration + 1)
+        self.xgb_model.fit(final_prepared[self.feature_names].astype(float), y, verbose=False)
         self.feature_importances_ = dict(
             zip(self.feature_names, self.xgb_model.feature_importances_.astype(float))
         )
         self.metrics_ = metrics
-        self.last_updated = trained_at
-        self.cumulative_accuracy = metrics["accuracy"]
         return metrics
 
     def _future_prophet_trend(self, df: pd.DataFrame) -> float:
@@ -183,7 +226,7 @@ class ModelC(BaseModel):
             raise ValueError("Se requieren al menos dos timestamps para proyectar Prophet")
         step = prophet_data["ds"].diff().dropna().median()
         future = self.prophet_model.make_future_dataframe(
-            periods=4, freq=pd.tseries.frequencies.to_offset(step), include_history=True
+            periods=TARGET_HORIZON_CANDLES, freq=pd.tseries.frequencies.to_offset(step), include_history=True
         )
         forecast = self.prophet_model.predict(future)
         close_actual = float(df["close"].iloc[-1])
@@ -239,6 +282,7 @@ class ModelC(BaseModel):
         joblib.dump({
             "prophet_model": self.prophet_model,
             "xgb_model": self.xgb_model,
+            "feature_set_version": self.feature_engineer.FEATURE_SET_VERSION,
             "feature_names": self.feature_names,
             "feature_importances": self.feature_importances_,
             "prophet_rmse": self.prophet_rmse,
@@ -249,9 +293,17 @@ class ModelC(BaseModel):
 
     def load(self, path: str) -> None:
         artifact = joblib.load(path)
+        version = artifact.get("feature_set_version")
+        if version != self.feature_engineer.FEATURE_SET_VERSION:
+            raise ValueError(
+                f"Feature set incompatible en artefacto ModelC: {version!r}; "
+                f"se requiere {self.feature_engineer.FEATURE_SET_VERSION!r}"
+            )
+        artifact_features = list(artifact.get("feature_names", []))
+        if artifact_features != self.feature_names:
+            raise KeyError("Las features del artefacto ModelC no coinciden con las actuales")
         self.prophet_model = artifact["prophet_model"]
         self.xgb_model = artifact["xgb_model"]
-        self.feature_names = list(artifact.get("feature_names", self.feature_names))
         self.feature_importances_ = dict(artifact.get("feature_importances", {}))
         self.prophet_rmse = artifact.get("prophet_rmse")
         self.last_updated = artifact.get("last_updated")

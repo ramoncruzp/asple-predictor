@@ -45,6 +45,7 @@ except (ImportError, OSError) as e:
     TensorDataset = None
 
 from data.feature_engineer import FeatureEngineer
+from data.splits import chronological_split
 from models.base_model import BaseModel
 
 
@@ -121,35 +122,54 @@ class ModelB(BaseModel):
     def _make_model(self) -> GRUNet:
         return GRUNet(len(self.feature_names), self.HIDDEN_SIZE, self.NUM_LAYERS, self.GRU_DROPOUT).to(self.device)
 
+    def _sequences_for_target_range(
+        self,
+        prepared: pd.DataFrame,
+        scaled_features: np.ndarray,
+        target_range: slice,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build sequences whose labels belong to one partition only."""
+        target_start = max(target_range.start, self.SEQUENCE_LEN - 1)
+        target_indices = range(target_start, target_range.stop)
+        X = np.stack([
+            scaled_features[index - self.SEQUENCE_LEN + 1:index + 1]
+            for index in target_indices
+        ])
+        y = prepared["target"].iloc[list(target_indices)].to_numpy(dtype="float32").reshape(-1, 1)
+        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+
     def train(self, df: pd.DataFrame) -> dict:
-        """Train with chronological sequences and validation early stopping."""
+        """Train on chronological train/validation/test partitions with embargo."""
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch no esta disponible para entrenar ModelB")
         torch.manual_seed(42)
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(42)
         prepared = self.feature_engineer.prepare_for_model(df)
-        if len(prepared) < self.SEQUENCE_LEN + 10:
-            raise ValueError("No hay suficientes datos limpios para entrenar ModelB")
-        row_split = int(len(prepared) * 0.8)
+        train_slice, val_slice, test_slice = chronological_split(len(prepared))
         self.scaler = MinMaxScaler()
-        self.scaler.fit(prepared.iloc[:row_split][self.feature_names].astype("float32"))
-        X, y = self._prepare_sequences(prepared, self.scaler)
-        sequence_split = row_split - self.SEQUENCE_LEN + 1
-        if sequence_split <= 0 or sequence_split >= len(X):
-            raise ValueError("No se pudo crear el split temporal 80/20 para las secuencias")
-        X_train, X_test = X[:sequence_split], X[sequence_split:]
-        y_train, y_test = y[:sequence_split], y[sequence_split:]
+        train_features = prepared.iloc[train_slice][self.feature_names].astype("float32")
+        self.scaler.fit(train_features)
+        scaled = self.scaler.transform(prepared[self.feature_names].astype("float32"))
+        X_train, y_train = self._sequences_for_target_range(prepared, scaled, train_slice)
+        X_val, y_val = self._sequences_for_target_range(prepared, scaled, val_slice)
+        X_test, y_test = self._sequences_for_target_range(prepared, scaled, test_slice)
+        if not len(X_train) or not len(X_val) or not len(X_test):
+            raise ValueError("No hay suficientes filas para crear secuencias train/val/test")
         if y_train.unique().numel() < 2 or y_test.unique().numel() < 2:
-            raise ValueError("Cada tramo temporal debe contener ambas clases")
+            raise ValueError("Los tramos train y test deben contener ambas clases")
+
         loader = DataLoader(TensorDataset(X_train, y_train), batch_size=self.BATCH_SIZE, shuffle=False)
         self.model = self._make_model()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.LEARNING_RATE, weight_decay=self.WEIGHT_DECAY)
         loss_function = nn.BCELoss()
         best_state: dict[str, torch.Tensor] | None = None
         best_val_loss = float("inf")
+        best_epoch = 0
         stale_epochs = 0
         self.training_history = {"train_loss": [], "val_loss": []}
-        X_test_device, y_test_device = X_test.to(self.device), y_test.to(self.device)
-        for _epoch in range(self.MAX_EPOCHS):
+        X_val_device, y_val_device = X_val.to(self.device), y_val.to(self.device)
+        for epoch in range(self.MAX_EPOCHS):
             self.model.train()
             total_loss, count = 0.0, 0
             for batch_X, batch_y in loader:
@@ -162,13 +182,14 @@ class ModelB(BaseModel):
                 count += len(batch_X)
             self.model.eval()
             with torch.no_grad():
-                val_loss = float(loss_function(self.model(X_test_device), y_test_device).item())
+                val_loss = float(loss_function(self.model(X_val_device), y_val_device).item())
             train_loss = total_loss / count
             self.training_history["train_loss"].append(float(train_loss))
             self.training_history["val_loss"].append(val_loss)
             if val_loss < best_val_loss - 1e-8:
                 best_val_loss = val_loss
                 best_state = copy.deepcopy(self.model.state_dict())
+                best_epoch = epoch + 1
                 stale_epochs = 0
             else:
                 stale_epochs += 1
@@ -178,9 +199,12 @@ class ModelB(BaseModel):
             self.model.load_state_dict(best_state)
         self.model.eval()
         with torch.no_grad():
-            probabilities = self.model(X_test_device).squeeze(1).cpu().numpy()
+            probabilities = self.model(X_test.to(self.device)).squeeze(1).cpu().numpy()
         actual = y_test.squeeze(1).numpy().astype("int8")
         predictions = (probabilities >= 0.5).astype("int8")
+        signal_mask = (probabilities > 0.55) | (probabilities < 0.45)
+        signal_predictions = (probabilities[signal_mask] > 0.55).astype("int8")
+        positive_rate_test = float(actual.mean())
         trained_at = datetime.now(timezone.utc).isoformat()
         metrics = {
             "accuracy": float(accuracy_score(actual, predictions)),
@@ -188,12 +212,52 @@ class ModelB(BaseModel):
             "recall": float(recall_score(actual, predictions, zero_division=0)),
             "f1": float(f1_score(actual, predictions, zero_division=0)),
             "roc_auc": float(roc_auc_score(actual, probabilities)),
+            "positive_rate_test": positive_rate_test,
+            "baseline_accuracy": max(positive_rate_test, 1.0 - positive_rate_test),
+            "signal_coverage": float(signal_mask.mean()),
+            "signal_accuracy": (
+                float(accuracy_score(actual[signal_mask], signal_predictions))
+                if signal_mask.any() else None
+            ),
+            "n_train": len(y_train),
+            "n_val": len(y_val),
+            "n_test": len(y_test),
             "trained_at": trained_at,
             "epochs_trained": len(self.training_history["train_loss"]),
             "best_val_loss": float(best_val_loss),
+            "best_epoch": best_epoch,
+            "final_fit_rows": len(prepared),
             "device": str(self.device),
         }
-        self.metrics_, self.last_updated, self.cumulative_accuracy = metrics, trained_at, metrics["accuracy"]
+        metrics["cumulative_accuracy_source"] = (
+            "signal_accuracy" if metrics["signal_accuracy"] is not None else "accuracy"
+        )
+        self.cumulative_accuracy = metrics[metrics["cumulative_accuracy_source"]]
+
+        # Refit the saved network on all labeled rows for the validation-picked
+        # epoch count. Evaluation results above remain based on held-out test.
+        self.scaler = MinMaxScaler().fit(prepared[self.feature_names].astype("float32"))
+        all_scaled = self.scaler.transform(prepared[self.feature_names].astype("float32"))
+        X_all, y_all = self._sequences_for_target_range(
+            prepared, all_scaled, slice(0, len(prepared))
+        )
+        final_loader = DataLoader(
+            TensorDataset(X_all, y_all), batch_size=self.BATCH_SIZE, shuffle=False
+        )
+        self.model = self._make_model()
+        final_optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.LEARNING_RATE, weight_decay=self.WEIGHT_DECAY
+        )
+        self.model.train()
+        for _ in range(best_epoch):
+            for batch_X, batch_y in final_loader:
+                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                final_optimizer.zero_grad()
+                loss = loss_function(self.model(batch_X), batch_y)
+                loss.backward()
+                final_optimizer.step()
+        self.model.eval()
+        self.metrics_, self.last_updated = metrics, trained_at
         return metrics
 
     def predict(self, df: pd.DataFrame) -> dict:
@@ -236,6 +300,7 @@ class ModelB(BaseModel):
         target.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model_state": self.model.state_dict(), "scaler": self.scaler, "config": {
             "feature_names": self.feature_names, "sequence_len": self.SEQUENCE_LEN,
+            "feature_set_version": self.feature_engineer.FEATURE_SET_VERSION,
             "hidden_size": self.HIDDEN_SIZE, "num_layers": self.NUM_LAYERS,
             "gru_dropout": self.GRU_DROPOUT, "head_dropout": self.HEAD_DROPOUT,
             "last_updated": self.last_updated, "cumulative_accuracy": self.cumulative_accuracy,
@@ -250,7 +315,15 @@ class ModelB(BaseModel):
             return False
         artifact = torch.load(path, map_location="cpu", weights_only=False)
         config = artifact.get("config", {})
-        self.feature_names = list(config.get("feature_names", self.feature_names))
+        version = config.get("feature_set_version")
+        if version != self.feature_engineer.FEATURE_SET_VERSION:
+            raise ValueError(
+                f"Feature set incompatible en artefacto ModelB: {version!r}; "
+                f"se requiere {self.feature_engineer.FEATURE_SET_VERSION!r}"
+            )
+        artifact_features = list(config.get("feature_names", self.feature_names))
+        if artifact_features != self.feature_names:
+            raise KeyError("Las features del artefacto ModelB no coinciden con las actuales")
         self.scaler = artifact["scaler"]
         self.model = self._make_model()
         self.model.load_state_dict(artifact["model_state"])

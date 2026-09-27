@@ -38,9 +38,9 @@ def make_ohlcv():
 def compute_residuals(frame, _prophet_model):
     result = frame.copy()
     residual = np.arange(len(frame), dtype=float)
-    result["residual"] = residual
-    result["residual_rolling_5"] = pd.Series(residual).rolling(5).mean().to_numpy()
-    result["prophet_trend"] = 0.01
+    result["residual_pct"] = residual / 1000.0
+    result["residual_pct_rolling_5"] = pd.Series(residual / 1000.0).rolling(5).mean().to_numpy()
+    result["prophet_trend_rel"] = 0.01
     return result
 
 
@@ -56,7 +56,7 @@ def test_predict_uses_latest_features_even_without_target(monkeypatch):
     result = model.predict(df)
 
     assert len(model.xgb_model.received) == 1
-    assert model.xgb_model.received["residual"].iloc[0] == len(df) - 1
+    assert model.xgb_model.received["residual_pct"].iloc[0] == (len(df) - 1) / 1000.0
     assert pd.Timestamp(result["timestamp"]).tz_convert("UTC") == pd.Timestamp(
         df["timestamp"].iloc[-1]
     ).tz_convert("UTC")
