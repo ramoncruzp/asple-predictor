@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, func, select, text
+from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, exists, func, select, text
+from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 
 
 class DBManager:
@@ -24,7 +25,7 @@ class DBManager:
             Column("id", Integer, primary_key=True), Column("prediction_id", String, nullable=False),
             Column("verified_at", DateTime(timezone=True), nullable=False), Column("price_at_verification", Float, nullable=False),
             Column("price_change_pct", Float, nullable=False), Column("actual_direction", String, nullable=False),
-            Column("was_correct", Integer, nullable=False), Column("why_correct", String), Column("why_wrong", String))
+            Column("was_correct", Integer, nullable=True), Column("why_correct", String), Column("why_wrong", String))
         self.conditions = Table("model_accuracy_by_condition", self.metadata,
             Column("id", Integer, primary_key=True), Column("model_name", String, nullable=False), Column("condition_name", String, nullable=False),
             Column("total_predictions", Integer, default=0), Column("correct_predictions", Integer, default=0), Column("accuracy", Float, default=0.0), Column("last_updated", DateTime(timezone=True)))
@@ -45,7 +46,7 @@ class DBManager:
         if verify_at is None:
             interval = str(prediction_dict.get("interval", "4h"))
             hours = int(interval[:-1]) if interval.endswith("h") else 24
-            verify_at = predicted_at + timedelta(hours=hours * int(prediction_dict.get("verification_delay_candles", 4)))
+            verify_at = predicted_at + timedelta(hours=hours * int(prediction_dict.get("verification_delay_candles", TARGET_HORIZON_CANDLES)))
         values = {"prediction_id": prediction_id, "symbol": prediction_dict["symbol"], "interval": prediction_dict["interval"],
                   "model_name": prediction_dict["model_name"], "predicted_at": predicted_at, "verify_at": verify_at,
                   "probability_up": float(prediction_dict["probability_up"]), "signal": prediction_dict["signal"], "confidence": prediction_dict["confidence"],
@@ -55,17 +56,36 @@ class DBManager:
             conn.execute(self.predictions.insert().values(**values))
         return prediction_id
 
+    def has_prediction_since(
+        self, symbol: str, interval: str, model_name: str, since_dt: datetime
+    ) -> bool:
+        if since_dt.tzinfo is None:
+            since_utc = since_dt.replace(tzinfo=timezone.utc)
+        else:
+            since_utc = since_dt.astimezone(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            since_utc = since_utc.replace(tzinfo=None)
+        stmt = select(exists().where(
+            self.predictions.c.symbol == symbol,
+            self.predictions.c.interval == interval,
+            self.predictions.c.model_name == model_name,
+            self.predictions.c.predicted_at >= since_utc,
+        ))
+        with self.engine.connect() as conn:
+            return bool(conn.execute(stmt).scalar_one())
+
     def save_outcome(self, prediction_id: str, price_at_verification: float) -> dict:
         with self.engine.begin() as conn:
             p = conn.execute(select(self.predictions).where(self.predictions.c.prediction_id == prediction_id)).mappings().one()
             change = (float(price_at_verification) - p["price_at_prediction"]) / p["price_at_prediction"] * 100
-            actual = "UP" if change > 0 else "DOWN"
-            expected = "UP" if p["signal"] == "ALCISTA" else "DOWN"
-            correct = int(actual == expected)
+            actual_label = int(change / 100 > TARGET_UP_THRESHOLD)
+            actual = "UP" if actual_label == 1 else "NOT_UP"
+            correct = (int(actual_label == 1) if p["signal"] == "ALCISTA" else
+                       int(actual_label == 0) if p["signal"] == "BAJISTA" else None)
             outcome = {"prediction_id": prediction_id, "verified_at": datetime.now(timezone.utc), "price_at_verification": float(price_at_verification),
                        "price_change_pct": change, "actual_direction": actual, "was_correct": correct,
-                       "why_correct": self._json({"signal": p["signal"]}) if correct else None,
-                       "why_wrong": self._json({"signal": p["signal"], "actual_direction": actual}) if not correct else None}
+                       "why_correct": self._json({"signal": p["signal"]}) if correct is not None and correct else None,
+                       "why_wrong": self._json({"signal": p["signal"], "actual_direction": actual}) if correct is not None and not correct else None}
             conn.execute(self.outcomes.insert().values(**outcome))
         return outcome
 
@@ -80,15 +100,16 @@ class DBManager:
         stmt = select(
             func.count(self.predictions.c.id).label("total"),
             func.count(self.outcomes.c.id).label("verified"),
+            func.count(self.outcomes.c.was_correct).label("evaluated"),
             func.coalesce(func.sum(self.outcomes.c.was_correct), 0).label("correct"),
         ).select_from(
             self.predictions.outerjoin(self.outcomes, self.predictions.c.prediction_id == self.outcomes.c.prediction_id)
         ).where(self.predictions.c.model_name == model_name, self.predictions.c.predicted_at >= cutoff)
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().one()
-        total, verified, correct = int(row["total"]), int(row["verified"]), int(row["correct"])
+        total, verified, evaluated, correct = int(row["total"]), int(row["verified"]), int(row["evaluated"]), int(row["correct"])
         return {"model_name": model_name, "total_predictions": total, "verified_predictions": verified,
-                "correct_predictions": correct, "accuracy": correct / verified if verified else None,
+                "evaluated_predictions": evaluated, "correct_predictions": correct, "accuracy": correct / evaluated if evaluated else None,
                 "last_n_days": last_n_days}
 
     def get_battle_stats(self, model_name: str) -> dict:
@@ -96,6 +117,7 @@ class DBManager:
         stmt = select(
             func.count(self.predictions.c.id).label("total"),
             func.count(self.outcomes.c.id).label("verified"),
+            func.count(self.outcomes.c.was_correct).label("evaluated"),
             func.coalesce(func.sum(self.outcomes.c.was_correct), 0).label("correct"),
         ).select_from(
             self.predictions.outerjoin(
@@ -107,14 +129,17 @@ class DBManager:
             row = conn.execute(stmt).mappings().one()
         total = int(row["total"])
         verified = int(row["verified"])
+        evaluated = int(row["evaluated"])
         correct = int(row["correct"])
         return {
             "model_name": model_name,
             "total_predictions": total,
             "verified_count": verified,
+            "evaluated_count": evaluated,
+            "neutral_count": verified - evaluated,
             "correct_count": correct,
             "pending_count": total - verified,
-            "accuracy": correct / verified if verified else None,
+            "accuracy": correct / evaluated if evaluated else None,
         }
 
     def get_accuracy_by_condition(self, model_name: str) -> list[dict]:
@@ -130,7 +155,7 @@ class DBManager:
             outcomes = {row.prediction_id: row.was_correct for row in conn.execute(select(self.outcomes.c.prediction_id, self.outcomes.c.was_correct)).all()}
         result = []
         for condition_name, rule in condition_rules.items():
-            total = verified = correct = 0
+            total = verified = evaluated = correct = 0
             for prediction in predictions:
                 try:
                     features = json.loads(prediction.features_snapshot or "{}")
@@ -141,10 +166,14 @@ class DBManager:
                     total += 1
                     if prediction.prediction_id in outcomes:
                         verified += 1
-                        correct += int(outcomes[prediction.prediction_id])
+                        was_correct = outcomes[prediction.prediction_id]
+                        if was_correct is not None:
+                            evaluated += 1
+                            correct += int(was_correct)
             result.append({"model_name": model_name, "condition_name": condition_name,
                            "total_predictions": total, "verified_predictions": verified,
-                           "correct_predictions": correct, "accuracy": correct / verified if verified else None})
+                           "evaluated_predictions": evaluated, "correct_predictions": correct,
+                           "accuracy": correct / evaluated if evaluated else None})
         return result
 
     def get_recent_predictions(self, symbol: str | None = None, limit: int = 50) -> list[dict]:

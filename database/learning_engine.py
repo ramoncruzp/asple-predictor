@@ -59,8 +59,9 @@ class LearningEngine:
                 with self.db_manager.engine.connect() as conn:
                     outcome = conn.execute(text("SELECT was_correct FROM outcomes WHERE prediction_id=:id"), {"id": prediction["prediction_id"]}).fetchone()
                 if outcome:
-                    total += 1
-                    correct += int(outcome[0])
+                    if outcome[0] is not None:
+                        total += 1
+                        correct += int(outcome[0])
             values = {"model_name": model_name, "condition_name": name, "total_predictions": total, "correct_predictions": correct,
                       "accuracy": correct / total if total else 0.0, "last_updated": datetime.now(timezone.utc)}
             with self.db_manager.engine.begin() as conn:
@@ -71,5 +72,5 @@ class LearningEngine:
 
     def should_retrain(self, model_name: str) -> bool:
         with self.db_manager.engine.connect() as conn:
-            count = conn.execute(text("SELECT COUNT(*) FROM outcomes o JOIN predictions p ON p.prediction_id=o.prediction_id WHERE p.model_name=:m"), {"m": model_name}).scalar_one()
+            count = conn.execute(text("SELECT COUNT(*) FROM outcomes o JOIN predictions p ON p.prediction_id=o.prediction_id WHERE p.model_name=:m AND o.was_correct IS NOT NULL"), {"m": model_name}).scalar_one()
         return int(count) >= 168

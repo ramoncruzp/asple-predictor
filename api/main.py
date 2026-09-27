@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
         model_d = ModelD()
         model_d.load(str(model_d_path))
     ensemble = EnsemblePredictor(*models, db, model_d=model_d)
-    prediction_loop, verification_loop = PredictionLoop(client, ensemble), VerificationLoop(LearningEngine(db, client))
+    prediction_loop, verification_loop = PredictionLoop(client, ensemble, db_manager=db), VerificationLoop(LearningEngine(db, client))
     app.state.settings, app.state.db, app.state.client = settings, db, client
     app.state.models, app.state.ensemble = dict(zip(("model_a", "model_b", "model_c"), models)), ensemble
     if model_d is not None:

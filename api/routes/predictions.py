@@ -8,9 +8,17 @@ def latest(request: Request, symbol: str = "XRPUSDT", interval: str = "4h", limi
 
 @router.get("/consensus")
 def consensus(request: Request, symbol: str = "XRPUSDT", interval: str = "4h"):
-    lookback_days = {"1h": 20, "4h": 90, "12h": 180, "1d": 365, "1w": 2200}.get(interval.lower(), 90)
-    df = request.app.state.client.get_historical_klines(symbol, interval.lower(), lookback_days=lookback_days).tail(200)
-    result = request.app.state.ensemble.predict_and_save(symbol, interval, df)
+    symbol = symbol.strip().upper().replace("/", "")
+    interval = interval.lower()
+    lookback_days = {"1h": 20, "4h": 90, "12h": 180, "1d": 365, "1w": 2200}.get(interval, 90)
+    df = request.app.state.client.get_historical_klines(symbol, interval, lookback_days=lookback_days).tail(200)
+    cached = request.app.state.prediction_loop.latest.get((symbol, interval))
+    if cached is not None:
+        result = dict(cached)
+        result["persisted"] = True
+    else:
+        result = dict(request.app.state.ensemble.predict(symbol, interval, df))
+        result["persisted"] = False
     features = FeatureEngineer().compute_features(df)
     latest = features.iloc[-1]
     result["candles"] = [{"time": int(row.timestamp.timestamp()), "open": float(row.open), "high": float(row.high), "low": float(row.low), "close": float(row.close)} for row in df.itertuples()]

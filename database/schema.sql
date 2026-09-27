@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS predictions (
 CREATE TABLE IF NOT EXISTS outcomes (
  id INTEGER PRIMARY KEY AUTOINCREMENT, prediction_id TEXT NOT NULL REFERENCES predictions(prediction_id),
  verified_at DATETIME NOT NULL, price_at_verification REAL NOT NULL, price_change_pct REAL NOT NULL,
- actual_direction TEXT NOT NULL, was_correct INTEGER NOT NULL, why_correct TEXT, why_wrong TEXT
+ actual_direction TEXT NOT NULL, was_correct INTEGER, why_correct TEXT, why_wrong TEXT
 );
 CREATE TABLE IF NOT EXISTS model_accuracy_by_condition (
  id INTEGER PRIMARY KEY AUTOINCREMENT, model_name TEXT NOT NULL, condition_name TEXT NOT NULL,

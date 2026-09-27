@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import ta as ta_lib
 from sklearn.preprocessing import StandardScaler
+from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 
 
 class FeatureEngineer:
@@ -66,9 +67,9 @@ class FeatureEngineer:
         result["vwap"] = (close * volume).cumsum() / cumulative_volume
         result["vol_ratio"] = volume / volume.rolling(20).mean()
 
-        future_return = close.shift(-4) / close - 1
+        future_return = close.shift(-TARGET_HORIZON_CANDLES) / close - 1
         result["target"] = np.where(
-            future_return.notna(), (future_return > 0.005).astype(float), np.nan
+            future_return.notna(), (future_return > TARGET_UP_THRESHOLD).astype(float), np.nan
         )
 
         for name in self.FEATURE_NAMES:

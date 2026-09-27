@@ -39,5 +39,5 @@ def recommend(request: Request, symbol: str = "XRPUSDT", capital: float = Query(
     atr = float(tr.rolling(14).mean().iloc[-1]); floor = support - {"low": 1.5, "medium": 2.0, "high": 3.0}[risk] * atr; ceiling = resistance + 0.5 * atr
     range_pct = max(0.0, (ceiling - floor) / floor * 100)
     grids = max(5, min(20, round(range_pct / 2.5)))
-    consensus = request.app.state.ensemble.predict_and_save(symbol, "4h", df.tail(200))
+    consensus = request.app.state.ensemble.predict(symbol, "4h", df.tail(200))
     return {"symbol": symbol, "current_price": current, "recommended_floor": floor, "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids, "capital_per_grid": capital / grids, "spacing_pct": range_pct / grids, "confidence": consensus["consensus_confidence"], "analysis": {"main_support": support, "main_resistance": resistance, "atr": atr, "support_touches": support_touches, "resistance_touches": resistance_touches}, "prediction_signal": consensus, "disclaimer": "Análisis estadístico. Validar antes de operar."}

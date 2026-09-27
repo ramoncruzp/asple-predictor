@@ -1,5 +1,8 @@
 """Configuration for the prediction models."""
 
+TARGET_HORIZON_CANDLES = 4
+TARGET_UP_THRESHOLD = 0.005
+
 MODELS_CONFIG = {
     "model_a": {
         "nombre": "XGBoost",
