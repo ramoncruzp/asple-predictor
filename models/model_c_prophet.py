@@ -101,7 +101,9 @@ class ModelC(BaseModel):
         result["prophet_trend"] = forecast["trend"].to_numpy()
         return result
 
-    def _prepare_hybrid_data(self, df: pd.DataFrame, prophet_model: Prophet) -> pd.DataFrame:
+    def _prepare_hybrid_data(
+        self, df: pd.DataFrame, prophet_model: Prophet, require_target: bool = True
+    ) -> pd.DataFrame:
         residuals = self._compute_residuals(df, prophet_model)
         technical = self.feature_engineer.compute_features(df)
         if "timestamp" in technical.columns:
@@ -112,7 +114,8 @@ class ModelC(BaseModel):
             hybrid = technical.copy()
             for name in self.RESIDUAL_FEATURES:
                 hybrid[name] = residuals.loc[technical.index, name].to_numpy()
-        return hybrid.dropna(subset=[*self.feature_names, "target"]).reset_index(drop=True)
+        required_columns = [*self.feature_names, "target"] if require_target else self.feature_names
+        return hybrid.dropna(subset=required_columns).reset_index(drop=True)
 
     @staticmethod
     def _new_xgb(scale_pos_weight: float) -> XGBClassifier:
@@ -133,7 +136,7 @@ class ModelC(BaseModel):
         self.prophet_model, _forecast = self._train_prophet(df)
         residual_df = self._compute_residuals(df, self.prophet_model)
         self.prophet_rmse = float(np.sqrt(np.mean(np.square(residual_df["residual"].dropna()))))
-        prepared = self._prepare_hybrid_data(df, self.prophet_model)
+        prepared = self._prepare_hybrid_data(df, self.prophet_model, require_target=True)
         if len(prepared) < 10:
             raise ValueError("Se requieren al menos 10 filas limpias para entrenar ModelC")
         X = prepared[self.feature_names].astype(float)
@@ -191,7 +194,7 @@ class ModelC(BaseModel):
         if self.prophet_model is None or self.xgb_model is None:
             raise RuntimeError("ModelC debe entrenarse o cargarse antes de predecir")
         prophet_trend = self._future_prophet_trend(df)
-        hybrid = self._prepare_hybrid_data(df, self.prophet_model)
+        hybrid = self._prepare_hybrid_data(df, self.prophet_model, require_target=False)
         if hybrid.empty:
             raise ValueError("No hay filas híbridas disponibles para predecir")
         latest = hybrid.iloc[[-1]]
@@ -214,7 +217,7 @@ class ModelC(BaseModel):
             confidence = "media"
         top_features = sorted(self.feature_importances_.items(), key=lambda item: item[1], reverse=True)[:5]
         top_features = [(name, float(importance)) for name, importance in top_features]
-        timestamp: Any = df["timestamp"].iloc[-1] if "timestamp" in df else datetime.now(timezone.utc)
+        timestamp: Any = latest["timestamp"].iloc[0] if "timestamp" in latest else datetime.now(timezone.utc)
         if isinstance(timestamp, pd.Timestamp):
             timestamp = timestamp.to_pydatetime()
         return {
