@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -38,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", default="1h", choices=sorted(binance_client.VALID_INTERVALS))
     parser.add_argument("--days", type=int, default=730)
     parser.add_argument("--models", default="a,b,c", help="Lista separada por comas: a,b,c")
+    parser.add_argument("--save-candles", type=Path, help="Guarda las velas cerradas usadas en CSV")
+    parser.add_argument("--candles", type=Path, help="Carga velas de un CSV en vez de Binance")
     parser.add_argument(
         "--force", action="store_true", help="Permite sobrescribir artefactos 4h existentes"
     )
@@ -59,17 +63,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    binance_client = _binance_client_class()
-    client = binance_client("", "")
-    frame = client.get_historical_klines(args.symbol, args.interval, args.days)
+    if args.candles:
+        frame = pd.read_csv(args.candles)
+        for column in ("timestamp", "close_time"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], utc=True)
+    else:
+        binance_client = _binance_client_class()
+        client = binance_client("", "")
+        frame = client.get_historical_klines(args.symbol, args.interval, args.days)
     if "close_time" in frame.columns and not frame.empty:
         now = datetime.now(timezone.utc)
-        close_times = frame["close_time"]
-        if close_times.dt.tz is None:
-            close_times = close_times.dt.tz_localize("UTC")
+        close_times = pd.to_datetime(frame["close_time"], utc=True)
         frame = frame.loc[close_times <= now].reset_index(drop=True)
     if frame.empty:
         raise RuntimeError("Binance no devolvió velas cerradas para entrenar")
+
+    if args.save_candles:
+        args.save_candles.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(args.save_candles, index=False)
 
     root = Path(__file__).resolve().parents[1]
     saved_dir = root / "models" / "saved"

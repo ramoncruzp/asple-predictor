@@ -151,6 +151,7 @@ class FeatureEngineer:
         result[relative_columns] = result[relative_columns].replace([np.inf, -np.inf], np.nan)
 
         future_return = close.shift(-TARGET_HORIZON_CANDLES) / close - 1
+        result["future_return"] = future_return
         result["target"] = np.where(
             future_return.notna(), (future_return > TARGET_UP_THRESHOLD).astype(float), np.nan
         )

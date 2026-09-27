@@ -39,6 +39,7 @@ class ModelA(BaseModel):
         self.last_updated: str | None = None
         self.cumulative_accuracy: float | None = None
         self.metrics_: dict[str, Any] = {}
+        self.evaluation_: dict[str, Any] | None = None
 
     def _new_classifier(self, scale_pos_weight: float) -> XGBClassifier:
         """Create the requested classifier parameters for installed XGBoost."""
@@ -88,6 +89,16 @@ class ModelA(BaseModel):
         self.model.fit(X_train_scaled, y_train, **fit_kwargs)
 
         probabilities = self.model.predict_proba(X_test_scaled)[:, 1]
+        self.evaluation_ = {
+            "val_proba": self.model.predict_proba(X_val_scaled)[:, 1],
+            "test_proba": probabilities,
+            "val_rows": prepared.iloc[val_slice][
+                ["timestamp", "close", "future_return", "target"]
+            ].reset_index(drop=True),
+            "test_rows": prepared.iloc[test_slice][
+                ["timestamp", "close", "future_return", "target"]
+            ].reset_index(drop=True),
+        }
         predictions = (probabilities >= 0.5).astype("int8")
         signal_mask = (probabilities > 0.55) | (probabilities < 0.45)
         signal_predictions = (probabilities[signal_mask] > 0.55).astype("int8")
