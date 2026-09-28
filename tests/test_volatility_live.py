@@ -220,3 +220,46 @@ def test_api_returns_503_when_volatility_manifest_is_unavailable():
         api_forecast(request)
     assert error.value.status_code == 503
     assert "manifest" in error.value.detail
+
+
+def test_frontend_volatility_contract_fields():
+    """Keep the three V2b frontend endpoint payloads aligned with their consumers."""
+    now = datetime.now(timezone.utc)
+    forecast_rows = [{
+        "horizon_h": horizon, "model_name": champion, "is_champion": True,
+        "forecast_at": now, "made_at": now, "pred_logvol_cal": float(np.log(0.01)),
+    } for horizon, champion in VOL_CHAMPIONS.items()]
+
+    class FakeDB:
+        def get_latest_vol_forecasts(self, symbol):
+            return forecast_rows
+
+        def get_vol_battle(self, symbol, horizon):
+            return []
+
+        def get_vol_history(self, symbol, horizon, model, limit):
+            return [{"forecast_at": now, "pred_vol_pct": 1.0, "realized_vol_pct": None}]
+
+    predictor = SimpleNamespace(
+        symbol="XRPUSDT",
+        manifest={"regime_percentiles_24h": {"p33": 0.005, "p66": 0.02}, "horizons": {"4": {}}},
+    )
+    request = _request_with_state(
+        vol_predictor=predictor, vol_loop=SimpleNamespace(latest={"price": 1.0}), db=FakeDB()
+    )
+
+    forecast_result = api_forecast(request)
+    assert {"symbol", "price", "regime", "forecasts"} <= forecast_result.keys()
+    forecast_fields = {
+        "horizon_h", "champion", "forecast_at", "made_at", "move_1sigma_pct",
+        "range_1sigma", "range_2sigma", "stale",
+    }
+    assert forecast_fields <= forecast_result["forecasts"][0].keys()
+
+    battle_result = api_battle(request, horizon=4)
+    assert {"symbol", "horizon_h", "models"} <= battle_result.keys()
+    battle_fields = {"model_name", "r2_cal", "qlike_cal", "n_verified", "r2_live", "is_champion"}
+    assert battle_fields <= battle_result["models"][0].keys()
+
+    history_result = api_history(request, horizon=4, model="GBM", limit=200)
+    assert {"forecast_at", "pred_vol_pct", "realized_vol_pct"} <= history_result[0].keys()
