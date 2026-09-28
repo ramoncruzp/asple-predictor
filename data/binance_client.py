@@ -18,8 +18,8 @@ T = TypeVar("T")
 class BinanceClient:
     """Small wrapper around python-binance with resilient market-data access."""
 
-    VALID_INTERVALS = {"15m", "1h", "4h", "12h", "1d", "1w"}
-    INTERVAL_MINUTES = {"15m": 15, "1h": 60, "4h": 240, "12h": 720, "1d": 1440, "1w": 10080}
+    VALID_INTERVALS = {"5m", "15m", "1h", "4h", "12h", "1d", "1w"}
+    INTERVAL_MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "12h": 720, "1d": 1440, "1w": 10080}
     KLINE_COLUMNS = [
         "timestamp", "open", "high", "low", "close", "volume", "close_time",
         "quote_volume", "trades", "taker_buy_base", "taker_buy_quote",
