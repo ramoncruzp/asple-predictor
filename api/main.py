@@ -15,10 +15,12 @@ from database.db_manager import DBManager
 from database.learning_engine import LearningEngine
 from models.model_a_xgboost import ModelA
 from models.shadow_predictor import ShadowPredictor
-from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import grid_advisor, models_status, predictions
+from api.routes import grid_advisor, models_status, predictions, volatility
+from models.volatility.live import VolPredictor
+from scheduler.vol_loop import VolLoop
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,15 +40,38 @@ async def lifespan(app: FastAPI):
         raise
     ensemble = ShadowPredictor(model_a, db)
     prediction_loop, verification_loop = PredictionLoop(client, ensemble, db_manager=db), VerificationLoop(LearningEngine(db, client))
+    volatility_manifest = Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json"
+    vol_predictor = None
+    vol_loop = None
+    if volatility_manifest.is_file():
+        try:
+            vol_predictor = VolPredictor()
+            vol_loop = VolLoop(client, vol_predictor, db)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "No se pudo inicializar volatilidad desde %s; la app seguirá sin ese módulo",
+                volatility_manifest,
+            )
+            vol_predictor = None
+            vol_loop = None
+    else:
+        logging.getLogger(__name__).warning(
+            "Volatilidad deshabilitada: no existe el manifest %s", volatility_manifest
+        )
     app.state.settings, app.state.db, app.state.client = settings, db, client
     app.state.models, app.state.ensemble = {"model_a": model_a}, ensemble
     app.state.prediction_loop, app.state.verification_loop = prediction_loop, verification_loop
+    app.state.vol_predictor, app.state.vol_loop = vol_predictor, vol_loop
     app.state.started_at = time.monotonic()
     prediction_loop.start()
     verification_loop.start()
+    if vol_loop is not None:
+        vol_loop.start()
     try:
         yield
     finally:
+        if vol_loop is not None:
+            vol_loop.stop()
         prediction_loop.stop(); verification_loop.stop()
 
 app = FastAPI(title="ASPLE Predictor API", version="1.0.0", lifespan=lifespan)
@@ -54,6 +79,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http
 app.include_router(predictions.router, prefix="/api/predictions", tags=["predictions"])
 app.include_router(models_status.router, prefix="/api/models", tags=["models"])
 app.include_router(grid_advisor.router, prefix="/api/grid", tags=["grid"])
+app.include_router(volatility.router, prefix="/api/volatility", tags=["volatility"])
 
 @app.get("/api/candles")
 def candles(symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):

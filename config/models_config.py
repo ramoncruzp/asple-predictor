@@ -12,6 +12,15 @@ SHADOW_KILL_MIN_SIGNALS = 40
 SHADOW_KILL_MIN_LIFT_PTS = 0.05
 SHADOW_KILL_MIN_MEAN_RETURN = 0.002
 
+VOL_SYMBOL = "XRPUSDT"
+VOL_HORIZONS = [1, 2, 4, 24]
+VOL_MODELS = [
+    "Persistence", "EWMA", "HAR", "HAR_range", "HAR_asym", "GBM", "NexoHAR", "GARCH_t"
+]
+VOL_CHAMPIONS = {1: "GBM", 2: "GBM", 4: "GBM", 24: "NexoHAR"}
+VOL_ARTIFACT_DIR = "models/saved/vol"
+VOL_LIVE_MIN_VERIFIED = 30
+
 MODELS_CONFIG = {
     "model_a": {
         "nombre": "XGBoost",

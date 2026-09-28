@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, exists, func, select, text
+import numpy as np
+from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, UniqueConstraint, create_engine, exists, func, select, text
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
@@ -34,6 +35,25 @@ class DBManager:
         self.conditions = Table("model_accuracy_by_condition", self.metadata,
             Column("id", Integer, primary_key=True), Column("model_name", String, nullable=False), Column("condition_name", String, nullable=False),
             Column("total_predictions", Integer, default=0), Column("correct_predictions", Integer, default=0), Column("accuracy", Float, default=0.0), Column("last_updated", DateTime(timezone=True)))
+        self.vol_forecasts = Table(
+            "vol_forecasts", self.metadata,
+            Column("id", Integer, primary_key=True),
+            Column("symbol", String, nullable=False),
+            Column("horizon_h", Integer, nullable=False),
+            Column("model_name", String, nullable=False),
+            Column("forecast_at", DateTime(timezone=True), nullable=False),
+            Column("made_at", DateTime(timezone=True), nullable=False),
+            Column("pred_logvol_raw", Float, nullable=False),
+            Column("pred_logvol_cal", Float, nullable=False),
+            Column("var_factor", Float, nullable=False),
+            Column("is_champion", Integer, nullable=False),
+            Column("realized_logvol", Float),
+            Column("verified_at", DateTime(timezone=True)),
+            UniqueConstraint(
+                "symbol", "horizon_h", "model_name", "forecast_at",
+                name="uq_vol_forecasts_identity",
+            ),
+        )
         self.metadata.create_all(self.engine)
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
@@ -286,3 +306,130 @@ class DBManager:
             "kill_min_lift_pts": SHADOW_KILL_MIN_LIFT_PTS,
             "kill_min_mean_return": SHADOW_KILL_MIN_MEAN_RETURN,
         }
+
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def save_vol_forecasts(self, rows: list[dict]) -> int:
+        """Insert forecasts idempotently; repeated startup cycles are harmless."""
+        if not rows:
+            return 0
+        values = [{
+            "symbol": row["symbol"],
+            "horizon_h": int(row["horizon_h"]),
+            "model_name": row["model_name"],
+            "forecast_at": self._utc(row["forecast_at"]),
+            "made_at": self._utc(row["made_at"]),
+            "pred_logvol_raw": float(row["pred_logvol_raw"]),
+            "pred_logvol_cal": float(row["pred_logvol_cal"]),
+            "var_factor": float(row["var_factor"]),
+            "is_champion": int(bool(row["is_champion"])),
+        } for row in rows]
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+                statement = dialect_insert(self.vol_forecasts).values(values).on_conflict_do_nothing(
+                    index_elements=["symbol", "horizon_h", "model_name", "forecast_at"]
+                )
+            elif self.engine.dialect.name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                statement = dialect_insert(self.vol_forecasts).values(values).on_conflict_do_nothing(
+                    index_elements=["symbol", "horizon_h", "model_name", "forecast_at"]
+                )
+            else:
+                statement = self.vol_forecasts.insert().values(values)
+            result = conn.execute(statement)
+            return int(result.rowcount or 0)
+
+    def get_pending_vol_verifications(self, now: datetime) -> list[dict]:
+        """Return matured forecasts awaiting their realized-volatility label."""
+        now_utc = self._utc(now)
+        statement = select(self.vol_forecasts).where(
+            self.vol_forecasts.c.realized_logvol.is_(None),
+            self.vol_forecasts.c.verified_at.is_(None),
+        ).order_by(self.vol_forecasts.c.forecast_at)
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        return [
+            row for row in rows
+            if self._utc(row["forecast_at"]) + timedelta(hours=int(row["horizon_h"])) <= now_utc
+        ]
+
+    def save_vol_realized(self, forecast_id: int, realized_logvol: float) -> bool:
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        statement = self.vol_forecasts.update().where(
+            self.vol_forecasts.c.id == int(forecast_id),
+            self.vol_forecasts.c.realized_logvol.is_(None),
+        ).values(realized_logvol=float(realized_logvol), verified_at=now)
+        with self.engine.begin() as conn:
+            return bool(conn.execute(statement).rowcount)
+
+    def get_vol_battle(self, symbol: str, horizon_h: int) -> list[dict]:
+        statement = select(self.vol_forecasts).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+        ).order_by(self.vol_forecasts.c.made_at)
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        by_model: dict[str, list[dict]] = {}
+        for row in rows:
+            by_model.setdefault(row["model_name"], []).append(row)
+        result = []
+        for model_name, model_rows in by_model.items():
+            verified = [row for row in model_rows if row["realized_logvol"] is not None]
+            y = np.asarray([row["realized_logvol"] for row in verified], dtype="float64")
+            pred = np.asarray([row["pred_logvol_cal"] for row in verified], dtype="float64")
+            mse = float(np.mean(np.square(y - pred))) if len(y) else None
+            sst = float(np.square(y - y.mean()).sum()) if len(y) else 0.0
+            r2 = (
+                1.0 - float(np.square(y - pred).sum()) / sst
+                if len(y) and sst > 0.0 else None
+            )
+            result.append({
+                "model_name": model_name,
+                "n_verified": len(verified),
+                "r2_live": r2,
+                "mse_live": mse,
+                "is_champion": bool(model_rows[-1]["is_champion"]),
+            })
+        return result
+
+    def get_vol_history(
+        self, symbol: str, horizon_h: int, model_name: str, limit: int = 200
+    ) -> list[dict]:
+        statement = select(
+            self.vol_forecasts.c.forecast_at,
+            self.vol_forecasts.c.pred_logvol_cal,
+            self.vol_forecasts.c.realized_logvol,
+        ).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+            self.vol_forecasts.c.model_name == model_name,
+        ).order_by(self.vol_forecasts.c.forecast_at.desc()).limit(int(limit))
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        rows.reverse()
+        return [{
+            "forecast_at": row["forecast_at"],
+            "pred_vol_pct": float(np.exp(row["pred_logvol_cal"]) * 100.0),
+            "realized_vol_pct": (
+                float(np.exp(row["realized_logvol"]) * 100.0)
+                if row["realized_logvol"] is not None else None
+            ),
+        } for row in rows]
+
+    def get_latest_vol_forecasts(self, symbol: str) -> list[dict]:
+        latest_at = select(func.max(self.vol_forecasts.c.forecast_at)).where(
+            self.vol_forecasts.c.symbol == symbol
+        ).scalar_subquery()
+        statement = select(self.vol_forecasts).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.forecast_at == latest_at,
+        ).order_by(self.vol_forecasts.c.horizon_h, self.vol_forecasts.c.model_name)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
