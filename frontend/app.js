@@ -11,6 +11,8 @@ function modelHeader(key) { return `${escapeHtml(getModelName(key))} ${tooltip(M
 class ApiClient {
   constructor(baseUrl = API_BASE) { this.baseUrl = baseUrl; }
   async get(path, params = {}) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(url, { signal: controller.signal }); if (!response.ok) throw new Error(`HTTP ${response.status}`); return await response.json(); } finally { clearTimeout(timer); } }
+  async post(path, body) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(this.baseUrl + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
+  async delete(path) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(this.baseUrl + path, { method: 'DELETE', signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
   status() { return this.get('/'); }
   candles(symbol, interval) { return this.get('/api/candles', { symbol, interval: interval.toLowerCase() }); }
   consensus(symbol, interval) { return this.get('/api/predictions/consensus', { symbol, interval: interval.toLowerCase() }); }
@@ -20,6 +22,10 @@ class ApiClient {
   shadowStatus() { return this.get('/api/models/shadow-status'); }
   conditions(model) { return this.get('/api/models/accuracy-by-condition', { model }); }
   grid(params) { return this.get('/api/grid/recommend', params); }
+  coinsAvailable() { return this.get('/api/coins/available'); }
+  coinsList() { return this.get('/api/coins'); }
+  addCoin(symbol, notes) { return this.post('/api/coins', { symbol, notes: notes || null }); }
+  removeCoin(symbol) { return this.delete(`/api/coins/${symbol}`); }
 }
 const api = new ApiClient();
 const $ = (selector) => document.querySelector(selector);
@@ -43,7 +49,7 @@ function renderBattle(status, conditionSets, history) { const models = status.mo
 async function loadBattleV2a() { try { const status = await api.modelsStatus(); const names = (status.models || []).map(model => model.model_name); const conditionRows = await Promise.all(names.map(name => api.conditions(name))); const history = await api.history(null, null, 30); renderBattle(status, Object.fromEntries(names.map((name, index) => [name, conditionRows[index]])), history); setOffline(false); } catch (_) { setOffline(true); } }
 function gridSvg(data) { const floor = Number(data.recommended_floor), ceiling = Number(data.recommended_ceiling), current = Number(data.current_price), count = Number(data.suggested_grids), y = value => 170 - ((value - floor) / (ceiling - floor)) * 140; let lines = ''; for (let index = 0; index <= count; index++) { const value = floor + (ceiling - floor) * index / count; lines += `<line x1="30" x2="570" y1="${y(value)}" y2="${y(value)}" stroke="#30363D"/>`; } return `<svg class="grid-svg" viewBox="0 0 620 190"><line x1="30" x2="570" y1="${y(floor)}" y2="${y(floor)}" stroke="#3FB950" stroke-width="2"/><line x1="30" x2="570" y1="${y(ceiling)}" y2="${y(ceiling)}" stroke="#F85149" stroke-width="2"/>${lines}<circle cx="300" cy="${y(current)}" r="5" fill="#2F81F7"/></svg>`; }
 function renderGridV2a(data) { const analysis = data.analysis, prediction = data.prediction_signal, signal = prediction?.consensus_signal; $('#grid-result').className = 'grid-result card'; $('#grid-result').innerHTML = `<div class="grid-header"><div><p class="eyebrow">RECOMENDACION ${escapeHtml(data.symbol)}</p><div class="price-large">${money(data.current_price)}</div><span class="muted">Rango ${Number(data.range_pct).toFixed(2)}%</span></div><span class="signal ${signalClass(signal)}">${signal ? escapeHtml(signal) : 'Sin predicci\u00f3n reciente'}</span></div><div class="level-row"><div class="level floor"><span>Piso recomendado</span><strong>${money(data.recommended_floor)}</strong></div><div class="level ceiling"><span>Techo recomendado</span><strong>${money(data.recommended_ceiling)}</strong></div></div>${gridSvg(data)}<div class="card-title"><h2>Configuracion sugerida</h2><button id="copy-grid" class="button secondary">Copiar configuracion</button></div><div class="indicator-strip"><div><span>GRIDS</span><b>${data.suggested_grids}</b></div><div><span>ESPACIADO</span><b>${Number(data.spacing_pct).toFixed(2)}%</b></div><div><span>CAPITAL / GRID</span><b>${money(data.capital_per_grid, 2)}</b></div></div><h2 style="font-size:14px;margin-top:24px">Por que estos niveles</h2><div class="why">Soporte: <b>${money(analysis.main_support)}</b> (${analysis.support_touches} toques) - Resistencia: <b>${money(analysis.main_resistance)}</b> (${analysis.resistance_touches} toques) - ATR: <b>${money(analysis.atr)}</b></div><p class="disclaimer">${escapeHtml(data.disclaimer)}</p>`; $('#copy-grid').onclick = () => { const text = `ASPLE Trade - Grid ${data.symbol.replace('USDT', '/USDT')}\nPiso: ${money(data.recommended_floor)} | Techo: ${money(data.recommended_ceiling)}\nGrids: ${data.suggested_grids} | Capital/grid: ${money(data.capital_per_grid, 2)}\nGenerado: ${new Date().toLocaleString()}`; navigator.clipboard.writeText(text).then(() => { const toast = $('#toast'); toast.textContent = 'Configuracion copiada'; toast.classList.remove('hidden'); setTimeout(() => toast.classList.add('hidden'), 2200); }); }; }
-function route() { const name = (location.hash || '#dashboard').slice(1); ['dashboard', 'battle', 'grid'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== name); document.querySelector(`[data-route="${screen}"]`).classList.toggle('active', screen === name); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); }
+function route() { const name = (location.hash || '#dashboard').slice(1); ['dashboard', 'battle', 'grid', 'coins'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== name); document.querySelector(`[data-route="${screen}"]`).classList.toggle('active', screen === name); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'coins') loadCoins(); }
 document.addEventListener('DOMContentLoaded', () => { restoreCache(); $('#grid-form').addEventListener('submit', loadGrid); $('#dashboard-symbol').addEventListener('change', loadDashboard); $('#dashboard-interval').addEventListener('change', loadDashboard); $('#refresh-dashboard').addEventListener('click', refreshDashboard); window.addEventListener('hashchange', route); route(); checkApiStatus(); setInterval(checkApiStatus, 30000); setInterval(() => { if ((location.hash || '#dashboard') === '#dashboard') loadDashboard(); }, 60000); });
 
 // V2b volatility UI: fetched alongside the existing dashboard and battle views.
@@ -100,3 +106,56 @@ async function loadGrid(event) {
   finally { button.disabled = false; button.innerHTML = 'ANALIZAR <span>-&gt;</span>'; }
 }
 document.addEventListener('DOMContentLoaded', () => { $('#vol-horizon-select')?.addEventListener('change', loadVolBattle); });
+
+// Coin registry: add/remove tradable pairs shown across the app.
+APP.coinsAvailableLoaded = false;
+APP.coinsPendingDelete = null;
+async function loadCoinsAvailableOnce() {
+  if (APP.coinsAvailableLoaded) return;
+  try {
+    const symbols = await api.coinsAvailable();
+    $('#coin-symbol-options').innerHTML = symbols.map(symbol => `<option value="${escapeHtml(symbol)}"></option>`).join('');
+    APP.coinsAvailableLoaded = true;
+  } catch (_) {}
+}
+function showCoinsError(message) { const el = $('#coins-error'); if (!message) { el.classList.add('hidden'); el.textContent = ''; return; } el.textContent = message; el.classList.remove('hidden'); }
+function renderCoinsTable(rows) {
+  const body = (rows || []).map(row => {
+    const changeClass = row.change_pct_24h == null ? '' : Number(row.change_pct_24h) >= 0 ? 'change-positive' : 'change-negative';
+    const changeText = row.change_pct_24h == null ? '—' : `${Number(row.change_pct_24h).toFixed(2)}%`;
+    const priceText = row.price == null ? '—' : money(row.price);
+    const volumeText = row.volume_24h_quote == null ? '—' : Number(row.volume_24h_quote).toLocaleString('es-ES', { maximumFractionDigits: 0 });
+    const addedText = row.added_at ? escapeHtml(new Date(row.added_at).toLocaleDateString()) : '—';
+    const notesText = row.notes ? escapeHtml(row.notes) : '—';
+    const pending = APP.coinsPendingDelete === row.symbol;
+    const buttonAttrs = row.is_predictor_symbol ? 'disabled title="Símbolo activo del predictor"' : '';
+    const buttonLabel = !row.is_predictor_symbol && pending ? '¿Sacar?' : '×';
+    return `<tr><td>${escapeHtml(row.symbol)}</td><td>${priceText}</td><td>${volumeText}</td><td class="${changeClass}">${changeText}</td><td>${addedText}</td><td>${notesText}</td><td><button type="button" class="button secondary coin-remove-btn" data-symbol="${escapeHtml(row.symbol)}" ${buttonAttrs}>${buttonLabel}</button></td></tr>`;
+  }).join('');
+  $('#coins-table').innerHTML = `<thead><tr><th>Simbolo</th><th>Precio</th><th>Volumen 24h</th><th>Cambio 24h</th><th>Alta</th><th>Notas</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="7">Sin monedas activas.</td></tr>'}</tbody>`;
+}
+async function loadCoins() {
+  loadCoinsAvailableOnce();
+  try { renderCoinsTable(await api.coinsList()); }
+  catch (_) { $('#coins-table').innerHTML = '<tbody><tr><td>No se pudo cargar la lista de monedas.</td></tr></tbody>'; }
+}
+async function handleCoinFormSubmit(event) {
+  event.preventDefault();
+  const symbolInput = $('#coin-symbol-input'), notesInput = $('#coin-notes-input');
+  const symbol = symbolInput.value.trim().toUpperCase();
+  if (!symbol) return;
+  showCoinsError(null);
+  try { await api.addCoin(symbol, notesInput.value.trim()); symbolInput.value = ''; notesInput.value = ''; await loadCoins(); }
+  catch (error) { showCoinsError(error.message || 'No se pudo agregar la moneda.'); }
+}
+async function handleCoinsTableClick(event) {
+  const button = event.target.closest('.coin-remove-btn');
+  if (!button || button.disabled) return;
+  const symbol = button.dataset.symbol;
+  if (APP.coinsPendingDelete !== symbol) { APP.coinsPendingDelete = symbol; await loadCoins(); return; }
+  APP.coinsPendingDelete = null;
+  showCoinsError(null);
+  try { await api.removeCoin(symbol); await loadCoins(); }
+  catch (error) { showCoinsError(error.message || 'No se pudo sacar la moneda.'); await loadCoins(); }
+}
+document.addEventListener('DOMContentLoaded', () => { $('#coins-form')?.addEventListener('submit', handleCoinFormSubmit); $('#coins-table')?.addEventListener('click', handleCoinsTableClick); });

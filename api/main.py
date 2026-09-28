@@ -18,7 +18,7 @@ from models.shadow_predictor import ShadowPredictor
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import grid_advisor, models_status, predictions, volatility
+from api.routes import coins, grid_advisor, models_status, predictions, volatility
 from models.volatility.live import VolPredictor
 from scheduler.vol_loop import VolLoop
 
@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI):
     key = "" if settings.binance_api_key.startswith("tu_") else settings.binance_api_key
     secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client, db = BinanceClient(key, secret), DBManager(settings.database_url)
+    db.seed_coin_if_missing(ACTIVE_SYMBOL, "Símbolo activo del predictor (sembrado)")
     model_a = ModelA()
     artifact = Path(SHADOW_ARTIFACT)
     try:
@@ -80,6 +81,7 @@ app.include_router(predictions.router, prefix="/api/predictions", tags=["predict
 app.include_router(models_status.router, prefix="/api/models", tags=["models"])
 app.include_router(grid_advisor.router, prefix="/api/grid", tags=["grid"])
 app.include_router(volatility.router, prefix="/api/volatility", tags=["volatility"])
+app.include_router(coins.router, prefix="/api/coins", tags=["coins"])
 
 @app.get("/api/candles")
 def candles(symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):

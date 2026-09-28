@@ -163,3 +163,23 @@ class BinanceClient:
             for item in exchange_info.get("symbols", [])
             if item.get("quoteAsset") == "USDT" and item.get("status") == "TRADING"
         )
+
+    def get_symbol_status(self, symbol: str) -> str | None:
+        """Return the Binance trading status for a USDT pair, or None if it does not exist."""
+        binance_symbol = self._binance_symbol(symbol)
+        info = self._request_with_retries(
+            lambda: self.client.get_symbol_info(binance_symbol), symbol=binance_symbol,
+        )
+        if info is None:
+            return None
+        return info.get("status")
+
+    def get_24h_stats(self, symbol: str) -> dict[str, float]:
+        """Return 24h ticker stats with a single attempt (no retry wait)."""
+        binance_symbol = self._binance_symbol(symbol)
+        ticker = self.client.get_ticker(symbol=binance_symbol)
+        return {
+            "price": float(ticker["lastPrice"]),
+            "volume_24h_quote": float(ticker["quoteVolume"]),
+            "change_pct_24h": float(ticker["priceChangePercent"]),
+        }

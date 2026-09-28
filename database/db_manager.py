@@ -54,6 +54,13 @@ class DBManager:
                 name="uq_vol_forecasts_identity",
             ),
         )
+        self.coins_registry = Table(
+            "coins_registry", self.metadata,
+            Column("symbol", String, primary_key=True),
+            Column("active", Integer, nullable=False, default=1),
+            Column("added_at", DateTime(timezone=True), nullable=False),
+            Column("notes", String, nullable=True),
+        )
         self.metadata.create_all(self.engine)
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
@@ -433,3 +440,60 @@ class DBManager:
         ).order_by(self.vol_forecasts.c.horizon_h, self.vol_forecasts.c.model_name)
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def get_coin(self, symbol: str) -> dict | None:
+        statement = select(self.coins_registry).where(self.coins_registry.c.symbol == symbol)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        return dict(row) if row else None
+
+    def get_active_coins(self) -> list[dict]:
+        statement = select(self.coins_registry).where(
+            self.coins_registry.c.active == 1
+        ).order_by(self.coins_registry.c.added_at)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def add_or_reactivate_coin(self, symbol: str, notes: str | None = None) -> dict:
+        now = self._utc(datetime.now(timezone.utc))
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                select(self.coins_registry).where(self.coins_registry.c.symbol == symbol)
+            ).mappings().first()
+            if existing is None:
+                conn.execute(self.coins_registry.insert().values(
+                    symbol=symbol, active=1, added_at=now, notes=notes,
+                ))
+            else:
+                values: dict[str, Any] = {"active": 1}
+                if notes is not None:
+                    values["notes"] = notes
+                conn.execute(
+                    self.coins_registry.update()
+                    .where(self.coins_registry.c.symbol == symbol)
+                    .values(**values)
+                )
+        return self.get_coin(symbol)
+
+    def deactivate_coin(self, symbol: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.coins_registry.update()
+                .where(self.coins_registry.c.symbol == symbol)
+                .values(active=0)
+            )
+
+    def seed_coin_if_missing(self, symbol: str, notes: str | None = None) -> None:
+        now = self._utc(datetime.now(timezone.utc))
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                select(self.coins_registry).where(self.coins_registry.c.symbol == symbol)
+            ).mappings().first()
+            if existing is None:
+                conn.execute(self.coins_registry.insert().values(
+                    symbol=symbol, active=1, added_at=now, notes=notes,
+                ))
