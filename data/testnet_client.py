@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Callable, TypeVar
 
@@ -134,8 +135,8 @@ class TestnetClient:
         self,
         symbol: str,
         side: str,
-        quantity: float,
-        price: float | None = None,
+        quantity: Decimal | str | float,
+        price: Decimal | str | float | None = None,
         order_type: str = "LIMIT",
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
@@ -147,20 +148,22 @@ class TestnetClient:
         if normalized_type not in {"LIMIT", "MARKET"}:
             raise ValueError("order_type must be LIMIT or MARKET.")
         try:
-            normalized_quantity = float(quantity)
-        except (TypeError, ValueError) as error:
+            quantity_decimal = Decimal(str(quantity))
+            normalized_quantity = float(quantity_decimal)
+        except (TypeError, ValueError, InvalidOperation) as error:
             raise ValueError("quantity must be greater than zero.") from error
-        if not isfinite(normalized_quantity) or normalized_quantity <= 0:
+        if not isfinite(normalized_quantity) or quantity_decimal <= 0:
             raise ValueError("quantity must be greater than zero.")
         if normalized_type == "LIMIT" and price is None:
             raise ValueError("price is required for LIMIT orders.")
         normalized_price = None
         if normalized_type == "LIMIT":
             try:
-                normalized_price = float(price)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as error:
+                price_decimal = Decimal(str(price))
+                normalized_price = float(price_decimal)
+            except (TypeError, ValueError, InvalidOperation) as error:
                 raise ValueError("price must be a positive number for LIMIT orders.") from error
-            if not isfinite(normalized_price) or normalized_price <= 0:
+            if not isfinite(normalized_price) or price_decimal <= 0:
                 raise ValueError("price must be a positive number for LIMIT orders.")
 
         order_client_id = client_order_id or uuid.uuid4().hex
@@ -168,11 +171,22 @@ class TestnetClient:
             "symbol": normalized_symbol,
             "side": normalized_side,
             "type": normalized_type,
-            "quantity": normalized_quantity,
+            "quantity": (
+                format(quantity_decimal, "f")
+                if isinstance(quantity, (Decimal, str))
+                else normalized_quantity
+            ),
             "newClientOrderId": order_client_id,
         }
         if normalized_type == "LIMIT":
-            params.update({"timeInForce": "GTC", "price": normalized_price})
+            params.update({
+                "timeInForce": "GTC",
+                "price": (
+                    format(price_decimal, "f")
+                    if isinstance(price, (Decimal, str))
+                    else normalized_price
+                ),
+            })
 
         last_error: Exception | None = None
         for attempt in range(len(_RETRY_DELAYS) + 1):
@@ -256,3 +270,69 @@ class TestnetClient:
                 continue
             balances[name] = {"free": free, "locked": locked}
         return balances
+
+    @staticmethod
+    def _normalize_extended_order(order: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **TestnetClient._normalize_order(order),
+            "executed_qty": Decimal(str(order.get("executedQty") or "0")),
+            "cummulative_quote_qty": Decimal(str(order.get("cummulativeQuoteQty") or "0")),
+        }
+
+    def get_symbol_info(self, symbol: str) -> dict[str, Any]:
+        normalized = self._symbol(symbol)
+        return self._run_read(lambda: self.client.get_symbol_info(normalized))
+
+    def get_avg_price(self, symbol: str) -> Decimal:
+        normalized = self._symbol(symbol)
+        result = self._run_read(lambda: self.client.get_avg_price(symbol=normalized))
+        return Decimal(str(result["price"]))
+
+    def get_book_ticker(self, symbol: str) -> dict[str, Decimal]:
+        normalized = self._symbol(symbol)
+        result = self._run_read(lambda: self.client.get_orderbook_ticker(symbol=normalized))
+        return {
+            "bid_price": Decimal(str(result["bidPrice"])),
+            "bid_qty": Decimal(str(result["bidQty"])),
+            "ask_price": Decimal(str(result["askPrice"])),
+            "ask_qty": Decimal(str(result["askQty"])),
+        }
+
+    def get_order(
+        self,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._symbol(symbol)
+        if (order_id is None) == (client_order_id is None):
+            raise ValueError("provide exactly one of order_id or client_order_id")
+        params = {"symbol": normalized}
+        params["orderId" if order_id is not None else "origClientOrderId"] = (
+            order_id if order_id is not None else client_order_id
+        )
+        result = self._run_read(lambda: self.client.get_order(**params))
+        return self._normalize_extended_order(result)
+
+    def get_my_trades(self, symbol: str, order_id: int | str) -> list[dict[str, Any]]:
+        normalized = self._symbol(symbol)
+        trades = self._run_read(
+            lambda: self.client.get_my_trades(symbol=normalized, orderId=order_id)
+        )
+        return [
+            {
+                "price": Decimal(str(trade.get("price") or "0")),
+                "qty": Decimal(str(trade.get("qty") or "0")),
+                "commission": Decimal(str(trade.get("commission") or "0")),
+                "commission_asset": str(trade.get("commissionAsset") or ""),
+            }
+            for trade in trades
+        ]
+
+    def find_order_by_client_id(
+        self, symbol: str, client_order_id: str
+    ) -> dict[str, Any] | None:
+        normalized = self._symbol(symbol)
+        return self._run_read(
+            lambda: self._find_by_client_order_id(normalized, client_order_id)
+        )

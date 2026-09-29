@@ -81,16 +81,17 @@ def remove_coin(request: Request, symbol: str):
     existing = db.get_coin(symbol)
     if existing is None or existing["active"] == 0:
         raise HTTPException(status_code=404, detail=f"{symbol} no existe o ya está inactivo.")
-    _assert_no_open_grid(symbol)
+    _assert_no_open_grid(db, symbol)
     db.deactivate_coin(symbol)
     return {"symbol": symbol, "active": False}
 
 
-def _assert_no_open_grid(symbol: str) -> None:
-    # Fase 14 (Grid Engine): cuando exista la tabla de grids, lanzar 409 si hay un grid
-    # abierto para este símbolo. Hoy no hay nada que chequear; no inventar tabla.
-    return None
-
+def _assert_no_open_grid(db: Any, symbol: str) -> None:
+    if db.has_open_grid(symbol):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No se puede desactivar {symbol} mientras tenga un grid abierto.",
+        )
 
 @router.get("")
 def list_coins(request: Request):

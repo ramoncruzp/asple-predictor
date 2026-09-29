@@ -330,3 +330,66 @@ def test_live_binance_testnet_far_limit_roundtrip():
                 testnet.cancel_order("XRPUSDT", order_id)
             except Exception:
                 pytest.fail("No se pudo cancelar la orden Testnet durante la limpieza.")
+
+
+def test_decimal_order_values_are_sent_as_plain_strings():
+    from decimal import Decimal
+
+    fake = FakeTestnetHTTP()
+    make_client(fake).place_order(
+        "XRPUSDT", "BUY", Decimal("0.00001"), Decimal("1E-5"),
+    )
+    assert fake.create_calls[0]["quantity"] == "0.00001"
+    assert fake.create_calls[0]["price"] == "0.00001"
+
+
+def test_float_order_values_keep_float_parameters():
+    fake = FakeTestnetHTTP()
+    make_client(fake).place_order("XRPUSDT", "BUY", 2.5, 0.125)
+    assert fake.create_calls[0]["quantity"] == 2.5
+    assert fake.create_calls[0]["price"] == 0.125
+
+
+def test_extended_read_methods_normalize_exchange_data():
+    from decimal import Decimal
+
+    fake = FakeTestnetHTTP()
+    fake.get_symbol_info = lambda symbol: {"symbol": symbol}
+    fake.get_avg_price = lambda symbol: {"mins": 5, "price": "1.2345"}
+    fake.get_orderbook_ticker = lambda symbol: {
+        "symbol": symbol, "bidPrice": "1.2", "bidQty": "3", "askPrice": "1.3", "askQty": "4",
+    }
+    fake.lookup_results.append(order_response(
+        executedQty="2", cummulativeQuoteQty="2.5",
+    ))
+    fake.get_my_trades = lambda **params: [{
+        "price": "1.25", "qty": "2", "commission": "0.002", "commissionAsset": "XRP",
+    }]
+    client = make_client(fake)
+
+    assert client.get_symbol_info("xrp/usdt") == {"symbol": "XRPUSDT"}
+    assert client.get_avg_price("XRPUSDT") == Decimal("1.2345")
+    assert client.get_book_ticker("XRPUSDT") == {
+        "bid_price": Decimal("1.2"), "bid_qty": Decimal("3"),
+        "ask_price": Decimal("1.3"), "ask_qty": Decimal("4"),
+    }
+    order = client.get_order("XRPUSDT", order_id=42)
+    assert order["executed_qty"] == Decimal("2")
+    assert order["cummulative_quote_qty"] == Decimal("2.5")
+    assert client.get_my_trades("XRPUSDT", 42) == [{
+        "price": Decimal("1.25"), "qty": Decimal("2"),
+        "commission": Decimal("0.002"), "commission_asset": "XRP",
+    }]
+
+
+def test_find_order_by_client_id_returns_none_for_unknown_order():
+    fake = FakeTestnetHTTP()
+    fake.lookup_results.append(api_error(-2013))
+    assert make_client(fake).find_order_by_client_id("XRPUSDT", "missing") is None
+
+
+def test_get_order_requires_exactly_one_identifier():
+    with pytest.raises(ValueError, match="exactly one"):
+        make_client().get_order("XRPUSDT")
+    with pytest.raises(ValueError, match="exactly one"):
+        make_client().get_order("XRPUSDT", order_id=42, client_order_id="id")

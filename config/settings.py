@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     verification_delay_candles: int = Field(4, validation_alias="VERIFICATION_DELAY_CANDLES")
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
     environment: str = Field("development", validation_alias="ENVIRONMENT")
+    usdt_por_grid: float = Field(100.0, validation_alias="USDT_POR_GRID")
+    max_grids_simultaneos: int = Field(5, validation_alias="MAX_GRIDS_SIMULTANEOS")
+    capital_max_por_nivel_pct: float = Field(0.30, validation_alias="CAPITAL_MAX_POR_NIVEL_PCT")
+    grid_min_step_pct: float = Field(0.003, validation_alias="GRID_MIN_STEP_PCT")
 
     model_config = SettingsConfigDict(
         env_file=".env",

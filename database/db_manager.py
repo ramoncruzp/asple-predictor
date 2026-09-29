@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, UniqueConstraint, create_engine, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, MetaData, String, Table, UniqueConstraint, create_engine, exists, func, select, text
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
@@ -61,11 +61,44 @@ class DBManager:
             Column("added_at", DateTime(timezone=True), nullable=False),
             Column("notes", String, nullable=True),
         )
+        self.grids = Table(
+            "grids", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String, nullable=False),
+            Column("range_low", Float, nullable=False),
+            Column("range_high", Float, nullable=False),
+            Column("n_levels", Integer, nullable=False),
+            Column("capital_total", Float, nullable=False),
+            Column("status", String, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("environment", String, nullable=False, default="testnet"),
+            Column("open_price", Float),
+            Column("closed_at", DateTime),
+            Column("fail_reason", String),
+        )
+        self.grid_levels = Table(
+            "grid_levels", self.metadata,
+            Column("grid_id", Integer, ForeignKey("grids.id"), primary_key=True),
+            Column("level_idx", Integer, primary_key=True),
+            Column("price", Float, nullable=False),
+            Column("capital", Float, nullable=False),
+            Column("order_id", Integer),
+            Column("state", String, nullable=False),
+            Column("cycles_completed", Integer, nullable=False, default=0),
+            Column("pnl", Float, nullable=False, default=0.0),
+            Column("sell_price", Float, nullable=False),
+            Column("held_qty", Float, nullable=False, default=0.0),
+            Column("client_order_id", String),
+            Column("fee_paid", Float, nullable=False, default=0.0),
+            Column("updated_at", DateTime, nullable=False),
+        )
         self.metadata.create_all(self.engine)
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_verify_at ON predictions(verify_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_outcomes_prediction_id ON outcomes(prediction_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_levels_grid_id ON grid_levels(grid_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grids_symbol_status ON grids(symbol, status)"))
 
     @staticmethod
     def _json(value: Any) -> str | None:
@@ -497,3 +530,103 @@ class DBManager:
                 conn.execute(self.coins_registry.insert().values(
                     symbol=symbol, active=1, added_at=now, notes=notes,
                 ))
+
+    def create_grid_with_levels(self, grid: dict[str, Any], levels: list[dict[str, Any]]) -> dict:
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        grid_values = {
+            "symbol": grid["symbol"],
+            "range_low": float(grid["range_low"]),
+            "range_high": float(grid["range_high"]),
+            "n_levels": int(grid["n_levels"]),
+            "capital_total": float(grid["capital_total"]),
+            "status": grid.get("status", "OPENING"),
+            "created_at": grid.get("created_at", now),
+            "environment": grid.get("environment", "testnet"),
+            "open_price": grid.get("open_price"),
+            "closed_at": grid.get("closed_at"),
+            "fail_reason": grid.get("fail_reason"),
+        }
+        with self.engine.begin() as conn:
+            result = conn.execute(self.grids.insert().values(**grid_values))
+            grid_id = result.inserted_primary_key[0]
+            level_rows = []
+            for index, level in enumerate(levels):
+                level_rows.append({
+                    "grid_id": grid_id,
+                    "level_idx": int(level.get("level_idx", index)),
+                    "price": float(level["price"]),
+                    "capital": float(level["capital"]),
+                    "order_id": level.get("order_id"),
+                    "state": level.get("state", level.get("initial_state", "IDLE")),
+                    "cycles_completed": int(level.get("cycles_completed", 0)),
+                    "pnl": float(level.get("pnl", 0.0)),
+                    "sell_price": float(level["sell_price"]),
+                    "held_qty": float(level.get("held_qty", 0.0)),
+                    "client_order_id": level.get("client_order_id"),
+                    "fee_paid": float(level.get("fee_paid", 0.0)),
+                    "updated_at": level.get("updated_at", now),
+                })
+            if level_rows:
+                conn.execute(self.grid_levels.insert(), level_rows)
+        return self.get_grid(grid_id)
+
+    def get_grid(self, grid_id: int) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.grids).where(self.grids.c.id == grid_id)).mappings().first()
+        return dict(row) if row else None
+
+    def get_grid_levels(self, grid_id: int) -> list[dict]:
+        statement = select(self.grid_levels).where(
+            self.grid_levels.c.grid_id == grid_id
+        ).order_by(self.grid_levels.c.level_idx)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def update_grid(self, grid_id: int, **fields: Any) -> dict | None:
+        allowed = {column.name for column in self.grids.columns} - {"id"}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError("invalid grid update fields")
+        with self.engine.begin() as conn:
+            conn.execute(self.grids.update().where(self.grids.c.id == grid_id).values(**fields))
+        return self.get_grid(grid_id)
+
+    def update_level(self, grid_id: int, level_idx: int, **fields: Any) -> dict | None:
+        allowed = {column.name for column in self.grid_levels.columns} - {"grid_id", "level_idx"}
+        if not set(fields) <= allowed:
+            raise ValueError("invalid grid level update fields")
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        values = {**fields, "updated_at": now}
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.grid_levels.update().where(
+                    self.grid_levels.c.grid_id == grid_id,
+                    self.grid_levels.c.level_idx == level_idx,
+                ).values(**values)
+            )
+        return next((row for row in self.get_grid_levels(grid_id) if row["level_idx"] == level_idx), None)
+
+    def count_open_grids(self) -> int:
+        statement = select(func.count()).select_from(self.grids).where(
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED"))
+        )
+        with self.engine.connect() as conn:
+            return int(conn.execute(statement).scalar_one())
+
+    def has_open_grid(self, symbol: str) -> bool:
+        statement = select(exists().where(
+            self.grids.c.symbol == symbol,
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED")),
+        ))
+        with self.engine.connect() as conn:
+            return bool(conn.execute(statement).scalar_one())
+
+    def list_open_grids(self) -> list[dict]:
+        statement = select(self.grids).where(
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED"))
+        ).order_by(self.grids.c.id)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
