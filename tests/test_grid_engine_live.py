@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -28,6 +29,15 @@ def live_context(tmp_path):
         pytest.fail(f"Binance Testnet client initialization failed ({type(exc).__name__})", pytrace=False)
     db = DBManager(f"sqlite:///{tmp_path / 'grid-live.db'}")
     db.add_or_reactivate_coin("XRPUSDT", "Fase 14 live test")
+    # Binance keeps client-order IDs after tests finish. Give each live run a
+    # fresh grid ID so its deterministic engine CIDs cannot resolve old fills.
+    unique_floor = int(time.time() * 1000)
+    with db.engine.begin() as conn:
+        conn.execute(db.grids.insert().values(
+            id=unique_floor, symbol="XRPUSDT", range_low=1.0, range_high=2.0,
+            n_levels=1, capital_total=0.0, status="CLOSED",
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None), environment="testnet",
+        ))
     engine = GridEngine(db, exchange, settings)
     return settings, exchange, db, engine
 

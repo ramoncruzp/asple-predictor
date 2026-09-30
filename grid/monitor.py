@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from grid.policy import evaluate_grid, stoploss_candidates
+from grid.policy import adjust_decision, evaluate_grid, stoploss_candidates, PolicyDecision
 from grid.volatility_provider import VolatilityProvider
 
 logger = logging.getLogger(__name__)
@@ -276,6 +276,36 @@ class GridMonitor:
                             float(current["capital_total"]), sigma, paused_since, now,
                             pause_reasons=pause_reasons,
                         )
+                        # Adjustment has precedence over PAUSE, but CLOSE remains
+                        # the highest priority. Legacy grids without the new
+                        # adjust_enabled key stay on the 15B-1 policy path.
+                        adjust = adjust_decision(
+                            current, levels, mid, sigma, now,
+                            (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
+                        )
+                        if decision.action != "CLOSE_REPOSITORY" and adjust.action == "ADJUST":
+                            preview = self.engine.preview_adjust(
+                                grid_id, adjust.metrics["range_low"], adjust.metrics["range_high"],
+                                adjust.metrics["n_levels"],
+                            )
+                            if not preview.get("ok"):
+                                adjust = PolicyDecision("BLOCKED", (preview.get("reason") or "invalid_plan",),
+                                                        {**adjust.metrics, "plan": preview.get("plan")})
+                        if adjust.action == "ADJUST" and decision.action != "CLOSE_REPOSITORY":
+                            decision = adjust
+                        elif adjust.action == "BLOCKED":
+                            decision = decision if decision.action == "CLOSE_REPOSITORY" else decision
+                            blocked_reason = ",".join(adjust.reasons) or "plan_invalid"
+                            recent = self.db.list_grid_events(grid_id=grid_id, event_type="ADJUST_BLOCKED", limit=100)
+                            already_logged = any(
+                                (event.get("details") or {}).get("blocked_reason") == blocked_reason
+                                and (_utc(now) - _utc(event["ts"])).total_seconds() < 6 * 3600
+                                for event in recent
+                            )
+                            if not already_logged:
+                                self._emit({"event_type": "ADJUST_BLOCKED", "grid_id": grid_id,
+                                    "reason": blocked_reason, "price": mid,
+                                    "details": {**adjust.metrics, "blocked_reason": blocked_reason}})
                         metrics = decision.metrics
                         details = {**decision.metrics, "reasons": list(decision.reasons)}
                         if decision.action == "PAUSE":
@@ -289,6 +319,21 @@ class GridMonitor:
                                             "reason": str(exc), "price": mid,
                                             "details": {"action": "PAUSE", **details}})
                                 self.logger.warning("grid=%s pause action failed", grid_id, exc_info=True)
+                        elif decision.action == "ADJUST":
+                            try:
+                                result = self.engine.adjust_grid(
+                                    grid_id, decision.metrics["range_low"], decision.metrics["range_high"],
+                                    decision.metrics["n_levels"], reason="policy_adjust",
+                                    details={**decision.metrics, "source": "MONITOR"},
+                                )
+                                if not result.get("ok"):
+                                    raise RuntimeError(result.get("reason") or "adjust rejected")
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "ADJUST", **decision.metrics}})
+                                self.logger.warning("grid=%s adjust action failed", grid_id, exc_info=True)
                         elif decision.action == "RESUME":
                             try:
                                 result = self.engine.resume_grid(grid_id, "hysteresis_cleared", details)
@@ -349,7 +394,7 @@ class GridMonitor:
                     continue
                 process_grid(grid)
 
-            status = "OK" if failed == 0 else "FAILED" if failed >= checked and checked else "PARTIAL"
+            status = "OK" if failed == 0 else "PARTIAL"
         except Exception as exc:
             unexpected = exc
             status = "FAILED"

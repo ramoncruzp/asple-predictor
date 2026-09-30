@@ -39,6 +39,9 @@ def test_defaults_and_parameter_validation_rules():
         "trapped_exit_factor": 0.8, "min_free_cells": 2,
         "pause_max_h": 48, "close_out_of_range_pct": 5.0,
         "max_loss_pct": 10.0, "stop_loss_pct": 5.0,
+        "adjust_enabled": True, "adjust_trigger_z": 0.75,
+        "adjust_cooldown_h": 6, "adjust_trapped_cap_pct": 30.0,
+        "adjust_n": None,
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
     assert validate_params({"pause_enter_prob": None}, 4)["pause_enter_prob"] is None

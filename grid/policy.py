@@ -21,6 +21,11 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "close_out_of_range_pct": 5.0,
     "max_loss_pct": 10.0,
     "stop_loss_pct": 5.0,
+    "adjust_enabled": True,
+    "adjust_trigger_z": 0.75,
+    "adjust_cooldown_h": 6,
+    "adjust_trapped_cap_pct": 30.0,
+    "adjust_n": None,
 }
 
 
@@ -82,7 +87,78 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     if isinstance(free, bool) or int(free) != free or not 1 <= int(free) < int(n_levels):
         raise ValueError("min_free_cells must satisfy 1 <= min_free_cells < n_levels")
     result["min_free_cells"] = int(free)
+    enabled = result["adjust_enabled"]
+    if not isinstance(enabled, bool):
+        raise ValueError("adjust_enabled must be boolean")
+    result["adjust_trigger_z"] = _number(result["adjust_trigger_z"], "adjust_trigger_z")
+    if result["adjust_trigger_z"] <= 0:
+        raise ValueError("adjust_trigger_z must be greater than zero")
+    result["adjust_cooldown_h"] = _number(result["adjust_cooldown_h"], "adjust_cooldown_h")
+    if result["adjust_cooldown_h"] < 0:
+        raise ValueError("adjust_cooldown_h must be >= 0")
+    result["adjust_trapped_cap_pct"] = _number(result["adjust_trapped_cap_pct"], "adjust_trapped_cap_pct")
+    if not 0 < result["adjust_trapped_cap_pct"] <= 100:
+        raise ValueError("adjust_trapped_cap_pct must be in (0, 100]")
+    adjust_n = result["adjust_n"]
+    if adjust_n is not None:
+        if isinstance(adjust_n, bool) or int(adjust_n) != adjust_n or int(adjust_n) < 4:
+            raise ValueError("adjust_n must be null or an integer >= 4")
+        if result["min_free_cells"] >= int(adjust_n):
+            raise ValueError("min_free_cells must be less than adjust_n")
+        result["adjust_n"] = int(adjust_n)
     return result
+
+
+def adjust_decision(
+    grid: Mapping[str, Any], cells: list[dict], mid: float,
+    sigma_24h: float | None, now: datetime, last_adjust_at: datetime | None,
+) -> PolicyDecision:
+    """Pure provisional decision for an in-place smart-grid range adjustment."""
+    raw = grid.get("params") or {}
+    if grid.get("strategy", "simple") != "smart" or grid.get("status") != "ACTIVE" \
+            or raw.get("adjust_enabled", False) is not True:
+        return PolicyDecision("NONE", (), {"adjust_enabled": False})
+    n_levels = int(grid.get("n_levels", len(cells)))
+    params = validate_params(raw, max(2, n_levels))
+    mid = _number(mid, "mid")
+    low, high = _number(grid["range_low"], "range_low"), _number(grid["range_high"], "range_high")
+    if mid <= 0 or low <= 0 or low >= high:
+        raise ValueError("mid or range is invalid")
+    if sigma_24h is None or not isfinite(float(sigma_24h)) or float(sigma_24h) <= 0:
+        return PolicyDecision("BLOCKED", ("vol_unavailable",), {"sigma_24h": sigma_24h})
+    sigma_h = float(sigma_24h) * params["sigma_scale"] * sqrt(params["horizon_h"] / 24.0)
+    edge_z = min(log(mid / low), log(high / mid)) / sigma_h if low < mid < high else float("inf")
+    close_buffer = params["close_out_of_range_pct"] / 100.0
+    within_close = low * (1 - close_buffer) <= mid <= high * (1 + close_buffer)
+    triggered = edge_z < params["adjust_trigger_z"] or (not low < mid < high and within_close)
+    details = {"mid": mid, "edge_z": edge_z, "sigma_h": sigma_h,
+               "trigger_z": params["adjust_trigger_z"], "triggered": triggered}
+    if not triggered:
+        return PolicyDecision("NONE", (), details)
+    reasons = []
+    if last_adjust_at is not None:
+        elapsed = (_as_utc(now) - _as_utc(last_adjust_at)).total_seconds() / 3600
+        details["cooldown_elapsed_h"] = elapsed
+        if elapsed < params["adjust_cooldown_h"]:
+            reasons.append("cooldown")
+    trapped, _unknown = _trapped_details(cells, now, params, float(grid["capital_total"]))
+    details["trapped_capital_pct"] = trapped
+    if trapped >= params["adjust_trapped_cap_pct"]:
+        reasons.append("trapped_capital_pct")
+    free = sum(row.get("state") in {"IDLE", "BUY_OPEN", "DONE"} and
+               float(row.get("held_qty") or 0) <= 0 for row in cells)
+    details["free_cells"] = free
+    if free < params["min_free_cells"]:
+        reasons.append("free_cells")
+    if reasons:
+        return PolicyDecision("BLOCKED", tuple(reasons), details)
+    log_width = log(high / low)
+    new_low = mid / exp(log_width / 2)
+    new_high = mid * exp(log_width / 2)
+    details.update({"range_low": new_low, "range_high": new_high,
+                    "n_levels": params["adjust_n"] or n_levels,
+                    "source": "MONITOR"})
+    return PolicyDecision("ADJUST", (), details)
 
 
 def norm_cdf(x: float) -> float:

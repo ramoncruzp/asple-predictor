@@ -43,6 +43,10 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
     grids.sort(key=lambda row: int(row["id"]))
     for grid in grids:
         grid["levels"] = db.get_grid_levels(int(grid["id"]))
+        latest_adjust = db.get_last_event(int(grid["id"]), "GRID_ADJUSTED") \
+            if hasattr(db, "get_last_event") else None
+        grid["last_adjust_at"] = None if latest_adjust is None else latest_adjust.get("ts")
+        grid["adjust_enabled"] = bool((grid.get("params") or {}).get("adjust_enabled", False))
         grid["calibrated"] = False
         snapshots = db.list_grid_snapshots(grid_id=int(grid["id"]), limit=100) if hasattr(db, "list_grid_snapshots") else []
         summaries = [row for row in snapshots
@@ -76,15 +80,50 @@ def main(argv: list[str] | None = None) -> int:
     close.add_argument("grid_id", type=int)
     close.add_argument("--mode", required=True, choices=("cancel", "liquidate", "repository"))
     close.add_argument("--yes", action="store_true", help="required confirmation for market liquidation")
+    adjust = subparsers.add_parser("adjust", help="move free cells to a new grid range")
+    adjust.add_argument("--grid-id", required=True, type=int)
+    adjust.add_argument("--low", required=True, type=Decimal)
+    adjust.add_argument("--high", required=True, type=Decimal)
+    adjust.add_argument("--n", type=int)
+    adjust.add_argument("--dry-run", action="store_true")
+    adjust.add_argument("--yes", action="store_true")
     subparsers.add_parser("run-once", help="run one monitor pass without starting the scheduler")
     args = parser.parse_args(argv)
     if args.command == "close" and args.mode == "liquidate" and not args.yes:
         print("error: close --mode liquidate requiere --yes", file=sys.stderr)
         return 2
+    if args.command == "adjust" and not args.dry_run and not args.yes:
+        print("error: adjust requiere --yes para enviar órdenes", file=sys.stderr)
+        return 2
     try:
         context = build_context()
         if args.command == "status":
             result = _status(context)
+        elif args.command == "adjust":
+            if str(getattr(context["settings"], "environment", "")).casefold() != "testnet":
+                raise RuntimeError("grid adjust solo permite environment=testnet")
+            grid = context["db"].get_grid(args.grid_id)
+            if grid is None:
+                raise ValueError(f"grid {args.grid_id} does not exist")
+            if args.dry_run:
+                result = context["engine"].preview_adjust(args.grid_id, args.low, args.high, args.n)
+            else:
+                engine, db = context["engine"], context["db"]
+                old_sink = getattr(engine, "event_sink", None)
+                def cli_event(event):
+                    db.add_grid_event(
+                        run_id=None, source="CLI", grid_id=event.get("grid_id"),
+                        level_idx=event.get("level_idx"),
+                        client_order_id=event.get("client_order_id"), order_id=event.get("order_id"),
+                        event_type=event["event_type"], reason=event.get("reason"),
+                        price=event.get("price"), details=event.get("details"),
+                    )
+                engine.event_sink = cli_event
+                try:
+                    result = engine.adjust_grid(args.grid_id, args.low, args.high, args.n,
+                                                reason="operator_adjust", details={"source": "CLI"})
+                finally:
+                    engine.event_sink = old_sink
         elif args.command == "open":
             settings, exchange, engine = context["settings"], context["exchange"], context["engine"]
             if str(getattr(settings, "environment", "")).casefold() != "testnet":

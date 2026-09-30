@@ -6,6 +6,7 @@ import json
 import hashlib
 import logging
 import re
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from data.exchange_filters import FilterViolation, SymbolFilters
 from data.testnet_client import TestnetOrderError
 from grid.policy import DEFAULT_SMART_PARAMS, validate_params
 from grid.levels import GridConfigError, compute_lines, plan_cells
+from grid.adjust import plan_adjust
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,8 @@ class GridEngine:
         self.environment = environment
         self.event_sink = event_sink
         self._event_price: float | None = None
+        self._adjust_lock_guard = threading.Lock()
+        self._adjust_locks: dict[int, threading.Lock] = {}
 
     def _emit(
         self, event_type: str, grid_id: int, level_idx: int | None = None, *,
@@ -72,6 +76,17 @@ class GridEngine:
             if match and (int(match.group(1)) != grid_id or int(match.group(2)) != level_idx):
                 return f"g{match.group(1)}L{match.group(2)}B{match.group(3)}"
         return GridEngine._client_order_id(grid_id, level_idx, "BUY", cycle)
+
+    @staticmethod
+    def _actual_buy_client_order_id(grid_id: int, level: dict) -> str:
+        explicit = level.get("buy_client_order_id")
+        match = re.fullmatch(r"g\d+L\d+B(\d+)", str(explicit or ""))
+        if explicit and (match is None or int(match.group(1)) == int(level.get("cycles_completed", 0))):
+            return str(explicit)
+        return GridEngine._buy_client_order_id(
+            int(grid_id), int(level["level_idx"]), int(level.get("cycles_completed", 0)),
+            level.get("client_order_id"),
+        )
 
     def _market_context(self, symbol: str) -> tuple[SymbolFilters, dict[str, Decimal], Decimal]:
         filters = SymbolFilters.from_symbol_info(self.exchange.get_symbol_info(symbol))
@@ -218,7 +233,8 @@ class GridEngine:
                 cid = self._client_order_id(grid_id, plan.level_idx, "BUY", 0)
                 attempted_ids.append((plan.level_idx, cid))
                 self.db.update_level(
-                    grid_id, plan.level_idx, state="BUY_OPEN", client_order_id=cid, order_id=None,
+                    grid_id, plan.level_idx, state="BUY_OPEN", client_order_id=cid,
+                    buy_client_order_id=cid, order_id=None,
                 )
                 logger.info("grid=%s level=%s action=BUY_INTENT client_order_id=%s", grid_id, plan.level_idx, cid)
                 order = self._send_limit(
@@ -292,6 +308,7 @@ class GridEngine:
         self.db.update_level(
             grid_id, int(level["level_idx"]), state=f"{side}_OPEN",
             client_order_id=cid, order_id=None,
+            **({"buy_client_order_id": cid} if side == "BUY" else {}),
         )
         logger.info("grid=%s level=%s action=%s_INTENT client_order_id=%s", grid_id, level["level_idx"], side, cid)
         order = self._send_limit(
@@ -347,6 +364,7 @@ class GridEngine:
             return True, True
         self.db.update_level(
             grid_id, idx, held_qty=float(held_qty), entry_price=float(entry_price), bought_at=bought_at,
+            buy_client_order_id=level.get("buy_client_order_id") or level.get("client_order_id"),
             fee_paid=float(_d(level["fee_paid"]) + fee_usdt),
         )
         try:
@@ -369,9 +387,7 @@ class GridEngine:
     ) -> tuple[bool, bool]:
         grid_id, idx, symbol = int(grid["id"]), int(level["level_idx"]), grid["symbol"]
         cycle = int(level["cycles_completed"])
-        buy_cid = self._buy_client_order_id(
-            grid_id, idx, cycle, level.get("client_order_id"),
-        )
+        buy_cid = self._actual_buy_client_order_id(grid_id, level)
         try:
             buy_order = self.exchange.get_order(symbol, client_order_id=buy_cid)
             buy_trades = self.exchange.get_my_trades(symbol, buy_order["order_id"])
@@ -396,6 +412,7 @@ class GridEngine:
             pnl=float(_d(level["pnl"]) + cycle_pnl), held_qty=0.0,
             entry_price=None, bought_at=None,
             fee_paid=float(_d(level["fee_paid"]) + sell_fee), order_id=None,
+            buy_client_order_id=None,
             client_order_id=None,
         )
         self._emit(
@@ -437,7 +454,7 @@ class GridEngine:
         if _d(level.get("held_qty")) <= 0 or (level.get("entry_price") is not None and level.get("bought_at") is not None):
             return
         idx, cycle = int(level["level_idx"]), int(level.get("cycles_completed", 0))
-        buy_cid = self._buy_client_order_id(grid["id"], idx, cycle, level.get("client_order_id"))
+        buy_cid = self._actual_buy_client_order_id(grid["id"], level)
         entry = level.get("entry_price")
         bought_at = level.get("bought_at")
         try:
@@ -541,6 +558,244 @@ class GridEngine:
             self._close_event(event_type, grid_id, details, reason=reason, price=self._event_price,
                               level_idx=level_idx, order_id=order_id)
 
+    def adjust_grid(
+        self, grid_id: int, new_low: Any, new_high: Any, new_n: int | None = None,
+        reason: str | None = None, details: dict | None = None,
+    ) -> dict[str, Any]:
+        key = int(grid_id)
+        with self._adjust_lock_guard:
+            lock = self._adjust_locks.setdefault(key, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return {"ok": False, "reason": "adjust_in_progress"}
+        try:
+            return self._adjust_grid_locked(key, new_low, new_high, new_n, reason, details)
+        finally:
+            lock.release()
+
+    def _adjust_grid_locked(
+        self, grid_id: int, new_low: Any, new_high: Any, new_n: int | None = None,
+        reason: str | None = None, details: dict | None = None,
+    ) -> dict[str, Any]:
+        """Move free cells through recoverable write-ahead BUY intents."""
+        grid = self.db.get_grid(int(grid_id))
+        if grid is None or grid.get("status") != "ACTIVE":
+            return {"ok": False, "reason": "grid_not_active" if grid else "grid_not_found"}
+        filters, snapshot, avg_price = self._market_context(grid["symbol"])
+        mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
+        target_n = int(grid["n_levels"]) if new_n is None else int(new_n)
+        if (_d(grid["range_low"]) == _d(new_low) and _d(grid["range_high"]) == _d(new_high)
+                and int(grid["n_levels"]) == target_n):
+            return {"ok": True, "changed": False, "reason": "already_at_target"}
+        cells = self.db.get_grid_levels(grid_id)
+        plan = plan_adjust(grid, cells, new_low, new_high, target_n, mid, filters, self.settings)
+        if not plan.ok:
+            return {"ok": False, "reason": plan.reason, "plan": plan.details}
+        old_range = {"low": grid["range_low"], "high": grid["range_high"], "n": grid["n_levels"]}
+        for cell in cells:
+            if cell.get("sell_price") is None:
+                self.db.set_level_fields(grid_id, int(cell["level_idx"]),
+                    sell_price=float(self._level_sell_price(grid, cell, filters)))
+        for idx in plan.append_level_idxs:
+            self.db.add_grid_level(grid_id, {
+                "level_idx": idx, "price": float(plan.lines[0]), "capital": 0,
+                "sell_price": float(plan.lines[1]), "state": "IDLE",
+            })
+        mapping = list(plan.mapping)
+        if mapping:
+            assigned = sum((Decimal(item["capital"]) for item in mapping[:-1]), Decimal(0))
+            mapping[-1]["capital"] = str(plan.free_capital - assigned)
+        by_idx = {int(row["level_idx"]): row for row in self.db.get_grid_levels(grid_id)}
+        for item in mapping:
+            idx, target = int(item["level_idx"]), _d(item["price"])
+            cell = by_idx[idx]
+            if cell.get("state") not in {"IDLE", "BUY_OPEN", "DONE"} or _d(cell.get("held_qty")) > 0:
+                self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, reason="cell_became_pinned",
+                           details={"target_price": item["price"]})
+                continue
+            old_order_id, old_cid = cell.get("order_id"), cell.get("client_order_id")
+            previous_cid = old_cid or cell.get("buy_client_order_id")
+
+            # Recover an accepted BUY whose response was lost before order_id
+            # was persisted. Link it first so the following write-ahead CID
+            # replacement cannot orphan the old exchange order on a crash.
+            if old_order_id is None and old_cid:
+                unlinked = self.exchange.find_order_by_client_id(grid["symbol"], old_cid)
+                if unlinked is not None:
+                    unlinked_status = str(unlinked.get("status", "")).upper()
+                    if unlinked_status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL", "FILLED"}:
+                        old_order_id = int(unlinked["order_id"])
+                        self.db.update_level(grid_id, idx, order_id=old_order_id)
+                        cell = {**cell, "order_id": old_order_id}
+                    elif unlinked_status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                        raise RuntimeError(
+                            f"unlinked BUY lookup unresolved: {unlinked_status or 'unknown'}"
+                        )
+
+            # A matching persisted gA intent is the write-ahead record for a
+            # retry. Otherwise chain from the last CID so returning to an old
+            # price (or reusing a line after changing N) always gets a new ID.
+            is_adjust_intent = (
+                isinstance(old_cid, str) and old_cid.startswith("gA")
+                and _d(cell.get("price")) == target
+                and str(cell.get("state", "")).upper() == "BUY_OPEN"
+            )
+
+            intent_cycle = int(cell.get("cycles_completed", 0))
+
+            def adjusted_buy_cid(prior_cid: str | None, cycle_number: int | None = None) -> str:
+                cycle_seed = intent_cycle if cycle_number is None else int(cycle_number)
+                prior_seed = "<none>" if prior_cid is None else str(prior_cid)
+                digest = hashlib.sha256(
+                    f"{grid_id}:{idx}:cycle:{cycle_seed}:previous:{prior_seed}:{target}".encode("ascii")
+                ).hexdigest()[:30]
+                return "gA" + digest
+
+            cid = old_cid if is_adjust_intent else adjusted_buy_cid(previous_cid)
+            self.db.update_level(grid_id, idx, price=float(target), capital=float(Decimal(item["capital"])),
+                sell_price=float(Decimal(item["sell_price"])), state="BUY_OPEN",
+                client_order_id=cid, buy_client_order_id=cid)
+            existing_old = None
+            if old_order_id is not None:
+                # The DB CID may already be the replacement after a crash; the
+                # exchange order itself determines whether this is old or new.
+                existing_old = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
+            actual_old_cid = None if existing_old is None else existing_old.get("client_order_id")
+            if old_order_id is not None and actual_old_cid != cid:
+                try:
+                    canceled = self.exchange.cancel_order(grid["symbol"], int(old_order_id))
+                except Exception:
+                    canceled = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
+                status = str(canceled.get("status", "")).upper()
+                if _d(canceled.get("executed_qty", 0)) > 0 or status == "FILLED":
+                    actual_cid = canceled.get("client_order_id") or old_cid
+                    actual_price = _d(canceled.get("price", cell["price"]))
+                    old_sell = self._level_sell_price(grid, {**cell, "price": actual_price}, filters)
+                    self.db.update_level(grid_id, idx, price=float(actual_price), sell_price=float(old_sell),
+                        client_order_id=actual_cid, buy_client_order_id=actual_cid, order_id=int(old_order_id))
+                    actual_cell = next(row for row in self.db.get_grid_levels(grid_id)
+                                       if int(row["level_idx"]) == idx)
+                    self._handle_buy_fill(grid, actual_cell, canceled, filters, avg_price)
+                    self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, client_order_id=actual_cid,
+                               order_id=int(old_order_id), reason="buy_filled_during_cancel")
+                    continue
+                if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    raise RuntimeError(f"old BUY cancellation unresolved: {status or 'unknown'}")
+            elif old_order_id is not None and existing_old is not None \
+                    and str(existing_old.get("status", "")).upper() in {"NEW", "PARTIALLY_FILLED"}:
+                # Already placed before a crash; retain the live order and
+                # complete the DB linkage without submitting a duplicate.
+                self.db.update_level(grid_id, idx, order_id=int(old_order_id))
+                self._emit("CELL_REPRICED", grid_id, idx, client_order_id=cid,
+                           order_id=int(old_order_id), details={"recovered_existing": True,
+                           "new_price": str(target)})
+                continue
+            self.db.update_level(grid_id, idx, order_id=None)
+            if target >= snapshot["bid_price"]:
+                # Retain the last buy CID as the per-cell chain head; a later
+                # reposition must not recreate an ID already used by Binance.
+                self.db.update_level(grid_id, idx, state="IDLE", client_order_id=None,
+                                     buy_client_order_id=cid)
+                self._emit("CELL_REPRICED", grid_id, idx, details={
+                    "old_price": cell["price"], "new_price": str(target),
+                    "old_client_order_id": old_cid, "new_client_order_id": None,
+                    "state": "IDLE"})
+                continue
+
+            existing = None
+            for _attempt in range(100):
+                existing = self.exchange.find_order_by_client_id(grid["symbol"], cid)
+                if existing is None:
+                    break
+                existing_status = str(existing.get("status", "")).upper()
+                if existing_status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}:
+                    break
+                if existing_status == "FILLED":
+                    persisted = next(row for row in self.db.get_grid_levels(grid_id)
+                                     if int(row["level_idx"]) == idx)
+                    persisted_cycle = int(persisted.get("cycles_completed", 0))
+                    if persisted.get("client_order_id") != cid or persisted_cycle != intent_cycle:
+                        # A terminal fill from an earlier cycle is historical,
+                        # even if the exchange still resolves its client ID.
+                        intent_cycle = persisted_cycle
+                        cid = adjusted_buy_cid(cid, intent_cycle)
+                        self.db.update_level(grid_id, idx, client_order_id=cid,
+                                             buy_client_order_id=cid)
+                        existing = None
+                        continue
+                    self.db.update_level(grid_id, idx, order_id=int(existing["order_id"]))
+                    filled_cell = next(row for row in self.db.get_grid_levels(grid_id)
+                                       if int(row["level_idx"]) == idx)
+                    self._handle_buy_fill(grid, filled_cell, existing, filters, avg_price)
+                    self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, client_order_id=cid,
+                               order_id=int(existing["order_id"]), reason="buy_filled_before_link")
+                    break
+                if existing_status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    cid = adjusted_buy_cid(cid)
+                    self.db.update_level(grid_id, idx, client_order_id=cid, buy_client_order_id=cid)
+                    existing = None
+                    continue
+                raise RuntimeError(f"replacement BUY lookup unresolved: {existing_status or 'unknown'}")
+            else:
+                raise RuntimeError("could not allocate an unused replacement BUY client id")
+
+            if existing is not None and str(existing.get("status", "")).upper() == "FILLED":
+                continue
+            if existing is None:
+                qty = filters.round_qty_down(Decimal(item["capital"]) / target)
+                order = self._send_limit(grid["symbol"], "BUY", qty, target, cid, filters, avg_price)
+            else:
+                order = existing
+            self.db.update_level(grid_id, idx, order_id=int(order["order_id"]))
+            self._emit("CELL_REPRICED", grid_id, idx, client_order_id=cid, order_id=int(order["order_id"]),
+                details={"old_price": cell["price"], "new_price": str(target),
+                         "old_client_order_id": old_cid, "new_client_order_id": cid})
+        for idx in plan.retire_level_idxs:
+            idx = int(idx)
+            cell = by_idx[idx]
+            if cell.get("order_id") is not None:
+                try:
+                    result = self.exchange.cancel_order(grid["symbol"], int(cell["order_id"]))
+                except Exception:
+                    result = self.exchange.get_order(grid["symbol"], order_id=int(cell["order_id"]))
+                status = str(result.get("status", "")).upper()
+                if _d(result.get("executed_qty", 0)) > 0 or status == "FILLED":
+                    actual_cid = result.get("client_order_id") or cell.get("client_order_id")
+                    self.db.update_level(grid_id, idx, state="BUY_OPEN",
+                        client_order_id=actual_cid, buy_client_order_id=actual_cid,
+                        order_id=int(cell["order_id"]))
+                    settled = next(row for row in self.db.get_grid_levels(grid_id)
+                                   if int(row["level_idx"]) == idx)
+                    self._handle_buy_fill(grid, settled, result, filters, avg_price)
+                    self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, client_order_id=actual_cid,
+                               order_id=int(cell["order_id"]), reason="retiring_buy_filled_during_cancel")
+                    continue
+                if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    raise RuntimeError(f"retired BUY cancellation unresolved: {status or 'unknown'}")
+            self.db.update_level(grid_id, idx, state="DONE", capital=0.0, order_id=None,
+                client_order_id=None)
+        self.db.update_grid(grid_id, range_low=float(plan.lines[0]), range_high=float(plan.lines[-1]),
+                            n_levels=target_n)
+        event_details = {**(details or {}), "old": old_range,
+            "new": {"low": str(plan.lines[0]), "high": str(plan.lines[-1]), "n": target_n},
+            "free_capital": str(plan.free_capital), "capital_per_cell": str(plan.capital_per_cell),
+            "fixed_cells": list(plan.covered), "mapping": list(plan.mapping),
+            "source": (details or {}).get("source", "ENGINE")}
+        self._emit("GRID_ADJUSTED", grid_id, reason=reason, details=event_details)
+        return {"ok": True, "changed": True, "plan": plan.details, "details": event_details}
+
+    def preview_adjust(self, grid_id: int, new_low: Any, new_high: Any,
+                       new_n: int | None = None) -> dict[str, Any]:
+        grid = self.db.get_grid(int(grid_id))
+        if grid is None:
+            return {"ok": False, "reason": "grid_not_found"}
+        if grid.get("status") != "ACTIVE":
+            return {"ok": False, "reason": "grid_not_active"}
+        filters, snapshot, _avg = self._market_context(grid["symbol"])
+        mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
+        plan = plan_adjust(grid, self.db.get_grid_levels(grid_id), new_low, new_high,
+                           new_n, mid, filters, self.settings)
+        return {"ok": plan.ok, "reason": plan.reason, "plan": plan.details}
+
     def pause_grid(self, grid_id: int, reason: str, details: dict) -> dict:
         if not self.db.transition_grid_status(grid_id, {"ACTIVE"}, "PAUSED"):
             return {"ok": False, "grid_id": int(grid_id), "status": (self.db.get_grid(grid_id) or {}).get("status")}
@@ -643,7 +898,10 @@ class GridEngine:
             try:
                 found = self.exchange.find_order_by_client_id(symbol, cid)
                 if found is not None:
-                    self.db.update_level(grid_id, level["level_idx"], order_id=found["order_id"])
+                    fields = {"order_id": found["order_id"]}
+                    if level["state"] == "BUY_OPEN":
+                        fields["buy_client_order_id"] = cid
+                    self.db.update_level(grid_id, level["level_idx"], **fields)
                     self._emit("INTENT_RECOVERED", grid_id, level["level_idx"], client_order_id=cid,
                                order_id=found["order_id"], details={"found_existing": True})
                     continue
@@ -663,7 +921,10 @@ class GridEngine:
                     _d(level["price"] if side == "BUY" else self._level_sell_price(grid, level, filters)),
                     cid, filters, avg_price,
                 )
-                self.db.update_level(grid_id, level["level_idx"], order_id=order["order_id"])
+                fields = {"order_id": order["order_id"]}
+                if side == "BUY":
+                    fields["buy_client_order_id"] = cid
+                self.db.update_level(grid_id, level["level_idx"], **fields)
                 summary["orders_placed"] += 1
                 self._emit("INTENT_RECOVERED", grid_id, level["level_idx"], client_order_id=cid,
                            order_id=order["order_id"], details={"found_existing": False})
@@ -713,6 +974,25 @@ class GridEngine:
                                  grid_id, level["level_idx"], exc)
                 continue
             status = str(order["status"]).upper()
+            if level["state"] == "BUY_OPEN" and order.get("client_order_id") \
+                    and order.get("client_order_id") != level.get("client_order_id") \
+                    and (status == "FILLED" or _d(order.get("executed_qty", 0)) > 0):
+                actual_cid = order["client_order_id"]
+                actual_price = _d(order.get("price", level["price"]))
+                old_geometry_sell = self._level_sell_price(
+                    grid, {**level, "price": actual_price, "sell_price": None}, filters,
+                )
+                self.db.update_level(
+                    grid_id, level["level_idx"], price=float(actual_price),
+                    sell_price=float(old_geometry_sell), client_order_id=actual_cid,
+                    buy_client_order_id=actual_cid,
+                )
+                actual_level = next(row for row in self.db.get_grid_levels(grid_id)
+                                    if int(row["level_idx"]) == int(level["level_idx"]))
+                changed, error = self._handle_buy_fill(grid, actual_level, order, filters, avg_price)
+                summary["buys_filled"] += int(changed)
+                summary["errors"] += int(error)
+                continue
             if status == "PARTIALLY_FILLED" or status == "NEW":
                 continue
             if status in {"CANCELED", "EXPIRED", "REJECTED"}:
@@ -755,6 +1035,36 @@ class GridEngine:
                             "grid=%s level=%s canceled inventory sell will retry", grid_id, idx,
                             exc_info=True,
                         )
+                    continue
+                # An in-place adjustment writes its replacement CID before it
+                # cancels the old BUY. A crash in that window leaves the row
+                # pointing at the canceled exchange order. Do not classify the
+                # replacement intent as an external cancellation/error.
+                if level["state"] == "BUY_OPEN" and order.get("client_order_id") \
+                        and order.get("client_order_id") != level.get("client_order_id"):
+                    executed = _d(order.get("executed_qty", 0))
+                    if executed > 0 or status == "FILLED":
+                        old_cid = order["client_order_id"]
+                        old_price = _d(order.get("price", level["price"]))
+                        old_sell = self._level_sell_price(
+                            grid, {**level, "price": old_price, "sell_price": None}, filters,
+                        )
+                        self.db.update_level(
+                            grid_id, level["level_idx"], price=float(old_price), sell_price=float(old_sell),
+                            client_order_id=old_cid, buy_client_order_id=old_cid,
+                            order_id=order_id,
+                        )
+                        settled_level = next(
+                            row for row in self.db.get_grid_levels(grid_id)
+                            if int(row["level_idx"]) == int(level["level_idx"])
+                        )
+                        changed, error = self._handle_buy_fill(
+                            grid, settled_level, order, filters, avg_price,
+                        )
+                        summary["buys_filled"] += int(changed)
+                        summary["errors"] += int(error)
+                    else:
+                        self.db.update_level(grid_id, level["level_idx"], order_id=None)
                     continue
                 if not rearm and status == "CANCELED":
                     self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None, client_order_id=None)
@@ -952,9 +1262,7 @@ class GridEngine:
         if str(market_order.get("status", "")).upper() != "FILLED":
             raise RuntimeError(f"market liquidation {cid} is not FILLED")
 
-        buy_cid = self._buy_client_order_id(
-            grid_id, idx, cycle, level.get("client_order_id"),
-        )
+        buy_cid = self._actual_buy_client_order_id(grid_id, level)
         buy_order = self.exchange.get_order(symbol, client_order_id=buy_cid)
         buy_trades = self.exchange.get_my_trades(symbol, buy_order["order_id"])
         sell_trades = self.exchange.get_my_trades(symbol, market_order["order_id"])
@@ -968,7 +1276,7 @@ class GridEngine:
             grid_id, idx, state="DONE", cycles_completed=cycle,
             pnl=float(_d(level.get("pnl")) + cycle_pnl), fee_paid=float(_d(level.get("fee_paid")) + sell_fee),
             held_qty=0.0, order_id=market_order["order_id"], client_order_id=cid,
-            entry_price=None, bought_at=None,
+            entry_price=None, bought_at=None, buy_client_order_id=None,
         )
         result = {
             "level_idx": idx, "client_order_id": cid, "order_id": int(market_order["order_id"]),
@@ -1086,9 +1394,7 @@ class GridEngine:
                         "origin_grid_id": grid_id, "origin_level_idx": int(level["level_idx"]),
                         "pnl": level.get("pnl", 0), "cycles_completed": level.get("cycles_completed", 0),
                         "held_qty": level["held_qty"], "sell_price": level["sell_price"],
-                        "buy_client_order_id": self._buy_client_order_id(
-                            grid_id, int(level["level_idx"]), int(level["cycles_completed"]), level.get("client_order_id"),
-                        ),
+                        "buy_client_order_id": self._actual_buy_client_order_id(grid_id, level),
                         "moved_at": now.isoformat(),
                         "market_mid": None if market_mid is None else str(market_mid),
                     }

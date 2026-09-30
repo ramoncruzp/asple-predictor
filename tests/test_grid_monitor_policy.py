@@ -18,8 +18,12 @@ class Vol:
 
 
 def _smart_grid(engine, params=None):
+    # These 15B-1 tests exercise pause/resume behavior in isolation; 15B-2
+    # adjustment has an explicit opt-out so the original policy assertions
+    # remain focused on their intended action.
+    effective = {"adjust_enabled": False, **(params or {})}
     return engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000,
-                              strategy="smart", params=params)
+                              strategy="smart", params=effective)
 
 
 def test_smart_grid_auto_pauses_and_resumes_with_hysteresis():

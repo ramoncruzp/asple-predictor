@@ -94,6 +94,7 @@ class DBManager:
             Column("stop_loss_pct", Float),
             Column("held_qty", Float, nullable=False, default=0.0),
             Column("client_order_id", String),
+            Column("buy_client_order_id", String),
             Column("fee_paid", Float, nullable=False, default=0.0),
             Column("updated_at", DateTime, nullable=False),
         )
@@ -156,6 +157,7 @@ class DBManager:
             "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT"},
             "grid_levels": {
                 "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
+                "buy_client_order_id": "VARCHAR",
             },
             "grid_snapshots": {
                 "break_prob": "FLOAT", "sigma_24h": "FLOAT",
@@ -649,6 +651,7 @@ class DBManager:
                     "stop_loss_pct": level.get("stop_loss_pct"),
                     "held_qty": float(level.get("held_qty", 0.0)),
                     "client_order_id": level.get("client_order_id"),
+                    "buy_client_order_id": level.get("buy_client_order_id"),
                     "fee_paid": float(level.get("fee_paid", 0.0)),
                     "updated_at": level.get("updated_at", now),
                 })
@@ -677,7 +680,7 @@ class DBManager:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
 
     def set_level_fields(self, grid_id: int, level_idx: int, **fields: Any) -> dict | None:
-        allowed = {"sell_price", "entry_price", "bought_at", "stop_loss_pct"}
+        allowed = {"sell_price", "entry_price", "bought_at", "stop_loss_pct", "buy_client_order_id"}
         if not fields or not set(fields) <= allowed:
             raise ValueError("invalid grid level fields")
         return self.update_level(grid_id, level_idx, **fields)
@@ -871,6 +874,26 @@ class DBManager:
                 ).values(**values)
             )
         return next((row for row in self.get_grid_levels(grid_id) if row["level_idx"] == level_idx), None)
+
+    def add_grid_level(self, grid_id: int, level: dict[str, Any]) -> dict:
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        values = {
+            "grid_id": int(grid_id), "level_idx": int(level["level_idx"]),
+            "price": float(level["price"]), "capital": float(level["capital"]),
+            "order_id": level.get("order_id"), "state": level.get("state", "IDLE"),
+            "cycles_completed": int(level.get("cycles_completed", 0)),
+            "pnl": float(level.get("pnl", 0)), "sell_price": level.get("sell_price"),
+            "entry_price": level.get("entry_price"), "bought_at": level.get("bought_at"),
+            "stop_loss_pct": level.get("stop_loss_pct"), "held_qty": float(level.get("held_qty", 0)),
+            "client_order_id": level.get("client_order_id"),
+            "buy_client_order_id": level.get("buy_client_order_id"),
+            "fee_paid": float(level.get("fee_paid", 0)), "updated_at": now,
+        }
+        with self.engine.begin() as conn:
+            conn.execute(self.grid_levels.insert().values(**values))
+        return next(row for row in self.get_grid_levels(grid_id) if row["level_idx"] == values["level_idx"])
 
     def count_open_grids(self) -> int:
         statement = select(func.count()).select_from(self.grids).where(
