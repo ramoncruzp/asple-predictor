@@ -219,6 +219,7 @@ class GridMonitor:
                 grid_id, status_before = int(grid["id"]), grid["status"]
                 mid = mids.get(grid["symbol"])
                 metrics: dict[str, Any] = {}
+                adjusted_this_pass = False
                 try:
                     current = self.db.get_grid(grid_id) or grid
                     view = None
@@ -331,6 +332,7 @@ class GridMonitor:
                                 )
                                 if not result.get("ok"):
                                     raise RuntimeError(result.get("reason") or "adjust rejected")
+                                adjusted_this_pass = bool(result.get("changed"))
                             except Exception as exc:
                                 failed += 1
                                 self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
@@ -360,6 +362,20 @@ class GridMonitor:
                                             "reason": str(exc), "price": mid,
                                             "details": {"action": "CLOSE_REPOSITORY", **details}})
                                 self.logger.warning("grid=%s automatic close failed", grid_id, exc_info=True)
+                    final_grid = self.db.get_grid(grid_id) or current
+                    params = final_grid.get("params") or {}
+                    if (policy_enabled and status_before == "ACTIVE" and not adjusted_this_pass
+                            and final_grid.get("status") == "ACTIVE"
+                            and final_grid.get("strategy", "simple") == "smart"
+                            and params.get("loans_enabled") is True):
+                        try:
+                            self.engine.process_grid_loans(grid_id, now=now)
+                        except Exception as exc:
+                            failed += 1
+                            self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                        "reason": str(exc), "price": mid,
+                                        "details": {"action": "LOANS"}})
+                            self.logger.warning("grid=%s loan processing failed", grid_id, exc_info=True)
                     final_grid = self.db.get_grid(grid_id) or current
                     try:
                         self._snapshot_grid(run_id, final_grid, mid, metrics)

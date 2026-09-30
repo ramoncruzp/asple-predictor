@@ -29,6 +29,17 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "compound_enabled": False,
     "compound_ratio": 1.0,
     "compound_max_growth_pct": 100.0,
+    "loans_enabled": False,
+    "reserve_pct": 0.0,
+    "loan_idle_h": 12.0,
+    "loan_borrower_min_cycles": 3,
+    "loan_recent_sell_h": 1.0,
+    "loan_topup_pct": 50.0,
+    "loan_lender_max_pct": 50.0,
+    "loan_cooldown_cycles": 2,
+    "loan_min_margin": 1.1,
+    "loan_cap_pct": 30.0,
+    "loan_min_amount": 1.0,
 }
 
 
@@ -120,6 +131,28 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     )
     if result["compound_max_growth_pct"] <= 0:
         raise ValueError("compound_max_growth_pct must be greater than zero")
+    loans_enabled = result["loans_enabled"]
+    if not isinstance(loans_enabled, bool):
+        raise ValueError("loans_enabled must be boolean")
+    result["reserve_pct"] = _number(result["reserve_pct"], "reserve_pct")
+    if not 0 <= result["reserve_pct"] < 50:
+        raise ValueError("reserve_pct must be in [0, 50)")
+    for key in ("loan_idle_h", "loan_recent_sell_h", "loan_min_amount"):
+        result[key] = _number(result[key], key)
+        if result[key] <= 0:
+            raise ValueError(f"{key} must be greater than zero")
+    for key in ("loan_topup_pct", "loan_lender_max_pct", "loan_cap_pct"):
+        result[key] = _number(result[key], key)
+        if not 0 < result[key] <= 100:
+            raise ValueError(f"{key} must be in (0, 100]")
+    result["loan_min_margin"] = _number(result["loan_min_margin"], "loan_min_margin")
+    if result["loan_min_margin"] < 1:
+        raise ValueError("loan_min_margin must be >= 1")
+    for key, minimum in (("loan_borrower_min_cycles", 1), ("loan_cooldown_cycles", 0)):
+        value = result[key]
+        if isinstance(value, bool) or int(value) != value or int(value) < minimum:
+            raise ValueError(f"{key} must be an integer >= {minimum}")
+        result[key] = int(value)
     return result
 
 

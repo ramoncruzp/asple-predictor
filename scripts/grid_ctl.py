@@ -45,6 +45,9 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
         grid["levels"] = db.get_grid_levels(int(grid["id"]))
         grid["compound_total"] = sum(float(row.get("capital_compound") or 0.0) for row in grid["levels"])
         grid["capital_effective"] = sum(float(row.get("capital") or 0.0) for row in grid["levels"])
+        grid["reserve"] = float(grid.get("reserve") or 0.0)
+        grid["loans"] = db.list_grid_loans(int(grid["id"])) if hasattr(db, "list_grid_loans") else []
+        grid["open_loans"] = [row for row in grid["loans"] if row.get("status") in {"OPEN", "PENDING"}]
         latest_adjust = db.get_last_event(int(grid["id"]), "GRID_ADJUSTED") \
             if hasattr(db, "get_last_event") else None
         grid["last_adjust_at"] = None if latest_adjust is None else latest_adjust.get("ts")
@@ -66,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manual grid monitor controls")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status", help="print grids, cells, repositories, and last pass as JSON")
+    loans_parser = subparsers.add_parser("loans", help="print read-only loan history for a grid")
+    loans_parser.add_argument("--grid-id", required=True, type=int)
     open_parser = subparsers.add_parser("open", help="validate or open a Testnet grid")
     open_parser.add_argument("--symbol", required=True)
     open_parser.add_argument("--low", required=True, type=Decimal)
@@ -101,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         context = build_context()
         if args.command == "status":
             result = _status(context)
+        elif args.command == "loans":
+            grid = context["db"].get_grid(args.grid_id)
+            if grid is None:
+                raise ValueError(f"grid {args.grid_id} does not exist")
+            result = {"grid_id": int(args.grid_id),
+                      "loans": context["db"].list_grid_loans(int(args.grid_id))}
         elif args.command == "adjust":
             if str(getattr(context["settings"], "environment", "")).casefold() != "testnet":
                 raise RuntimeError("grid adjust solo permite environment=testnet")
@@ -159,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
             if effective is not None and stop_loss is not None:
                 effective["stop_loss_pct"] = float(stop_loss)
             filters = SymbolFilters.from_symbol_info(exchange.get_symbol_info(symbol))
-            minimum_cell = args.capital / Decimal(args.n)
+            reserve_pct = Decimal(str((effective or {}).get("reserve_pct", 0)))
+            reserve = args.capital * reserve_pct / Decimal(100)
+            distributable = args.capital - reserve
+            minimum_cell = distributable / Decimal(args.n)
             if minimum_cell < filters.min_notional * Decimal("1.1"):
                 raise ValueError("capital por celda debe ser al menos min_notional × 1.1")
             if step / low < Decimal("0.003"):
@@ -169,13 +183,15 @@ def main(argv: list[str] | None = None) -> int:
             avg = Decimal(str(exchange.get_avg_price(symbol)))
             snapshot = {"bid_price": Decimal(str(book["bid_price"])),
                         "ask_price": Decimal(str(book["ask_price"])), "avg_price": avg}
-            plans = plan_cells(lines, args.capital, snapshot, filters, settings)
+            plans = plan_cells(lines, distributable, snapshot, filters, settings)
             if args.dry_run:
                 result = {
                     "dry_run": True, "symbol": symbol, "strategy": args.strategy,
                     "range": {"low": str(low), "high": str(high)},
                     "levels": [str(value) for value in lines],
                     "capital_per_cell": str(minimum_cell),
+                    "reserve": str(reserve),
+                    "distributable_capital": str(distributable),
                     "params": effective, "calibrated": False,
                     "validations": {"min_notional_with_margin": True, "min_step_pct": float(step / low * 100),
                                     "planned_buy_cells": sum(plan.initial_state == "BUY_OPEN" for plan in plans)},

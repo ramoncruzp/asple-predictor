@@ -7,6 +7,7 @@ import hashlib
 import logging
 import re
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
@@ -21,6 +22,7 @@ from grid.compound import compound_amount
 from grid.policy import DEFAULT_SMART_PARAMS, validate_params
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.adjust import plan_adjust
+from grid import loans as loan_policy
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +185,18 @@ class GridEngine:
         capital_total = _d(
             _get(self.settings, "usdt_por_grid", 100) if capital is None else capital
         )
+        reserve = Decimal(0)
+        if strategy == "smart":
+            reserve = (capital_total * _d(effective_params.get("reserve_pct", 0))
+                       / Decimal(100)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        distributable_capital = capital_total - reserve
         filters, snapshot, avg_price = self._market_context(symbol)
         self._event_price = float((snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2))
         open_orders = self.exchange.get_open_orders(symbol)
         if filters.max_num_orders is not None and len(open_orders) >= filters.max_num_orders:
             raise GridConfigError("exchange MAX_NUM_ORDERS is already reached")
         lines = compute_lines(range_low, range_high, n_levels, filters)
-        plans = plan_cells(lines, capital_total, snapshot, filters, self.settings)
+        plans = plan_cells(lines, distributable_capital, snapshot, filters, self.settings)
         buy_plans = [plan for plan in plans if plan.initial_state == "BUY_OPEN"]
         if filters.max_num_orders is not None and len(open_orders) + len(buy_plans) > filters.max_num_orders:
             raise GridConfigError("grid buy orders exceed exchange MAX_NUM_ORDERS")
@@ -205,6 +212,7 @@ class GridEngine:
                 "range_high": lines[-1],
                 "n_levels": n_levels,
                 "capital_total": capital_total,
+                "reserve": reserve,
                 "status": "OPENING",
                 "environment": self.environment,
                 "open_price": (snapshot["bid_price"] + snapshot["ask_price"]) / 2,
@@ -220,6 +228,7 @@ class GridEngine:
                     "capital": plan.capital,
                     "capital_base": plan.capital,
                     "capital_compound": Decimal(0),
+                    "capital_loan": Decimal(0),
                     "state": plan.initial_state,
                     "held_qty": 0,
                     "cycles_completed": 0,
@@ -325,6 +334,405 @@ class GridEngine:
         logger.info("grid=%s level=%s action=%s_SENT order_id=%s", grid_id, level["level_idx"], side, order["order_id"])
         return int(order["order_id"])
 
+    @staticmethod
+    def _loan_cid(grid_id: int, level_idx: int, cycle: int, previous: str | None,
+                  loan_id: int, amount: Any, role: str) -> str:
+        seed = f"{grid_id}:{level_idx}:{cycle}:{previous or '<none>'}:{loan_id}:{amount}:{role}"
+        return "gL" + hashlib.sha256(seed.encode("ascii")).hexdigest()[:30]
+
+    def _resize_loan_buy(self, grid: dict, loan: dict, plan: dict, role: str,
+                         target_capital: Decimal, filters: SymbolFilters,
+                         avg_price: Decimal) -> str:
+        """Idempotently cancel and replace one BUY as a durable loan-plan step."""
+        idx_key = f"{role}_idx"
+        idx = int(plan[idx_key])
+        cell = next(row for row in self.db.get_grid_levels(int(grid["id"]))
+                    if int(row["level_idx"]) == idx)
+        if cell["state"] != "BUY_OPEN":
+            if cell["state"] not in {"IDLE", "DONE"} or _d(cell.get("held_qty", 0)) > 0:
+                return "CHANGED"
+            return "IDLE"
+        old_cid = cell.get("client_order_id") or cell.get("buy_client_order_id")
+        cid_key = f"{role}_replacement_cid"
+        cid = plan.get(cid_key)
+        if not cid:
+            cid = self._loan_cid(int(grid["id"]), idx, int(cell.get("cycles_completed", 0)),
+                                 old_cid, int(loan["id"]), plan["amount"], role)
+            plan[cid_key] = cid
+            self.db.update_grid_loan(int(loan["id"]), plan=plan)
+        existing = self.exchange.find_order_by_client_id(grid["symbol"], cid)
+        if existing is not None:
+            status = str(existing.get("status", "")).upper()
+            if status == "FILLED" or _d(existing.get("executed_qty", 0)) > 0:
+                return "FILLED"
+            if status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}:
+                self.db.update_level(int(grid["id"]), idx, order_id=int(existing["order_id"]),
+                                     client_order_id=cid, buy_client_order_id=cid)
+                return "PLACED"
+            if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                raise RuntimeError(f"loan replacement status unresolved: {status or 'unknown'}")
+            # Terminal IDs are immutable at Binance. A retry gets another deterministic ID.
+            cid = self._loan_cid(int(grid["id"]), idx, int(cell.get("cycles_completed", 0)),
+                                 cid, int(loan["id"]), plan["amount"], role + "retry")
+            cid_key = f"{role}_replacement_cid"
+            plan[cid_key] = cid
+            self.db.update_grid_loan(int(loan["id"]), plan=plan)
+        old_order_id = cell.get("order_id")
+        if old_order_id is not None:
+            old_order = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
+            if str(old_order.get("client_order_id")) != cid:
+                try:
+                    canceled = self.exchange.cancel_order(grid["symbol"], int(old_order_id))
+                except Exception:
+                    canceled = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
+                if _d(canceled.get("executed_qty", 0)) > 0 or str(canceled.get("status", "")).upper() == "FILLED":
+                    actual_cid = canceled.get("client_order_id") or old_cid
+                    self.db.update_level(int(grid["id"]), idx, state="BUY_OPEN",
+                        client_order_id=actual_cid, buy_client_order_id=actual_cid,
+                        order_id=int(old_order_id))
+                    current = next(row for row in self.db.get_grid_levels(int(grid["id"]))
+                                   if int(row["level_idx"]) == idx)
+                    self._handle_buy_fill(grid, current, canceled, filters, avg_price)
+                    return "FILLED"
+                if str(canceled.get("status", "")).upper() not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    raise RuntimeError("loan lender/borrower buy cancellation unresolved")
+        # Write-ahead replacement intent is recoverable by client order ID.
+        self.db.update_level(int(grid["id"]), idx, state="BUY_OPEN", client_order_id=cid,
+                             buy_client_order_id=cid, order_id=None)
+        qty = filters.round_qty_down(target_capital / _d(cell["price"]))
+        order = self._send_limit(grid["symbol"], "BUY", qty, _d(cell["price"]), cid,
+                                 filters, avg_price)
+        self.db.update_level(int(grid["id"]), idx, order_id=int(order["order_id"]))
+        return "PLACED"
+
+    def lend_from_plan(self, grid_id: int, plan: dict[str, Any], market: dict | None = None) -> dict:
+        """Execute one reserve-first loan from a write-ahead plan."""
+        grid = self.db.get_grid(int(grid_id))
+        if (grid is None or grid.get("status") != "ACTIVE"
+                or grid.get("strategy", "simple") != "smart"
+                or not (grid.get("params") or {}).get("loans_enabled", False)):
+            return {"ok": False, "reason": "loans_disabled_or_grid_inactive"}
+        reserve_part = _d(plan.get("reserve_part", 0))
+        lender_part = _d(plan.get("lender_part", 0))
+        amount = _d(plan["amount"])
+        if amount <= 0 or reserve_part + lender_part != amount:
+            raise ValueError("invalid loan plan amounts")
+        loans = self.db.list_grid_loans(int(grid_id))
+        pending = next((row for row in loans if row["status"] == "PENDING"
+                        and int(row["borrower_idx"]) == int(plan["borrower_idx"])), None)
+        if pending is None:
+            detail = {**(market or {}), "source": "monitor_or_cli"}
+            loan = self.db.create_grid_loan({
+                "grid_id": int(grid_id), "lender_idx": plan.get("lender_idx"),
+                "borrower_idx": int(plan["borrower_idx"]), "amount": float(amount),
+                "reserve_part": float(reserve_part),
+                "lender_cycles_at_open": int(plan.get("lender_cycles_at_open", 0)),
+                "borrower_cycles_at_open": int(plan.get("borrower_cycles_at_open", 0)),
+                "plan": {**plan, "stage": "PREPARED"}, "details": detail,
+            })
+        else:
+            loan = pending
+        self._continue_pending_loan(grid, loan)
+        final = self.db.get_grid_loan(int(loan["id"]))
+        return {"ok": final is not None and final["status"] == "OPEN", "loan": final}
+
+    def _continue_pending_loan(self, grid: dict, loan: dict) -> None:
+        if loan["status"] != "PENDING":
+            return
+        plan = dict(loan["plan"] or {})
+        filters, _snapshot, avg_price = self._market_context(grid["symbol"])
+        lender_idx = loan.get("lender_idx")
+        lender_part = _d(plan.get("lender_part", 0))
+        borrower_idx = int(loan["borrower_idx"])
+        amount = _d(loan["amount"])
+        if lender_idx is not None and lender_part > 0 and plan.get("stage") not in {
+            "LENDER_RESIZED", "BORROWER_RESIZED", "OPEN"
+        }:
+            outcome = self._resize_loan_buy(grid, loan, plan, "lender",
+                                            _d(plan["lender_capital_before"]) - lender_part,
+                                            filters, avg_price)
+            if outcome == "FILLED":
+                self._cancel_pending_loan(grid, loan, "lender_buy_filled_during_resize")
+                return
+            if outcome == "CHANGED":
+                self._cancel_pending_loan(grid, loan, "lender_cell_changed")
+                return
+            plan["stage"] = "LENDER_RESIZED"
+            self.db.update_grid_loan(int(loan["id"]), plan=plan)
+        if plan.get("stage") not in {"BORROWER_RESIZED", "OPEN"}:
+            borrower = next(row for row in self.db.get_grid_levels(int(grid["id"]))
+                            if int(row["level_idx"]) == borrower_idx)
+            if borrower.get("state") not in {"IDLE", "BUY_OPEN"} or _d(borrower.get("held_qty", 0)) > 0:
+                self._cancel_pending_loan(grid, loan, "borrower_cell_changed")
+                return
+            outcome = self._resize_loan_buy(grid, loan, plan, "borrower",
+                                            _d(plan["borrower_capital_before"]) + amount,
+                                            filters, avg_price)
+            if outcome in {"FILLED", "CHANGED"}:
+                self._cancel_pending_loan(grid, loan, "borrower_cell_changed_during_resize")
+                return
+            plan["stage"] = "BORROWER_RESIZED"
+            self.db.update_grid_loan(int(loan["id"]), plan=plan)
+        cells = {int(row["level_idx"]): row for row in self.db.get_grid_levels(int(grid["id"]))}
+        lender_updates = {}
+        if lender_idx is not None and lender_part > 0:
+            lender = cells[int(lender_idx)]
+            lender_updates[int(lender_idx)] = {
+                "capital": float(_d(plan["lender_capital_before"]) - lender_part),
+                "capital_base": float(_d(lender.get("capital_base", lender["capital_base"]))),
+                "capital_loan": float(_d(lender.get("capital_loan", 0)) - lender_part),
+            }
+        borrower = cells[borrower_idx]
+        borrower_updates = {
+            "capital": float(_d(plan["borrower_capital_before"]) + amount),
+            "capital_base": float(_d(borrower.get("capital_base", borrower["capital_base"]))),
+            "capital_loan": float(_d(borrower.get("capital_loan", 0)) + amount),
+        }
+        lender_updates[borrower_idx] = borrower_updates
+        grid_fields = {"reserve": float(_d(grid.get("reserve", 0)) - _d(loan["reserve_part"]))}
+        if grid_fields["reserve"] < -1e-8:
+            raise RuntimeError("loan reserve became negative")
+        self.db.apply_grid_loan_ledger(int(loan["id"]), level_updates=lender_updates,
+            grid_fields=grid_fields, status="OPEN", event={
+                "grid_id": int(grid["id"]), "source": "MONITOR" if self.event_sink else "CLI",
+                "run_id": getattr(getattr(self.event_sink, "__self__", None), "_run_id", None),
+                "event_type": "LOAN_CREATED", "reason": None, "price": self._event_price,
+                "details": {**(loan.get("details") or {}), "amount": str(amount),
+                            "reserve_part": str(loan["reserve_part"]), "lender_part": str(lender_part),
+                            "lender_idx": lender_idx, "borrower_idx": borrower_idx},
+            })
+
+    def _cancel_pending_loan(self, grid: dict, loan: dict, reason: str) -> None:
+        loan = self.db.get_grid_loan(int(loan["id"])) or loan
+        plan = dict(loan.get("plan") or {})
+        if plan.get("stage") in {"LENDER_RESIZED", "BORROWER_RESIZED"} \
+                and loan.get("lender_idx") is not None and _d(plan.get("lender_part", 0)) > 0 \
+                and "borrower" in reason:
+            plan["rollback_idx"] = int(loan["lender_idx"])
+            lender_before = _d(plan["lender_capital_before"])
+            grid_now = self.db.get_grid(int(grid["id"]))
+            filters, _snapshot, avg_price = self._market_context(grid_now["symbol"])
+            outcome = self._resize_loan_buy(grid_now, loan, plan, "rollback",
+                                            lender_before, filters, avg_price)
+            if outcome in {"FILLED", "CHANGED"}:
+                # A fill while restoring is real owned inventory; do not leave a synthetic loan.
+                reason += ":rollback_" + outcome.lower()
+            if plan.get("stage") == "BORROWER_RESIZED":
+                plan["borrower_rollback_idx"] = int(loan["borrower_idx"])
+                borrower_before = _d(plan["borrower_capital_before"])
+                outcome = self._resize_loan_buy(grid_now, loan, plan, "borrower_rollback",
+                                                borrower_before, filters, avg_price)
+                if outcome in {"FILLED", "CHANGED"}:
+                    reason += ":borrower_rollback_" + outcome.lower()
+        self.db.update_grid_loan(int(loan["id"]), status="CANCELLED", close_reason=reason,
+                                 closed_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        self.db.add_grid_event(run_id=None, source="MONITOR" if self.event_sink else "CLI",
+            grid_id=int(grid["id"]), event_type="LOAN_CANCELLED", reason=reason,
+            details={"loan_id": int(loan["id"]), "amount": loan["amount"]})
+
+    def resume_pending_loans(self, grid_id: int | None = None) -> int:
+        grids = ([self.db.get_grid(int(grid_id))] if grid_id is not None else
+                 self.db.list_grids_by_status({"ACTIVE"}))
+        resumed = 0
+        for grid in grids:
+            if not grid or grid.get("strategy", "simple") != "smart":
+                continue
+            for loan in self.db.list_grid_loans(int(grid["id"]), statuses={"PENDING"}):
+                self._continue_pending_loan(grid, loan)
+                resumed += 1
+        return resumed
+
+    def repay_loan(self, loan_id: int) -> dict:
+        loan = self.db.get_grid_loan(int(loan_id))
+        if loan is None or loan["status"] != "OPEN":
+            return {"ok": False, "reason": "loan_not_open"}
+        grid = self.db.get_grid(int(loan["grid_id"]))
+        borrower_idx = int(loan["borrower_idx"])
+        amount = _d(loan["amount"])
+        cells = {int(row["level_idx"]): row for row in self.db.get_grid_levels(int(grid["id"]))}
+        borrower = cells[borrower_idx]
+        if borrower["state"] not in {"IDLE", "BUY_OPEN"} or _d(borrower.get("held_qty", 0)) > 0:
+            self._loan_throttled_event(int(grid["id"]), "LOAN_REPAY_WAITING", "borrower_not_free",
+                {"loan_id": int(loan_id), "amount": str(amount)}, key="loan_id", value=int(loan_id),
+                level_idx=borrower_idx)
+            return {"ok": False, "reason": "borrower_not_free"}
+        lender_idx = loan.get("lender_idx")
+        lender = None if lender_idx is None else cells[int(lender_idx)]
+        lender_target = None if lender is None else _d(lender["capital"]) + amount
+        borrower_target = _d(borrower["capital"]) - amount
+        if borrower_target < 0:
+            return {"ok": False, "reason": "insufficient_borrower_capital"}
+        filters, _snapshot, avg_price = self._market_context(grid["symbol"])
+        if lender is None:
+            repayment_triggered = int(borrower.get("cycles_completed", 0)) > int(
+                loan.get("borrower_cycles_at_open", 0)
+            )
+        else:
+            repayment_triggered = int(lender.get("cycles_completed", 0)) > int(
+                loan.get("lender_cycles_at_open", 0)
+            )
+        if not repayment_triggered:
+            return {"ok": False, "reason": "repayment_trigger_not_reached"}
+        minimum_remaining = max(
+            filters.min_notional * _d((grid.get("params") or {}).get("loan_min_margin", 1.1)),
+            filters.min_qty * _d(borrower["price"]),
+        )
+        if borrower_target < minimum_remaining:
+            self._loan_throttled_event(int(grid["id"]), "LOAN_REPAY_WAITING",
+                "borrower_minimum_margin", {"loan_id": int(loan_id),
+                    "amount": str(amount), "capital_after": str(borrower_target),
+                    "minimum_remaining": str(minimum_remaining)}, key="loan_id",
+                value=int(loan_id), level_idx=borrower_idx)
+            return {"ok": False, "reason": "borrower_minimum_margin"}
+        repayment_plan = {"amount": str(amount), "borrower_idx": borrower_idx,
+                          "lender_idx": lender_idx, "stage": "REPAYING"}
+        self.db.update_grid_loan(int(loan_id), plan={**(loan.get("plan") or {}), **repayment_plan})
+        for role, cell, target in (("borrower", borrower, borrower_target),
+                                   ("lender", lender, lender_target)):
+            if cell is None or cell.get("state") != "BUY_OPEN":
+                continue
+            outcome = self._resize_loan_buy(grid, loan,
+                {**repayment_plan, "lender_idx": lender_idx, "borrower_idx": borrower_idx,
+                 "amount": str(amount)}, role, target, filters, avg_price)
+            if outcome != "PLACED":
+                return {"ok": False, "reason": f"{role}_resize_{outcome.lower()}"}
+        updates = {}
+        updates[borrower_idx] = {
+            "capital": float(borrower_target), "capital_base": float(borrower["capital_base"]),
+            "capital_loan": float(_d(borrower.get("capital_loan", 0)) - amount),
+        }
+        grid_fields = {}
+        if lender is not None:
+            updates[int(lender_idx)] = {
+                "capital": float(lender_target), "capital_base": float(lender["capital_base"]),
+                "capital_loan": float(_d(lender.get("capital_loan", 0)) + amount),
+            }
+        else:
+            grid_fields["reserve"] = float(_d(grid.get("reserve", 0)) + amount)
+        self.db.apply_grid_loan_ledger(int(loan_id), level_updates=updates, grid_fields=grid_fields,
+            status="REPAID", event={"grid_id": int(grid["id"]),
+            "source": "MONITOR" if self.event_sink else "CLI", "event_type": "LOAN_REPAID",
+            "reason": "repayment_triggered", "price": self._event_price,
+            "details": {"amount": str(amount), "borrower_idx": borrower_idx,
+                        "lender_idx": lender_idx}})
+        return {"ok": True, "loan_id": int(loan_id), "amount": float(amount)}
+
+    def transfer_loans(self, grid_id: int, reason: str, level_idx: int | None = None) -> int:
+        """Permanently settle all OPEN loans in accounting before ADJUST/close."""
+        grid = self.db.get_grid(int(grid_id))
+        if grid is None:
+            return 0
+        count = 0
+        for loan in self.db.list_grid_loans(int(grid_id), statuses={"OPEN"}):
+            if level_idx is not None and int(level_idx) not in {
+                int(loan["borrower_idx"]),
+                -1 if loan.get("lender_idx") is None else int(loan["lender_idx"]),
+            }:
+                continue
+            grid = self.db.get_grid(int(grid_id))
+            amount = _d(loan["amount"])
+            borrower_idx = int(loan["borrower_idx"])
+            cells = {int(row["level_idx"]): row for row in self.db.get_grid_levels(int(grid_id))}
+            borrower = cells[borrower_idx]
+            updates = {}
+            grid_fields = {}
+            if loan.get("lender_idx") is None:
+                grid_fields["reserve"] = float(_d(grid.get("reserve", 0)) + amount)
+                borrower_base = _d(borrower["capital_base"])
+                borrower_loan = _d(borrower.get("capital_loan", 0)) - amount
+                borrower_capital = _d(borrower["capital"]) - amount
+                updates[borrower_idx] = {"capital": float(borrower_capital),
+                    "capital_base": float(borrower_base), "capital_loan": float(borrower_loan)}
+            else:
+                lender_idx = int(loan["lender_idx"])
+                lender = cells[lender_idx]
+                lender_base = _d(lender["capital_base"]) - amount
+                borrower_base = _d(borrower["capital_base"]) + amount
+                lender_loan = _d(lender.get("capital_loan", 0)) + amount
+                borrower_loan = _d(borrower.get("capital_loan", 0)) - amount
+                updates[lender_idx] = {"capital": float(_d(lender["capital"])),
+                    "capital_base": float(lender_base), "capital_loan": float(lender_loan)}
+                updates[borrower_idx] = {"capital": float(_d(borrower["capital"])),
+                    "capital_base": float(borrower_base), "capital_loan": float(borrower_loan)}
+            event_type = "LOAN_TRANSFERRED"
+            self.db.apply_grid_loan_ledger(int(loan["id"]), level_updates=updates,
+                grid_fields=grid_fields, status="TRANSFERRED", event={
+                    "grid_id": int(grid_id), "source": "MONITOR" if self.event_sink else "CLI",
+                    "event_type": event_type, "reason": reason, "price": self._event_price,
+                    "details": {"loan_id": int(loan["id"]), "amount": str(amount),
+                                "lender_idx": loan.get("lender_idx"), "borrower_idx": borrower_idx},
+                })
+            count += 1
+        return count
+
+    def process_grid_loans(self, grid_id: int, now: datetime | None = None) -> dict:
+        grid = self.db.get_grid(int(grid_id))
+        if (grid is None or grid.get("status") != "ACTIVE" or grid.get("strategy") != "smart"
+                or not (grid.get("params") or {}).get("loans_enabled", False)):
+            return {"resumed": 0, "repaid": 0, "created": 0, "skipped": "disabled_or_inactive"}
+        resumed = self.resume_pending_loans(int(grid_id))
+        now = now or datetime.now(timezone.utc)
+        cells = self.db.get_grid_levels(int(grid_id))
+        events = self.db.list_grid_events(grid_id=int(grid_id), limit=5000)
+        loans = self.db.list_grid_loans(int(grid_id))
+        by_idx = {int(cell["level_idx"]): cell for cell in cells}
+        repaid = 0
+        for loan in loans:
+            if loan.get("status") != "OPEN":
+                continue
+            lender = None if loan.get("lender_idx") is None else by_idx.get(int(loan["lender_idx"]))
+            borrower = by_idx.get(int(loan["borrower_idx"]))
+            repay = loan_policy.plan_repayment(loan, lender, borrower) if borrower else None
+            if repay:
+                result = self.repay_loan(int(loan["id"]))
+                repaid += int(result.get("ok", False))
+        grid = self.db.get_grid(int(grid_id))
+        cells = self.db.get_grid_levels(int(grid_id))
+        loans = self.db.list_grid_loans(int(grid_id))
+        borrower = loan_policy.select_borrower(cells, events, loans, now, grid.get("params") or {})
+        if borrower is None:
+            return {"resumed": resumed, "repaid": repaid, "created": 0}
+        last_adjust = self.db.get_last_event(int(grid_id), "GRID_ADJUSTED")
+        lender = loan_policy.select_lender(cells, events, loans,
+            borrower_idx=int(borrower["level_idx"]), now=now, params=grid["params"],
+            grid_created_at=grid["created_at"],
+            last_adjust_at=None if last_adjust is None else last_adjust["ts"])
+        filters, _snapshot, avg_price = self._market_context(grid["symbol"])
+        plan = loan_policy.plan_loan(borrower, lender, reserve=grid.get("reserve", 0),
+            capital_total=grid["capital_total"], params=grid["params"],
+            min_notional=filters.min_notional, min_qty=filters.min_qty,
+            step_size=filters.step_size)
+        if plan is None:
+            self._loan_throttled_event(int(grid_id), "LOAN_SKIPPED", "no_valid_plan",
+                {"reason": "no_valid_plan"}, key="reason", value="no_valid_plan")
+            return {"resumed": resumed, "repaid": repaid, "created": 0, "skipped": "no_valid_plan"}
+        plan = {**plan, "lender_cycles_at_open": 0 if lender is None else int(lender.get("cycles_completed", 0)),
+                "borrower_cycles_at_open": int(borrower.get("cycles_completed", 0))}
+        result = self.lend_from_plan(int(grid_id), plan,
+            market={"mid": str((_d(_snapshot["bid_price"]) + _d(_snapshot["ask_price"])) / 2),
+                    "avg_price": str(avg_price)})
+        return {"resumed": resumed, "repaid": repaid,
+                "created": int(bool(result.get("ok"))), "loan": result.get("loan")}
+
+    def _loan_throttled_event(self, grid_id: int, event_type: str, reason: str,
+                              details: dict, *, key: str, value: Any,
+                              level_idx: int | None = None) -> None:
+        now = datetime.now(timezone.utc)
+        recent = self.db.list_grid_events(grid_id=int(grid_id), event_type=event_type, limit=1000)
+        for event in recent:
+            old_details = event.get("details") or {}
+            if old_details.get(key) != value:
+                continue
+            stamp = event.get("ts")
+            if isinstance(stamp, str):
+                stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if isinstance(stamp, datetime):
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                if (now - stamp.astimezone(timezone.utc)).total_seconds() < 6 * 3600:
+                    return
+        self._policy_event(event_type, int(grid_id), reason=reason, details=details, level_idx=level_idx)
+
     def _handle_buy_fill(
         self, grid: dict, level: dict, order: dict, filters: SymbolFilters, avg_price: Decimal,
     ) -> tuple[bool, bool]:
@@ -409,6 +817,7 @@ class GridEngine:
         grid_id, idx, symbol = int(grid["id"]), int(level["level_idx"]), grid["symbol"]
         cycle = int(level["cycles_completed"])
         buy_cid = self._actual_buy_client_order_id(grid_id, level)
+        pnl_estimated = False
         try:
             buy_order = self.exchange.get_order(symbol, client_order_id=buy_cid)
             buy_trades = self.exchange.get_my_trades(symbol, buy_order["order_id"])
@@ -421,6 +830,7 @@ class GridEngine:
                 - buy_fee - sell_fee
             )
         except (TestnetOrderError, RuntimeError, KeyError) as exc:
+            pnl_estimated = True
             sell_fee = Decimal(0)
             cycle_pnl = (
                 _d(level["sell_price"]) * _d(sell_order["executed_qty"])
@@ -448,12 +858,16 @@ class GridEngine:
         skip_reason: str | None = None
         skip_details: dict[str, Any] = {}
         if compound_allowed:
-            decision = compound_amount(
-                cycle_pnl, capital_base, compound_before, params, grid["capital_total"],
-            )
-            skip_reason = decision.reason if decision.amount <= 0 else None
-            skip_details = dict(decision.details)
-            compound_amount_value = decision.amount
+            if pnl_estimated:
+                skip_reason = "pnl_estimated"
+                skip_details = {"cycle_pnl": str(cycle_pnl), "estimated": True}
+            else:
+                decision = compound_amount(
+                    cycle_pnl, capital_base, compound_before, params, grid["capital_total"],
+                )
+                skip_reason = decision.reason if decision.amount <= 0 else None
+                skip_details = dict(decision.details)
+                compound_amount_value = decision.amount
             if compound_amount_value > 0:
                 try:
                     balance = self.exchange.get_balance("USDT")
@@ -692,6 +1106,11 @@ class GridEngine:
         grid = self.db.get_grid(int(grid_id))
         if grid is None or grid.get("status") != "ACTIVE":
             return {"ok": False, "reason": "grid_not_active" if grid else "grid_not_found"}
+        loan_enabled = (grid.get("strategy") == "smart"
+                        and (grid.get("params") or {}).get("loans_enabled") is True)
+        if loan_enabled:
+            self.transfer_loans(int(grid_id), "before_adjust")
+            grid = self.db.get_grid(int(grid_id))
         filters, snapshot, avg_price = self._market_context(grid["symbol"])
         mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
         target_n = int(grid["n_levels"]) if new_n is None else int(new_n)
@@ -699,7 +1118,17 @@ class GridEngine:
                 and int(grid["n_levels"]) == target_n):
             return {"ok": True, "changed": False, "reason": "already_at_target"}
         cells = self.db.get_grid_levels(grid_id)
-        plan = plan_adjust(grid, cells, new_low, new_high, target_n, mid, filters, self.settings)
+        reserve_target = (_d(grid["capital_total"])
+                          * _d((grid.get("params") or {}).get("reserve_pct", 0)) / Decimal(100))
+        reserve_excess = max(Decimal(0), _d(grid.get("reserve", 0)) - reserve_target) if loan_enabled else Decimal(0)
+        planning_cells = [dict(row) for row in cells]
+        if reserve_excess:
+            free = next((row for row in planning_cells if row.get("state") in {"IDLE", "BUY_OPEN", "DONE"}
+                         and _d(row.get("held_qty", 0)) <= 0), None)
+            if free is not None:
+                free["capital"] = str(_d(free.get("capital", 0)) + reserve_excess)
+                free["capital_base"] = str(_d(free.get("capital_base", 0)) + reserve_excess)
+        plan = plan_adjust(grid, planning_cells, new_low, new_high, target_n, mid, filters, self.settings)
         if not plan.ok:
             return {"ok": False, "reason": plan.reason, "plan": plan.details}
         old_range = {"low": grid["range_low"], "high": grid["range_high"], "n": grid["n_levels"]}
@@ -926,7 +1355,9 @@ class GridEngine:
         self.db.update_levels_and_grid_with_event(
             grid_id, level_updates=capital_updates,
             grid_fields={"range_low": float(plan.lines[0]), "range_high": float(plan.lines[-1]),
-                         "n_levels": target_n, "capital_total": float(normalized_capital_total)},
+                         "n_levels": target_n, "capital_total": float(normalized_capital_total),
+                         **({"reserve": float(_d(grid.get("reserve", 0)) - reserve_excess)}
+                            if loan_enabled else {})},
             event={"source": source, "run_id": getattr(sink_owner, "_run_id", None),
                    "event_type": "GRID_ADJUSTED", "reason": reason,
                    "price": self._event_price, "details": event_details},
@@ -943,7 +1374,20 @@ class GridEngine:
             return {"ok": False, "reason": "grid_not_active"}
         filters, snapshot, _avg = self._market_context(grid["symbol"])
         mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
-        plan = plan_adjust(grid, self.db.get_grid_levels(grid_id), new_low, new_high,
+        cells = self.db.get_grid_levels(grid_id)
+        loan_enabled = (grid.get("strategy") == "smart"
+                        and (grid.get("params") or {}).get("loans_enabled") is True)
+        target_reserve = (_d(grid["capital_total"])
+                          * _d((grid.get("params") or {}).get("reserve_pct", 0)) / Decimal(100))
+        excess = max(Decimal(0), _d(grid.get("reserve", 0)) - target_reserve) if loan_enabled else Decimal(0)
+        cells = [dict(row) for row in cells]
+        if excess:
+            free = next((row for row in cells if row.get("state") in {"IDLE", "BUY_OPEN", "DONE"}
+                         and _d(row.get("held_qty", 0)) <= 0), None)
+            if free:
+                free["capital"] = str(_d(free.get("capital", 0)) + excess)
+                free["capital_base"] = str(_d(free.get("capital_base", 0)) + excess)
+        plan = plan_adjust(grid, cells, new_low, new_high,
                            new_n, mid, filters, self.settings)
         return {"ok": plan.ok, "reason": plan.reason, "plan": plan.details}
 
@@ -997,7 +1441,9 @@ class GridEngine:
                     return {"ok": False, "status": status or "CANCEL_PENDING"}
             result = self._market_sell_owned_cell(grid, level, filters, avg_price, emit_event=False)
             if result.get("status") == "DUST":
+                self.return_cell_to_reserve(grid_id, int(level_idx), "stoploss_dust")
                 return {"ok": True, **result}
+            self.return_cell_to_reserve(grid_id, int(level_idx), "stoploss")
             updated = next(row for row in self.db.get_grid_levels(grid_id) if int(row["level_idx"]) == int(level_idx))
             payload = dict(details or {})
             payload.update({
@@ -1387,14 +1833,24 @@ class GridEngine:
         qty = filters.round_qty_down(held_qty)
         if qty < filters.min_qty:
             result = {"level_idx": idx, "qty": str(held_qty), "status": "DUST"}
-            self.db.update_level(grid_id, idx, state="DONE")
+            current_grid = self.db.get_grid(grid_id)
+            if (current_grid.get("strategy") == "smart"
+                    and (current_grid.get("params") or {}).get("loans_enabled") is True):
+                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE"})
+            else:
+                self.db.update_level(grid_id, idx, state="DONE")
             self._close_event("CELL_DUST", grid_id, result, reason="below market minimum notional", level_idx=idx)
             return result
         if filters.max_qty > 0 and qty > filters.max_qty:
             raise FilterViolation("LOT_SIZE", f"market liquidation quantity {qty} exceeds maxQty")
         if filters.apply_min_to_market and qty * avg_price < filters.min_notional:
             result = {"level_idx": idx, "qty": str(held_qty), "status": "DUST"}
-            self.db.update_level(grid_id, idx, state="DONE")
+            current_grid = self.db.get_grid(grid_id)
+            if (current_grid.get("strategy") == "smart"
+                    and (current_grid.get("params") or {}).get("loans_enabled") is True):
+                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE"})
+            else:
+                self.db.update_level(grid_id, idx, state="DONE")
             self._close_event("CELL_DUST", grid_id, result, reason="below market minimum notional", level_idx=idx)
             return result
 
@@ -1405,6 +1861,7 @@ class GridEngine:
             accepted_order = self.exchange.place_order(
                 symbol, "SELL", qty, order_type="MARKET", client_order_id=cid,
             )
+
             market_order = self.exchange.get_order(symbol, order_id=accepted_order["order_id"])
         else:
             market_order = self.exchange.get_order(symbol, order_id=existing["order_id"])
@@ -1423,12 +1880,20 @@ class GridEngine:
             _d(market_order["cummulative_quote_qty"])
             - _d(buy_order["cummulative_quote_qty"]) - buy_fee - sell_fee
         )
-        self.db.update_level(
-            grid_id, idx, state="DONE", cycles_completed=cycle,
-            pnl=float(_d(level.get("pnl")) + cycle_pnl), fee_paid=float(_d(level.get("fee_paid")) + sell_fee),
-            held_qty=0.0, order_id=market_order["order_id"], client_order_id=cid,
-            entry_price=None, bought_at=None, buy_client_order_id=None,
-        )
+        completion_fields = {
+            "state": "DONE", "cycles_completed": cycle,
+            "pnl": float(_d(level.get("pnl")) + cycle_pnl),
+            "fee_paid": float(_d(level.get("fee_paid")) + sell_fee),
+            "held_qty": 0.0, "order_id": market_order["order_id"],
+            "client_order_id": cid, "entry_price": None, "bought_at": None,
+            "buy_client_order_id": None,
+        }
+        current_grid = self.db.get_grid(grid_id)
+        if (current_grid.get("strategy") == "smart"
+                and (current_grid.get("params") or {}).get("loans_enabled") is True):
+            self._persist_done_to_reserve(grid_id, idx, "liquidated", completion_fields)
+        else:
+            self.db.update_level(grid_id, idx, **completion_fields)
         result = {
             "level_idx": idx, "client_order_id": cid, "order_id": int(market_order["order_id"]),
             "qty": str(_d(market_order["executed_qty"])), "cycle_pnl": str(cycle_pnl),
@@ -1442,6 +1907,42 @@ class GridEngine:
                 client_order_id=cid, order_id=int(market_order["order_id"]),
             )
         return result
+
+    def _persist_done_to_reserve(self, grid_id: int, level_idx: int, reason: str,
+                                 level_updates: dict[str, Any] | None = None) -> dict:
+        grid = self.db.get_grid(int(grid_id))
+        if (grid is None or grid.get("strategy") != "smart"
+                or not (grid.get("params") or {}).get("loans_enabled", False)):
+            return {"ok": True, "returned": 0.0, "skipped": "disabled"}
+        self.transfer_loans(int(grid_id), f"done_cell:{reason}", level_idx=int(level_idx))
+        grid = self.db.get_grid(int(grid_id))
+        cell = next((row for row in self.db.get_grid_levels(int(grid_id))
+                     if int(row["level_idx"]) == int(level_idx)), None)
+        if cell is None:
+            return {"ok": False, "reason": "cell_not_found"}
+        capital = _d(cell.get("capital", 0))
+        if capital == 0 and not level_updates:
+            return {"ok": True, "returned": 0.0, "skipped": "already_returned"}
+        updated_reserve = _d(grid.get("reserve", 0)) + capital
+        self.db.update_levels_and_grid_with_event(int(grid_id),
+            level_updates={int(level_idx): {**(level_updates or {}), "capital": 0.0,
+                "capital_base": 0.0, "capital_compound": 0.0, "capital_loan": 0.0}},
+            grid_fields={"reserve": float(updated_reserve)},
+            event={"source": "MONITOR" if self.event_sink else "CLI",
+                "run_id": getattr(getattr(self.event_sink, "__self__", None), "_run_id", None),
+                "event_type": "RESERVE_RETURNED", "reason": reason,
+                "price": self._event_price, "level_idx": int(level_idx),
+                "details": {"amount": str(capital), "reserve_before": str(grid.get("reserve", 0)),
+                            "reserve_after": str(updated_reserve)}})
+        return {"ok": True, "returned": float(capital), "reserve": float(updated_reserve)}
+
+    def return_cell_to_reserve(self, grid_id: int, level_idx: int, reason: str = "cell_done") -> dict:
+        grid = self.db.get_grid(int(grid_id))
+        cell = next((row for row in self.db.get_grid_levels(int(grid_id))
+                     if int(row["level_idx"]) == int(level_idx)), None) if grid else None
+        if cell is None or cell.get("state") != "DONE" or _d(cell.get("held_qty", 0)) > 0:
+            return {"ok": False, "reason": "cell_not_done_or_has_inventory"}
+        return self._persist_done_to_reserve(int(grid_id), int(level_idx), reason)
 
     def _close_repository(self, grid_id: int) -> dict:
         grid = self.db.get_grid(grid_id)
@@ -1584,6 +2085,8 @@ class GridEngine:
             raise ValueError(f"grid {grid_id} does not exist")
         if not self.db.transition_grid_status(grid_id, {"ACTIVE", "PAUSED", "CLOSING"}, "CLOSING"):
             raise ValueError(f"grid {grid_id} cannot close from status {grid['status']}")
+        if grid.get("strategy") == "smart" and (grid.get("params") or {}).get("loans_enabled") is True:
+            self.transfer_loans(int(grid_id), "before_close")
         self._close_event("GRID_CLOSE_STARTED", grid_id, {"mode": mode})
         try:
             self.sync_closing(grid_id)
@@ -1630,6 +2133,8 @@ class GridEngine:
                 try:
                     sold = self._market_sell_owned_cell(grid, level, filters, avg_price)
                     (dust if sold["status"] == "DUST" else liquidated).append(sold)
+                    if sold["status"] == "DUST":
+                        self.return_cell_to_reserve(grid_id, int(level["level_idx"]), "close_dust")
                 except Exception as exc:
                     errors.append({"level_idx": level["level_idx"], "reason": str(exc)})
                     self.db.update_grid(grid_id, status="CLOSING", fail_reason=str(exc))

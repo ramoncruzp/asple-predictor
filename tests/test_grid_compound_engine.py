@@ -330,3 +330,29 @@ def test_rearm_plan_allows_effective_cell_capital_above_thirty_percent_base():
     assert armed["state"] == "BUY_OPEN" and armed["capital"] == 600
     assert exchange.get_order("XRPUSDT", order_id=armed["order_id"])["quantity"] > Decimal("5")
     assert_capital_ledger(db, grid["id"])
+
+
+def test_estimated_cycle_pnl_never_compounds_and_records_skip_reason():
+    engine, db, exchange, grid = make_compound_engine()
+    level = _buy_level(engine, db, exchange, grid)
+    buy_cid = level["buy_client_order_id"]
+    sell_id = int(level["order_id"])
+    exchange.fill(sell_id)
+    before = db.get_grid_levels(grid["id"])[int(level["level_idx"])]
+    original_get_order = exchange.get_order
+
+    def fail_buy_trade_lookup(symbol, order_id=None, client_order_id=None):
+        if client_order_id == buy_cid:
+            raise KeyError("injected missing buy order history")
+        return original_get_order(symbol, order_id=order_id, client_order_id=client_order_id)
+
+    exchange.get_order = fail_buy_trade_lookup
+    engine.sync_grid(grid["id"])
+
+    after = db.get_grid_levels(grid["id"])[int(level["level_idx"])]
+    assert after["capital"] == before["capital"]
+    assert after["capital_base"] == before["capital_base"]
+    assert after["capital_compound"] == before["capital_compound"] == 0
+    skipped = db.get_last_event(grid["id"], "COMPOUND_SKIPPED")
+    assert skipped is not None and skipped["reason"] == "pnl_estimated"
+    assert_capital_ledger(db, grid["id"])

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, exists, func, select, text
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
@@ -69,6 +69,7 @@ class DBManager:
             Column("range_high", Float, nullable=False),
             Column("n_levels", Integer, nullable=False),
             Column("capital_total", Float, nullable=False),
+            Column("reserve", Float, nullable=False, default=0.0, server_default="0"),
             Column("status", String, nullable=False),
             Column("created_at", DateTime(timezone=True), nullable=False),
             Column("environment", String, nullable=False, default="testnet"),
@@ -86,6 +87,7 @@ class DBManager:
             Column("capital", Float, nullable=False),
             Column("capital_base", Float, nullable=True),
             Column("capital_compound", Float, nullable=False, default=0.0, server_default="0"),
+            Column("capital_loan", Float, nullable=False, default=0.0, server_default="0"),
             Column("order_id", Integer),
             Column("state", String, nullable=False),
             Column("cycles_completed", Integer, nullable=False, default=0),
@@ -122,6 +124,21 @@ class DBManager:
             Column("event_type", String, nullable=False), Column("reason", String),
             Column("price", Float), Column("details", Text),
         )
+        self.grid_loans = Table(
+            "grid_loans", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("grid_id", Integer, ForeignKey("grids.id"), nullable=False),
+            Column("lender_idx", Integer), Column("borrower_idx", Integer, nullable=False),
+            Column("amount", Float, nullable=False), Column("reserve_part", Float, nullable=False),
+            Column("status", String, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("updated_at", DateTime(timezone=True), nullable=False),
+            Column("closed_at", DateTime(timezone=True)), Column("close_reason", String),
+            Column("lender_cycles_at_open", Integer, nullable=False),
+            Column("borrower_cycles_at_open", Integer, nullable=False),
+            Column("plan", Text, nullable=False), Column("details", Text, nullable=False),
+        )
+        Index("ix_grid_loans_grid_status", self.grid_loans.c.grid_id, self.grid_loans.c.status)
         self.grid_snapshots = Table(
             "grid_snapshots", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
@@ -156,11 +173,13 @@ class DBManager:
         if self.engine.dialect.name != "sqlite":
             return
         additions = {
-            "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT"},
+            "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT",
+                      "reserve": "FLOAT NOT NULL DEFAULT 0"},
             "grid_levels": {
                 "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
                 "buy_client_order_id": "VARCHAR",
                 "capital_base": "FLOAT", "capital_compound": "FLOAT NOT NULL DEFAULT 0",
+                "capital_loan": "FLOAT NOT NULL DEFAULT 0",
             },
             "grid_snapshots": {
                 "break_prob": "FLOAT", "sigma_24h": "FLOAT",
@@ -621,6 +640,7 @@ class DBManager:
             "range_high": float(grid["range_high"]),
             "n_levels": int(grid["n_levels"]),
             "capital_total": float(grid["capital_total"]),
+            "reserve": float(grid.get("reserve", 0.0)),
             "status": grid.get("status", "OPENING"),
             "created_at": grid.get("created_at", now),
             "environment": grid.get("environment", "testnet"),
@@ -647,6 +667,7 @@ class DBManager:
                         else float(level["capital"]) - float(level.get("capital_compound", 0.0))
                     ),
                     "capital_compound": float(level.get("capital_compound", 0.0)),
+                    "capital_loan": float(level.get("capital_loan", 0.0)),
                     "order_id": level.get("order_id"),
                     "state": level.get("state", level.get("initial_state", "IDLE")),
                     "cycles_completed": int(level.get("cycles_completed", 0)),
@@ -786,6 +807,104 @@ class DBManager:
         with self.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def create_grid_loan(self, values: dict[str, Any]) -> dict:
+        """Persist the write-ahead record before a loan changes exchange orders."""
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        row = {
+            **values, "status": "PENDING", "created_at": now, "updated_at": now,
+            "plan": self._json(values.get("plan") or {}),
+            "details": self._json(values.get("details") or {}),
+        }
+        with self.engine.begin() as conn:
+            loan_id = conn.execute(self.grid_loans.insert().values(**row)).inserted_primary_key[0]
+        return self.get_grid_loan(int(loan_id))
+
+    def get_grid_loan(self, loan_id: int) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.grid_loans).where(
+                self.grid_loans.c.id == int(loan_id)
+            )).mappings().first()
+        return self._decode_json_fields(dict(row), ("plan", "details")) if row else None
+
+    def list_grid_loans(self, grid_id: int, statuses: set[str] | None = None) -> list[dict]:
+        statement = select(self.grid_loans).where(self.grid_loans.c.grid_id == int(grid_id))
+        if statuses:
+            statement = statement.where(self.grid_loans.c.status.in_(sorted(
+                {str(value).upper() for value in statuses}
+            )))
+        statement = statement.order_by(self.grid_loans.c.id)
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("plan", "details")) for row in rows]
+
+    def update_grid_loan(self, loan_id: int, **fields: Any) -> dict | None:
+        allowed = {column.name for column in self.grid_loans.columns} - {"id", "created_at"}
+        if not set(fields) <= allowed:
+            raise ValueError("invalid grid loan update fields")
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        values = {**fields, "updated_at": now}
+        for name in ("plan", "details"):
+            if name in values:
+                values[name] = self._json(values[name] or {})
+        with self.engine.begin() as conn:
+            conn.execute(self.grid_loans.update().where(
+                self.grid_loans.c.id == int(loan_id)
+            ).values(**values))
+        return self.get_grid_loan(int(loan_id))
+
+    def apply_grid_loan_ledger(
+        self, loan_id: int, *, level_updates: dict[int, dict[str, Any]],
+        grid_fields: dict[str, Any], status: str, event: dict[str, Any],
+    ) -> None:
+        """Atomically apply loan accounting, ledger status and its audit event."""
+        level_allowed = {column.name for column in self.grid_levels.columns} - {"grid_id", "level_idx"}
+        grid_allowed = {column.name for column in self.grids.columns} - {"id"}
+        if any(not set(fields) <= level_allowed for fields in level_updates.values()):
+            raise ValueError("invalid grid level update fields")
+        if not set(grid_fields) <= grid_allowed:
+            raise ValueError("invalid grid update fields")
+        source = str(event.get("source", "CLI")).upper()
+        if source not in {"MONITOR", "CLI"}:
+            raise ValueError("source must be MONITOR or CLI")
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        event_values = {
+            "run_id": event.get("run_id"), "source": source, "ts": now,
+            "grid_id": int(event["grid_id"]), "level_idx": event.get("level_idx"),
+            "client_order_id": event.get("client_order_id"), "order_id": event.get("order_id"),
+            "event_type": str(event["event_type"]), "reason": event.get("reason"),
+            "price": None if event.get("price") is None else float(event["price"]),
+            "details": self._json(event.get("details") or {}),
+        }
+        loan_values = {"status": str(status).upper(), "updated_at": now}
+        if str(status).upper() not in {"PENDING", "OPEN"}:
+            loan_values["closed_at"] = now
+            loan_values["close_reason"] = event.get("reason")
+        with self.engine.begin() as conn:
+            loan = conn.execute(select(self.grid_loans).where(
+                self.grid_loans.c.id == int(loan_id)
+            )).mappings().first()
+            if loan is None:
+                raise ValueError(f"grid loan {loan_id} does not exist")
+            for idx, fields in level_updates.items():
+                conn.execute(self.grid_levels.update().where(
+                    self.grid_levels.c.grid_id == int(loan["grid_id"]),
+                    self.grid_levels.c.level_idx == int(idx),
+                ).values(**fields, updated_at=now))
+            if grid_fields:
+                conn.execute(self.grids.update().where(
+                    self.grids.c.id == int(loan["grid_id"])
+                ).values(**grid_fields))
+            conn.execute(self.grid_loans.update().where(
+                self.grid_loans.c.id == int(loan_id)
+            ).values(**loan_values))
+            conn.execute(self.grid_events.insert().values(**event_values))
 
     def get_last_event(self, grid_id: int, event_type: str) -> dict | None:
         statement = select(self.grid_events).where(
@@ -969,6 +1088,7 @@ class DBManager:
                 else float(level["capital"]) - float(level.get("capital_compound", 0.0))
             ),
             "capital_compound": float(level.get("capital_compound", 0.0)),
+            "capital_loan": float(level.get("capital_loan", 0.0)),
             "order_id": level.get("order_id"), "state": level.get("state", "IDLE"),
             "cycles_completed": int(level.get("cycles_completed", 0)),
             "pnl": float(level.get("pnl", 0)), "sell_price": level.get("sell_price"),

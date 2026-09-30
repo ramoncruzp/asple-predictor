@@ -44,6 +44,12 @@ def test_defaults_and_parameter_validation_rules():
         "adjust_n": None,
         "compound_enabled": False, "compound_ratio": 1.0,
         "compound_max_growth_pct": 100.0,
+        "loans_enabled": False, "reserve_pct": 0.0,
+        "loan_idle_h": 12.0, "loan_borrower_min_cycles": 3,
+        "loan_recent_sell_h": 1.0, "loan_topup_pct": 50.0,
+        "loan_lender_max_pct": 50.0, "loan_cooldown_cycles": 2,
+        "loan_min_margin": 1.1, "loan_cap_pct": 30.0,
+        "loan_min_amount": 1.0,
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
     assert validate_params({"pause_enter_prob": None}, 4)["pause_enter_prob"] is None
