@@ -16,11 +16,14 @@ class SimOrder:
 
 
 class SimExchange:
-    def __init__(self, capital, fee_pct=.1):
+    def __init__(self, capital, fee_pct=.1, *, filters=None, fee_asset=None):
         self.usdt = Decimal(str(capital))
         self.base = Decimal(0)
         self.fees = Decimal(0)
         self.fee_rate = Decimal(str(fee_pct)) / 100
+        self.filters = filters
+        self.buy_fee_asset = "XRP" if fee_asset is None else str(fee_asset).upper()
+        self.sell_fee_asset = "USDT" if fee_asset is None else str(fee_asset).upper()
         self.orders = {}
         self.realized = Decimal(0)
         self.events = []
@@ -47,40 +50,53 @@ class SimExchange:
             if order.side == "BUY":
                 cost = order.price * gross
                 if cost > self.usdt:
-                    raise ValueError("simulated USDT balance would become negative")
-                fee = gross * self.fee_rate
-                net = gross - fee
-                self.usdt -= cost
-                self.base += net
-                self.fees += fee * order.price
-                cell.update(state="SELL_OPEN", held_qty=net, entry_price=order.price, bought_at=i)
+                    raise ValueError(f"simulated USDT balance would become negative at candle {i}, "
+                                     f"cell {idx}: free={self.usdt}, required={cost}")
+                fee = (gross * self.fee_rate if self.buy_fee_asset == "XRP"
+                       else cost * self.fee_rate)
+                net = (gross - fee if self.buy_fee_asset == "XRP" else gross)
+                if self.filters is not None:
+                    net = self.filters.round_qty_down(net)
+                self.usdt -= cost + (fee if self.buy_fee_asset == "USDT" else Decimal(0))
+                self.base += gross - (fee if self.buy_fee_asset == "XRP" else Decimal(0))
+                self.fees += fee * order.price if self.buy_fee_asset == "XRP" else fee
+                cell.update(state="SELL_OPEN", held_qty=net, entry_price=order.price,
+                            entry_cost=cost,
+                            entry_fee_usdt=fee * order.price if self.buy_fee_asset == "XRP" else fee,
+                            bought_at=i)
                 self.cancel(idx)
-                fills.append((idx, "BUY", order.price, gross, fee))
+                fills.append((idx, "BUY", order.price, gross, fee, net))
             else:
-                if gross > self.base or gross > cell["held_qty"]:
+                fee = (gross * self.fee_rate if self.sell_fee_asset == "XRP"
+                       else order.price * gross * self.fee_rate)
+                base_debit = gross + fee if self.sell_fee_asset == "XRP" else gross
+                if base_debit > self.base or gross > cell["held_qty"]:
                     raise ValueError("simulated base balance would become negative")
                 proceeds = order.price * gross
-                fee = proceeds * self.fee_rate
-                self.usdt += proceeds - fee
-                self.base -= gross
-                self.fees += fee
-                pnl = proceeds - fee - cell["entry_price"] * (gross / (Decimal(1) - self.fee_rate))
+                fee_usdt = fee * order.price if self.sell_fee_asset == "XRP" else fee
+                self.usdt += proceeds - (fee if self.sell_fee_asset == "USDT" else Decimal(0))
+                self.base -= base_debit
+                self.fees += fee_usdt
+                pnl = proceeds - fee_usdt - cell.get("entry_fee_usdt", Decimal(0)) - cell["entry_cost"]
                 self.realized += pnl
-                cell.update(state="IDLE", held_qty=Decimal(0), entry_price=None, bought_at=None,
+                cell.update(state="IDLE", held_qty=Decimal(0), entry_price=None, entry_cost=Decimal(0),
+                            entry_fee_usdt=Decimal(0), bought_at=None,
                             cycles_completed=cell["cycles_completed"] + 1, pnl=cell["pnl"] + pnl)
                 self.cancel(idx)
-                fills.append((idx, "SELL", order.price, gross, fee))
+                fills.append((idx, "SELL", order.price, gross, fee, gross))
         return fills
 
     def market_sell(self, cell, price):
         qty = cell["held_qty"]
         proceeds = qty * Decimal(str(price))
-        fee = proceeds * self.fee_rate
-        basis = cell["entry_price"] * (qty / (Decimal(1) - self.fee_rate))
-        self.base -= qty
-        self.usdt += proceeds - fee
-        self.fees += fee
-        self.realized += proceeds - fee - basis
-        cell.update(state="DONE", held_qty=Decimal(0), entry_price=None, bought_at=None,
-                    pnl=cell["pnl"] + proceeds - fee - basis)
-        return proceeds - fee - basis
+        fee = qty * self.fee_rate if self.sell_fee_asset == "XRP" else proceeds * self.fee_rate
+        basis = cell["entry_cost"]
+        self.base -= qty + (fee if self.sell_fee_asset == "XRP" else Decimal(0))
+        self.usdt += proceeds - (fee if self.sell_fee_asset == "USDT" else Decimal(0))
+        fee_usdt = fee * Decimal(str(price)) if self.sell_fee_asset == "XRP" else fee
+        self.fees += fee_usdt
+        realized = proceeds - fee_usdt - cell.get("entry_fee_usdt", Decimal(0)) - basis
+        self.realized += realized
+        cell.update(state="DONE", held_qty=Decimal(0), entry_price=None, entry_cost=Decimal(0),
+                    entry_fee_usdt=Decimal(0), bought_at=None, pnl=cell["pnl"] + realized)
+        return realized

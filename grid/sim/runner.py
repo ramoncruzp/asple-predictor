@@ -21,6 +21,20 @@ from grid.sim.metrics import calculate_metrics
 FILTERS = SymbolFilters(Decimal("0.0001"), Decimal("0.0001"), Decimal("100000"),
                        Decimal("0.1"), Decimal("0.1"), Decimal("100000000"),
                        Decimal("5"), True, 200)
+ADJUST_BLOCKED_THROTTLE_SECONDS = 6 * 60 * 60
+
+
+def _should_emit_adjust_blocked(timestamp, blocked_reason, recent_events):
+    """Mirror GridMonitor's same-reason/six-hour/last-100 event throttle."""
+    for event in list(recent_events)[-100:]:
+        details = event.get("details") or {}
+        previous_reason = details.get("blocked_reason", event.get("blocked_reason"))
+        if previous_reason != blocked_reason:
+            continue
+        previous_ts = int(event.get("ts", 0))
+        if int(timestamp) - previous_ts < ADJUST_BLOCKED_THROTTLE_SECONDS:
+            return False
+    return True
 
 
 def _json_safe(value):
@@ -35,7 +49,8 @@ def _json_safe(value):
 
 def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, high=None,
                    width_pct=None, fee_pct=.1, resync_candles=3, params=None,
-                   halflife_h=72, sigma_scale=1.0, csv_hash=None):
+                   halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
+                   fee_asset=None, include_details=False):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     if n < 4 or capital <= 0 or resync_candles < 1 or fee_pct < 0:
@@ -51,30 +66,38 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         high = initial * np.exp(half)
     if low is None or high is None or float(low) <= 0 or float(high) <= float(low):
         raise ValueError("provide valid low/high or width_pct")
-    lines = compute_lines(str(low), str(high), n, FILTERS)
+    filters = FILTERS if filters is None else filters
+    fee_asset = None if fee_asset is None else str(fee_asset).upper()
+    if fee_asset not in {None, "XRP", "USDT"}:
+        raise ValueError("fee_asset must be XRP, USDT or None")
+    lines = compute_lines(str(low), str(high), n, filters)
     cells_plan = plan_cells(lines, str(capital),
                             {"bid_price": str(initial * (1 - 1e-8)), "ask_price": str(initial * (1 + 1e-8)),
-                             "avg_price": str(initial)}, FILTERS,
+                             "avg_price": str(initial)}, filters,
                             {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
     cells = [{"level_idx": p.level_idx, "price": p.buy_price, "sell_price": p.sell_price,
               "capital": p.capital, "qty": p.qty, "state": "IDLE", "entry_price": None,
-              "held_qty": Decimal(0), "bought_at": None, "cycles_completed": 0,
+              "entry_cost": Decimal(0), "held_qty": Decimal(0), "bought_at": None, "cycles_completed": 0,
               "pnl": Decimal(0), "stop_loss_pct": Decimal(str(effective.get("stop_loss_pct", 5))) if strategy == "smart" else None}
              for p in cells_plan]
     for row, plan in zip(cells, cells_plan):
         row["state"] = plan.initial_state
-    exchange = SimExchange(capital, fee_pct)
+    exchange = SimExchange(capital, fee_pct, filters=filters, fee_asset=fee_asset)
     sigma = ewma_sigma_24h(closes, halflife_h) * float(sigma_scale)
     equity, events, trapped_values = [], [], []
+    recent_adjust_blocked = []
+    adjust_attempts_blocked = 0
+    adjust_rejected_events = 0
     status, paused_since, pause_reasons = "ACTIVE", None, None
     last_adjust_at = None
     active_low, active_high = float(lines[0]), float(lines[-1])
     paused = 0
     for i, (ts, lo, hi, close) in enumerate(zip(candles.timestamp, candles.low, candles.high, closes)):
         fills = exchange.process(i, lo, hi, close, cells)
-        for idx, side, price, qty, fee in fills:
+        for idx, side, price, qty, fee, qty_net in fills:
             events.append({"ts": int(ts), "type": f"{side}_FILLED", "level_idx": idx,
-                           "price": str(price), "qty": str(qty), "fee": str(fee)})
+                           "price": str(price), "qty": str(qty), "qty_net": str(qty_net),
+                           "fee": str(fee)})
         if i % resync_candles == 0:
             if strategy == "smart" and status in {"ACTIVE", "PAUSED"}:
                 policy_cells = [dict(c, held_qty=float(c["held_qty"]),
@@ -98,9 +121,17 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                         action = "ADJUST"
                         decision = adjust_decision_result
                     elif adjust_decision_result.action == "BLOCKED":
-                        events.append({"ts": int(ts), "type": "ADJUST_REJECTED",
-                                       "reason": list(adjust_decision_result.reasons),
-                                       "metrics": adjust_decision_result.metrics})
+                        adjust_attempts_blocked += 1
+                        blocked_reason = ",".join(adjust_decision_result.reasons) or "plan_invalid"
+                        blocked_event = {"ts": int(ts), "type": "ADJUST_REJECTED",
+                                         "reason": list(adjust_decision_result.reasons),
+                                         "metrics": adjust_decision_result.metrics,
+                                         "details": {"blocked_reason": blocked_reason}}
+                        if _should_emit_adjust_blocked(int(ts), blocked_reason, recent_adjust_blocked):
+                            events.append(blocked_event)
+                            recent_adjust_blocked.append(blocked_event)
+                            recent_adjust_blocked = recent_adjust_blocked[-100:]
+                            adjust_rejected_events += 1
                 if action not in {"NONE", "ADJUST"}:
                     events.append({"ts": int(ts), "type": action, "reason": list(decision.reasons),
                                    "metrics": decision.metrics})
@@ -126,7 +157,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                             "capital_total": capital, "params": effective}
                     adjust = plan_adjust(grid, cells, decision.metrics["range_low"],
                                          decision.metrics["range_high"], decision.metrics["n_levels"],
-                                         close, FILTERS, type("Settings", (), {"grid_min_step_pct": .003,
+                                         close, filters, type("Settings", (), {"grid_min_step_pct": .003,
                                          "capital_max_por_nivel_pct": .30})())
                     events.append({"ts": int(ts), "type": "ADJUST" if adjust.ok else "ADJUST_REJECTED",
                                    "reason": adjust.reason,
@@ -146,13 +177,14 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                 cells.append({"level_idx": new_idx, "price": Decimal(0),
                                               "sell_price": Decimal(0), "capital": Decimal(0),
                                               "qty": Decimal(0), "state": "IDLE", "entry_price": None,
+                                              "entry_cost": Decimal(0),
                                               "held_qty": Decimal(0), "bought_at": None,
                                               "cycles_completed": 0, "pnl": Decimal(0),
                                               "stop_loss_pct": Decimal(str(effective.get("stop_loss_pct", 5)))})
                             c = cells[idx]
                             c.update(price=Decimal(item["price"]), sell_price=Decimal(item["sell_price"]),
-                                     capital=Decimal(item["capital"]), qty=FILTERS.round_qty_down(
-                                         Decimal(item["capital"]) / Decimal(item["price"])), state="IDLE")
+                                     capital=Decimal(item["capital"]), qty=filters.round_qty_down(
+                               Decimal(item["capital"]) / Decimal(item["price"])), state="IDLE")
                         active_low, active_high, n = float(adjust.lines[0]), float(adjust.lines[-1]), len(adjust.lines)-1
             if status in {"ACTIVE", "PAUSED"}:
                 for c in cells:
@@ -172,6 +204,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     # Open inventory after CLOSE is retained and valued at the last close.
     metric = calculate_metrics(equity, float(capital), cells, exchange, closes,
                                paused=paused, trapped_values=trapped_values)
+    metric["adjust_attempts_blocked"] = adjust_attempts_blocked
+    metric["adjust_rejected_events"] = adjust_rejected_events
     intervention_types = {"PAUSE", "RESUME", "ADJUST", "ADJUST_REJECTED", "CLOSE_REPOSITORY", "STOP_LOSS"}
     metric["interventions_by_type"] = {
         kind: sum(event.get("type") == kind for event in events)
@@ -180,14 +214,38 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     hashed_params = {"strategy": strategy, "n": n, "capital": capital,
                      "range_low": str(lines[0]), "range_high": str(lines[-1]),
                      "width_pct": width_pct, "fee_pct": fee_pct,
+                     "fee_asset": fee_asset,
+                     "filters": {
+                         "tick_size": str(filters.tick_size), "min_price": str(filters.min_price),
+                         "max_price": str(filters.max_price), "step_size": str(filters.step_size),
+                         "min_qty": str(filters.min_qty), "max_qty": str(filters.max_qty),
+                         "min_notional": str(filters.min_notional),
+                         "apply_min_to_market": bool(filters.apply_min_to_market),
+                         "max_num_orders": filters.max_num_orders,
+                         "band": None if filters.band is None else {
+                             key: str(getattr(filters.band, key))
+                             for key in ("bid_up", "bid_down", "ask_up", "ask_down")
+                         },
+                     },
                      "resync_candles": resync_candles, "halflife_h": halflife_h,
                      "sigma_scale": sigma_scale, "params": effective}
     params_digest = hashlib.sha256(json.dumps(hashed_params,
                                                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return _json_safe({"strategy": strategy, "start": int(candles.timestamp[0]), "end": int(candles.timestamp[-1]),
+    result = {"strategy": strategy, "start": int(candles.timestamp[0]), "end": int(candles.timestamp[-1]),
             "candles": len(candles.timestamp), "gaps": candles.gaps,
             "low": str(lines[0]), "high": str(lines[-1]), "n": n, "capital": float(capital),
-            "fee_pct": float(fee_pct), "resync_candles": resync_candles,
+            "fee_pct": float(fee_pct), "fee_asset": fee_asset,
+            "filters": hashed_params["filters"], "resync_candles": resync_candles,
             "halflife_h": float(halflife_h), "sigma_scale": float(sigma_scale),
             "csv_sha256": csv_hash, "params_sha256": params_digest, "metrics": metric,
-            "events": events, "equity": equity})
+            "events": events, "equity": equity}
+    if include_details:
+        result["details"] = {
+            "balances": {"USDT": str(exchange.usdt), "XRP": str(exchange.base)},
+            "fees_usdt": str(exchange.fees),
+            "cells": [{key: (str(cell[key]) if isinstance(cell.get(key), Decimal) else cell.get(key))
+                       for key in ("level_idx", "state", "held_qty", "cycles_completed", "pnl",
+                                   "entry_price", "entry_cost", "capital", "qty", "price", "sell_price")}
+                      for cell in cells],
+        }
+    return _json_safe(result)

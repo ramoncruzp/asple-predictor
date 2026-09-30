@@ -16,6 +16,7 @@ def test_limit_fill_requires_strict_penetration_and_not_same_candle_cycle():
     assert ex.process(1, 9.99, 11, 10.5, [cell])[0][1] == "BUY"
     ex.place(0, "SELL", "11", cell["held_qty"], 2, 1)
     assert ex.process(1, 9, 12, 11.5, [cell]) == []
+    assert ex.process(2, 9, 11, 11, [cell]) == []
     assert ex.process(2, 9, 11.01, 11, [cell])[0][1] == "SELL"
     assert cell["cycles_completed"] == 1
 
@@ -27,6 +28,7 @@ def test_buy_fee_is_base_and_sell_fee_is_quote():
     ex.process(1, 9, 11, 10, [cell])
     assert cell["held_qty"] == Decimal("1.998")
     assert ex.usdt == Decimal("80")
+    assert ex.base == Decimal("1.998")
     before = ex.usdt
     ex.place(0, "SELL", "12", cell["held_qty"], 2, 1)
     ex.process(2, 10, 13, 12, [cell])

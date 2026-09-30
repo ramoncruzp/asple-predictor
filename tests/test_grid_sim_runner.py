@@ -2,6 +2,8 @@ import numpy as np
 
 from grid.sim.data import CandleData
 from grid.sim.runner import run_simulation
+from data.exchange_filters import SymbolFilters
+from tests.grid_fakes import fake_symbol_info
 
 
 def _candles():
@@ -37,4 +39,17 @@ def test_manual_one_cycle_has_exact_net_pnl_and_accounting_identity():
     result = run_simulation(candles, n=4, capital=100, low=99, high=101,
                             fee_pct=.1, resync_candles=3)
     assert result["metrics"]["cycles_completed"] == 1
-    assert abs(result["metrics"]["pnl_total_net_usdt"] - .06002) < 1e-8
+    assert abs(result["metrics"]["pnl_total_net_usdt"] - .07) < 1e-8
+
+
+def test_params_hash_includes_fee_asset_and_injected_filters():
+    candles = _candles()
+    fake_filters = SymbolFilters.from_symbol_info(fake_symbol_info())
+    baseline = run_simulation(candles, n=4, capital=100, low=99, high=101, fee_pct=0)
+    base_fee = run_simulation(candles, n=4, capital=100, low=99, high=101,
+                              fee_pct=0, fee_asset="XRP")
+    fake_filters_run = run_simulation(candles, n=4, capital=100, low=99, high=101,
+                                      fee_pct=0, filters=fake_filters)
+    assert baseline["params_sha256"] != base_fee["params_sha256"]
+    assert baseline["params_sha256"] != fake_filters_run["params_sha256"]
+    assert fake_filters_run["filters"]["tick_size"] == "0.01"
