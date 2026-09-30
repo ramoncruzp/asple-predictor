@@ -6,7 +6,9 @@ import time
 
 import pytest
 
-from tests.test_grid_engine_live import live_context, live_range, verify_no_grid_orders
+from tests.test_grid_engine_live import (
+    cancel_orders_created_since, live_context, live_range, verify_no_grid_orders,
+)
 
 
 def _live_plan(engine, exchange, db, grid_id):
@@ -40,6 +42,7 @@ def test_live_l10_adjust_keeps_owned_sell_and_replaces_free_buys(tmp_path):
     settings, exchange, db, engine = live_context(tmp_path)
     if exchange.get_open_orders("XRPUSDT"):
         pytest.skip("la cuenta Testnet ya tiene órdenes XRPUSDT; no se tocarán")
+    baseline_order_ids = set()
     baseline_xrp = _total_xrp(exchange)
     _unique_grid_sequence(db)
     filters = engine._market_context("XRPUSDT")[0]
@@ -96,7 +99,7 @@ def test_live_l10_adjust_keeps_owned_sell_and_replaces_free_buys(tmp_path):
     finally:
         if grid is not None:
             try:
-                if db.get_grid(grid["id"])["status"] == "ACTIVE":
+                if db.get_grid(grid["id"])["status"] in {"ACTIVE", "PAUSED", "CLOSING"}:
                     engine.sync_grid(grid["id"])
                     engine.close_grid(grid["id"], "liquidate")
             except Exception:
@@ -111,7 +114,8 @@ def test_live_l10_adjust_keeps_owned_sell_and_replaces_free_buys(tmp_path):
                 exchange.cancel_order("XRPUSDT", owned_buy_id)
             except Exception:
                 pass
-        verify_no_grid_orders(exchange)
+        cancel_orders_created_since(exchange, baseline_order_ids)
+        verify_no_grid_orders(exchange, baseline_order_ids)
         assert abs(_total_xrp(exchange) - baseline_xrp) <= filters.step_size
 
 
@@ -119,6 +123,7 @@ def test_live_l11_adjust_changes_n_up_and_down(tmp_path):
     _settings, exchange, db, engine = live_context(tmp_path)
     if exchange.get_open_orders("XRPUSDT"):
         pytest.skip("la cuenta Testnet ya tiene órdenes XRPUSDT; no se tocarán")
+    baseline_order_ids = set()
     baseline_xrp = _total_xrp(exchange)
     filters = engine._market_context("XRPUSDT")[0]
     _unique_grid_sequence(db)
@@ -140,7 +145,7 @@ def test_live_l11_adjust_changes_n_up_and_down(tmp_path):
     finally:
         if grid is not None:
             try:
-                if db.get_grid(grid["id"])["status"] == "ACTIVE":
+                if db.get_grid(grid["id"])["status"] in {"ACTIVE", "PAUSED", "CLOSING"}:
                     engine.close_grid(grid["id"], "liquidate")
             except Exception:
                 for row in db.get_grid_levels(grid["id"]):
@@ -149,7 +154,8 @@ def test_live_l11_adjust_changes_n_up_and_down(tmp_path):
                             exchange.cancel_order("XRPUSDT", int(row["order_id"]))
                         except Exception:
                             pass
-        verify_no_grid_orders(exchange)
+        cancel_orders_created_since(exchange, baseline_order_ids)
+        verify_no_grid_orders(exchange, baseline_order_ids)
         assert abs(_total_xrp(exchange) - baseline_xrp) <= filters.step_size
 
 
@@ -157,6 +163,7 @@ def test_live_l12_adjust_cid_a_to_b_to_a_creates_fresh_owned_buy(tmp_path):
     _settings, exchange, db, engine = live_context(tmp_path)
     if exchange.get_open_orders("XRPUSDT"):
         pytest.skip("la cuenta Testnet ya tiene órdenes XRPUSDT; no se tocarán")
+    baseline_order_ids = set()
     baseline_xrp = _total_xrp(exchange)
     filters = engine._market_context("XRPUSDT")[0]
     _unique_grid_sequence(db)
@@ -201,7 +208,7 @@ def test_live_l12_adjust_cid_a_to_b_to_a_creates_fresh_owned_buy(tmp_path):
     finally:
         if grid is not None:
             try:
-                if db.get_grid(grid["id"])["status"] == "ACTIVE":
+                if db.get_grid(grid["id"])["status"] in {"ACTIVE", "PAUSED", "CLOSING"}:
                     engine.close_grid(grid["id"], "liquidate")
             except Exception:
                 for row in db.get_grid_levels(grid["id"]):
@@ -210,5 +217,6 @@ def test_live_l12_adjust_cid_a_to_b_to_a_creates_fresh_owned_buy(tmp_path):
                             exchange.cancel_order("XRPUSDT", int(row["order_id"]))
                         except Exception:
                             pass
-        verify_no_grid_orders(exchange)
+        cancel_orders_created_since(exchange, baseline_order_ids)
+        verify_no_grid_orders(exchange, baseline_order_ids)
         assert abs(_total_xrp(exchange) - baseline_xrp) <= filters.step_size

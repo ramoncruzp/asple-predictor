@@ -57,6 +57,24 @@ def verify_no_grid_orders(exchange, expected_ids=()):
     raise AssertionError(f"órdenes XRPUSDT restantes tras limpieza: {sorted(current)}")
 
 
+def cancel_orders_created_since(exchange, baseline_ids=()):
+    """Cancel exchange-visible orders added by this isolated live test only."""
+    baseline = {int(value) for value in baseline_ids}
+    for order in exchange.get_open_orders("XRPUSDT"):
+        order_id = int(order["order_id"])
+        if order_id in baseline:
+            continue
+        result = exchange.cancel_order("XRPUSDT", order_id)
+        status = str(result.get("status", "")).upper()
+        if status not in {"CANCELED", "CANCELLED"}:
+            current = exchange.get_order("XRPUSDT", order_id=order_id)
+            assert str(current.get("status", "")).upper() in {"CANCELED", "CANCELLED"}, (
+                f"test-owned order {order_id} remained {current.get('status')} after cancel"
+            )
+    remaining = {int(order["order_id"]) for order in exchange.get_open_orders("XRPUSDT")}
+    assert remaining == baseline, f"test cleanup order IDs differ from baseline: {sorted(remaining ^ baseline)}"
+
+
 def test_live_grid_l1_create_and_cancel_roundtrip(tmp_path):
     settings, exchange, db, engine = live_context(tmp_path)
     before_orders = exchange.get_open_orders("XRPUSDT")
