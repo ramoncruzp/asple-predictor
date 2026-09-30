@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from config.settings import Settings
 from data.binance_client import BinanceClient
+from data.testnet_client import TestnetClient
 from database.db_manager import DBManager
 from database.learning_engine import LearningEngine
 from models.model_a_xgboost import ModelA
@@ -21,6 +22,8 @@ from scheduler.verification_loop import VerificationLoop
 from api.routes import coins, grid_advisor, models_status, predictions, volatility
 from models.volatility.live import VolPredictor
 from scheduler.vol_loop import VolLoop
+from grid.engine import GridEngine
+from grid.monitor import GridMonitor
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,18 +62,50 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning(
             "Volatilidad deshabilitada: no existe el manifest %s", volatility_manifest
         )
+    grid_monitor = None
+    if settings.grid_monitor_enabled:
+        testnet_key = (settings.testnet_api_key or "").strip()
+        testnet_secret = (settings.testnet_api_secret or "").strip()
+        valid_testnet_credentials = (
+            bool(testnet_key and testnet_secret)
+            and not testnet_key.casefold().startswith("tu_")
+            and not testnet_secret.casefold().startswith("tu_")
+        )
+        if valid_testnet_credentials:
+            try:
+                testnet_client = TestnetClient(
+                    testnet_key, testnet_secret,
+                    production_api_key=settings.binance_api_key,
+                )
+                grid_engine = GridEngine(db, testnet_client, settings)
+                grid_monitor = GridMonitor(db, testnet_client, grid_engine, settings)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Grid monitor disabled: Testnet client initialization failed"
+                )
+        else:
+            logging.getLogger(__name__).warning(
+                "Grid monitor disabled: faltan credenciales válidas de Binance Testnet"
+            )
+    else:
+        logging.getLogger(__name__).warning("Grid monitor disabled by GRID_MONITOR_ENABLED")
     app.state.settings, app.state.db, app.state.client = settings, db, client
     app.state.models, app.state.ensemble = {"model_a": model_a}, ensemble
     app.state.prediction_loop, app.state.verification_loop = prediction_loop, verification_loop
     app.state.vol_predictor, app.state.vol_loop = vol_predictor, vol_loop
+    app.state.grid_monitor = grid_monitor
     app.state.started_at = time.monotonic()
     prediction_loop.start()
     verification_loop.start()
     if vol_loop is not None:
         vol_loop.start()
+    if grid_monitor is not None:
+        grid_monitor.start()
     try:
         yield
     finally:
+        if grid_monitor is not None:
+            grid_monitor.stop()
         if vol_loop is not None:
             vol_loop.stop()
         prediction_loop.stop(); verification_loop.stop()

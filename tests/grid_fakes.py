@@ -59,7 +59,8 @@ class FakeExchange:
             raise self.create_failure or RuntimeError("injected exchange rejection")
         if client_order_id in self.orders_by_client:
             return self._normalize(self.orders_by_client[client_order_id])
-        qty, price = Decimal(str(quantity)), Decimal(str(price))
+        qty = Decimal(str(quantity))
+        price = Decimal(str(self.avg if price is None else price))
         self.filters.validate_order(side, price, qty, self.avg)
         order = {
             "order_id": self.next_order_id,
@@ -77,6 +78,8 @@ class FakeExchange:
         self.next_order_id += 1
         self.orders[order["order_id"]] = order
         self.orders_by_client[client_order_id] = order
+        if order_type == "MARKET":
+            self.fill(order["order_id"])
         if self.lose_next_response:
             self.lose_next_response = False
             raise RuntimeError("simulated lost response after accepting order")

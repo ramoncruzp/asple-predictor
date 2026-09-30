@@ -122,6 +122,23 @@ def test_lost_response_intent_recovers_order_by_client_id_without_duplicate():
     assert len(exchange.create_calls) == before
 
 
+def test_closing_does_not_repost_missing_write_ahead_buy_intent():
+    engine, db, exchange = make_engine()
+    grid = create(engine)
+    level = db.get_grid_levels(grid["id"])[3]
+    db.update_grid(grid["id"], status="CLOSING")
+    db.update_level(grid["id"], level["level_idx"], state="BUY_OPEN", order_id=None,
+                    client_order_id=f"g{grid['id']}L{level['level_idx']}B0")
+    before = len(exchange.create_calls)
+
+    engine.close_grid(grid["id"], "cancel")
+
+    assert len(exchange.create_calls) == before
+    recovered = db.get_grid_levels(grid["id"])[level["level_idx"]]
+    assert recovered["state"] == "IDLE"
+    assert recovered["order_id"] is None and recovered["client_order_id"] is None
+
+
 def test_creation_failure_cancels_prior_orders_and_marks_grid_failed():
     engine, db, exchange = make_engine()
     exchange.fail_on_create = 2
@@ -360,3 +377,146 @@ def test_pnl_fallback_does_not_subtract_fees_from_prior_cycles():
     engine.sync_grid(grid["id"])
     updated = db.get_grid_levels(grid["id"])[2]
     assert Decimal(str(updated["pnl"])) == expected
+
+
+def test_orders_placed_counts_transient_sell_retry_only_when_exchange_accepts_it():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = exchange.get_open_orders("XRPUSDT")[-1]
+    exchange.fill(buy["order_id"])
+    original = exchange.place_order
+    failed = False
+    def fail_first_sell(symbol, side, *args, **kwargs):
+        nonlocal failed
+        if side == "SELL" and not failed:
+            failed = True
+            raise RuntimeError("temporary network failure")
+        return original(symbol, side, *args, **kwargs)
+    exchange.place_order = fail_first_sell
+    first = engine.sync_grid(grid["id"])
+    assert first["orders_placed"] == 0
+    second = engine.sync_grid(grid["id"])
+    assert second["orders_placed"] == 1
+
+
+def test_transient_rearm_buy_keeps_write_ahead_intent_for_next_sync():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = exchange.get_open_orders("XRPUSDT")[-1]
+    exchange.fill(buy["order_id"])
+    engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[2]
+    sell_id = int(level["order_id"])
+    exchange.fill(sell_id)
+    original = exchange.place_order
+    failed = False
+    def fail_first_rearm(symbol, side, *args, **kwargs):
+        nonlocal failed
+        if side == "BUY" and not failed:
+            failed = True
+            raise RuntimeError("temporary rearm failure")
+        return original(symbol, side, *args, **kwargs)
+    exchange.place_order = fail_first_rearm
+    result = engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[2]
+    assert result["errors"] == 0
+    assert level["state"] == "BUY_OPEN" and level["order_id"] is None
+    assert level["client_order_id"] == "g1L2B1"
+    assert engine.sync_grid(grid["id"])["errors"] == 0
+    assert db.get_grid_levels(grid["id"])[2]["order_id"] is not None
+
+
+def test_transient_idle_arm_keeps_intent_for_next_sync():
+    engine, db, exchange = make_engine()
+    grid = create(engine)
+    exchange.move_price("104", "104.01", "104")
+    original = exchange.place_order
+    failed = False
+    def fail_first_buy(symbol, side, *args, **kwargs):
+        nonlocal failed
+        if side == "BUY" and not failed:
+            failed = True
+            raise RuntimeError("temporary idle-arm failure")
+        return original(symbol, side, *args, **kwargs)
+    exchange.place_order = fail_first_buy
+    first = engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[3]
+    assert first["errors"] == 1
+    assert level["state"] == "BUY_OPEN" and level["order_id"] is None
+    assert engine.sync_grid(grid["id"])["errors"] == 0
+    assert db.get_grid_levels(grid["id"])[3]["order_id"] is not None
+
+
+def test_transient_order_lookup_does_not_permanently_error_cell():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = exchange.get_open_orders("XRPUSDT")[-1]
+    exchange.fill(buy["order_id"])
+    original = exchange.get_order
+    failed = False
+    def fail_once(symbol, order_id=None, client_order_id=None):
+        nonlocal failed
+        if order_id is not None and int(order_id) == int(buy["order_id"]) and not failed:
+            failed = True
+            raise RuntimeError("temporary lookup failure")
+        return original(symbol, order_id=order_id, client_order_id=client_order_id)
+    exchange.get_order = fail_once
+    first = engine.sync_grid(grid["id"])
+    assert first["errors"] == 1
+    assert db.get_grid_levels(grid["id"])[2]["state"] == "BUY_OPEN"
+    assert engine.sync_grid(grid["id"])["errors"] == 0
+    assert db.get_grid_levels(grid["id"])[2]["state"] == "SELL_OPEN"
+
+
+def test_cancel_reports_buy_that_fills_during_cancel_with_cell_and_quantity():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = exchange.get_open_orders("XRPUSDT")[-1]
+    original = exchange.cancel_order
+    def fill_before_cancel_returns(symbol, order_id):
+        if int(order_id) == int(buy["order_id"]):
+            return exchange.fill(order_id)
+        return original(symbol, order_id)
+    exchange.cancel_order = fill_before_cancel_returns
+    result = engine.cancel_grid_orders(grid["id"])
+    fill = next(row for row in result["filled_during_cancel"] if row["order_id"] == buy["order_id"])
+    assert fill["grid_id"] == grid["id"]
+    assert fill["level_idx"] == 2
+    assert Decimal(str(fill["executed_qty"])) == Decimal("2.0")
+    assert fill["has_sell"] is False
+
+
+def test_failed_grid_creation_resets_canceled_buy_cells_to_idle_and_keeps_client_id():
+    engine, db, exchange = make_engine()
+    exchange.fail_on_create = len(exchange.create_calls) + 2
+    with pytest.raises(GridCreationError):
+        create(engine)
+    with db.engine.connect() as conn:
+        grid_row = conn.execute(db.grids.select()).mappings().first()
+    levels = db.get_grid_levels(grid_row["id"])
+    first = levels[0]
+    assert grid_row["status"] == "FAILED"
+    assert first["state"] == "IDLE" and first["order_id"] is None
+    assert first["client_order_id"] == "g1L0B0"
+
+
+def test_grid_can_open_for_symbol_with_only_a_holding_repository():
+    engine, db, exchange = make_engine()
+    db.create_grid_with_levels(
+        {"symbol": "XRPUSDT", "range_low": 90, "range_high": 110, "n_levels": 1,
+         "capital_total": 20, "status": "HOLDING", "environment": "testnet", "open_price": 100},
+        [{"level_idx": 0, "price": 99, "sell_price": 101, "capital": 20, "state": "SELL_OPEN", "held_qty": 0.2}],
+    )
+    assert create(engine)["status"] == "ACTIVE"
+
+
+def test_engine_treats_absent_exchange_order_limit_as_unlimited():
+    engine, db, exchange = make_engine()
+    info = exchange.get_symbol_info("XRPUSDT")
+    info["filters"] = [row for row in info["filters"] if row["filterType"] != "MAX_NUM_ORDERS"]
+    exchange.get_symbol_info = lambda symbol: info
+    grid = create(engine)
+    exchange.move_price("104", "104.01", "104")
+    result = engine.sync_grid(grid["id"])
+    assert result["errors"] == 0
+    assert db.get_grid(grid["id"])["status"] == "ACTIVE"

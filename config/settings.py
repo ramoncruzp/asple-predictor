@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     max_grids_simultaneos: int = Field(5, validation_alias="MAX_GRIDS_SIMULTANEOS")
     capital_max_por_nivel_pct: float = Field(0.30, validation_alias="CAPITAL_MAX_POR_NIVEL_PCT")
     grid_min_step_pct: float = Field(0.003, validation_alias="GRID_MIN_STEP_PCT")
+    grid_monitor_interval: int = Field(900, validation_alias="GRID_MONITOR_INTERVAL")
+    grid_monitor_gap_minutes: int = Field(20, validation_alias="GRID_MONITOR_GAP_MINUTES")
+    grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
 
     model_config = SettingsConfigDict(
         env_file=".env",

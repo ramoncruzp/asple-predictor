@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, MetaData, String, Table, UniqueConstraint, create_engine, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, exists, func, select, text
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
@@ -92,6 +92,41 @@ class DBManager:
             Column("fee_paid", Float, nullable=False, default=0.0),
             Column("updated_at", DateTime, nullable=False),
         )
+        self.monitor_runs = Table(
+            "monitor_runs", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("started_at", DateTime(timezone=True), nullable=False),
+            Column("finished_at", DateTime(timezone=True)),
+            Column("trigger", String, nullable=False),
+            Column("status", String, nullable=False),
+            Column("grids_checked", Integer, nullable=False, default=0),
+            Column("grids_failed", Integer, nullable=False, default=0),
+            Column("events_written", Integer, nullable=False, default=0),
+            Column("duration_ms", Integer), Column("note", String),
+        )
+        self.grid_events = Table(
+            "grid_events", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("run_id", Integer), Column("source", String, nullable=False),
+            Column("ts", DateTime(timezone=True), nullable=False),
+            Column("grid_id", Integer), Column("level_idx", Integer),
+            Column("client_order_id", String), Column("order_id", Integer),
+            Column("event_type", String, nullable=False), Column("reason", String),
+            Column("price", Float), Column("details", Text),
+        )
+        self.grid_snapshots = Table(
+            "grid_snapshots", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("run_id", Integer, nullable=False), Column("ts", DateTime(timezone=True), nullable=False),
+            Column("grid_id", Integer, nullable=False), Column("level_idx", Integer),
+            Column("symbol", String, nullable=False), Column("grid_status", String, nullable=False),
+            Column("level_state", String), Column("buy_price", Float), Column("sell_price", Float),
+            Column("held_qty", Float), Column("cycles_completed", Integer), Column("pnl_realized", Float),
+            Column("fee_paid", Float), Column("market_mid", Float), Column("unrealized_pnl", Float),
+            Column("open_orders_db", Integer), Column("inventory_value_usdt", Float),
+            Column("in_repository", Integer, nullable=False, default=0),
+            Column("origin_grid_id", Integer), Column("origin_level_idx", Integer), Column("age_hours", Float),
+        )
         self.metadata.create_all(self.engine)
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
@@ -99,10 +134,19 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_outcomes_prediction_id ON outcomes(prediction_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_levels_grid_id ON grid_levels(grid_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grids_symbol_status ON grids(symbol, status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monitor_runs_started_at ON monitor_runs(started_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_grid_ts ON grid_events(grid_id, ts)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
 
     @staticmethod
     def _json(value: Any) -> str | None:
         return None if value is None else json.dumps(value, default=str)
+
+    def _utc_now(self) -> datetime:
+        now = datetime.now(timezone.utc)
+        return now.replace(tzinfo=None) if self.engine.dialect.name == "sqlite" else now
 
     def save_prediction(self, prediction_dict: dict[str, Any]) -> str:
         prediction_id = str(prediction_dict.get("prediction_id") or uuid.uuid4())
@@ -584,6 +628,161 @@ class DBManager:
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
 
+    @staticmethod
+    def _decode_json_fields(row: dict, fields: tuple[str, ...]) -> dict:
+        for field in fields:
+            if row.get(field) is not None:
+                try:
+                    row[field] = json.loads(row[field])
+                except (TypeError, json.JSONDecodeError):
+                    pass
+        return row
+
+    def start_monitor_run(self, trigger: str) -> dict:
+        trigger = str(trigger).upper()
+        if trigger not in {"SCHEDULED", "STARTUP"}:
+            raise ValueError("trigger must be SCHEDULED or STARTUP")
+        values = {
+            "started_at": self._utc_now(), "trigger": trigger, "status": "RUNNING",
+            "grids_checked": 0, "grids_failed": 0, "events_written": 0,
+        }
+        with self.engine.begin() as conn:
+            run_id = conn.execute(self.monitor_runs.insert().values(**values)).inserted_primary_key[0]
+        return self.get_monitor_run(int(run_id))
+
+    def get_monitor_run(self, run_id: int) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.monitor_runs).where(self.monitor_runs.c.id == run_id)).mappings().first()
+        return dict(row) if row else None
+
+    def finish_monitor_run(self, run_id: int, **fields: Any) -> dict | None:
+        allowed = {"status", "grids_checked", "grids_failed", "events_written", "duration_ms", "note"}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError("invalid monitor run update fields")
+        values = {**fields, "finished_at": self._utc_now()}
+        with self.engine.begin() as conn:
+            conn.execute(self.monitor_runs.update().where(self.monitor_runs.c.id == run_id).values(**values))
+        return self.get_monitor_run(run_id)
+
+    def get_last_monitor_run(self, exclude_id: int | None = None) -> dict | None:
+        statement = select(self.monitor_runs)
+        if exclude_id is not None:
+            statement = statement.where(self.monitor_runs.c.id != exclude_id)
+        statement = statement.order_by(self.monitor_runs.c.id.desc()).limit(1)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        return dict(row) if row else None
+
+    def mark_stale_runs_interrupted(self, before_id: int) -> int:
+        now = self._utc_now()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.monitor_runs.update().where(
+                    self.monitor_runs.c.id < int(before_id),
+                    self.monitor_runs.c.status == "RUNNING",
+                ).values(status="INTERRUPTED", finished_at=now, note="interrupted by a later STARTUP run")
+            )
+        return int(result.rowcount or 0)
+
+    def add_grid_event(
+        self, *, run_id: int | None, source: str, event_type: str, grid_id: int | None = None,
+        level_idx: int | None = None, client_order_id: str | None = None,
+        order_id: int | None = None, reason: str | None = None, price: float | None = None,
+        details: Any = None, ts: datetime | None = None,
+    ) -> dict:
+        source = str(source).upper()
+        if source not in {"MONITOR", "CLI"}:
+            raise ValueError("source must be MONITOR or CLI")
+        values = {
+            "run_id": run_id, "source": source, "ts": ts or self._utc_now(),
+            "grid_id": grid_id, "level_idx": level_idx, "client_order_id": client_order_id,
+            "order_id": order_id, "event_type": str(event_type), "reason": reason,
+            "price": None if price is None else float(price), "details": self._json(details),
+        }
+        with self.engine.begin() as conn:
+            event_id = conn.execute(self.grid_events.insert().values(**values)).inserted_primary_key[0]
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.grid_events).where(self.grid_events.c.id == event_id)).mappings().one()
+        return self._decode_json_fields(dict(row), ("details",))
+
+    def list_grid_events(
+        self, grid_id: int | None = None, event_type: str | None = None, limit: int = 100,
+    ) -> list[dict]:
+        statement = select(self.grid_events)
+        if grid_id is not None:
+            statement = statement.where(self.grid_events.c.grid_id == grid_id)
+        if event_type is not None:
+            statement = statement.where(self.grid_events.c.event_type == event_type)
+        statement = statement.order_by(self.grid_events.c.ts.desc(), self.grid_events.c.id.desc()).limit(max(0, int(limit)))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def add_snapshots(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        now = self._utc_now()
+        values = [{**row, "ts": row.get("ts") or now} for row in rows]
+        with self.engine.begin() as conn:
+            conn.execute(self.grid_snapshots.insert(), values)
+        return len(values)
+
+    def list_grid_snapshots(
+        self, grid_id: int | None = None, run_id: int | None = None, limit: int = 1000,
+    ) -> list[dict]:
+        statement = select(self.grid_snapshots)
+        if grid_id is not None:
+            statement = statement.where(self.grid_snapshots.c.grid_id == grid_id)
+        if run_id is not None:
+            statement = statement.where(self.grid_snapshots.c.run_id == run_id)
+        statement = statement.order_by(self.grid_snapshots.c.ts.desc(), self.grid_snapshots.c.id.desc()).limit(max(0, int(limit)))
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def list_grids_by_status(self, statuses: set[str] | list[str] | tuple[str, ...]) -> list[dict]:
+        normalized = sorted({str(status).upper() for status in statuses})
+        if not normalized:
+            return []
+        statement = select(self.grids).where(self.grids.c.status.in_(normalized)).order_by(self.grids.c.id)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def transition_grid_status(self, grid_id: int, from_statuses: set[str] | list[str], to_status: str) -> bool:
+        expected = sorted({str(status).upper() for status in from_statuses})
+        if not expected:
+            return False
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.grids.update().where(
+                    self.grids.c.id == grid_id, self.grids.c.status.in_(expected),
+                ).values(status=str(to_status).upper())
+            )
+        return bool(result.rowcount)
+
+    def move_level_to_grid(
+        self, from_grid_id: int, from_level_idx: int, to_grid_id: int,
+        new_level_idx: int, conn: Any = None,
+    ) -> dict:
+        def move(connection):
+            row = connection.execute(select(self.grid_levels).where(
+                self.grid_levels.c.grid_id == from_grid_id,
+                self.grid_levels.c.level_idx == from_level_idx,
+            )).mappings().first()
+            if row is None:
+                raise ValueError(f"grid level {from_grid_id}/{from_level_idx} does not exist")
+            values = {**dict(row), "grid_id": to_grid_id, "level_idx": new_level_idx}
+            connection.execute(self.grid_levels.delete().where(
+                self.grid_levels.c.grid_id == from_grid_id,
+                self.grid_levels.c.level_idx == from_level_idx,
+            ))
+            connection.execute(self.grid_levels.insert().values(**values))
+            return values
+
+        if conn is not None:
+            return move(conn)
+        with self.engine.begin() as connection:
+            return move(connection)
+
     def update_grid(self, grid_id: int, **fields: Any) -> dict | None:
         allowed = {column.name for column in self.grids.columns} - {"id"}
         if not fields or not set(fields) <= allowed:
@@ -611,7 +810,7 @@ class DBManager:
 
     def count_open_grids(self) -> int:
         statement = select(func.count()).select_from(self.grids).where(
-            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED"))
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED", "CLOSING"))
         )
         with self.engine.connect() as conn:
             return int(conn.execute(statement).scalar_one())
@@ -619,14 +818,14 @@ class DBManager:
     def has_open_grid(self, symbol: str) -> bool:
         statement = select(exists().where(
             self.grids.c.symbol == symbol,
-            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED")),
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING")),
         ))
         with self.engine.connect() as conn:
             return bool(conn.execute(statement).scalar_one())
 
     def list_open_grids(self) -> list[dict]:
         statement = select(self.grids).where(
-            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED"))
+            self.grids.c.status.in_(("OPENING", "ACTIVE", "PAUSED", "CLOSING"))
         ).order_by(self.grids.c.id)
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]

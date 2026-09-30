@@ -35,7 +35,7 @@ class SymbolFilters:
     max_qty: Decimal
     min_notional: Decimal
     apply_min_to_market: bool
-    max_num_orders: int
+    max_num_orders: int | None
     band: BandRules | None = None
 
     @classmethod
@@ -72,7 +72,8 @@ class SymbolFilters:
         else:
             band = None
 
-        max_orders = by_type.get("MAX_NUM_ORDERS", {}).get("maxNumOrders", 0)
+        max_filter = by_type.get("MAX_NUM_ORDERS")
+        max_orders = None if max_filter is None else int(max_filter.get("maxNumOrders", 0))
         return cls(
             tick_size=_decimal(price["tickSize"]),
             min_price=_decimal(price["minPrice"]),
@@ -82,7 +83,7 @@ class SymbolFilters:
             max_qty=_decimal(lot["maxQty"]),
             min_notional=_decimal(min_notional),
             apply_min_to_market=apply_min,
-            max_num_orders=int(max_orders),
+            max_num_orders=max_orders,
             band=band,
         )
 

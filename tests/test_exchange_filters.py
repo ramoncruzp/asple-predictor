@@ -35,6 +35,12 @@ def test_parses_notional_and_side_specific_band():
     assert filters.band.ask_down == Decimal("0.8")
 
 
+def test_absent_max_num_orders_is_unlimited():
+    info = symbol_info()
+    info["filters"] = [item for item in info["filters"] if item["filterType"] != "MAX_NUM_ORDERS"]
+    assert SymbolFilters.from_symbol_info(info).max_num_orders is None
+
+
 def test_parses_min_notional_and_common_percent_band():
     filters = SymbolFilters.from_symbol_info(symbol_info("MIN_NOTIONAL", "PERCENT_PRICE"))
     assert filters.min_notional == Decimal("5")
