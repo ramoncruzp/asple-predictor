@@ -192,3 +192,17 @@ def test_policy_metrics_contain_effective_audit_values():
     decision = evaluate_grid("ACTIVE", DEFAULT_SMART_PARAMS, [cell("IDLE") for _ in range(4)], 100, 90, 110, 100, 0.03, None, NOW)
     for key in ("params", "mid", "sigma_24h", "sigma_h", "z_low", "z_high", "break_prob", "trapped_capital_pct", "free_cells", "total_pnl_pct", "pause_hours", "unknown_age", "unknown_entry"):
         assert key in decision.metrics
+
+
+def test_break_pause_with_unavailable_volatility_holds_but_other_pause_can_resume():
+    cells = [cell("IDLE") for _ in range(4)]
+    params = {**DEFAULT_SMART_PARAMS, "min_free_cells": 2}
+    break_paused = evaluate_grid("PAUSED", params, cells, 100, 90, 110, 100, None,
+                                 NOW, NOW, pause_reasons=("break_prob",))
+    capital_paused = evaluate_grid("PAUSED", params, cells, 100, 90, 110, 100, None,
+                                   NOW, NOW, pause_reasons=("trapped_capital_pct",))
+    available_again = evaluate_grid("PAUSED", params, cells, 100, 90, 110, 100, 0.001,
+                                    NOW, NOW, pause_reasons=("break_prob",))
+    assert break_paused.action == "NONE" and break_paused.reasons == ("vol_unavailable_hold",)
+    assert capital_paused.action == "RESUME"
+    assert available_again.action == "RESUME"

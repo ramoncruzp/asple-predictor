@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     grid_monitor_interval: int = Field(900, validation_alias="GRID_MONITOR_INTERVAL")
     grid_monitor_gap_minutes: int = Field(20, validation_alias="GRID_MONITOR_GAP_MINUTES")
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
+    grid_policy_enabled: bool = Field(True, validation_alias="GRID_POLICY_ENABLED")
 
     model_config = SettingsConfigDict(
         env_file=".env",

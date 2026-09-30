@@ -31,6 +31,7 @@ def test_monitor_tables_have_exact_audit_columns(db):
         "buy_price", "sell_price", "held_qty", "cycles_completed", "pnl_realized", "fee_paid",
         "market_mid", "unrealized_pnl", "open_orders_db", "inventory_value_usdt", "in_repository",
         "origin_grid_id", "origin_level_idx", "age_hours",
+        "break_prob", "sigma_24h", "trapped_capital_pct", "free_cells",
     }
 
 

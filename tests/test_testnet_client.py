@@ -283,11 +283,14 @@ def test_live_binance_testnet_far_limit_roundtrip():
     ):
         pytest.skip("faltan credenciales de Testnet")
 
-    testnet = LiveTestnetClient(
-        api_key,
-        api_secret,
-        production_api_key=settings.binance_api_key,
-    )
+    try:
+        testnet = LiveTestnetClient(
+            api_key,
+            api_secret,
+            production_api_key=settings.binance_api_key,
+        )
+    except Exception as exc:
+        pytest.fail(f"Binance Testnet client initialization failed ({type(exc).__name__})", pytrace=False)
     market = PublicMarketClient(None, None)
     market_price = market.get_current_price("XRPUSDT")["price"]
 

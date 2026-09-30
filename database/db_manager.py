@@ -75,6 +75,8 @@ class DBManager:
             Column("open_price", Float),
             Column("closed_at", DateTime),
             Column("fail_reason", String),
+            Column("strategy", String, nullable=False, default="simple", server_default="simple"),
+            Column("params", Text),
         )
         self.grid_levels = Table(
             "grid_levels", self.metadata,
@@ -86,7 +88,10 @@ class DBManager:
             Column("state", String, nullable=False),
             Column("cycles_completed", Integer, nullable=False, default=0),
             Column("pnl", Float, nullable=False, default=0.0),
-            Column("sell_price", Float, nullable=False),
+            Column("sell_price", Float),
+            Column("entry_price", Float),
+            Column("bought_at", DateTime),
+            Column("stop_loss_pct", Float),
             Column("held_qty", Float, nullable=False, default=0.0),
             Column("client_order_id", String),
             Column("fee_paid", Float, nullable=False, default=0.0),
@@ -126,8 +131,11 @@ class DBManager:
             Column("open_orders_db", Integer), Column("inventory_value_usdt", Float),
             Column("in_repository", Integer, nullable=False, default=0),
             Column("origin_grid_id", Integer), Column("origin_level_idx", Integer), Column("age_hours", Float),
+            Column("break_prob", Float), Column("sigma_24h", Float),
+            Column("trapped_capital_pct", Float), Column("free_cells", Integer),
         )
         self.metadata.create_all(self.engine)
+        self._migrate_grid_columns()
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_verify_at ON predictions(verify_at)"))
@@ -139,6 +147,29 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
+
+    def _migrate_grid_columns(self) -> None:
+        """Idempotently add the approved 15B columns to existing SQLite databases."""
+        if self.engine.dialect.name != "sqlite":
+            return
+        additions = {
+            "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT"},
+            "grid_levels": {
+                "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
+            },
+            "grid_snapshots": {
+                "break_prob": "FLOAT", "sigma_24h": "FLOAT",
+                "trapped_capital_pct": "FLOAT", "free_cells": "INTEGER",
+            },
+        }
+        with self.engine.begin() as conn:
+            for table, columns in additions.items():
+                existing = {row["name"] for row in conn.execute(text(f"PRAGMA table_info({table})")).mappings()}
+                for name, sql_type in columns.items():
+                    if name not in existing:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+            conn.execute(text("UPDATE grids SET strategy='simple' WHERE strategy IS NULL OR strategy=''"))
+            conn.execute(text("UPDATE grids SET strategy='repository' WHERE status='HOLDING'"))
 
     @staticmethod
     def _json(value: Any) -> str | None:
@@ -591,12 +622,16 @@ class DBManager:
             "open_price": grid.get("open_price"),
             "closed_at": grid.get("closed_at"),
             "fail_reason": grid.get("fail_reason"),
+            "strategy": str(grid.get("strategy", "simple")),
+            "params": self._json(grid.get("params")),
         }
         with self.engine.begin() as conn:
             result = conn.execute(self.grids.insert().values(**grid_values))
             grid_id = result.inserted_primary_key[0]
             level_rows = []
             for index, level in enumerate(levels):
+                if "sell_price" not in level:
+                    raise KeyError("sell_price")
                 level_rows.append({
                     "grid_id": grid_id,
                     "level_idx": int(level.get("level_idx", index)),
@@ -606,7 +641,12 @@ class DBManager:
                     "state": level.get("state", level.get("initial_state", "IDLE")),
                     "cycles_completed": int(level.get("cycles_completed", 0)),
                     "pnl": float(level.get("pnl", 0.0)),
-                    "sell_price": float(level["sell_price"]),
+                    "sell_price": None if "sell_price" not in level else (
+                        None if level["sell_price"] is None else float(level["sell_price"])
+                    ),
+                    "entry_price": level.get("entry_price"),
+                    "bought_at": level.get("bought_at"),
+                    "stop_loss_pct": level.get("stop_loss_pct"),
                     "held_qty": float(level.get("held_qty", 0.0)),
                     "client_order_id": level.get("client_order_id"),
                     "fee_paid": float(level.get("fee_paid", 0.0)),
@@ -619,7 +659,15 @@ class DBManager:
     def get_grid(self, grid_id: int) -> dict | None:
         with self.engine.connect() as conn:
             row = conn.execute(select(self.grids).where(self.grids.c.id == grid_id)).mappings().first()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        if result.get("params") is not None:
+            try:
+                result["params"] = json.loads(result["params"])
+            except (TypeError, json.JSONDecodeError):
+                pass
+        return result
 
     def get_grid_levels(self, grid_id: int) -> list[dict]:
         statement = select(self.grid_levels).where(
@@ -627,6 +675,12 @@ class DBManager:
         ).order_by(self.grid_levels.c.level_idx)
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def set_level_fields(self, grid_id: int, level_idx: int, **fields: Any) -> dict | None:
+        allowed = {"sell_price", "entry_price", "bought_at", "stop_loss_pct"}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError("invalid grid level fields")
+        return self.update_level(grid_id, level_idx, **fields)
 
     @staticmethod
     def _decode_json_fields(row: dict, fields: tuple[str, ...]) -> dict:
@@ -718,6 +772,15 @@ class DBManager:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
 
+    def get_last_event(self, grid_id: int, event_type: str) -> dict | None:
+        statement = select(self.grid_events).where(
+            self.grid_events.c.grid_id == int(grid_id),
+            self.grid_events.c.event_type == str(event_type),
+        ).order_by(self.grid_events.c.ts.desc(), self.grid_events.c.id.desc()).limit(1)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        return self._decode_json_fields(dict(row), ("details",)) if row else None
+
     def add_snapshots(self, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
@@ -745,7 +808,8 @@ class DBManager:
             return []
         statement = select(self.grids).where(self.grids.c.status.in_(normalized)).order_by(self.grids.c.id)
         with self.engine.connect() as conn:
-            return [dict(row) for row in conn.execute(statement).mappings().all()]
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        return [self._decode_json_fields(row, ("params",)) for row in rows]
 
     def transition_grid_status(self, grid_id: int, from_statuses: set[str] | list[str], to_status: str) -> bool:
         expected = sorted({str(status).upper() for status in from_statuses})

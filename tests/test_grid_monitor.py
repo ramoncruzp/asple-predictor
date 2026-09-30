@@ -87,7 +87,14 @@ def test_monitor_run_records_heartbeat_snapshots_without_noise():
 
 def test_monitor_isolates_grid_sync_failure_and_keeps_other_grids_running():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
-    grids = [engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000) for _ in range(3)]
+    # Seed legacy duplicate grids directly: the production create_grid guard now
+    # prevents creating this invalid same-symbol/same-strategy setup.
+    grids = [db.create_grid_with_levels(
+        {"symbol": "XRPUSDT", "range_low": 90, "range_high": 110, "n_levels": 5,
+         "capital_total": 1000, "status": "ACTIVE", "environment": "testnet"},
+        [{"level_idx": i, "price": 90 + i, "sell_price": 91 + i, "capital": 200, "state": "IDLE"}
+         for i in range(5)],
+    ) for _ in range(3)]
     seen = []
     def sync(grid_id):
         seen.append(grid_id)
@@ -216,7 +223,13 @@ def test_monitor_start_schedules_interval_and_nonblocking_startup_job():
 
 def test_monitor_snapshot_failure_isolated_per_grid():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
-    grids = [engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000) for _ in range(3)]
+    # Seed legacy duplicate grids directly; see the guard test in 15B-1A.
+    grids = [db.create_grid_with_levels(
+        {"symbol": "XRPUSDT", "range_low": 90, "range_high": 110, "n_levels": 5,
+         "capital_total": 1000, "status": "ACTIVE", "environment": "testnet"},
+        [{"level_idx": i, "price": 90 + i, "sell_price": 91 + i, "capital": 200, "state": "IDLE"}
+         for i in range(5)],
+    ) for _ in range(3)]
     original_add_snapshots = db.add_snapshots
     failed_id = grids[0]["id"]
     def fail_one_grid(rows):

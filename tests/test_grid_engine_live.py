@@ -22,7 +22,10 @@ def live_context(tmp_path):
         or secret.casefold().startswith("tu_")
     ):
         pytest.skip("faltan credenciales de Testnet")
-    exchange = _TestnetClient(key, secret, production_api_key=settings.binance_api_key)
+    try:
+        exchange = _TestnetClient(key, secret, production_api_key=settings.binance_api_key)
+    except Exception as exc:
+        pytest.fail(f"Binance Testnet client initialization failed ({type(exc).__name__})", pytrace=False)
     db = DBManager(f"sqlite:///{tmp_path / 'grid-live.db'}")
     db.add_or_reactivate_coin("XRPUSDT", "Fase 14 live test")
     engine = GridEngine(db, exchange, settings)

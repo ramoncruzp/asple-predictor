@@ -10,6 +10,8 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from grid.policy import evaluate_grid, stoploss_candidates
+from grid.volatility_provider import VolatilityProvider
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class GridMonitor:
     def __init__(
         self, db: Any, exchange: Any, engine: Any, settings: Any,
         scheduler: Any = None, clock: Callable[[], datetime] | None = None,
+        vol_provider: Any = None,
     ):
         self.db = db
         self.exchange = exchange
@@ -35,6 +38,7 @@ class GridMonitor:
         self.settings = settings
         self.scheduler = scheduler or BackgroundScheduler()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.vol_provider = vol_provider or VolatilityProvider(db, clock=self.clock)
         self.logger = logging.getLogger(__name__)
         self._run_id: int | None = None
         self._event_count = 0
@@ -87,7 +91,8 @@ class GridMonitor:
                 origins[int(event["level_idx"])] = (details, _utc(event["ts"]))
         return origins
 
-    def _snapshot_grid(self, run_id: int, grid: dict, mid: float | None) -> int:
+    def _snapshot_grid(self, run_id: int, grid: dict, mid: float | None,
+                       policy_metrics: dict | None = None) -> int:
         grid_id = int(grid["id"])
         levels = self.db.get_grid_levels(grid_id)
         repository = grid["status"] == "HOLDING"
@@ -130,6 +135,10 @@ class GridMonitor:
             "inventory_value_usdt": float(inventory) if mid is not None else None,
             "in_repository": int(repository), "origin_grid_id": None,
             "origin_level_idx": None, "age_hours": None,
+            "break_prob": (policy_metrics or {}).get("break_prob"),
+            "sigma_24h": (policy_metrics or {}).get("sigma_24h"),
+            "trapped_capital_pct": (policy_metrics or {}).get("trapped_capital_pct"),
+            "free_cells": (policy_metrics or {}).get("free_cells"),
         })
         return self.db.add_snapshots(rows)
 
@@ -192,35 +201,153 @@ class GridMonitor:
             closings = self.db.list_grids_by_status({"CLOSING"})
             all_grids = normal_grids + repositories + closings
             mids = self._market_mids(all_grids)
-            for grid in normal_grids:
-                checked += 1
-                if grid["status"] == "ACTIVE":
+            policy_enabled = bool(getattr(self.settings, "grid_policy_enabled", True))
+            vol_cache: dict[str, Any] = {}
+
+            def unavailable_event(grid: dict, reason: str) -> None:
+                previous_event = self.db.get_last_event(int(grid["id"]), "VOL_UNAVAILABLE")
+                if previous_event and (_utc(now) - _utc(previous_event["ts"])).total_seconds() < 6 * 3600:
+                    return
+                self._emit({"event_type": "VOL_UNAVAILABLE", "grid_id": int(grid["id"]),
+                            "reason": reason, "price": mids.get(grid["symbol"]), "details": {"reason": reason}})
+
+            def process_grid(grid: dict) -> None:
+                nonlocal failed
+                grid_id, status_before = int(grid["id"]), grid["status"]
+                mid = mids.get(grid["symbol"])
+                metrics: dict[str, Any] = {}
+                try:
+                    current = self.db.get_grid(grid_id) or grid
+                    view = None
+                    if policy_enabled:
+                        if grid["symbol"] not in vol_cache:
+                            vol_cache[grid["symbol"]] = self.vol_provider.get(grid["symbol"])
+                        view = vol_cache[grid["symbol"]]
+                    if policy_enabled and mid is not None:
+                        levels = self.db.get_grid_levels(grid_id)
+                        if current["status"] in {"ACTIVE", "PAUSED", "HOLDING"}:
+                            for cell in stoploss_candidates(levels, mid):
+                                try:
+                                    outcome = self.engine.stoploss_cell(
+                                        grid_id, int(cell["level_idx"]), "stop_loss_pct",
+                                        {"params": current.get("params"), "mid": mid,
+                                         "sigma_24h": None if view is None else view.sigma_24h,
+                                         "sigma_h": None, "z_low": None, "z_high": None,
+                                         "break_prob": None, "trapped_capital_pct": None,
+                                         "free_cells": sum(row["state"] in {"BUY_OPEN", "IDLE"} for row in levels),
+                                         "total_pnl_pct": None, "pause_hours": None},
+                                    )
+                                    if not outcome.get("ok"):
+                                        raise RuntimeError(outcome.get("reason") or outcome.get("status"))
+                                except Exception as exc:
+                                    failed += 1
+                                    self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                                "reason": str(exc), "price": mid,
+                                                "details": {"action": "STOPLOSS", "level_idx": cell["level_idx"]}})
+                                    self.logger.warning("grid=%s stop-loss action failed", grid_id, exc_info=True)
+                            levels = self.db.get_grid_levels(grid_id)
+
+                    # Retry triggered stop-losses before sync can classify their
+                    # canceled limit sell as an external cancellation.
+                    if status_before == "ACTIVE":
+                        self.engine.sync_grid(grid_id)
+                    elif status_before == "PAUSED":
+                        self.engine.sync_paused(grid_id)
+                    elif status_before == "HOLDING":
+                        self.engine.sync_repository(grid_id)
+                    current = self.db.get_grid(grid_id) or current
+
+                    if policy_enabled and mid is not None and current.get("strategy", "simple") == "smart" \
+                            and current["status"] in {"ACTIVE", "PAUSED"}:
+                        levels = self.db.get_grid_levels(grid_id)
+                        sigma = None if view is None else float(view.sigma_24h)
+                        if sigma is None:
+                            unavailable_event(grid, getattr(self.vol_provider, "last_reason", None) or "unavailable")
+                        last_pause = self.db.get_last_event(grid_id, "GRID_PAUSED")
+                        paused_since = last_pause.get("ts") if last_pause else now
+                        pause_reasons = None
+                        if last_pause:
+                            pause_details = last_pause.get("details") or {}
+                            values = pause_details.get("reasons")
+                            pause_reasons = tuple(values) if values is not None else None
+                        decision = evaluate_grid(
+                            current["status"], current.get("params") or {}, levels, mid,
+                            float(current["range_low"]), float(current["range_high"]),
+                            float(current["capital_total"]), sigma, paused_since, now,
+                            pause_reasons=pause_reasons,
+                        )
+                        metrics = decision.metrics
+                        details = {**decision.metrics, "reasons": list(decision.reasons)}
+                        if decision.action == "PAUSE":
+                            try:
+                                result = self.engine.pause_grid(grid_id, ",".join(decision.reasons), details)
+                                if not result.get("ok"):
+                                    raise RuntimeError("grid could not transition to PAUSED")
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "PAUSE", **details}})
+                                self.logger.warning("grid=%s pause action failed", grid_id, exc_info=True)
+                        elif decision.action == "RESUME":
+                            try:
+                                result = self.engine.resume_grid(grid_id, "hysteresis_cleared", details)
+                                if not result.get("ok"):
+                                    raise RuntimeError("grid could not transition to ACTIVE")
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "RESUME", **details}})
+                                self.logger.warning("grid=%s resume action failed", grid_id, exc_info=True)
+                        elif decision.action == "CLOSE_REPOSITORY":
+                            self._emit({"event_type": "GRID_AUTO_CLOSE", "grid_id": grid_id,
+                                        "reason": ",".join(decision.reasons), "price": mid,
+                                        "details": details})
+                            try:
+                                self.engine.close_grid(grid_id, "repository")
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "CLOSE_REPOSITORY", **details}})
+                                self.logger.warning("grid=%s automatic close failed", grid_id, exc_info=True)
+                    final_grid = self.db.get_grid(grid_id) or current
                     try:
-                        self.engine.sync_grid(int(grid["id"]))
+                        self._snapshot_grid(run_id, final_grid, mid, metrics)
                     except Exception as exc:
                         failed += 1
-                        self.logger.exception("grid=%s monitor sync failed", grid["id"])
-                        self._emit({
-                            "event_type": "SYNC_FAILED", "grid_id": int(grid["id"]),
-                            "reason": str(exc), "price": mids.get(grid["symbol"]), "details": {},
-                        })
-                snapshot_grid(grid, mids.get(grid["symbol"]))
-            for grid in repositories:
-                checked += 1
-                try:
-                    self.engine.sync_repository(int(grid["id"]))
+                        self.logger.warning("grid=%s monitor snapshot failed", grid_id, exc_info=True)
+                        self._emit({"event_type": "SNAPSHOT_FAILED", "grid_id": grid_id,
+                                    "reason": str(exc), "price": mid, "details": {}})
                 except Exception as exc:
                     failed += 1
-                    self.logger.exception("repository grid=%s monitor sync failed", grid["id"])
-                    self._emit({
-                        "event_type": "SYNC_FAILED", "grid_id": int(grid["id"]),
-                        "reason": str(exc), "price": mids.get(grid["symbol"]), "details": {},
-                    })
-                snapshot_grid(grid, mids.get(grid["symbol"]))
-            for grid in closings:
+                    self.logger.exception("grid=%s monitor processing failed", grid_id)
+                    self._emit({"event_type": "SYNC_FAILED", "grid_id": grid_id,
+                                "reason": str(exc), "price": mid, "details": {}})
+                    snapshot_grid(grid, mid)
+
+            for grid in all_grids:
                 checked += 1
-                self._close_pending(run_id, grid, now)
-                snapshot_grid(grid, mids.get(grid["symbol"]))
+                if grid["status"] == "CLOSING":
+                    close_event = self.db.get_last_event(int(grid["id"]), "GRID_CLOSE_STARTED")
+                    close_details = (close_event or {}).get("details") or {}
+                    if close_event and close_event.get("source") == "MONITOR" and close_details.get("mode"):
+                        try:
+                            self.engine.close_grid(int(grid["id"]), close_details["mode"])
+                        except Exception as exc:
+                            failed += 1
+                            self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
+                                        "reason": str(exc), "price": mids.get(grid["symbol"]),
+                                        "details": {"action": "CLOSE_RETRY", "mode": close_details["mode"]}})
+                    refreshed = self.db.get_grid(int(grid["id"])) or grid
+                    if refreshed["status"] == "CLOSING":
+                        self._close_pending(run_id, refreshed, now)
+                        snapshot_grid(refreshed, mids.get(grid["symbol"]))
+                    else:
+                        snapshot_grid(refreshed, mids.get(grid["symbol"]))
+                    continue
+                process_grid(grid)
 
             status = "OK" if failed == 0 else "FAILED" if failed >= checked and checked else "PARTIAL"
         except Exception as exc:

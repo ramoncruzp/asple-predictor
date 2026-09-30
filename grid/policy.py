@@ -219,6 +219,7 @@ def evaluate_grid(
     sigma_24h: float | None,
     paused_since: datetime | None,
     now: datetime,
+    pause_reasons: tuple[str, ...] | None = None,
 ) -> PolicyDecision:
     effective = validate_params(params, max(len(cells), int(params.get("min_free_cells", 2)) + 1, 2))
     status = str(grid_status).upper()
@@ -271,6 +272,8 @@ def evaluate_grid(
         return PolicyDecision("NONE", (), metrics)
 
     resume_reasons = []
+    if sigma_24h is None and pause_reasons is not None and "break_prob" in pause_reasons:
+        return PolicyDecision("NONE", ("vol_unavailable_hold",), metrics)
     exit_prob = effective["pause_exit_prob"]
     if probability is not None and effective["pause_enter_prob"] is not None and exit_prob is not None:
         if probability > exit_prob:

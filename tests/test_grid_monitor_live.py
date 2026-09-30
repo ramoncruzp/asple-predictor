@@ -46,7 +46,10 @@ def _context():
     key, secret = (settings.testnet_api_key or "").strip(), (settings.testnet_api_secret or "").strip()
     if not key or not secret or key.casefold().startswith("tu_") or secret.casefold().startswith("tu_"):
         pytest.skip("faltan credenciales de Testnet")
-    client = _safe_client(BinanceTestnetClient(key, secret, production_api_key=settings.binance_api_key))
+    try:
+        client = _safe_client(BinanceTestnetClient(key, secret, production_api_key=settings.binance_api_key))
+    except Exception as exc:
+        pytest.fail(f"Binance Testnet client initialization failed ({type(exc).__name__})", pytrace=False)
     db = DBManager("sqlite:///:memory:")
     db.add_or_reactivate_coin("XRPUSDT")
     # Binance keeps client-order IDs in account history after a test finishes.

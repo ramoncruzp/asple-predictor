@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from sqlalchemy import select
 
 from data.exchange_filters import FilterViolation, SymbolFilters
 from data.testnet_client import TestnetOrderError
+from grid.policy import DEFAULT_SMART_PARAMS, validate_params
 from grid.levels import GridConfigError, compute_lines, plan_cells
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,15 @@ class GridEngine:
         }
         return filters, snapshot, avg
 
+    @staticmethod
+    def _level_sell_price(grid: dict, level: dict, filters: SymbolFilters) -> Decimal:
+        stored = level.get("sell_price")
+        if stored is not None:
+            return _d(stored)
+        step = (_d(grid["range_high"]) - _d(grid["range_low"])) / Decimal(int(grid["n_levels"]))
+        derived = filters.round_price(_d(grid["range_low"]) + step * (int(level["level_idx"]) + 1), "nearest")
+        return derived
+
     def _active_coin(self, symbol: str) -> bool:
         coin = self.db.get_coin(symbol)
         return coin is not None and int(coin["active"]) == 1
@@ -93,6 +104,11 @@ class GridEngine:
         if len(value) > 36:
             raise ValueError("deterministic client order id exceeds Binance's 36 character limit")
         return value
+
+    @staticmethod
+    def _recovery_sell_client_order_id(grid_id: int, level_idx: int, canceled_order_id: int) -> str:
+        key = f"{grid_id}:{level_idx}:{canceled_order_id}".encode("ascii")
+        return "gR" + hashlib.sha256(key).hexdigest()[:30]
 
     def _send_limit(
         self,
@@ -116,12 +132,38 @@ class GridEngine:
         range_high: Decimal | str | float,
         n_levels: int,
         capital: Decimal | str | float | None = None,
+        strategy: str = "simple",
+        params: dict | None = None,
+        stop_loss_pct: Decimal | str | float | None = None,
     ) -> dict:
         symbol = str(symbol).replace("/", "").upper()
         if not self._active_coin(symbol):
             raise GridConfigError(f"{symbol} must be an active registered coin")
+        strategy = str(strategy).lower()
+        if strategy not in {"simple", "smart"}:
+            raise GridConfigError("strategy must be simple or smart")
+        effective_params = None
+        if strategy == "smart":
+            try:
+                effective_params = validate_params(params, n_levels)
+            except ValueError as exc:
+                raise GridConfigError(str(exc)) from exc
+            effective_stop = stop_loss_pct if stop_loss_pct is not None else effective_params["stop_loss_pct"]
+            if float(effective_stop) <= 0:
+                raise GridConfigError("stop_loss_pct must be greater than zero")
+            effective_params["stop_loss_pct"] = float(effective_stop)
+        else:
+            if params is not None:
+                raise GridConfigError("params are supported only for smart grids")
+            effective_stop = stop_loss_pct
+            if effective_stop is not None and float(effective_stop) <= 0:
+                raise GridConfigError("stop_loss_pct must be greater than zero")
         if self.db.count_open_grids() >= int(_get(self.settings, "max_grids_simultaneos", 5)):
             raise GridConfigError("maximum simultaneous open grids reached")
+        if any(g["symbol"] == symbol and g.get("strategy", "simple") == strategy
+               for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING")
+               for g in self.db.list_grids_by_status({status})):
+            raise GridConfigError(f"an open {strategy} grid already exists for {symbol}")
         capital_total = _d(
             _get(self.settings, "usdt_por_grid", 100) if capital is None else capital
         )
@@ -150,12 +192,15 @@ class GridEngine:
                 "status": "OPENING",
                 "environment": self.environment,
                 "open_price": (snapshot["bid_price"] + snapshot["ask_price"]) / 2,
+                "strategy": strategy,
+                "params": effective_params,
             },
             [
                 {
                     "level_idx": plan.level_idx,
                     "price": plan.buy_price,
                     "sell_price": plan.sell_price,
+                    "stop_loss_pct": None if effective_stop is None else float(effective_stop),
                     "capital": plan.capital,
                     "state": plan.initial_state,
                     "held_qty": 0,
@@ -272,6 +317,13 @@ class GridEngine:
         )
         gross_qty = _d(order["executed_qty"])
         held_qty = filters.round_qty_down(gross_qty - base_fee)
+        fills = [trade for trade in trades if _d(trade.get("qty", 0)) > 0]
+        gross_quote = sum((_d(trade.get("quoteQty", _d(trade.get("qty", 0)) * _d(trade.get("price", 0)))) for trade in fills), Decimal(0))
+        entry_price = gross_quote / gross_qty if gross_qty > 0 else _d(order.get("price", level["price"]))
+        bought_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        sell_price = self._level_sell_price(grid, level, filters)
+        if level.get("sell_price") is None:
+            self.db.set_level_fields(grid_id, idx, sell_price=float(sell_price))
         fee_usdt = self._fee_value_usdt(trades, symbol)
         self._emit(
             "BUY_FILLED", grid_id, idx, client_order_id=level.get("client_order_id"),
@@ -285,7 +337,7 @@ class GridEngine:
             logger.error("grid=%s level=%s action=SELL_BLOCKED reason=held_qty_below_min", grid_id, idx)
             return True, True
         try:
-            filters.validate_order("SELL", _d(level["sell_price"]), held_qty, avg_price)
+            filters.validate_order("SELL", sell_price, held_qty, avg_price)
         except FilterViolation as exc:
             self.db.update_level(
                 grid_id, idx, state="ERROR", held_qty=float(held_qty),
@@ -294,12 +346,12 @@ class GridEngine:
             logger.error("grid=%s level=%s action=SELL_BLOCKED reason=%s", grid_id, idx, exc)
             return True, True
         self.db.update_level(
-            grid_id, idx, held_qty=float(held_qty),
+            grid_id, idx, held_qty=float(held_qty), entry_price=float(entry_price), bought_at=bought_at,
             fee_paid=float(_d(level["fee_paid"]) + fee_usdt),
         )
         try:
             self._place_level_intent(
-                grid_id, level, "SELL", held_qty, _d(level["sell_price"]), filters, avg_price,
+                grid_id, {**level, "sell_price": sell_price}, "SELL", held_qty, sell_price, filters, avg_price,
             )
             return True, False
         except (FilterViolation, TestnetOrderError) as exc:
@@ -313,6 +365,7 @@ class GridEngine:
     def _handle_sell_fill(
         self, grid: dict, level: dict, sell_order: dict, bid: Decimal,
         filters: SymbolFilters, avg_price: Decimal, rearm: bool = True,
+        post_sell_state: str = "DONE",
     ) -> tuple[bool, bool]:
         grid_id, idx, symbol = int(grid["id"]), int(level["level_idx"]), grid["symbol"]
         cycle = int(level["cycles_completed"])
@@ -341,6 +394,7 @@ class GridEngine:
         self.db.update_level(
             grid_id, idx, cycles_completed=new_cycle,
             pnl=float(_d(level["pnl"]) + cycle_pnl), held_qty=0.0,
+            entry_price=None, bought_at=None,
             fee_paid=float(_d(level["fee_paid"]) + sell_fee), order_id=None,
             client_order_id=None,
         )
@@ -353,7 +407,7 @@ class GridEngine:
         )
         updated = next(row for row in self.db.get_grid_levels(grid_id) if row["level_idx"] == idx)
         if not rearm:
-            self.db.update_level(grid_id, idx, state="DONE")
+            self.db.update_level(grid_id, idx, state=post_sell_state)
             return True, False
         if _d(level["price"]) < bid:
             updated["cycles_completed"] = new_cycle
@@ -378,11 +432,88 @@ class GridEngine:
         self.db.update_level(grid_id, idx, state="IDLE")
         return True, False
 
+    def _recover_legacy_entry(self, grid: dict, level: dict) -> None:
+        """Recover cost basis for pre-15B inventory; preserve unknown fill time as unknown."""
+        if _d(level.get("held_qty")) <= 0 or (level.get("entry_price") is not None and level.get("bought_at") is not None):
+            return
+        idx, cycle = int(level["level_idx"]), int(level.get("cycles_completed", 0))
+        buy_cid = self._buy_client_order_id(grid["id"], idx, cycle, level.get("client_order_id"))
+        entry = level.get("entry_price")
+        bought_at = level.get("bought_at")
+        try:
+            order = self.exchange.get_order(grid["symbol"], client_order_id=buy_cid)
+            qty, quote = _d(order.get("executed_qty")), _d(order.get("cummulative_quote_qty"))
+            if entry is None and qty > 0 and quote > 0:
+                entry = float(quote / qty)
+            stamp = order.get("time")
+            if bought_at is None and stamp is not None:
+                if isinstance(stamp, datetime):
+                    bought_at = stamp.astimezone(timezone.utc).replace(tzinfo=None) if stamp.tzinfo else stamp
+                else:
+                    bought_at = datetime.fromtimestamp(float(stamp) / 1000.0, timezone.utc).replace(tzinfo=None)
+        except Exception as exc:
+            logger.warning("grid=%s level=%s legacy buy lookup failed; using estimated entry and unknown age (%s)",
+                           grid["id"], idx, type(exc).__name__)
+        if entry is None:
+            entry = float(level["price"])
+            logger.warning("grid=%s level=%s legacy inventory entry estimated from grid price", grid["id"], idx)
+        if bought_at is None:
+            updated_at = level.get("updated_at")
+            if isinstance(updated_at, datetime):
+                bought_at = updated_at
+                logger.warning("grid=%s level=%s legacy inventory fill time estimated from updated_at", grid["id"], idx)
+            else:
+                logger.warning("grid=%s level=%s legacy inventory fill time unavailable; age remains unknown", grid["id"], idx)
+        updates = {"entry_price": entry}
+        if bought_at is not None:
+            updates["bought_at"] = bought_at
+        self.db.set_level_fields(int(grid["id"]), idx, **updates)
+
     def sync_grid(self, grid_id: int) -> dict[str, Any]:
         return self._sync_grid(grid_id, rearm=True, allowed_statuses={"ACTIVE"})
 
     def sync_closing(self, grid_id: int) -> dict[str, Any]:
         return self._sync_grid(grid_id, rearm=False, allowed_statuses={"CLOSING"})
+
+    def sync_paused(self, grid_id: int) -> dict[str, Any]:
+        grid = self.db.get_grid(grid_id)
+        if grid is None or grid["status"] != "PAUSED":
+            return {"buys_filled": 0, "sells_filled": 0, "cycles_completed": 0,
+                    "orders_placed": 0, "errors": 0, "states": {}}
+        errors = 0
+        for level in self.db.get_grid_levels(grid_id):
+            if level["state"] != "BUY_OPEN":
+                continue
+            order_id = level.get("order_id")
+            try:
+                if order_id is None and level.get("client_order_id"):
+                    found = self.exchange.find_order_by_client_id(grid["symbol"], level["client_order_id"])
+                    if found:
+                        order_id = int(found["order_id"])
+                        self.db.update_level(grid_id, level["level_idx"], order_id=order_id)
+                if order_id is None:
+                    self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None, client_order_id=None)
+                    continue
+                result = self.exchange.cancel_order(grid["symbol"], int(order_id))
+                status = str(result.get("status", "")).upper()
+                if status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None, client_order_id=None)
+                elif status == "FILLED":
+                    # The shared synchronization below settles this real fill and places its protective sell.
+                    continue
+                else:
+                    errors += 1
+                    self._emit("PAUSE_BUY_CANCEL_RETRY", grid_id, int(level["level_idx"]),
+                               client_order_id=level.get("client_order_id"), order_id=int(order_id),
+                               reason=status or "unknown cancel status")
+            except Exception as exc:
+                errors += 1
+                logger.warning("grid=%s level=%s pause buy cancel will retry", grid_id, level["level_idx"], exc_info=True)
+                self._emit("PAUSE_BUY_CANCEL_RETRY", grid_id, int(level["level_idx"]),
+                           reason=str(exc), client_order_id=level.get("client_order_id"), order_id=order_id)
+        summary = self._sync_grid(grid_id, rearm=False, allowed_statuses={"PAUSED"}, post_sell_state="IDLE")
+        summary["errors"] += errors
+        return summary
 
     def sync_repository(self, grid_id: int) -> dict[str, Any]:
         summary = self._sync_grid(
@@ -400,9 +531,86 @@ class GridEngine:
             summary["states"][row["state"]] = summary["states"].get(row["state"], 0) + 1
         return summary
 
+    def _policy_event(self, event_type: str, grid_id: int, *, reason: str | None, details: dict,
+                      level_idx: int | None = None, order_id: int | None = None) -> None:
+        event = {"event_type": event_type, "grid_id": grid_id, "level_idx": level_idx,
+                 "order_id": order_id, "reason": reason, "price": self._event_price, "details": details}
+        if self.event_sink is not None:
+            self._emit(event_type, grid_id, level_idx, order_id=order_id, reason=reason, details=details)
+        else:
+            self._close_event(event_type, grid_id, details, reason=reason, price=self._event_price,
+                              level_idx=level_idx, order_id=order_id)
+
+    def pause_grid(self, grid_id: int, reason: str, details: dict) -> dict:
+        if not self.db.transition_grid_status(grid_id, {"ACTIVE"}, "PAUSED"):
+            return {"ok": False, "grid_id": int(grid_id), "status": (self.db.get_grid(grid_id) or {}).get("status")}
+        payload = dict(details or {})
+        reasons = payload.get("reasons")
+        if reasons is None:
+            reasons = [str(reason)]
+        payload["reasons"] = list(reasons)
+        self._policy_event("GRID_PAUSED", grid_id, reason=reason, details=payload)
+        summary = self.sync_paused(grid_id)
+        return {"ok": True, "grid_id": int(grid_id), "status": "PAUSED", "sync": summary}
+
+    def resume_grid(self, grid_id: int, reason: str, details: dict) -> dict:
+        if not self.db.transition_grid_status(grid_id, {"PAUSED"}, "ACTIVE"):
+            return {"ok": False, "grid_id": int(grid_id), "status": (self.db.get_grid(grid_id) or {}).get("status")}
+        self._policy_event("GRID_RESUMED", grid_id, reason=reason, details=details or {})
+        return {"ok": True, "grid_id": int(grid_id), "status": "ACTIVE"}
+
+    def stoploss_cell(self, grid_id: int, level_idx: int, reason: str, details: dict) -> dict:
+        grid = self.db.get_grid(grid_id)
+        level = next((row for row in self.db.get_grid_levels(grid_id)
+                      if int(row["level_idx"]) == int(level_idx)), None) if grid else None
+        if grid is None or grid["status"] not in {"ACTIVE", "PAUSED", "HOLDING"} or level is None \
+                or level["state"] != "SELL_OPEN" or _d(level.get("held_qty")) <= 0:
+            return {"ok": False, "reason": "cell_not_eligible"}
+        try:
+            filters, _snapshot, avg_price = self._market_context(grid["symbol"])
+            self._event_price = float((_snapshot["bid_price"] + _snapshot["ask_price"]) / 2)
+            order_id = level.get("order_id")
+            if order_id is None and level.get("client_order_id"):
+                found = self.exchange.find_order_by_client_id(grid["symbol"], level["client_order_id"])
+                order_id = found["order_id"] if found else None
+            if order_id is not None:
+                try:
+                    canceled = self.exchange.cancel_order(grid["symbol"], int(order_id))
+                except Exception:
+                    canceled = self.exchange.get_order(grid["symbol"], order_id=int(order_id))
+                status = str(canceled.get("status", "")).upper()
+                if status == "FILLED":
+                    if grid["status"] == "ACTIVE":
+                        settled = self.sync_grid(grid_id)
+                    elif grid["status"] == "PAUSED":
+                        settled = self.sync_paused(grid_id)
+                    else:
+                        settled = self.sync_repository(grid_id)
+                    return {"ok": True, "status": "SELL_FILLED", "settled": settled}
+                if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    return {"ok": False, "status": status or "CANCEL_PENDING"}
+            result = self._market_sell_owned_cell(grid, level, filters, avg_price, emit_event=False)
+            if result.get("status") == "DUST":
+                return {"ok": True, **result}
+            updated = next(row for row in self.db.get_grid_levels(grid_id) if int(row["level_idx"]) == int(level_idx))
+            payload = dict(details or {})
+            payload.update({
+                "entry_price": level.get("entry_price"), "stop_loss_pct": level.get("stop_loss_pct"),
+                "market_price": self._event_price, "execution_price": result.get("price"),
+                "held_qty": level.get("held_qty"), "pnl_realized": updated.get("pnl"),
+                "realized_pnl": result.get("realized_pnl"),
+                "cycles_completed": updated.get("cycles_completed"),
+            })
+            self._policy_event("CELL_STOPLOSS", grid_id, reason=reason, details=payload,
+                               level_idx=int(level_idx), order_id=result.get("order_id"))
+            return {"ok": True, **result}
+        except Exception as exc:
+            logger.warning("grid=%s level=%s stop-loss will retry", grid_id, level_idx, exc_info=True)
+            return {"ok": False, "reason": str(exc)}
+
     def _sync_grid(
         self, grid_id: int, *, rearm: bool, allowed_statuses: set[str],
-        repository_only: bool = False,
+        repository_only: bool = False, post_sell_state: str = "DONE",
     ) -> dict[str, Any]:
         grid = self.db.get_grid(grid_id)
         if grid is None:
@@ -416,6 +624,14 @@ class GridEngine:
         filters, snapshot, avg_price = self._market_context(symbol)
         self._event_price = float((snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2))
         bid = snapshot["bid_price"]
+
+        for existing_level in self.db.get_grid_levels(grid_id):
+            if existing_level.get("sell_price") is None:
+                derived_sell = self._level_sell_price(grid, existing_level, filters)
+                self.db.set_level_fields(grid_id, int(existing_level["level_idx"]), sell_price=float(derived_sell))
+                existing_level["sell_price"] = float(derived_sell)
+            if existing_level["state"] == "SELL_OPEN" and _d(existing_level.get("held_qty")) > 0:
+                self._recover_legacy_entry(grid, existing_level)
 
         # Recover write-ahead intents before taking the single open-order snapshot.
         for level in self.db.get_grid_levels(grid_id):
@@ -444,7 +660,7 @@ class GridEngine:
                 )
                 order = self._send_limit(
                     symbol, side, qty,
-                    _d(level["price"] if side == "BUY" else level["sell_price"]),
+                    _d(level["price"] if side == "BUY" else self._level_sell_price(grid, level, filters)),
                     cid, filters, avg_price,
                 )
                 self.db.update_level(grid_id, level["level_idx"], order_id=order["order_id"])
@@ -452,11 +668,18 @@ class GridEngine:
                 self._emit("INTENT_RECOVERED", grid_id, level["level_idx"], client_order_id=cid,
                            order_id=order["order_id"], details={"found_existing": False})
             except (FilterViolation, TestnetOrderError) as exc:
-                self.db.update_level(grid_id, level["level_idx"], state="ERROR")
-                self._emit("LEVEL_ERROR", grid_id, level["level_idx"], client_order_id=cid,
-                           order_id=level.get("order_id"), reason=str(exc))
                 summary["errors"] += 1
-                logger.error("grid=%s level=%s action=INTENT_RECOVERY_FAILED reason=%s", grid_id, level["level_idx"], exc)
+                if level["state"] == "SELL_OPEN" and _d(level.get("held_qty")) > 0:
+                    self._emit("SELL_REPROTECT_RETRY", grid_id, int(level["level_idx"]),
+                               client_order_id=cid, reason=str(exc))
+                    logger.warning("grid=%s level=%s action=SELL_REPROTECT_RETRY reason=%s",
+                                   grid_id, level["level_idx"], exc)
+                else:
+                    self.db.update_level(grid_id, level["level_idx"], state="ERROR")
+                    self._emit("LEVEL_ERROR", grid_id, level["level_idx"], client_order_id=cid,
+                               order_id=level.get("order_id"), reason=str(exc))
+                    logger.error("grid=%s level=%s action=INTENT_RECOVERY_FAILED reason=%s",
+                                 grid_id, level["level_idx"], exc)
             except (RuntimeError, BinanceRequestException, RequestException) as exc:
                 logger.warning("grid=%s level=%s action=INTENT_RECOVERY_RETRY reason=%s", grid_id, level["level_idx"], exc)
 
@@ -477,11 +700,17 @@ class GridEngine:
                 logger.warning("grid=%s level=%s action=ORDER_LOOKUP_RETRY reason=%s", grid_id, level["level_idx"], exc)
                 continue
             except Exception as exc:
-                self.db.update_level(grid_id, level["level_idx"], state="ERROR")
-                self._emit("LEVEL_ERROR", grid_id, level["level_idx"], client_order_id=level.get("client_order_id"),
-                           order_id=order_id, reason=str(exc))
                 summary["errors"] += 1
-                logger.error("grid=%s level=%s action=ORDER_LOOKUP_FAILED reason=%s", grid_id, level["level_idx"], exc)
+                if level["state"] == "SELL_OPEN" and _d(level.get("held_qty")) > 0:
+                    logger.warning("grid=%s level=%s action=SELL_STATUS_RETRY reason=%s",
+                                   grid_id, level["level_idx"], type(exc).__name__)
+                else:
+                    self.db.update_level(grid_id, level["level_idx"], state="ERROR")
+                    self._emit("LEVEL_ERROR", grid_id, level["level_idx"],
+                               client_order_id=level.get("client_order_id"),
+                               order_id=order_id, reason=str(exc))
+                    logger.error("grid=%s level=%s action=ORDER_LOOKUP_FAILED reason=%s",
+                                 grid_id, level["level_idx"], exc)
                 continue
             status = str(order["status"]).upper()
             if status == "PARTIALLY_FILLED" or status == "NEW":
@@ -492,6 +721,41 @@ class GridEngine:
                     client_order_id=level.get("client_order_id"), order_id=order_id,
                     reason=status,
                 )
+                if level["state"] == "SELL_OPEN" and _d(level.get("held_qty")) > 0:
+                    # Keep owned inventory protected when its sell was canceled
+                    # during an interrupted stop-loss. The canceled client ID
+                    # must not be reused by write-ahead recovery.
+                    idx = int(level["level_idx"])
+                    recovery_cid = self._recovery_sell_client_order_id(grid_id, idx, order_id)
+                    self.db.update_level(
+                        grid_id, idx, state="SELL_OPEN", order_id=None,
+                        client_order_id=recovery_cid,
+                    )
+                    try:
+                        qty = filters.round_qty_down(_d(level["held_qty"]))
+                        sell_price = self._level_sell_price(grid, level, filters)
+                        order = self._send_limit(
+                            symbol, "SELL", qty, sell_price, recovery_cid, filters, avg_price,
+                        )
+                        self.db.update_level(grid_id, idx, order_id=order["order_id"])
+                        summary["orders_placed"] += 1
+                        self._emit(
+                            "SELL_REPROTECTED", grid_id, idx, client_order_id=recovery_cid,
+                            order_id=order["order_id"], details={"qty": str(qty), "price": str(sell_price)},
+                        )
+                    except Exception as exc:
+                        # Leave the write-ahead SELL_OPEN intent and inventory
+                        # intact so the next pass retries with this new ID.
+                        summary["errors"] += 1
+                        self._emit(
+                            "SELL_REPROTECT_RETRY", grid_id, idx,
+                            client_order_id=recovery_cid, reason=str(exc),
+                        )
+                        logger.warning(
+                            "grid=%s level=%s canceled inventory sell will retry", grid_id, idx,
+                            exc_info=True,
+                        )
+                    continue
                 if not rearm and status == "CANCELED":
                     self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None, client_order_id=None)
                 else:
@@ -505,7 +769,10 @@ class GridEngine:
                 changed, error = self._handle_buy_fill(grid, level, order, filters, avg_price)
                 summary["buys_filled"] += int(changed)
             else:
-                changed, error = self._handle_sell_fill(grid, level, order, bid, filters, avg_price, rearm=rearm)
+                changed, error = self._handle_sell_fill(
+                    grid, level, order, bid, filters, avg_price,
+                    rearm=rearm, post_sell_state=post_sell_state,
+                )
                 summary["sells_filled"] += int(changed)
                 summary["cycles_completed"] += int(changed and not error)
             summary["errors"] += int(error)
@@ -639,6 +906,10 @@ class GridEngine:
         level_idx: int | None = None, client_order_id: str | None = None,
         order_id: int | None = None,
     ) -> None:
+        if self.event_sink is not None:
+            self._emit(event_type, grid_id, level_idx, client_order_id=client_order_id,
+                       order_id=order_id, reason=reason, details=details)
+            return
         self.db.add_grid_event(
             run_id=None, source="CLI", grid_id=grid_id, level_idx=level_idx,
             client_order_id=client_order_id, order_id=order_id,
@@ -648,6 +919,7 @@ class GridEngine:
 
     def _market_sell_owned_cell(
         self, grid: dict, level: dict, filters: SymbolFilters, avg_price: Decimal,
+        *, emit_event: bool = True,
     ) -> dict:
         grid_id, idx, symbol = int(grid["id"]), int(level["level_idx"]), grid["symbol"]
         held_qty = _d(level.get("held_qty"))
@@ -696,16 +968,20 @@ class GridEngine:
             grid_id, idx, state="DONE", cycles_completed=cycle,
             pnl=float(_d(level.get("pnl")) + cycle_pnl), fee_paid=float(_d(level.get("fee_paid")) + sell_fee),
             held_qty=0.0, order_id=market_order["order_id"], client_order_id=cid,
+            entry_price=None, bought_at=None,
         )
         result = {
             "level_idx": idx, "client_order_id": cid, "order_id": int(market_order["order_id"]),
             "qty": str(_d(market_order["executed_qty"])), "cycle_pnl": str(cycle_pnl),
             "pnl_realized": str(cycle_pnl), "cycles_completed": cycle, "status": "FILLED",
+            "price": str(_d(market_order["cummulative_quote_qty"]) / _d(market_order["executed_qty"])),
+            "realized_pnl": str(cycle_pnl),
         }
-        self._close_event(
-            "CELL_LIQUIDATED", grid_id, result, level_idx=idx,
-            client_order_id=cid, order_id=int(market_order["order_id"]),
-        )
+        if emit_event:
+            self._close_event(
+                "CELL_LIQUIDATED", grid_id, result, level_idx=idx,
+                client_order_id=cid, order_id=int(market_order["order_id"]),
+            )
         return result
 
     def _close_repository(self, grid_id: int) -> dict:
@@ -791,9 +1067,10 @@ class GridEngine:
                     range_high=max(float(row["sell_price"]) for row in movable),
                     n_levels=0, capital_total=0.0, status="HOLDING", created_at=db_now,
                     environment=grid["environment"], open_price=grid.get("open_price"),
+                    strategy="repository", params=None,
                 )).inserted_primary_key[0])
                 conn.execute(self.db.grid_events.insert().values(
-                    run_id=None, source="CLI", ts=db_now, grid_id=repository_id,
+                    run_id=None, source="MONITOR" if self.event_sink is not None else "CLI", ts=db_now, grid_id=repository_id,
                     event_type="REPOSITORY_CREATED", details=self.db._json({"symbol": symbol, "origin_grid_id": grid_id}),
                 ))
             if repository_id is not None:
@@ -816,7 +1093,7 @@ class GridEngine:
                         "market_mid": None if market_mid is None else str(market_mid),
                     }
                     conn.execute(self.db.grid_events.insert().values(
-                        run_id=None, source="CLI", ts=db_now, grid_id=repository_id,
+                        run_id=None, source="MONITOR" if self.event_sink is not None else "CLI", ts=db_now, grid_id=repository_id,
                         level_idx=new_idx, client_order_id=level.get("client_order_id"),
                         order_id=level.get("order_id"), event_type="CELL_MOVED_TO_REPOSITORY",
                         price=None if market_mid is None else float(market_mid), details=self.db._json(detail),
