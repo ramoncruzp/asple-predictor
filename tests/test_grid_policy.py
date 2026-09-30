@@ -42,6 +42,8 @@ def test_defaults_and_parameter_validation_rules():
         "adjust_enabled": True, "adjust_trigger_z": 0.75,
         "adjust_cooldown_h": 6, "adjust_trapped_cap_pct": 30.0,
         "adjust_n": None,
+        "compound_enabled": False, "compound_ratio": 1.0,
+        "compound_max_growth_pct": 100.0,
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
     assert validate_params({"pause_enter_prob": None}, 4)["pause_enter_prob"] is None

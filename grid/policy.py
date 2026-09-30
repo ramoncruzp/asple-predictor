@@ -26,6 +26,9 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "adjust_cooldown_h": 6,
     "adjust_trapped_cap_pct": 30.0,
     "adjust_n": None,
+    "compound_enabled": False,
+    "compound_ratio": 1.0,
+    "compound_max_growth_pct": 100.0,
 }
 
 
@@ -106,6 +109,17 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
         if result["min_free_cells"] >= int(adjust_n):
             raise ValueError("min_free_cells must be less than adjust_n")
         result["adjust_n"] = int(adjust_n)
+    compound_enabled = result["compound_enabled"]
+    if not isinstance(compound_enabled, bool):
+        raise ValueError("compound_enabled must be boolean")
+    result["compound_ratio"] = _number(result["compound_ratio"], "compound_ratio")
+    if not 0 < result["compound_ratio"] <= 1:
+        raise ValueError("compound_ratio must be in (0, 1]")
+    result["compound_max_growth_pct"] = _number(
+        result["compound_max_growth_pct"], "compound_max_growth_pct",
+    )
+    if result["compound_max_growth_pct"] <= 0:
+        raise ValueError("compound_max_growth_pct must be greater than zero")
     return result
 
 

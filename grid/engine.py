@@ -8,7 +8,7 @@ import logging
 import re
 import threading
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from binance.exceptions import BinanceRequestException
@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from data.exchange_filters import FilterViolation, SymbolFilters
 from data.testnet_client import TestnetOrderError
+from grid.compound import compound_amount
 from grid.policy import DEFAULT_SMART_PARAMS, validate_params
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.adjust import plan_adjust
@@ -55,14 +56,14 @@ class GridEngine:
     def _emit(
         self, event_type: str, grid_id: int, level_idx: int | None = None, *,
         client_order_id: str | None = None, order_id: int | None = None,
-        reason: str | None = None, details: dict | None = None,
+        reason: str | None = None, details: dict | None = None, persisted: bool = False,
     ) -> None:
         if self.event_sink is None:
             return
         event = {
             "event_type": str(event_type), "grid_id": grid_id, "level_idx": level_idx,
             "client_order_id": client_order_id, "order_id": order_id, "reason": reason,
-            "price": self._event_price, "details": details or {},
+            "price": self._event_price, "details": details or {}, "persisted": persisted,
         }
         try:
             self.event_sink(event)
@@ -217,6 +218,8 @@ class GridEngine:
                     "sell_price": plan.sell_price,
                     "stop_loss_pct": None if effective_stop is None else float(effective_stop),
                     "capital": plan.capital,
+                    "capital_base": plan.capital,
+                    "capital_compound": Decimal(0),
                     "state": plan.initial_state,
                     "held_qty": 0,
                     "cycles_completed": 0,
@@ -380,6 +383,24 @@ class GridEngine:
             logger.warning("grid=%s level=%s action=SELL_RETRY reason=%s", grid_id, idx, exc)
             return True, False
 
+    def _emit_compound_skipped(
+        self, grid_id: int, level_idx: int, level: dict, sell_order: dict,
+        reason: str, details: dict[str, Any],
+    ) -> None:
+        if self.event_sink is not None:
+            self._emit(
+                "COMPOUND_SKIPPED", grid_id, level_idx,
+                client_order_id=level.get("client_order_id"),
+                order_id=sell_order.get("order_id"), reason=reason, details=details,
+            )
+            return
+        self.db.add_grid_event(
+            run_id=None, source="CLI", grid_id=grid_id, level_idx=level_idx,
+            client_order_id=level.get("client_order_id"), order_id=sell_order.get("order_id"),
+            event_type="COMPOUND_SKIPPED", reason=reason,
+            price=self._event_price, details=details,
+        )
+
     def _handle_sell_fill(
         self, grid: dict, level: dict, sell_order: dict, bid: Decimal,
         filters: SymbolFilters, avg_price: Decimal, rearm: bool = True,
@@ -407,14 +428,103 @@ class GridEngine:
             )
             logger.warning("grid=%s level=%s action=PNL_ESTIMATE reason=%s", grid_id, idx, exc)
         new_cycle = cycle + 1
-        self.db.update_level(
-            grid_id, idx, cycles_completed=new_cycle,
-            pnl=float(_d(level["pnl"]) + cycle_pnl), held_qty=0.0,
-            entry_price=None, bought_at=None,
-            fee_paid=float(_d(level["fee_paid"]) + sell_fee), order_id=None,
-            buy_client_order_id=None,
-            client_order_id=None,
+        params = grid.get("params") or {}
+        grid_status = str(grid.get("status", "")).upper()
+        compound_allowed = (
+            str(grid.get("strategy", "simple")).lower() == "smart"
+            and params.get("compound_enabled", False) is True
+            and grid_status in {"ACTIVE", "PAUSED"}
+            and post_sell_state != "DONE"
+            and (rearm or grid_status == "PAUSED")
         )
+        capital_before = _d(level.get("capital", 0))
+        compound_before = _d(level.get("capital_compound", 0))
+        base_value = level.get("capital_base")
+        capital_base = (
+            capital_before - compound_before if base_value is None else _d(base_value)
+        )
+        decision = None
+        compound_amount_value = Decimal(0)
+        skip_reason: str | None = None
+        skip_details: dict[str, Any] = {}
+        if compound_allowed:
+            decision = compound_amount(
+                cycle_pnl, capital_base, compound_before, params, grid["capital_total"],
+            )
+            skip_reason = decision.reason if decision.amount <= 0 else None
+            skip_details = dict(decision.details)
+            compound_amount_value = decision.amount
+            if compound_amount_value > 0:
+                try:
+                    balance = self.exchange.get_balance("USDT")
+                    free_usdt = _d(balance["USDT"]["free"])
+                except Exception as exc:
+                    compound_amount_value = Decimal(0)
+                    skip_reason = "balance_unavailable"
+                    skip_details.update({"balance_error_type": type(exc).__name__})
+                else:
+                    required = capital_before + compound_amount_value
+                    skip_details["free_usdt"] = free_usdt
+                    skip_details["required_usdt"] = required
+                    if free_usdt < required:
+                        compound_amount_value = Decimal(0)
+                        skip_reason = "insufficient_usdt"
+
+        cycle_state = "IDLE" if rearm or grid_status == "PAUSED" else post_sell_state
+        cycle_fields = {
+            "state": cycle_state,
+            "cycles_completed": new_cycle,
+            "pnl": float(_d(level["pnl"]) + cycle_pnl),
+            "held_qty": 0.0,
+            "entry_price": None,
+            "bought_at": None,
+            "fee_paid": float(_d(level["fee_paid"]) + sell_fee),
+            "order_id": None,
+            "buy_client_order_id": None,
+            "client_order_id": None,
+        }
+        compound_event_details: dict[str, Any] | None = None
+        if compound_amount_value > 0 and decision is not None:
+            capital_after = capital_before + compound_amount_value
+            compound_after = compound_before + compound_amount_value
+            ratio = _d(params.get("compound_ratio", 1.0))
+            compound_event_details = {
+                "cycle_pnl": str(cycle_pnl), "ratio": str(ratio),
+                "amount": str(compound_amount_value),
+                "capital_before": str(capital_before), "capital_after": str(capital_after),
+                "capital_base": str(capital_base),
+                "capital_compound_before": str(compound_before),
+                "capital_compound_after": str(compound_after),
+                "room": str(decision.details["room"]),
+            }
+            source = "MONITOR" if self.event_sink is not None else "CLI"
+            sink_owner = getattr(self.event_sink, "__self__", None)
+            event = {
+                "source": source,
+                "run_id": getattr(sink_owner, "_run_id", None),
+                "event_type": "COMPOUND_APPLIED", "reason": "cycle_profit",
+                "client_order_id": level.get("client_order_id"),
+                "order_id": sell_order.get("order_id"),
+                "price": self._event_price, "details": compound_event_details,
+            }
+            self.db.update_level_with_event(
+                grid_id, idx, event=event,
+                **cycle_fields,
+                capital=float(capital_after), capital_base=float(capital_base),
+                capital_compound=float(compound_after),
+            )
+            self._emit(
+                "COMPOUND_APPLIED", grid_id, idx,
+                client_order_id=level.get("client_order_id"),
+                order_id=sell_order.get("order_id"), reason="cycle_profit",
+                details=compound_event_details, persisted=True,
+            )
+        else:
+            self.db.update_level(grid_id, idx, **cycle_fields)
+            if compound_allowed and skip_reason is not None:
+                self._emit_compound_skipped(
+                    grid_id, idx, level, sell_order, skip_reason, skip_details,
+                )
         self._emit(
             "SELL_FILLED", grid_id, idx, client_order_id=level.get("client_order_id"),
             order_id=sell_order["order_id"], details={
@@ -430,7 +540,7 @@ class GridEngine:
             updated["cycles_completed"] = new_cycle
             updated["symbol"] = symbol
             try:
-                qty = filters.round_qty_down(_d(level["capital"]) / _d(level["price"]))
+                qty = filters.round_qty_down(_d(updated["capital"]) / _d(level["price"]))
                 self._place_level_intent(
                     grid_id, updated, "BUY", qty, _d(level["price"]), filters, avg_price,
                 )
@@ -487,7 +597,9 @@ class GridEngine:
         self.db.set_level_fields(int(grid["id"]), idx, **updates)
 
     def sync_grid(self, grid_id: int) -> dict[str, Any]:
-        return self._sync_grid(grid_id, rearm=True, allowed_statuses={"ACTIVE"})
+        return self._sync_grid(
+            grid_id, rearm=True, allowed_statuses={"ACTIVE"}, post_sell_state="IDLE",
+        )
 
     def sync_closing(self, grid_id: int) -> dict[str, Any]:
         return self._sync_grid(grid_id, rearm=False, allowed_statuses={"CLOSING"})
@@ -598,9 +710,11 @@ class GridEngine:
         for idx in plan.append_level_idxs:
             self.db.add_grid_level(grid_id, {
                 "level_idx": idx, "price": float(plan.lines[0]), "capital": 0,
+                "capital_base": 0, "capital_compound": 0,
                 "sell_price": float(plan.lines[1]), "state": "IDLE",
             })
         mapping = list(plan.mapping)
+        capital_updates: dict[int, dict[str, Any]] = {}
         if mapping:
             assigned = sum((Decimal(item["capital"]) for item in mapping[:-1]), Decimal(0))
             mapping[-1]["capital"] = str(plan.free_capital - assigned)
@@ -651,7 +765,7 @@ class GridEngine:
                 return "gA" + digest
 
             cid = old_cid if is_adjust_intent else adjusted_buy_cid(previous_cid)
-            self.db.update_level(grid_id, idx, price=float(target), capital=float(Decimal(item["capital"])),
+            self.db.update_level(grid_id, idx, price=float(target),
                 sell_price=float(Decimal(item["sell_price"])), state="BUY_OPEN",
                 client_order_id=cid, buy_client_order_id=cid)
             existing_old = None
@@ -675,6 +789,10 @@ class GridEngine:
                     actual_cell = next(row for row in self.db.get_grid_levels(grid_id)
                                        if int(row["level_idx"]) == idx)
                     self._handle_buy_fill(grid, actual_cell, canceled, filters, avg_price)
+                    capital_updates[idx] = {
+                        "capital": float(Decimal(item["capital"])),
+                        "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+                    }
                     self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, client_order_id=actual_cid,
                                order_id=int(old_order_id), reason="buy_filled_during_cancel")
                     continue
@@ -685,6 +803,10 @@ class GridEngine:
                 # Already placed before a crash; retain the live order and
                 # complete the DB linkage without submitting a duplicate.
                 self.db.update_level(grid_id, idx, order_id=int(old_order_id))
+                capital_updates[idx] = {
+                    "capital": float(Decimal(item["capital"])),
+                    "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+                }
                 self._emit("CELL_REPRICED", grid_id, idx, client_order_id=cid,
                            order_id=int(old_order_id), details={"recovered_existing": True,
                            "new_price": str(target)})
@@ -695,6 +817,10 @@ class GridEngine:
                 # reposition must not recreate an ID already used by Binance.
                 self.db.update_level(grid_id, idx, state="IDLE", client_order_id=None,
                                      buy_client_order_id=cid)
+                capital_updates[idx] = {
+                    "capital": float(Decimal(item["capital"])),
+                    "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+                }
                 self._emit("CELL_REPRICED", grid_id, idx, details={
                     "old_price": cell["price"], "new_price": str(target),
                     "old_client_order_id": old_cid, "new_client_order_id": None,
@@ -726,6 +852,10 @@ class GridEngine:
                     filled_cell = next(row for row in self.db.get_grid_levels(grid_id)
                                        if int(row["level_idx"]) == idx)
                     self._handle_buy_fill(grid, filled_cell, existing, filters, avg_price)
+                    capital_updates[idx] = {
+                        "capital": float(Decimal(item["capital"])),
+                        "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+                    }
                     self._emit("ADJUST_SKIPPED_CELL", grid_id, idx, client_order_id=cid,
                                order_id=int(existing["order_id"]), reason="buy_filled_before_link")
                     break
@@ -746,6 +876,10 @@ class GridEngine:
             else:
                 order = existing
             self.db.update_level(grid_id, idx, order_id=int(order["order_id"]))
+            capital_updates[idx] = {
+                "capital": float(Decimal(item["capital"])),
+                "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+            }
             self._emit("CELL_REPRICED", grid_id, idx, client_order_id=cid, order_id=int(order["order_id"]),
                 details={"old_price": cell["price"], "new_price": str(target),
                          "old_client_order_id": old_cid, "new_client_order_id": cid})
@@ -771,16 +905,33 @@ class GridEngine:
                     continue
                 if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
                     raise RuntimeError(f"retired BUY cancellation unresolved: {status or 'unknown'}")
-            self.db.update_level(grid_id, idx, state="DONE", capital=0.0, order_id=None,
+            self.db.update_level(grid_id, idx, state="DONE", order_id=None,
                 client_order_id=None)
-        self.db.update_grid(grid_id, range_low=float(plan.lines[0]), range_high=float(plan.lines[-1]),
-                            n_levels=target_n)
+            capital_updates[idx] = {"capital": 0.0, "capital_base": 0.0, "capital_compound": 0.0}
+        assigned_capital = sum((_d(fields["capital"]) for fields in capital_updates.values()), Decimal(0))
+        if abs(assigned_capital - plan.free_capital) > Decimal("0.00000001"):
+            raise RuntimeError("adjust_capital_assignment_incomplete")
+        compound_normalized = sum((
+            _d(by_idx[idx].get("capital_compound", 0)) for idx in capital_updates
+        ), Decimal(0)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        normalized_capital_total = _d(grid["capital_total"]) + compound_normalized
         event_details = {**(details or {}), "old": old_range,
             "new": {"low": str(plan.lines[0]), "high": str(plan.lines[-1]), "n": target_n},
             "free_capital": str(plan.free_capital), "capital_per_cell": str(plan.capital_per_cell),
+            "compound_normalized": str(compound_normalized),
             "fixed_cells": list(plan.covered), "mapping": list(plan.mapping),
             "source": (details or {}).get("source", "ENGINE")}
-        self._emit("GRID_ADJUSTED", grid_id, reason=reason, details=event_details)
+        source = "MONITOR" if self.event_sink is not None else "CLI"
+        sink_owner = getattr(self.event_sink, "__self__", None)
+        self.db.update_levels_and_grid_with_event(
+            grid_id, level_updates=capital_updates,
+            grid_fields={"range_low": float(plan.lines[0]), "range_high": float(plan.lines[-1]),
+                         "n_levels": target_n, "capital_total": float(normalized_capital_total)},
+            event={"source": source, "run_id": getattr(sink_owner, "_run_id", None),
+                   "event_type": "GRID_ADJUSTED", "reason": reason,
+                   "price": self._event_price, "details": event_details},
+        )
+        self._emit("GRID_ADJUSTED", grid_id, reason=reason, details=event_details, persisted=True)
         return {"ok": True, "changed": True, "plan": plan.details, "details": event_details}
 
     def preview_adjust(self, grid_id: int, new_low: Any, new_high: Any,

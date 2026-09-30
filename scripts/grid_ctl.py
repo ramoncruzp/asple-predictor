@@ -43,6 +43,8 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
     grids.sort(key=lambda row: int(row["id"]))
     for grid in grids:
         grid["levels"] = db.get_grid_levels(int(grid["id"]))
+        grid["compound_total"] = sum(float(row.get("capital_compound") or 0.0) for row in grid["levels"])
+        grid["capital_effective"] = sum(float(row.get("capital") or 0.0) for row in grid["levels"])
         latest_adjust = db.get_last_event(int(grid["id"]), "GRID_ADJUSTED") \
             if hasattr(db, "get_last_event") else None
         grid["last_adjust_at"] = None if latest_adjust is None else latest_adjust.get("ts")

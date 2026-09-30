@@ -84,6 +84,8 @@ class DBManager:
             Column("level_idx", Integer, primary_key=True),
             Column("price", Float, nullable=False),
             Column("capital", Float, nullable=False),
+            Column("capital_base", Float, nullable=True),
+            Column("capital_compound", Float, nullable=False, default=0.0, server_default="0"),
             Column("order_id", Integer),
             Column("state", String, nullable=False),
             Column("cycles_completed", Integer, nullable=False, default=0),
@@ -158,6 +160,7 @@ class DBManager:
             "grid_levels": {
                 "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
                 "buy_client_order_id": "VARCHAR",
+                "capital_base": "FLOAT", "capital_compound": "FLOAT NOT NULL DEFAULT 0",
             },
             "grid_snapshots": {
                 "break_prob": "FLOAT", "sigma_24h": "FLOAT",
@@ -639,6 +642,11 @@ class DBManager:
                     "level_idx": int(level.get("level_idx", index)),
                     "price": float(level["price"]),
                     "capital": float(level["capital"]),
+                    "capital_base": (
+                        float(level["capital_base"]) if level.get("capital_base") is not None
+                        else float(level["capital"]) - float(level.get("capital_compound", 0.0))
+                    ),
+                    "capital_compound": float(level.get("capital_compound", 0.0)),
                     "order_id": level.get("order_id"),
                     "state": level.get("state", level.get("initial_state", "IDLE")),
                     "cycles_completed": int(level.get("cycles_completed", 0)),
@@ -677,7 +685,11 @@ class DBManager:
             self.grid_levels.c.grid_id == grid_id
         ).order_by(self.grid_levels.c.level_idx)
         with self.engine.connect() as conn:
-            return [dict(row) for row in conn.execute(statement).mappings().all()]
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        for row in rows:
+            if row.get("capital_base") is None:
+                row["capital_base"] = float(row["capital"]) - float(row.get("capital_compound") or 0.0)
+        return rows
 
     def set_level_fields(self, grid_id: int, level_idx: int, **fields: Any) -> dict | None:
         allowed = {"sell_price", "entry_price", "bought_at", "stop_loss_pct", "buy_client_order_id"}
@@ -875,6 +887,76 @@ class DBManager:
             )
         return next((row for row in self.get_grid_levels(grid_id) if row["level_idx"] == level_idx), None)
 
+    def update_level_with_event(
+        self, grid_id: int, level_idx: int, *, event: dict[str, Any], **fields: Any,
+    ) -> dict | None:
+        """Commit a level update and its causative audit event atomically."""
+        allowed = {column.name for column in self.grid_levels.columns} - {"grid_id", "level_idx"}
+        if not set(fields) <= allowed:
+            raise ValueError("invalid grid level update fields")
+        source = str(event.get("source", "CLI")).upper()
+        if source not in {"MONITOR", "CLI"}:
+            raise ValueError("source must be MONITOR or CLI")
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        event_values = {
+            "run_id": event.get("run_id"), "source": source, "ts": now,
+            "grid_id": int(grid_id), "level_idx": int(level_idx),
+            "client_order_id": event.get("client_order_id"),
+            "order_id": event.get("order_id"),
+            "event_type": str(event["event_type"]), "reason": event.get("reason"),
+            "price": None if event.get("price") is None else float(event["price"]),
+            "details": self._json(event.get("details") or {}),
+        }
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.grid_levels.update().where(
+                    self.grid_levels.c.grid_id == int(grid_id),
+                    self.grid_levels.c.level_idx == int(level_idx),
+                ).values(**fields, updated_at=now)
+            )
+            conn.execute(self.grid_events.insert().values(**event_values))
+        return next((row for row in self.get_grid_levels(grid_id)
+                     if int(row["level_idx"]) == int(level_idx)), None)
+
+    def update_levels_and_grid_with_event(
+        self, grid_id: int, *, level_updates: dict[int, dict[str, Any]],
+        grid_fields: dict[str, Any], event: dict[str, Any],
+    ) -> None:
+        """Atomically commit an ADJUST capital redistribution and its audit event."""
+        level_allowed = {column.name for column in self.grid_levels.columns} - {"grid_id", "level_idx"}
+        grid_allowed = {column.name for column in self.grids.columns} - {"id"}
+        if any(not set(values) <= level_allowed for values in level_updates.values()):
+            raise ValueError("invalid grid level update fields")
+        if not set(grid_fields) <= grid_allowed:
+            raise ValueError("invalid grid update fields")
+        source = str(event.get("source", "CLI")).upper()
+        if source not in {"MONITOR", "CLI"}:
+            raise ValueError("source must be MONITOR or CLI")
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        event_values = {
+            "run_id": event.get("run_id"), "source": source, "ts": now,
+            "grid_id": int(grid_id), "level_idx": event.get("level_idx"),
+            "client_order_id": event.get("client_order_id"),
+            "order_id": event.get("order_id"),
+            "event_type": str(event["event_type"]), "reason": event.get("reason"),
+            "price": None if event.get("price") is None else float(event["price"]),
+            "details": self._json(event.get("details") or {}),
+        }
+        with self.engine.begin() as conn:
+            for level_idx, fields in level_updates.items():
+                conn.execute(self.grid_levels.update().where(
+                    self.grid_levels.c.grid_id == int(grid_id),
+                    self.grid_levels.c.level_idx == int(level_idx),
+                ).values(**fields, updated_at=now))
+            conn.execute(self.grids.update().where(
+                self.grids.c.id == int(grid_id),
+            ).values(**grid_fields))
+            conn.execute(self.grid_events.insert().values(**event_values))
+
     def add_grid_level(self, grid_id: int, level: dict[str, Any]) -> dict:
         now = datetime.now(timezone.utc)
         if self.engine.dialect.name == "sqlite":
@@ -882,6 +964,11 @@ class DBManager:
         values = {
             "grid_id": int(grid_id), "level_idx": int(level["level_idx"]),
             "price": float(level["price"]), "capital": float(level["capital"]),
+            "capital_base": (
+                float(level["capital_base"]) if level.get("capital_base") is not None
+                else float(level["capital"]) - float(level.get("capital_compound", 0.0))
+            ),
+            "capital_compound": float(level.get("capital_compound", 0.0)),
             "order_id": level.get("order_id"), "state": level.get("state", "IDLE"),
             "cycles_completed": int(level.get("cycles_completed", 0)),
             "pnl": float(level.get("pnl", 0)), "sell_price": level.get("sell_price"),

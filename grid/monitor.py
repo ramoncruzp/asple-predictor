@@ -44,6 +44,9 @@ class GridMonitor:
         self._event_count = 0
 
     def _emit(self, event: dict) -> None:
+        if event.get("persisted"):
+            self._event_count += 1
+            return
         saved = self.db.add_grid_event(
             run_id=self._run_id, source="MONITOR", grid_id=event.get("grid_id"),
             level_idx=event.get("level_idx"), client_order_id=event.get("client_order_id"),
