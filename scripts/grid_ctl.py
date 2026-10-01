@@ -53,6 +53,14 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
         grid["last_adjust_at"] = None if latest_adjust is None else latest_adjust.get("ts")
         grid["adjust_enabled"] = bool((grid.get("params") or {}).get("adjust_enabled", False))
         grid["calibrated"] = False
+        calibration_id = grid.get("calibration_id")
+        if calibration_id is not None and hasattr(db, "get_grid_calibration"):
+            calibration = db.get_grid_calibration(int(calibration_id))
+            if calibration:
+                grid["calibrated"] = calibration.get("verdict") == "validated_walk_forward"
+                if grid["calibrated"]:
+                    grid["calibration"] = {"id": int(calibration_id), "verdict": calibration.get("verdict"),
+                                            "data_end": calibration.get("data_end")}
         snapshots = db.list_grid_snapshots(grid_id=int(grid["id"]), limit=100) if hasattr(db, "list_grid_snapshots") else []
         summaries = [row for row in snapshots
                      if row.get("level_idx") is None]
@@ -81,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     open_parser.add_argument("--shift-half-step", action="store_true")
     open_parser.add_argument("--stop-loss-pct", type=Decimal)
     open_parser.add_argument("--param", action="append", default=[])
+    open_parser.add_argument("--calibration", help="use latest or a validated calibration ID")
     open_parser.add_argument("--dry-run", action="store_true")
     open_parser.add_argument("--yes", action="store_true")
     close = subparsers.add_parser("close", help="close one grid")
@@ -163,7 +172,21 @@ def main(argv: list[str] | None = None) -> int:
                 params[key] = None if raw.casefold() == "none" else json.loads(raw)
             if args.strategy == "simple" and params:
                 raise ValueError("--param solo se admite con --strategy smart")
-            effective = validate_params(params, args.n) if args.strategy == "smart" else None
+            calibration_id = None
+            calibration_params = {}
+            if args.calibration is not None:
+                if args.strategy != "smart":
+                    raise ValueError("--calibration solo se admite con --strategy smart")
+                calibration = (context["db"].get_latest_grid_calibration() if args.calibration == "latest"
+                               else context["db"].get_grid_calibration(int(args.calibration)))
+                if calibration is None:
+                    raise ValueError(f"calibración {args.calibration} no existe")
+                if calibration.get("verdict") != "validated_walk_forward":
+                    raise ValueError(f"calibración {calibration.get('id')} rechazada: verdict defaults_kept")
+                calibration_id = int(calibration["id"])
+                calibration_params = dict(calibration.get("params") or {})
+            calibration_params.update(params)
+            effective = validate_params(calibration_params, args.n) if args.strategy == "smart" else None
             stop_loss = args.stop_loss_pct
             if stop_loss is not None and stop_loss <= 0:
                 raise ValueError("--stop-loss-pct debe ser mayor que cero")
@@ -192,19 +215,25 @@ def main(argv: list[str] | None = None) -> int:
                     "capital_per_cell": str(minimum_cell),
                     "reserve": str(reserve),
                     "distributable_capital": str(distributable),
-                    "params": effective, "calibrated": False,
+                    "params": effective, "calibrated": calibration_id is not None,
+                    "calibration_id": calibration_id,
                     "validations": {"min_notional_with_margin": True, "min_step_pct": float(step / low * 100),
                                     "planned_buy_cells": sum(plan.initial_state == "BUY_OPEN" for plan in plans)},
                 }
             else:
                 grid = engine.create_grid(symbol, low, high, args.n, args.capital,
                                           strategy=args.strategy, params=effective,
-                                          stop_loss_pct=stop_loss)
+                                          stop_loss_pct=stop_loss, calibration_id=calibration_id)
                 context["db"].add_grid_event(run_id=None, source="CLI", event_type="GRID_OPENED",
                                              grid_id=int(grid["id"]), reason="operator_open",
                                              details={"strategy": args.strategy, "params": effective,
-                                                      "calibrated": False, "range_low": str(low), "range_high": str(high)})
-                result = {"grid": grid, "calibrated": False}
+                                                      "calibrated": calibration_id is not None,
+                                                      "calibration_id": calibration_id,
+                                                      "explicit_params_prevailed": bool((params or stop_loss is not None) and calibration_id is not None),
+                                                      "range_low": str(low), "range_high": str(high)})
+                result = {"grid": grid, "calibrated": calibration_id is not None,
+                          "calibration_id": calibration_id,
+                          "explicit_params_prevailed": bool((params or stop_loss is not None) and calibration_id is not None)}
         elif args.command == "close":
             result = context["engine"].close_grid(args.grid_id, args.mode)
         else:

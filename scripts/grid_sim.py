@@ -15,6 +15,9 @@ if str(ROOT) not in sys.path:
 
 from grid.sim.data import CandleDataError, load_candles
 from grid.sim.runner import run_simulation
+from grid.sim.calibration import calibrate
+from config.settings import Settings
+from database.db_manager import DBManager
 
 
 def _param(value):
@@ -50,11 +53,48 @@ def parser():
         p.add_argument("--allow-gaps", action="store_true")
         p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
         p.add_argument("--out", type=Path)
+    p = sub.add_parser("calibrate", help="seeded walk-forward smart parameter calibration")
+    p.add_argument("--n", type=int, default=10)
+    p.add_argument("--capital", type=float, default=100)
+    p.add_argument("--width-pct", type=float, default=9)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--candidates", type=int, default=150)
+    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
+    p.add_argument("--allow-gaps", action="store_true")
+    p.add_argument("--out", type=Path)
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.command == "calibrate":
+        try:
+            candles = load_candles(args.csv, allow_gaps=args.allow_gaps)
+            digest = hashlib.sha256(args.csv.read_bytes()).hexdigest()
+            result = calibrate(candles, n=args.n, capital=args.capital, width_pct=args.width_pct,
+                               seed=args.seed, candidate_count=args.candidates, workers=args.workers,
+                               csv_hash=digest)
+            db = DBManager(Settings().database_url)
+            calibration_id = db.save_grid_calibration({
+                "symbol": "XRPUSDT", "data_start": datetime.fromtimestamp(result["data_start"], timezone.utc).isoformat(),
+                "data_end": datetime.fromtimestamp(result["data_end"], timezone.utc).isoformat(),
+                "method": result["method"], "seed": args.seed, "params": result["params"],
+                "metrics": result["metrics"], "verdict": result["verdict"],
+                "data_sha256": digest, "notes": "EWMA causal; no compounding, loans, or objective."})
+            result["calibration_id"] = calibration_id
+            outdir = ROOT / "data/cache/sim" / f"calibration_{calibration_id}"
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / "folds.json").write_text(json.dumps(result["folds"], sort_keys=True, indent=2), encoding="utf-8")
+            (outdir / "candidates.json").write_text(json.dumps(result["candidates"], sort_keys=True, indent=2), encoding="utf-8")
+            outpath = args.out or (outdir / "summary.json")
+            outpath.parent.mkdir(parents=True, exist_ok=True)
+            outpath.write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
+            print(json.dumps({k: result[k] for k in ("calibration_id", "seed", "params", "metrics", "verdict")}, sort_keys=True))
+            return 0
+        except (CandleDataError, OSError, ValueError, TypeError) as exc:
+            print(f"calibration error: {exc}", file=sys.stderr)
+            return 3
     try:
         if args.low is not None and args.high is None:
             raise ValueError("--high is required with --low")

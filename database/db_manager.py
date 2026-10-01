@@ -78,6 +78,17 @@ class DBManager:
             Column("fail_reason", String),
             Column("strategy", String, nullable=False, default="simple", server_default="simple"),
             Column("params", Text),
+            Column("calibration_id", Integer),
+        )
+        self.grid_calibrations = Table(
+            "grid_calibrations", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("symbol", String, nullable=False), Column("data_start", String, nullable=False),
+            Column("data_end", String, nullable=False), Column("method", Text, nullable=False),
+            Column("seed", Integer, nullable=False), Column("params", Text, nullable=False),
+            Column("metrics", Text, nullable=False), Column("verdict", String, nullable=False),
+            Column("data_sha256", String, nullable=False), Column("notes", Text),
         )
         self.grid_levels = Table(
             "grid_levels", self.metadata,
@@ -173,7 +184,7 @@ class DBManager:
         if self.engine.dialect.name != "sqlite":
             return
         additions = {
-            "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT",
+            "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT", "calibration_id": "INTEGER",
                       "reserve": "FLOAT NOT NULL DEFAULT 0"},
             "grid_levels": {
                 "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
@@ -649,6 +660,7 @@ class DBManager:
             "fail_reason": grid.get("fail_reason"),
             "strategy": str(grid.get("strategy", "simple")),
             "params": self._json(grid.get("params")),
+            "calibration_id": grid.get("calibration_id"),
         }
         with self.engine.begin() as conn:
             result = conn.execute(self.grids.insert().values(**grid_values))
@@ -687,6 +699,42 @@ class DBManager:
             if level_rows:
                 conn.execute(self.grid_levels.insert(), level_rows)
         return self.get_grid(grid_id)
+
+    def save_grid_calibration(self, record: dict[str, Any]) -> int:
+        values = dict(record)
+        values.setdefault("created_at", self._utc_now())
+        for key in ("params", "metrics"):
+            values[key] = self._json(values[key])
+        with self.engine.begin() as conn:
+            result = conn.execute(self.grid_calibrations.insert().values(**values))
+            return int(result.inserted_primary_key[0])
+
+    def get_grid_calibration(self, calibration_id: int) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.grid_calibrations).where(
+                self.grid_calibrations.c.id == calibration_id)).mappings().first()
+        return self._decode_calibration(dict(row)) if row else None
+
+    def get_latest_grid_calibration(self) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.grid_calibrations).order_by(
+                self.grid_calibrations.c.id.desc()).limit(1)).mappings().first()
+        return self._decode_calibration(dict(row)) if row else None
+
+    @staticmethod
+    def _decode_calibration(row):
+        for key in ("params", "metrics"):
+            try:
+                row[key] = json.loads(row[key])
+            except (TypeError, json.JSONDecodeError):
+                pass
+        return row
+
+    def list_grid_calibrations(self):
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(self.grid_calibrations).order_by(
+                self.grid_calibrations.c.id.desc())).mappings().all()
+        return [self._decode_calibration(dict(row)) for row in rows]
 
     def get_grid(self, grid_id: int) -> dict | None:
         with self.engine.connect() as conn:

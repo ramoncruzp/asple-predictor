@@ -255,6 +255,7 @@ class GridEngine:
         strategy: str = "simple",
         params: dict | None = None,
         stop_loss_pct: Decimal | str | float | None = None,
+        calibration_id: int | None = None,
     ) -> dict:
         symbol = str(symbol).replace("/", "").upper()
         if not self._active_coin(symbol):
@@ -319,6 +320,7 @@ class GridEngine:
                 "open_price": (snapshot["bid_price"] + snapshot["ask_price"]) / 2,
                 "strategy": strategy,
                 "params": effective_params,
+                "calibration_id": calibration_id,
             },
             [
                 {
