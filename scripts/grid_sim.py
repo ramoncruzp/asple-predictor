@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from grid.sim.data import CandleDataError, load_candles
 from grid.sim.runner import run_simulation
 from grid.sim.calibration import calibrate
+from grid.sim.sweep import run_sweep, write_artifacts
 from config.settings import Settings
 from database.db_manager import DBManager
 
@@ -63,6 +64,15 @@ def parser():
     p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
     p.add_argument("--allow-gaps", action="store_true")
     p.add_argument("--out", type=Path)
+    p = sub.add_parser("sweep", help="sweep grid structure and diagnose market regimes")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--capital", type=float, default=100)
+    p.add_argument("--fee-pct", type=float, default=.1)
+    p.add_argument("--resync-candles", type=int, default=3)
+    p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
+    p.add_argument("--allow-gaps", action="store_true")
+    p.add_argument("--out-dir", type=Path, default=ROOT / "data/cache/sim/structure_sweep")
     return root
 
 
@@ -94,6 +104,19 @@ def main(argv=None):
             return 0
         except (CandleDataError, OSError, ValueError, TypeError) as exc:
             print(f"calibration error: {exc}", file=sys.stderr)
+            return 3
+    if args.command == "sweep":
+        try:
+            candles = load_candles(args.csv, allow_gaps=args.allow_gaps)
+            digest = hashlib.sha256(args.csv.read_bytes()).hexdigest()
+            result = run_sweep(candles, seed=args.seed, workers=args.workers,
+                               capital=args.capital, fee_pct=args.fee_pct,
+                               resync_candles=args.resync_candles, csv_sha256=digest)
+            write_artifacts(result, args.out_dir)
+            print(json.dumps(result["summary"], sort_keys=True))
+            return 0
+        except (CandleDataError, OSError, ValueError, TypeError) as exc:
+            print(f"sweep error: {exc}", file=sys.stderr)
             return 3
     try:
         if args.low is not None and args.high is None:
