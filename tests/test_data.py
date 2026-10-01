@@ -1,5 +1,9 @@
 """Integration tests for public Binance market data."""
 
+import pytest
+
+pytestmark = pytest.mark.live
+
 from data.binance_client import BinanceClient
 
 

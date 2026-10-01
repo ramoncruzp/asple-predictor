@@ -267,6 +267,7 @@ def test_get_balance_normalizes_omits_zero_and_filters_asset():
     assert client.get_balance("usdt") == {"USDT": {"free": 12.25, "locked": 0.0}}
 
 
+@pytest.mark.live
 def test_live_binance_testnet_far_limit_roundtrip():
     from config.settings import Settings
     from data.binance_client import BinanceClient as PublicMarketClient

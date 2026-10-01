@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.live
+
 from config.settings import Settings
 from data.exchange_filters import SymbolFilters
 from data.testnet_client import TestnetClient as BinanceTestnetClient
@@ -282,3 +284,57 @@ def test_live_l6_binance_repository_keeps_and_finishes_owned_sell():
         )
     finally:
         _assert_clean(ctx)
+
+
+def test_live_l16_pause_resume_rearms_with_fresh_cid(tmp_path):
+    """Testnet mechanics only; this does not validate profitability."""
+    from tests.test_grid_engine_live import (
+        cancel_orders_created_since, live_context, live_range, verify_no_grid_orders,
+    )
+
+    settings, exchange, db, engine = live_context(tmp_path)
+    baseline_ids = {int(row["order_id"]) for row in exchange.get_open_orders("XRPUSDT")}
+    grid = None
+    try:
+        low, high = live_range(exchange)
+        grid = engine.create_grid("XRPUSDT", low, high, 4, capital=Decimal("120"),
+                                  strategy="smart", params={"adjust_enabled": False})
+        before = engine.sync_grid(grid["id"])
+        assert before["errors"] == 0
+        old_buy_cids = {row["client_order_id"] for row in db.get_grid_levels(grid["id"])
+                        if row["state"] == "BUY_OPEN"}
+        assert old_buy_cids
+
+        paused = engine.pause_grid(grid["id"], "live_test", {"reasons": ["live_test"]})
+        assert paused["ok"] and paused["sync"]["errors"] == 0
+        assert not any(order["side"] == "BUY" for order in exchange.get_open_orders("XRPUSDT"))
+        resumed = engine.resume_grid(grid["id"], "live_test", {})
+        assert resumed["ok"]
+        synced = engine.sync_grid(grid["id"])
+        assert synced["errors"] == 0
+
+        levels = db.get_grid_levels(grid["id"])
+        live = exchange.get_open_orders("XRPUSDT")
+        owned = {int(row["order_id"]): row for row in levels if row.get("order_id") is not None}
+        buys = [order for order in live if order["side"] == "BUY"
+                and int(order["order_id"]) in owned]
+        for order in buys:
+            owner = owned[int(order["order_id"])]
+            assert owner["state"] == "BUY_OPEN"
+            assert owner["client_order_id"] not in old_buy_cids
+        free_cells = [row for row in levels if row["state"] == "BUY_OPEN"]
+        assert len(buys) == len(free_cells)
+    finally:
+        if grid is not None:
+            try:
+                engine.cancel_grid_orders(grid["id"], finalize=True)
+            finally:
+                cancel_orders_created_since(exchange, baseline_ids)
+                verify_no_grid_orders(exchange, baseline_ids)
+
+
+def test_live_l17_insufficient_balance_defers_cell(tmp_path):
+    pytest.skip(
+        "NO VIABLE EN LIVE: provocar -2010 tras un prechequeo válido exige reservar saldo o forzar un ciclo; "
+        "la ruta de carrera queda cubierta con FakeExchange sin órdenes reales."
+    )

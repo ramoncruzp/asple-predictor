@@ -3,6 +3,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.live
+
 from data.exchange_filters import SymbolFilters
 from tests.test_grid_adjust_live import _unique_grid_sequence
 from tests.test_grid_compound_engine import assert_capital_ledger

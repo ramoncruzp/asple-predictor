@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -264,7 +265,12 @@ class GridMonitor:
                     if policy_enabled and mid is not None and current.get("strategy", "simple") == "smart" \
                             and current["status"] in {"ACTIVE", "PAUSED"}:
                         levels = self.db.get_grid_levels(grid_id)
-                        sigma = None if view is None else float(view.sigma_24h)
+                        try:
+                            sigma = None if view is None else float(view.sigma_24h)
+                        except (TypeError, ValueError, OverflowError):
+                            sigma = None
+                        if sigma is not None and (not math.isfinite(sigma) or sigma <= 0):
+                            sigma = None
                         if sigma is None:
                             unavailable_event(grid, getattr(self.vol_provider, "last_reason", None) or "unavailable")
                         last_pause = self.db.get_last_event(grid_id, "GRID_PAUSED")

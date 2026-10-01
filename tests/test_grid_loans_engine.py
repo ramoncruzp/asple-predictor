@@ -4,6 +4,8 @@ import pytest
 
 from tests.test_grid_engine import create, make_engine
 from tests.test_grid_adjust_engine import assert_adjust_invariants
+from data.testnet_client import TestnetOrderError as BinanceOrderRejection
+from data.exchange_filters import FilterViolation
 
 
 class SimulatedProcessCrash(BaseException):
@@ -31,6 +33,46 @@ def assert_loan_ledger(db, grid_id):
             Decimal(str(row["capital_base"])) + Decimal(str(row.get("capital_compound", 0)))
             + Decimal(str(row.get("capital_loan", 0)))
         )
+
+
+def make_pending_loan_case(*, borrower_open=False):
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine, capital=1000, strategy="smart",
+                  params={"loans_enabled": True, "reserve_pct": 0.0})
+    cells = db.get_grid_levels(grid["id"])
+    open_buys = [row for row in cells if row["state"] == "BUY_OPEN"]
+    lender = open_buys[0]
+    borrower = open_buys[1] if borrower_open else next(
+        row for row in reversed(cells) if row["state"] == "IDLE"
+    )
+    plan = {
+        "lender_idx": lender["level_idx"], "borrower_idx": borrower["level_idx"],
+        "amount": "20", "reserve_part": "0", "lender_part": "20",
+        "lender_capital_before": str(lender["capital"]),
+        "borrower_capital_before": str(borrower["capital"]),
+        "lender_cycles_at_open": int(lender["cycles_completed"]),
+        "borrower_cycles_at_open": int(borrower["cycles_completed"]),
+    }
+    return engine, db, exchange, grid, lender, borrower, plan
+
+
+def reject_loan_buy(exchange, *, attempt_to_reject=1, messages=None):
+    original = exchange.place_order
+    attempts = []
+    messages = messages or ["Account has insufficient balance"]
+
+    def place(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if client_order_id and client_order_id.startswith("gL"):
+            attempts.append(client_order_id)
+            rejected_attempt = (attempt_to_reject is None or len(attempts) == attempt_to_reject
+                                or isinstance(attempt_to_reject, set) and len(attempts) in attempt_to_reject)
+            if rejected_attempt:
+                message = messages[min(len(messages) - 1, len(attempts) - 1)]
+                raise BinanceOrderRejection(-2010, message)
+        return original(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = place
+    return attempts
 
 
 @pytest.mark.parametrize("reserve_part,lender_part", [(20, 0), (0, 20), (10, 10)])
@@ -139,6 +181,177 @@ def test_f2_pending_loan_resumes_after_lender_buy_cancel_before_replacement():
     assert len({order["client_order_id"] for order in exchange.get_open_orders("XRPUSDT")}) == len(
         exchange.get_open_orders("XRPUSDT")
     )
+
+
+def test_loan_insufficient_balance_rejection_defers_same_stage_after_old_buy_cancel():
+    engine, db, exchange, grid, lender, _borrower, plan = make_pending_loan_case()
+    old_order_id = int(lender["order_id"])
+    attempts = reject_loan_buy(exchange)
+
+    result = engine.lend_from_plan(grid["id"], plan)
+
+    loan = result["loan"]
+    lender_after = db.get_grid_levels(grid["id"])[int(lender["level_idx"])]
+    events = db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")
+    assert result["ok"] is False
+    assert loan["status"] == "PENDING" and loan["plan"]["stage"] == "PREPARED"
+    assert lender_after["state"] == "BUY_OPEN" and lender_after["order_id"] is None
+    assert lender_after["client_order_id"] == loan["plan"]["lender_replacement_cid"]
+    assert exchange.get_order("XRPUSDT", order_id=old_order_id)["status"] == "CANCELED"
+    assert len(attempts) == 1 and attempts[0] == lender_after["client_order_id"]
+    assert len(events) == 1 and events[0]["details"]["stage"] == "PREPARED"
+    assert not any(row["state"] == "ERROR" for row in db.get_grid_levels(grid["id"]))
+    assert_loan_ledger(db, grid["id"])
+
+
+@pytest.mark.parametrize(("reject_n", "expected_stage", "expected_role"), [
+    (1, "PREPARED", "lender"), (2, "LENDER_RESIZED", "borrower"),
+])
+def test_loan_insufficient_balance_each_resize_stage_defers_without_error(
+    reject_n, expected_stage, expected_role,
+):
+    engine, db, exchange, grid, _lender, _borrower, plan = make_pending_loan_case(
+        borrower_open=reject_n == 2,
+    )
+    attempts = reject_loan_buy(exchange, attempt_to_reject=reject_n)
+
+    result = engine.lend_from_plan(grid["id"], plan)
+
+    loan = result["loan"]
+    events = db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")
+    assert not result["ok"] and loan["status"] == "PENDING"
+    assert loan["plan"]["stage"] == expected_stage
+    assert len(events) == 1
+    assert events[0]["details"]["stage"] == expected_stage
+    assert events[0]["details"]["role"] == expected_role
+    assert not any(row["state"] == "ERROR" for row in db.get_grid_levels(grid["id"]))
+    assert len(attempts) == reject_n
+    assert_loan_ledger(db, grid["id"])
+
+
+def test_loan_five_fundless_resumes_deduplicate_event_then_complete_with_same_cid():
+    engine, db, exchange, grid, lender, borrower, plan = make_pending_loan_case()
+    attempts = reject_loan_buy(exchange, attempt_to_reject=None)
+    first = engine.lend_from_plan(grid["id"], plan)
+    loan = first["loan"]
+    deferred_cid = loan["plan"]["lender_replacement_cid"]
+    for _ in range(4):
+        assert engine.resume_pending_loans(grid["id"]) == 1
+        assert db.get_grid_loan(loan["id"])["plan"]["stage"] == "PREPARED"
+    events = db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")
+    assert len(events) == 1
+    assert attempts == [deferred_cid] * 5
+    assert_loan_ledger(db, grid["id"])
+
+    # Restore funds and let the durable plan resume.
+    exchange.place_order = exchange.__class__.place_order.__get__(exchange, exchange.__class__)
+    exchange.free_usdt = Decimal("100000")
+    assert engine.resume_pending_loans(grid["id"]) == 1
+    final_loan = db.get_grid_loan(loan["id"])
+    assert final_loan["status"] == "OPEN"
+    assert final_loan["plan"]["stage"] == "BORROWER_RESIZED"
+    assert_loan_ledger(db, grid["id"])
+    assert db.get_grid_levels(grid["id"])[int(lender["level_idx"])]["state"] == "BUY_OPEN"
+    assert db.get_grid_levels(grid["id"])[int(borrower["level_idx"])]["state"] == "IDLE"
+    assert len(db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")) == 1
+
+
+def test_loan_restart_between_rejection_and_retry_reuses_stage_cid_and_event():
+    engine, db, exchange, grid, _lender, _borrower, plan = make_pending_loan_case()
+    attempts = reject_loan_buy(exchange)
+    first = engine.lend_from_plan(grid["id"], plan)
+    loan = first["loan"]
+    cid = loan["plan"]["lender_replacement_cid"]
+
+    restarted = type(engine)(db, exchange, engine.settings)
+    assert restarted.resume_pending_loans(grid["id"]) == 1
+
+    resumed = db.get_grid_loan(loan["id"])
+    assert resumed["status"] == "OPEN"
+    assert resumed["plan"]["stage"] == "BORROWER_RESIZED"
+    assert attempts == [cid, cid]
+    assert len(db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")) == 1
+    assert_loan_ledger(db, grid["id"])
+
+
+def test_loan_deferred_event_deduplicates_by_cause_and_stage():
+    engine, db, exchange, grid, _lender, _borrower, plan = make_pending_loan_case()
+    attempts = reject_loan_buy(
+        exchange, attempt_to_reject={1, 2}, messages=["first shortfall", "different shortfall"],
+    )
+    first = engine.lend_from_plan(grid["id"], plan)
+    resumed = type(engine)(db, exchange, engine.settings).resume_pending_loans(grid["id"])
+    events = db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")
+    assert resumed == 1 and first["loan"]["status"] == "PENDING"
+    assert len(events) == 2
+    assert events[0]["details"]["cause_key"] != events[1]["details"]["cause_key"]
+
+
+def test_loan_deferred_event_is_emitted_again_after_stage_advances():
+    engine, db, exchange, grid, _lender, _borrower, plan = make_pending_loan_case(borrower_open=True)
+    attempts = reject_loan_buy(
+        exchange, attempt_to_reject={1, 3}, messages=["same shortfall", "same shortfall"],
+    )
+    first = engine.lend_from_plan(grid["id"], plan)
+    resumed = engine.resume_pending_loans(grid["id"])
+    events = db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")
+    stages = {event["details"]["stage"] for event in events}
+    causes = {event["details"]["cause_key"] for event in events}
+    assert not first["ok"] and resumed == 1
+    assert db.list_grid_loans(grid_id=grid["id"], statuses={"PENDING"})[0]["plan"]["stage"] == "LENDER_RESIZED"
+    assert len(events) == 2 and stages == {"PREPARED", "LENDER_RESIZED"}
+    assert len(causes) == 1
+    assert len(attempts) == 3
+    assert_loan_ledger(db, grid["id"])
+
+
+def test_loan_filter_rejection_keeps_existing_error_path_without_funds_event():
+    engine, db, exchange, grid, _lender, _borrower, plan = make_pending_loan_case()
+    original = exchange.place_order
+
+    def reject_filter(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if client_order_id and client_order_id.startswith("gL"):
+            raise FilterViolation("LOT_SIZE", "quantity below minimum")
+        return original(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_filter
+    with pytest.raises(FilterViolation, match="LOT_SIZE"):
+        engine.lend_from_plan(grid["id"], plan)
+    loan = db.list_grid_loans(grid_id=grid["id"], statuses={"PENDING"})[0]
+    assert loan["plan"]["stage"] == "PREPARED"
+    assert db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS") == []
+    assert not any(row["state"] == "ERROR" for row in db.get_grid_levels(grid["id"]))
+
+
+@pytest.mark.parametrize(("reject_n", "borrower_open"), [(1, False), (2, True)])
+def test_sync_does_not_recover_or_rearm_cells_owned_by_pending_loan(reject_n, borrower_open):
+    engine, db, exchange, grid, lender, borrower, plan = make_pending_loan_case(
+        borrower_open=borrower_open,
+    )
+    attempts = reject_loan_buy(exchange, attempt_to_reject=reject_n)
+    result = engine.lend_from_plan(grid["id"], plan)
+    assert not result["ok"]
+    pending_loan = result["loan"]
+    before_lender = db.get_grid_levels(grid["id"])[int(lender["level_idx"])]
+    before_borrower = db.get_grid_levels(grid["id"])[int(borrower["level_idx"])]
+    exchange.bid = Decimal("120")
+    exchange.ask = Decimal("120.01")
+    calls_before = len(exchange.create_calls)
+
+    engine.sync_grid(grid["id"])
+
+    after = db.get_grid_levels(grid["id"])
+    after_lender = after[int(lender["level_idx"])]
+    after_borrower = after[int(borrower["level_idx"])]
+    assert after_lender["state"] == before_lender["state"] == "BUY_OPEN"
+    assert after_lender["order_id"] == before_lender["order_id"]
+    assert after_lender["client_order_id"] == before_lender["client_order_id"]
+    assert after_borrower["state"] == before_borrower["state"]
+    assert after_borrower["order_id"] == before_borrower["order_id"]
+    assert after_borrower["client_order_id"] == before_borrower["client_order_id"]
+    assert not any(row["state"] == "ERROR" for row in after)
+    assert len(db.list_grid_events(grid_id=grid["id"], event_type="LOAN_DEFERRED_FUNDS")) == 1
+    assert len(attempts) == reject_n
 
 
 @pytest.mark.parametrize("boundary", ["F1", "F3", "F4", "F5", "F8"])
@@ -403,8 +616,9 @@ def test_f7_borrower_fill_after_lender_resize_rolls_lender_back_and_protects_inv
     current_borrower = db.get_grid_levels(grid["id"])[borrower["level_idx"]]
     exchange.fill(current_borrower["order_id"])
     engine.sync_grid(grid["id"])
-    assert db.get_grid_levels(grid["id"])[borrower["level_idx"]]["state"] == "SELL_OPEN"
+    assert db.get_grid_levels(grid["id"])[borrower["level_idx"]]["state"] == "BUY_OPEN"
     engine.resume_pending_loans(grid["id"])
+    assert db.get_grid_levels(grid["id"])[borrower["level_idx"]]["state"] == "SELL_OPEN"
     loan = db.list_grid_loans(grid["id"])[0]
     lender_after = db.get_grid_levels(grid["id"])[lender["level_idx"]]
     restored_order = exchange.get_order("XRPUSDT", order_id=lender_after["order_id"])

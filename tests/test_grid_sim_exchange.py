@@ -37,10 +37,27 @@ def test_buy_fee_is_base_and_sell_fee_is_quote():
 
 def test_balances_never_negative():
     ex = SimExchange(5, .1)
-    cell = _cell()
-    ex.place(0, "BUY", "10", "1", 0, 0)
     try:
-        ex.process(0, 9, 11, 10, [cell])
+        ex.place(0, "BUY", "10", "1", 0, 0)
+    except ValueError:
+        return
+    raise AssertionError("buy order without reserved quote funds was accepted")
+
+
+def test_open_buy_reserves_quote_funds_until_fill_or_cancel():
+    ex = SimExchange(20, 0)
+    cells = [_cell(), _cell(), _cell()]
+    ex.place(0, "BUY", "10", "1", 1, 0)
+    ex.place(1, "BUY", "10", "1", 1, 0)
+    try:
+        ex.place(2, "BUY", "10", "1", 1, 0)
     except ValueError:
         pass
+    else:
+        raise AssertionError("over-committed buy order was accepted")
+    ex.cancel(1, "BUY")
+    ex.place(2, "BUY", "10", "1", 1, 0)
+    fills = ex.process(1, 9, 11, 10, cells)
+    assert [row[0] for row in fills] == [0, 2]
+    assert ex.usdt == Decimal("0")
     assert ex.usdt >= 0 and ex.base >= 0

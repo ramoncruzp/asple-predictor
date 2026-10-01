@@ -54,6 +54,108 @@ class GridEngine:
         self._event_price: float | None = None
         self._adjust_lock_guard = threading.Lock()
         self._adjust_locks: dict[int, threading.Lock] = {}
+        self._deferred_funds_causes: dict[tuple[int, int], str] = {}
+
+    @staticmethod
+    def _is_insufficient_balance(error: Exception) -> bool:
+        code = getattr(error, "code", None)
+        if code is not None:
+            try:
+                return int(code) == -2010
+            except (TypeError, ValueError):
+                return str(code).strip() == "-2010"
+        message = getattr(error, "message", str(error))
+        return "insufficient balance" in str(message).casefold()
+
+    def _deferred_funds_event_is_duplicate(self, grid_id: int, level_idx: int, cause_key: str) -> bool:
+        key = (int(grid_id), int(level_idx))
+        if self._deferred_funds_causes.get(key) == cause_key:
+            return True
+        list_events = getattr(self.db, "list_grid_events", None)
+        if callable(list_events):
+            try:
+                events = list_events(grid_id=int(grid_id), limit=5000)
+            except Exception:
+                events = []
+            for event in events:
+                if event.get("level_idx") is None or int(event["level_idx"]) != int(level_idx):
+                    continue
+                kind = str(event.get("event_type", "")).upper()
+                if kind == "BUY_DEFERRED_FUNDS":
+                    details = event.get("details") or {}
+                    self._deferred_funds_causes[key] = str(details.get("cause_key", ""))
+                    return str(details.get("cause_key", "")) == cause_key
+                if kind in {"BUY_PLACED", "INTENT_RECOVERED"}:
+                    break
+                if kind == "CELL_REPRICED" and event.get("order_id") is not None:
+                    break
+        return False
+
+    def _clear_deferred_funds(self, grid_id: int, level_idx: int, cid: str,
+                              order_id: int | None) -> None:
+        key = (int(grid_id), int(level_idx))
+        self._deferred_funds_causes.pop(key, None)
+        if self.event_sink is not None:
+            return
+        list_events = getattr(self.db, "list_grid_events", None)
+        add_event = getattr(self.db, "add_grid_event", None)
+        if not callable(list_events) or not callable(add_event):
+            return
+        try:
+            reset_types = {"BUY_PLACED", "INTENT_RECOVERED"}
+            latest = next((event for event in list_events(grid_id=int(grid_id), limit=5000)
+                           if event.get("level_idx") is not None
+                           and int(event["level_idx"]) == int(level_idx)
+                           and (str(event.get("event_type", "")).upper() == "BUY_DEFERRED_FUNDS"
+                                or str(event.get("event_type", "")).upper() in reset_types
+                                or (str(event.get("event_type", "")).upper() == "CELL_REPRICED"
+                                    and event.get("order_id") is not None))), None)
+            if latest and str(latest.get("event_type", "")).upper() == "BUY_DEFERRED_FUNDS":
+                add_event(
+                    run_id=None, source="CLI", grid_id=int(grid_id), level_idx=int(level_idx),
+                    client_order_id=cid, order_id=order_id, event_type="BUY_PLACED",
+                    details={"clears_deferred_funds": True},
+                )
+        except Exception:
+            logger.exception("grid=%s level=%s could not persist deferred-funds reset", grid_id, level_idx)
+
+    def _defer_buy_for_insufficient_funds(
+        self, grid_id: int, level: dict, cid: str, error: TestnetOrderError, *,
+        capital: Any, qty: Any, price: Any,
+    ) -> bool:
+        level_idx = int(level["level_idx"])
+        self.db.update_level(
+            int(grid_id), level_idx, state="IDLE", order_id=None, client_order_id=None,
+            buy_client_order_id=cid,
+        )
+        code = getattr(error, "code", None)
+        raw_message = str(getattr(error, "message", str(error)))
+        normalized_message = " ".join(raw_message.casefold().split())
+        cause_key = f"code:{code}" if code is not None else f"message:{normalized_message}"
+        duplicate = self._deferred_funds_event_is_duplicate(int(grid_id), level_idx, cause_key)
+        self._deferred_funds_causes[(int(grid_id), level_idx)] = cause_key
+        if not duplicate:
+            details = {
+                "level_idx": level_idx, "capital_requested": str(capital),
+                "quantity": str(qty), "price": str(price), "error_code": code,
+                "cause_key": cause_key,
+            }
+            if self.event_sink is None and callable(getattr(self.db, "add_grid_event", None)):
+                try:
+                    self.db.add_grid_event(
+                        run_id=None, source="CLI", grid_id=int(grid_id), level_idx=level_idx,
+                        client_order_id=cid, event_type="BUY_DEFERRED_FUNDS",
+                        reason=raw_message, price=self._event_price, details=details,
+                    )
+                except Exception:
+                    logger.exception("grid=%s level=%s could not persist BUY_DEFERRED_FUNDS",
+                                     grid_id, level_idx)
+            else:
+                self._emit(
+                    "BUY_DEFERRED_FUNDS", int(grid_id), level_idx,
+                    client_order_id=cid, reason=raw_message, details=details,
+                )
+        return True
 
     def _emit(
         self, event_type: str, grid_id: int, level_idx: int | None = None, *,
@@ -204,7 +306,6 @@ class GridEngine:
         required = sum((plan.capital for plan in buy_plans), Decimal(0))
         if _d(balance.get("free", 0)) < required:
             raise GridConfigError("free USDT balance is below the required buy-cell capital")
-
         grid = self.db.create_grid_with_levels(
             {
                 "symbol": symbol,
@@ -249,9 +350,19 @@ class GridEngine:
                     buy_client_order_id=cid, order_id=None,
                 )
                 logger.info("grid=%s level=%s action=BUY_INTENT client_order_id=%s", grid_id, plan.level_idx, cid)
-                order = self._send_limit(
-                    symbol, "BUY", plan.qty, plan.buy_price, cid, filters, avg_price,
-                )
+                try:
+                    order = self._send_limit(
+                        symbol, "BUY", plan.qty, plan.buy_price, cid, filters, avg_price,
+                    )
+                except TestnetOrderError as exc:
+                    if not self._is_insufficient_balance(exc):
+                        raise
+                    self._defer_buy_for_insufficient_funds(
+                        grid_id, {"level_idx": plan.level_idx}, cid, exc,
+                        capital=plan.capital, qty=plan.qty, price=plan.buy_price,
+                    )
+                    continue
+                self._clear_deferred_funds(grid_id, int(plan.level_idx), cid, int(order["order_id"]))
                 self.db.update_level(grid_id, plan.level_idx, order_id=order["order_id"])
                 self._emit(
                     "BUY_PLACED", grid_id, plan.level_idx, client_order_id=cid,
@@ -316,6 +427,13 @@ class GridEngine:
     ) -> int:
         cycle = int(level["cycles_completed"])
         cid = self._client_order_id(grid_id, int(level["level_idx"]), side, cycle)
+        if side == "BUY":
+            prior_cid = level.get("buy_client_order_id") or level.get("client_order_id")
+            prior_cycle = re.fullmatch(rf"g{int(grid_id)}L{int(level['level_idx'])}B(\d+)", str(prior_cid or ""))
+            prior_is_adjusted = bool(re.fullmatch(r"gA[0-9a-f]{30}", str(prior_cid or "")))
+            if prior_is_adjusted or (prior_cycle and int(prior_cycle.group(1)) == cycle):
+                seed = f"{grid_id}:{level['level_idx']}:cycle:{cycle}:previous:{prior_cid}:rearm"
+                cid = "gA" + hashlib.sha256(seed.encode("ascii")).hexdigest()[:30]
         symbol = self.db.get_grid(grid_id)["symbol"]
         self.db.update_level(
             grid_id, int(level["level_idx"]), state=f"{side}_OPEN",
@@ -326,6 +444,10 @@ class GridEngine:
         order = self._send_limit(
             symbol, side, qty, price, cid, filters, avg_price,
         )
+        if side == "BUY":
+            self._clear_deferred_funds(
+                int(grid_id), int(level["level_idx"]), cid, int(order["order_id"]),
+            )
         self.db.update_level(grid_id, int(level["level_idx"]), order_id=order["order_id"])
         self._emit(
             f"{side}_PLACED", grid_id, int(level["level_idx"]), client_order_id=cid,
@@ -339,6 +461,59 @@ class GridEngine:
                   loan_id: int, amount: Any, role: str) -> str:
         seed = f"{grid_id}:{level_idx}:{cycle}:{previous or '<none>'}:{loan_id}:{amount}:{role}"
         return "gL" + hashlib.sha256(seed.encode("ascii")).hexdigest()[:30]
+
+    def _pending_loan_level_indices(self, grid_id: int) -> set[int]:
+        """Return cells exclusively owned by a durable, unfinished loan saga."""
+        return {
+            int(idx)
+            for loan in self.db.list_grid_loans(int(grid_id), statuses={"PENDING"})
+            for idx in (loan.get("lender_idx"), loan.get("borrower_idx"))
+            if idx is not None
+        }
+
+    def _defer_pending_loan_for_funds(
+        self, grid: dict, loan: dict, plan: dict, role: str,
+        cid: str | None, error: TestnetOrderError,
+    ) -> None:
+        stage = str(plan.get("stage", "PREPARED"))
+        raw_message = str(getattr(error, "message", str(error)))
+        normalized_message = " ".join(raw_message.casefold().split())
+        code = getattr(error, "code", None)
+        cause_key = (f"code:{code}|message:{normalized_message}" if code is not None
+                     else f"message:{normalized_message}")
+        events = self.db.list_grid_events(
+            grid_id=int(grid["id"]), event_type="LOAN_DEFERRED_FUNDS", limit=5000,
+        )
+        duplicate = False
+        for event in events:
+            details = event.get("details") or {}
+            try:
+                event_loan_id = int(details.get("loan_id", -1))
+            except (TypeError, ValueError):
+                continue
+            if event_loan_id != int(loan["id"]):
+                continue
+            if details.get("role") != role:
+                continue
+            duplicate = details.get("stage") == stage and details.get("cause_key") == cause_key
+            break
+        if duplicate:
+            return
+        owner = getattr(self.event_sink, "__self__", None)
+        self.db.add_grid_event(
+            run_id=getattr(owner, "_run_id", None),
+            source="MONITOR" if self.event_sink else "CLI",
+            grid_id=int(grid["id"]),
+            level_idx=int(plan[f"{role}_idx"]),
+            client_order_id=cid,
+            event_type="LOAN_DEFERRED_FUNDS",
+            reason=raw_message,
+            price=self._event_price,
+            details={
+                "loan_id": int(loan["id"]), "role": role, "stage": stage,
+                "cause_key": cause_key, "error_code": code,
+            },
+        )
 
     def _resize_loan_buy(self, grid: dict, loan: dict, plan: dict, role: str,
                          target_capital: Decimal, filters: SymbolFilters,
@@ -448,9 +623,17 @@ class GridEngine:
         if lender_idx is not None and lender_part > 0 and plan.get("stage") not in {
             "LENDER_RESIZED", "BORROWER_RESIZED", "OPEN"
         }:
-            outcome = self._resize_loan_buy(grid, loan, plan, "lender",
-                                            _d(plan["lender_capital_before"]) - lender_part,
-                                            filters, avg_price)
+            try:
+                outcome = self._resize_loan_buy(grid, loan, plan, "lender",
+                                                _d(plan["lender_capital_before"]) - lender_part,
+                                                filters, avg_price)
+            except TestnetOrderError as exc:
+                if not self._is_insufficient_balance(exc):
+                    raise
+                self._defer_pending_loan_for_funds(
+                    grid, loan, plan, "lender", plan.get("lender_replacement_cid"), exc,
+                )
+                return
             if outcome == "FILLED":
                 self._cancel_pending_loan(grid, loan, "lender_buy_filled_during_resize")
                 return
@@ -465,9 +648,17 @@ class GridEngine:
             if borrower.get("state") not in {"IDLE", "BUY_OPEN"} or _d(borrower.get("held_qty", 0)) > 0:
                 self._cancel_pending_loan(grid, loan, "borrower_cell_changed")
                 return
-            outcome = self._resize_loan_buy(grid, loan, plan, "borrower",
-                                            _d(plan["borrower_capital_before"]) + amount,
-                                            filters, avg_price)
+            try:
+                outcome = self._resize_loan_buy(grid, loan, plan, "borrower",
+                                                _d(plan["borrower_capital_before"]) + amount,
+                                                filters, avg_price)
+            except TestnetOrderError as exc:
+                if not self._is_insufficient_balance(exc):
+                    raise
+                self._defer_pending_loan_for_funds(
+                    grid, loan, plan, "borrower", plan.get("borrower_replacement_cid"), exc,
+                )
+                return
             if outcome in {"FILLED", "CHANGED"}:
                 self._cancel_pending_loan(grid, loan, "borrower_cell_changed_during_resize")
                 return
@@ -813,7 +1004,7 @@ class GridEngine:
         self, grid: dict, level: dict, sell_order: dict, bid: Decimal,
         filters: SymbolFilters, avg_price: Decimal, rearm: bool = True,
         post_sell_state: str = "DONE",
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, bool]:
         grid_id, idx, symbol = int(grid["id"]), int(level["level_idx"]), grid["symbol"]
         cycle = int(level["cycles_completed"])
         buy_cid = self._actual_buy_client_order_id(grid_id, level)
@@ -949,7 +1140,7 @@ class GridEngine:
         updated = next(row for row in self.db.get_grid_levels(grid_id) if row["level_idx"] == idx)
         if not rearm:
             self.db.update_level(grid_id, idx, state=post_sell_state)
-            return True, False
+            return True, False, False
         if _d(level["price"]) < bid:
             updated["cycles_completed"] = new_cycle
             updated["symbol"] = symbol
@@ -958,20 +1149,32 @@ class GridEngine:
                 self._place_level_intent(
                     grid_id, updated, "BUY", qty, _d(level["price"]), filters, avg_price,
                 )
-                return True, False
+                return True, False, False
             except (RuntimeError, BinanceRequestException, RequestException) as exc:
                 logger.warning("grid=%s level=%s action=REARM_RETRY reason=%s", grid_id, idx, exc)
-                return True, False
-            except (FilterViolation, TestnetOrderError) as exc:
+                return True, False, False
+            except TestnetOrderError as exc:
+                if self._is_insufficient_balance(exc):
+                    cid = str(self.db.get_grid_levels(grid_id)[idx].get("client_order_id") or
+                              self.db.get_grid_levels(grid_id)[idx].get("buy_client_order_id") or "")
+                    emitted = self._defer_buy_for_insufficient_funds(
+                        grid_id, {"level_idx": idx}, cid, exc,
+                        capital=updated["capital"], qty=qty, price=level["price"],
+                    )
+                    return True, False, emitted
                 self.db.update_level(grid_id, idx, state="ERROR")
                 logger.error("grid=%s level=%s action=REARM_FAILED reason=%s", grid_id, idx, exc)
-                return True, True
+                return True, True, False
+            except FilterViolation as exc:
+                self.db.update_level(grid_id, idx, state="ERROR")
+                logger.error("grid=%s level=%s action=REARM_FAILED reason=%s", grid_id, idx, exc)
+                return True, True, False
             except Exception as exc:
                 self.db.update_level(grid_id, idx, state="ERROR")
                 logger.exception("grid=%s level=%s action=REARM_FAILED reason=%s", grid_id, idx, exc)
-                return True, True
+                return True, True, False
         self.db.update_level(grid_id, idx, state="IDLE")
-        return True, False
+        return True, False, False
 
     def _recover_legacy_entry(self, grid: dict, level: dict) -> None:
         """Recover cost basis for pre-15B inventory; preserve unknown fill time as unknown."""
@@ -1301,9 +1504,27 @@ class GridEngine:
                 continue
             if existing is None:
                 qty = filters.round_qty_down(Decimal(item["capital"]) / target)
-                order = self._send_limit(grid["symbol"], "BUY", qty, target, cid, filters, avg_price)
+                try:
+                    order = self._send_limit(grid["symbol"], "BUY", qty, target, cid, filters, avg_price)
+                except TestnetOrderError as exc:
+                    if not self._is_insufficient_balance(exc):
+                        raise
+                    self._defer_buy_for_insufficient_funds(
+                        grid_id, {"level_idx": idx}, cid, exc,
+                        capital=item["capital"], qty=qty, price=target,
+                    )
+                    capital_updates[idx] = {
+                        "capital": float(Decimal(item["capital"])),
+                        "capital_base": float(Decimal(item["capital"])), "capital_compound": 0.0,
+                    }
+                    self._emit("CELL_REPRICED", grid_id, idx, client_order_id=cid,
+                               reason="buy_deferred_insufficient_funds",
+                               details={"old_price": cell["price"], "new_price": str(target),
+                                        "state": "IDLE", "side": "BUY"})
+                    continue
             else:
                 order = existing
+            self._clear_deferred_funds(int(grid_id), idx, cid, int(order["order_id"]))
             self.db.update_level(grid_id, idx, order_id=int(order["order_id"]))
             capital_updates[idx] = {
                 "capital": float(Decimal(item["capital"])),
@@ -1468,7 +1689,7 @@ class GridEngine:
         if grid is None:
             raise ValueError(f"grid {grid_id} does not exist")
         summary = {"buys_filled": 0, "sells_filled": 0, "cycles_completed": 0,
-                   "orders_placed": 0, "errors": 0, "states": {}}
+                   "orders_placed": 0, "errors": 0, "buys_deferred": 0, "states": {}}
         if grid["status"] not in allowed_statuses:
             summary["states"] = {}
             return summary
@@ -1476,8 +1697,12 @@ class GridEngine:
         filters, snapshot, avg_price = self._market_context(symbol)
         self._event_price = float((snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2))
         bid = snapshot["bid_price"]
+        deferred_this_pass: set[int] = set()
+        pending_loan_levels = self._pending_loan_level_indices(int(grid_id))
 
         for existing_level in self.db.get_grid_levels(grid_id):
+            if int(existing_level["level_idx"]) in pending_loan_levels:
+                continue
             if existing_level.get("sell_price") is None:
                 derived_sell = self._level_sell_price(grid, existing_level, filters)
                 self.db.set_level_fields(grid_id, int(existing_level["level_idx"]), sell_price=float(derived_sell))
@@ -1487,17 +1712,23 @@ class GridEngine:
 
         # Recover write-ahead intents before taking the single open-order snapshot.
         for level in self.db.get_grid_levels(grid_id):
+            if int(level["level_idx"]) in pending_loan_levels:
+                continue
             if repository_only and level["state"] != "SELL_OPEN":
                 continue
             cid = level.get("client_order_id")
             if not cid or level.get("order_id") is not None or level["state"] not in {"BUY_OPEN", "SELL_OPEN"}:
                 continue
+            side = "BUY" if level["state"] == "BUY_OPEN" else "SELL"
             try:
                 found = self.exchange.find_order_by_client_id(symbol, cid)
                 if found is not None:
                     fields = {"order_id": found["order_id"]}
                     if level["state"] == "BUY_OPEN":
                         fields["buy_client_order_id"] = cid
+                        self._clear_deferred_funds(
+                            int(grid_id), int(level["level_idx"]), cid, int(found["order_id"]),
+                        )
                     self.db.update_level(grid_id, level["level_idx"], **fields)
                     self._emit("INTENT_RECOVERED", grid_id, level["level_idx"], client_order_id=cid,
                                order_id=found["order_id"], details={"found_existing": True})
@@ -1508,7 +1739,6 @@ class GridEngine:
                         order_id=None, client_order_id=None,
                     )
                     continue
-                side = "BUY" if level["state"] == "BUY_OPEN" else "SELL"
                 qty = (
                     filters.round_qty_down(_d(level["capital"]) / _d(level["price"]))
                     if side == "BUY" else filters.round_qty_down(_d(level["held_qty"]))
@@ -1521,11 +1751,37 @@ class GridEngine:
                 fields = {"order_id": order["order_id"]}
                 if side == "BUY":
                     fields["buy_client_order_id"] = cid
+                    self._clear_deferred_funds(
+                        int(grid_id), int(level["level_idx"]), cid, int(order["order_id"]),
+                    )
                 self.db.update_level(grid_id, level["level_idx"], **fields)
                 summary["orders_placed"] += 1
                 self._emit("INTENT_RECOVERED", grid_id, level["level_idx"], client_order_id=cid,
                            order_id=order["order_id"], details={"found_existing": False})
-            except (FilterViolation, TestnetOrderError) as exc:
+            except TestnetOrderError as exc:
+                if side == "BUY" and self._is_insufficient_balance(exc):
+                    deferred_cid = str(level.get("client_order_id") or level.get("buy_client_order_id") or "")
+                    self._defer_buy_for_insufficient_funds(
+                        grid_id, level, deferred_cid, exc,
+                        capital=level.get("capital", 0), qty=qty,
+                        price=level.get("price", 0),
+                    )
+                    summary["buys_deferred"] += 1
+                    deferred_this_pass.add(int(level["level_idx"]))
+                    continue
+                summary["errors"] += 1
+                if level["state"] == "SELL_OPEN" and _d(level.get("held_qty")) > 0:
+                    self._emit("SELL_REPROTECT_RETRY", grid_id, int(level["level_idx"]),
+                               client_order_id=cid, reason=str(exc))
+                    logger.warning("grid=%s level=%s action=SELL_REPROTECT_RETRY reason=%s",
+                                   grid_id, level["level_idx"], exc)
+                else:
+                    self.db.update_level(grid_id, level["level_idx"], state="ERROR")
+                    self._emit("LEVEL_ERROR", grid_id, level["level_idx"], client_order_id=cid,
+                               order_id=level.get("order_id"), reason=str(exc))
+                    logger.error("grid=%s level=%s action=INTENT_RECOVERY_FAILED reason=%s",
+                                 grid_id, level["level_idx"], exc)
+            except FilterViolation as exc:
                 summary["errors"] += 1
                 if level["state"] == "SELL_OPEN" and _d(level.get("held_qty")) > 0:
                     self._emit("SELL_REPROTECT_RETRY", grid_id, int(level["level_idx"]),
@@ -1544,6 +1800,8 @@ class GridEngine:
         open_orders = self.exchange.get_open_orders(symbol)
         open_ids = {int(row["order_id"]) for row in open_orders}
         for level in self.db.get_grid_levels(grid_id):
+            if int(level["level_idx"]) in pending_loan_levels:
+                continue
             if repository_only and level["state"] != "SELL_OPEN":
                 continue
             if level["state"] not in {"BUY_OPEN", "SELL_OPEN"} or level.get("order_id") is None:
@@ -1676,12 +1934,15 @@ class GridEngine:
                 changed, error = self._handle_buy_fill(grid, level, order, filters, avg_price)
                 summary["buys_filled"] += int(changed)
             else:
-                changed, error = self._handle_sell_fill(
+                changed, error, deferred = self._handle_sell_fill(
                     grid, level, order, bid, filters, avg_price,
                     rearm=rearm, post_sell_state=post_sell_state,
                 )
                 summary["sells_filled"] += int(changed)
                 summary["cycles_completed"] += int(changed and not error)
+                summary["buys_deferred"] += int(deferred)
+                if deferred:
+                    deferred_this_pass.add(int(level["level_idx"]))
             summary["errors"] += int(error)
             current = self.db.get_grid_levels(grid_id)[level["level_idx"]]
             summary["orders_placed"] += int(
@@ -1694,7 +1955,9 @@ class GridEngine:
             filters.max_num_orders is None or len(open_orders) + summary["orders_placed"] < filters.max_num_orders
         ):
             for level in current_levels:
-                if level["state"] != "IDLE" or _d(level["price"]) >= bid:
+                if (level["state"] != "IDLE" or int(level["level_idx"]) in pending_loan_levels
+                        or int(level["level_idx"]) in deferred_this_pass
+                        or _d(level["price"]) >= bid):
                     continue
                 qty = filters.round_qty_down(_d(level["capital"]) / _d(level["price"]))
                 try:
@@ -1703,6 +1966,21 @@ class GridEngine:
                 except (RuntimeError, BinanceRequestException, RequestException) as exc:
                     summary["errors"] += 1
                     logger.warning("grid=%s level=%s action=IDLE_ARM_RETRY reason=%s", grid_id, level["level_idx"], exc)
+                except TestnetOrderError as exc:
+                    if self._is_insufficient_balance(exc):
+                        cid = str(self.db.get_grid_levels(grid_id)[int(level["level_idx"])].get("client_order_id") or
+                                  self.db.get_grid_levels(grid_id)[int(level["level_idx"])].get("buy_client_order_id") or "")
+                        self._defer_buy_for_insufficient_funds(
+                            grid_id, level, cid, exc,
+                            capital=level["capital"], qty=qty, price=level["price"],
+                        )
+                        summary["buys_deferred"] += 1
+                        deferred_this_pass.add(int(level["level_idx"]))
+                        continue
+                    self.db.update_level(grid_id, level["level_idx"], state="ERROR")
+                    self._emit("LEVEL_ERROR", grid_id, level["level_idx"], reason=str(exc))
+                    summary["errors"] += 1
+                    logger.error("grid=%s level=%s action=IDLE_ARM_FAILED reason=%s", grid_id, level["level_idx"], exc)
                 except Exception as exc:
                     self.db.update_level(grid_id, level["level_idx"], state="ERROR")
                     self._emit("LEVEL_ERROR", grid_id, level["level_idx"], reason=str(exc))

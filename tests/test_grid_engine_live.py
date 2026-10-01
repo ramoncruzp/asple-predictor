@@ -6,6 +6,8 @@ from decimal import Decimal
 
 import pytest
 
+pytestmark = pytest.mark.live
+
 from config.settings import Settings
 from database.db_manager import DBManager
 from data.exchange_filters import SymbolFilters

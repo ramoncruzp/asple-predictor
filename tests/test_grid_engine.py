@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from database.db_manager import DBManager
+from data.testnet_client import TestnetOrderError
+from data.exchange_filters import FilterViolation
 from grid.engine import GridCreationError, GridEngine
 from grid.levels import GridConfigError
 from tests.grid_fakes import FakeExchange
@@ -175,18 +177,11 @@ def test_ninth_cell_grid_failure_on_fifth_buy_cleans_prior_orders():
 
 def test_insufficient_balance_is_not_retried_and_grid_fails_closed():
     engine, db, exchange = make_engine()
-    exchange.fail_on_create = 1
-    exchange.create_failure = exchange.insufficient_balance()
-    try:
+    exchange.free_usdt = Decimal("0")
+    with pytest.raises(GridConfigError, match="free USDT balance is below the required buy-cell capital"):
         create(engine)
-    except GridCreationError as exc:
-        assert "insufficient balance" in str(exc)
-    else:
-        raise AssertionError("expected insufficient-balance failure")
-    assert len(exchange.create_calls) == 1
-    with db.engine.connect() as conn:
-        row = conn.execute(db.grids.select()).mappings().first()
-    assert row["status"] == "FAILED"
+    assert db.list_open_grids() == []
+    assert exchange.create_calls == []
     assert exchange.get_open_orders("XRPUSDT") == []
 
 
@@ -508,6 +503,333 @@ def test_grid_can_open_for_symbol_with_only_a_holding_repository():
         [{"level_idx": 0, "price": 99, "sell_price": 101, "capital": 20, "state": "SELL_OPEN", "held_qty": 0.2}],
     )
     assert create(engine)["status"] == "ACTIVE"
+
+
+def test_pause_resume_twice_never_reuses_buy_cid_or_orphans_live_buy():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    history = {int(row["level_idx"]): [row["client_order_id"]]
+               for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN"}
+    for _ in range(2):
+        assert engine.pause_grid(grid["id"], "test", {})["ok"]
+        assert not [order for order in exchange.get_open_orders("XRPUSDT") if order["side"] == "BUY"]
+        assert engine.resume_grid(grid["id"], "test", {})["ok"]
+        assert engine.sync_grid(grid["id"])["errors"] == 0
+        levels = db.get_grid_levels(grid["id"])
+        open_buys = [order for order in exchange.get_open_orders("XRPUSDT") if order["side"] == "BUY"]
+        for row in levels:
+            if row["state"] == "BUY_OPEN":
+                owned = [order for order in open_buys if int(order["order_id"]) == int(row["order_id"])]
+                assert len(owned) == 1
+                idx = int(row["level_idx"])
+                cid = row["client_order_id"]
+                assert cid not in history[idx], f"reused CID for level {idx}: {cid}"
+                assert len(cid) <= 36
+                history[idx].append(cid)
+        assert len(open_buys) == sum(row["state"] == "BUY_OPEN" for row in levels)
+
+
+def test_pause_cancel_crash_and_engine_restart_reuses_write_ahead_cid():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    old = next(row for row in db.get_grid_levels(grid["id"]) if row["level_idx"] == 0)
+    old_cid = old["client_order_id"]
+    assert engine.pause_grid(grid["id"], "test", {})["ok"]
+    assert engine.resume_grid(grid["id"], "test", {})["ok"]
+    place = exchange.place_order
+    failed = {"once": False}
+
+    def fail_once(*args, **kwargs):
+        if not failed["once"] and kwargs.get("client_order_id") != old_cid:
+            failed["once"] = True
+            raise RuntimeError("injected process crash after write-ahead CID")
+        return place(*args, **kwargs)
+
+    exchange.place_order = fail_once
+    engine.sync_grid(grid["id"])
+    exchange.place_order = place
+    intent = db.get_grid_levels(grid["id"])[0]
+    intent_cid = intent["client_order_id"]
+    assert intent["state"] == "BUY_OPEN" and intent["order_id"] is None
+    assert exchange.find_order_by_client_id("XRPUSDT", intent_cid) is None
+
+    restarted = GridEngine(db, exchange, engine.settings)
+    assert restarted.sync_grid(grid["id"])["errors"] == 0
+    recovered = db.get_grid_levels(grid["id"])[0]
+    assert recovered["client_order_id"] == intent_cid
+    assert recovered["order_id"] is not None
+    assert exchange.find_order_by_client_id("XRPUSDT", intent_cid)["order_id"] == recovered["order_id"]
+    assert len([order for order in exchange.get_open_orders("XRPUSDT")
+                if order["client_order_id"] == intent_cid]) == 1
+
+
+def test_buy_filled_during_pause_becomes_sell_without_rearming_buy():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = exchange.get_open_orders("XRPUSDT")[0]
+    original_cancel = exchange.cancel_order
+
+    def fill_during_cancel(symbol, order_id):
+        if int(order_id) == int(buy["order_id"]):
+            return exchange.fill(order_id)
+        return original_cancel(symbol, order_id)
+
+    exchange.cancel_order = fill_during_cancel
+    result = engine.pause_grid(grid["id"], "test", {})
+    exchange.cancel_order = original_cancel
+    assert result["ok"] and result["sync"]["errors"] == 0
+    level = db.get_grid_levels(grid["id"])[0]
+    assert level["state"] == "SELL_OPEN"
+    assert level["order_id"] is not None
+    order = exchange.get_order("XRPUSDT", order_id=level["order_id"])
+    assert order["side"] == "SELL" and order["status"] == "NEW"
+    assert not any(row["side"] == "BUY" and int(row["order_id"]) == int(buy["order_id"])
+                   for row in exchange.get_open_orders("XRPUSDT"))
+
+
+def test_after_sell_cycle_next_buy_uses_flat_cycle_cid():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = db.get_grid_levels(grid["id"])[2]
+    exchange.fill(level["order_id"])
+    engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[2]
+    assert level["state"] == "SELL_OPEN"
+    exchange.fill(level["order_id"])
+    engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[2]
+    assert level["cycles_completed"] == 1
+    assert level["state"] == "BUY_OPEN"
+    assert level["buy_client_order_id"] == f"g{grid['id']}L2B1"
+    assert level["client_order_id"] == f"g{grid['id']}L2B1"
+
+
+def test_insufficient_balance_business_rejection_defers_rearm_cell():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    events = []
+    engine.event_sink = events.append
+    exchange.move_price("108", "108.01", "108")
+    rejected = {"done": False}
+    place = exchange.place_order
+
+    def reject_first_buy(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY" and not rejected["done"]:
+            rejected["done"] = True
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_first_buy
+    summary = engine.sync_grid(grid["id"])
+    assert rejected["done"]
+    assert summary["errors"] == 0
+    assert summary["buys_deferred"] == 1
+    levels = db.get_grid_levels(grid["id"])
+    deferred = [row for row in levels if row["state"] == "IDLE" and row.get("buy_client_order_id")]
+    assert len(deferred) == 1
+    assert deferred[0]["order_id"] is None
+    assert deferred[0]["client_order_id"] is None
+    assert not exchange.find_order_by_client_id("XRPUSDT", deferred[0]["buy_client_order_id"])
+    event = next(item for item in events if item["event_type"] == "BUY_DEFERRED_FUNDS")
+    assert event["details"]["error_code"] == -2010
+
+
+def _prepare_idle_rearm(engine, db, exchange):
+    grid = create(engine)
+    exchange.move_price("108", "108.01", "108")
+    return grid
+
+
+def test_insufficient_balance_retry_uses_fresh_cid_after_funds_return():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _prepare_idle_rearm(engine, db, exchange)
+    events = []
+    engine.event_sink = events.append
+    place = exchange.place_order
+    failed_cids = []
+
+    def reject_once(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY" and not failed_cids:
+            failed_cids.append(client_order_id)
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_once
+    first = engine.sync_grid(grid["id"])
+    assert first["buys_deferred"] == 1 and first["errors"] == 0
+    exchange.place_order = place
+    second = engine.sync_grid(grid["id"])
+    assert second["orders_placed"] == 1
+    level = next(row for row in db.get_grid_levels(grid["id"])
+                 if row["level_idx"] == int(failed_cids[0].split("L")[1].split("B")[0]))
+    assert level["state"] == "BUY_OPEN"
+    assert level["client_order_id"] != failed_cids[0]
+    assert exchange.find_order_by_client_id("XRPUSDT", level["client_order_id"])
+
+
+def test_insufficient_balance_repeated_syncs_emit_one_defer_event():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _prepare_idle_rearm(engine, db, exchange)
+    events = []
+    engine.event_sink = events.append
+    place = exchange.place_order
+
+    def reject_all(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY":
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_all
+    for _ in range(5):
+        result = engine.sync_grid(grid["id"])
+        assert result["errors"] == 0
+    deferred_events = [event for event in events if event["event_type"] == "BUY_DEFERRED_FUNDS"]
+    level_ids = {event["level_idx"] for event in deferred_events}
+    assert level_ids
+    assert all(sum(event["level_idx"] == level_idx for event in deferred_events) == 1
+               for level_idx in level_ids)
+    assert not any(row["state"] == "ERROR" for row in db.get_grid_levels(grid["id"]))
+
+
+def test_insufficient_balance_rejection_restart_leaves_no_orphan_buy():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _prepare_idle_rearm(engine, db, exchange)
+    events = []
+    def persist_event(event):
+        events.append(event)
+        db.add_grid_event(
+            run_id=None, source="CLI", grid_id=event["grid_id"],
+            level_idx=event.get("level_idx"), client_order_id=event.get("client_order_id"),
+            order_id=event.get("order_id"), event_type=event["event_type"],
+            reason=event.get("reason"), price=event.get("price"), details=event.get("details"),
+        )
+
+    engine.event_sink = persist_event
+    level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "IDLE"
+                 and row["price"] < 108)
+    write_ahead_cid = f"g{grid['id']}L{level['level_idx']}B77"
+    db.update_level(grid["id"], level["level_idx"], state="BUY_OPEN",
+                    client_order_id=write_ahead_cid, buy_client_order_id=write_ahead_cid,
+                    order_id=None)
+    place = exchange.place_order
+
+    def reject_buy(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY":
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_buy
+    engine.sync_grid(grid["id"])
+    persisted = db.get_grid_levels(grid["id"])
+    deferred = [row for row in persisted if row.get("buy_client_order_id") and row["state"] == "IDLE"]
+    assert deferred and not any(row["state"] == "ERROR" for row in persisted)
+    assert all(row["state"] != "BUY_OPEN" or row["order_id"] is not None for row in persisted)
+    restarted = GridEngine(db, exchange, engine.settings, event_sink=persist_event)
+    restarted.sync_grid(grid["id"])
+    assert all(row["state"] != "BUY_OPEN" or row["order_id"] is not None
+               for row in db.get_grid_levels(grid["id"]))
+    assert not any(row["side"] == "BUY" for row in exchange.get_open_orders("XRPUSDT")
+                   if not any(level.get("order_id") == row["order_id"]
+                              for level in db.get_grid_levels(grid["id"])))
+    assert sum(event["level_idx"] == level["level_idx"] for event in db.list_grid_events(
+        grid_id=grid["id"], event_type="BUY_DEFERRED_FUNDS")) == 1
+
+
+def test_filter_rejection_still_sets_rearm_cell_error():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _prepare_idle_rearm(engine, db, exchange)
+    def reject_filter(*args, **kwargs):
+        raise FilterViolation("LOT_SIZE", "quantity below minimum")
+
+    engine._send_limit = reject_filter
+    result = engine.sync_grid(grid["id"])
+    assert result["errors"] >= 1
+    assert result["buys_deferred"] == 0
+    assert any(row["state"] == "ERROR" for row in db.get_grid_levels(grid["id"]))
+
+
+def test_initial_buy_race_after_balance_precheck_defers_only_that_cell():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    events = []
+    engine.event_sink = events.append
+    balance_reads = []
+    get_balance = exchange.get_balance
+    def record_balance(asset=None):
+        result = get_balance(asset)
+        balance_reads.append(Decimal(str(result["USDT"]["free"])))
+        return result
+    exchange.get_balance = record_balance
+    place = exchange.place_order
+    rejected = {"done": False}
+
+    def reject_one(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY" and not rejected["done"]:
+            rejected["done"] = True
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_one
+    grid = create(engine)
+    levels = db.get_grid_levels(grid["id"])
+    assert grid["status"] == "ACTIVE"
+    assert balance_reads and balance_reads[0] >= Decimal("1000")
+    assert any(row["state"] == "IDLE" and row.get("buy_client_order_id") for row in levels)
+    assert len([event for event in events if event["event_type"] == "BUY_DEFERRED_FUNDS"]) == 1
+
+
+def test_sell_fill_rearm_insufficient_balance_counts_as_deferred_not_error():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    cell = db.get_grid_levels(grid["id"])[2]
+    exchange.fill(cell["order_id"])
+    engine.sync_grid(grid["id"])
+    cell = db.get_grid_levels(grid["id"])[2]
+    exchange.fill(cell["order_id"])
+    exchange.move_price("108", "108.01", "108")
+    events = []
+    engine.event_sink = events.append
+    place = exchange.place_order
+    rejected = {"done": False}
+
+    def reject_first_buy(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY" and not rejected["done"]:
+            rejected["done"] = True
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_first_buy
+    result = engine.sync_grid(grid["id"])
+    cell = db.get_grid_levels(grid["id"])[2]
+    assert result["errors"] == 0
+    assert result["buys_deferred"] >= 1
+    assert cell["state"] == "IDLE" and cell["order_id"] is None
+    assert any(event["event_type"] == "BUY_DEFERRED_FUNDS" and event["level_idx"] == 2
+               for event in events)
+
+
+def test_adjust_buy_insufficient_balance_leaves_cell_idle_and_reports_deferred():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    events = []
+    engine.event_sink = events.append
+    place = exchange.place_order
+    rejected = {"done": False}
+
+    def reject_first_buy(symbol, side, quantity, price=None, order_type="LIMIT", client_order_id=None):
+        if side == "BUY" and not rejected["done"]:
+            rejected["done"] = True
+            raise TestnetOrderError(-2010, "Account has insufficient balance")
+        return place(symbol, side, quantity, price, order_type, client_order_id)
+
+    exchange.place_order = reject_first_buy
+    result = engine.adjust_grid(grid["id"], 88, 112, 5, reason="test")
+    assert result["ok"] and rejected["done"]
+    deferred = [row for row in db.get_grid_levels(grid["id"])
+                if row["state"] == "IDLE" and row.get("buy_client_order_id")]
+    assert deferred
+    event = next(event for event in events if event["event_type"] == "BUY_DEFERRED_FUNDS")
+    assert any(row["level_idx"] == event["level_idx"]
+               and row["buy_client_order_id"] == event["client_order_id"] for row in deferred)
 
 
 def test_engine_treats_absent_exchange_order_limit_as_unlimited():

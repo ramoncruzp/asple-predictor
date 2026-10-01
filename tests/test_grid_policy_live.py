@@ -6,6 +6,8 @@ from decimal import Decimal
 
 import pytest
 
+pytestmark = pytest.mark.live
+
 from data.exchange_filters import SymbolFilters
 from grid.monitor import GridMonitor
 from tests.test_grid_monitor_live import _assert_clean, _balance, _context, _create_and_fill_one_buy

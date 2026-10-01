@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 
+class SimInsufficientFunds(ValueError):
+    """An exchange-style rejection when an order cannot reserve quote funds."""
+
+
 @dataclass
 class SimOrder:
     cell: int
@@ -13,6 +17,8 @@ class SimOrder:
     qty: Decimal
     active_from: int
     created_at: int
+    reserved_usdt: Decimal = Decimal(0)
+    order_id: int = 0
 
 
 class SimExchange:
@@ -25,12 +31,26 @@ class SimExchange:
         self.buy_fee_asset = "XRP" if fee_asset is None else str(fee_asset).upper()
         self.sell_fee_asset = "USDT" if fee_asset is None else str(fee_asset).upper()
         self.orders = {}
+        self.next_order_id = 1
         self.realized = Decimal(0)
         self.events = []
 
     def place(self, cell, side, price, qty, active_from, created_at):
         self.cancel(cell)
-        self.orders[cell] = SimOrder(cell, side, Decimal(str(price)), Decimal(str(qty)), active_from, created_at)
+        price, qty = Decimal(str(price)), Decimal(str(qty))
+        reserve = Decimal(0)
+        if side == "BUY":
+            reserve = price * qty
+            if self.sell_fee_asset == "USDT":
+                reserve += reserve * self.fee_rate
+            locked = sum((order.reserved_usdt for order in self.orders.values()), Decimal(0))
+            if locked + reserve > self.usdt:
+                available = self.usdt - locked
+                raise SimInsufficientFunds(f"simulated USDT balance insufficient at order placement: "
+                                           f"free={available}, required={reserve}")
+        self.orders[cell] = SimOrder(cell, side, price, qty, active_from, created_at,
+                                     reserve, self.next_order_id)
+        self.next_order_id += 1
 
     def cancel(self, cell, side=None):
         order = self.orders.get(cell)
@@ -49,11 +69,11 @@ class SimExchange:
             gross = order.qty
             if order.side == "BUY":
                 cost = order.price * gross
-                if cost > self.usdt:
+                fee = cost * self.fee_rate if self.buy_fee_asset == "USDT" else Decimal(0)
+                if cost + fee > order.reserved_usdt or cost + fee > self.usdt:
                     raise ValueError(f"simulated USDT balance would become negative at candle {i}, "
-                                     f"cell {idx}: free={self.usdt}, required={cost}")
-                fee = (gross * self.fee_rate if self.buy_fee_asset == "XRP"
-                       else cost * self.fee_rate)
+                                     f"cell {idx}: free={self.usdt}, required={cost + fee}")
+                fee = (gross * self.fee_rate if self.buy_fee_asset == "XRP" else fee)
                 net = (gross - fee if self.buy_fee_asset == "XRP" else gross)
                 if self.filters is not None:
                     net = self.filters.round_qty_down(net)

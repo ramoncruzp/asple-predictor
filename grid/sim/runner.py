@@ -14,7 +14,7 @@ from grid.adjust import plan_adjust
 from grid.levels import compute_lines, plan_cells
 from grid.policy import adjust_decision, evaluate_grid, stoploss_candidates, validate_params
 from grid.sim.data import ewma_sigma_24h
-from grid.sim.exchange import SimExchange
+from grid.sim.exchange import SimExchange, SimInsufficientFunds
 from grid.sim.metrics import calculate_metrics
 
 
@@ -50,7 +50,8 @@ def _json_safe(value):
 def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, high=None,
                    width_pct=None, fee_pct=.1, resync_candles=3, params=None,
                    halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
-                   fee_asset=None, include_details=False):
+                   fee_asset=None, include_details=False, trace_callback=None,
+                   sigma_values=None):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     if n < 4 or capital <= 0 or resync_candles < 1 or fee_pct < 0:
@@ -83,7 +84,12 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     for row, plan in zip(cells, cells_plan):
         row["state"] = plan.initial_state
     exchange = SimExchange(capital, fee_pct, filters=filters, fee_asset=fee_asset)
-    sigma = ewma_sigma_24h(closes, halflife_h) * float(sigma_scale)
+    if sigma_values is None:
+        sigma = ewma_sigma_24h(closes, halflife_h) * float(sigma_scale)
+    else:
+        if len(sigma_values) != len(closes):
+            raise ValueError("sigma_values must have one item per candle")
+        sigma = np.asarray([np.nan if value is None else float(value) for value in sigma_values], dtype=float)
     equity, events, trapped_values = [], [], []
     recent_adjust_blocked = []
     adjust_attempts_blocked = 0
@@ -93,6 +99,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     active_low, active_high = float(lines[0]), float(lines[-1])
     paused = 0
     for i, (ts, lo, hi, close) in enumerate(zip(candles.timestamp, candles.low, candles.high, closes)):
+        resumed_this_pass = False
+        sigma_used = float(sigma[i])
         fills = exchange.process(i, lo, hi, close, cells)
         for idx, side, price, qty, fee, qty_net in fills:
             events.append({"ts": int(ts), "type": f"{side}_FILLED", "level_idx": idx,
@@ -107,8 +115,26 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                          int(candles.timestamp[int(c["bought_at"])]) + (int(c["bought_at"]) % 1), timezone.utc),
                                      stop_loss_pct=float(c["stop_loss_pct"]) if c["stop_loss_pct"] is not None else None)
                                 for c in cells]
+                # Match GridMonitor ordering: stop-loss executes before sync/policy.
+                for candidate in stoploss_candidates(policy_cells, float(close)):
+                    c = cells[int(candidate["level_idx"])]
+                    exchange.cancel(c["level_idx"])
+                    pnl = exchange.market_sell(c, close)
+                    events.append({"ts": int(ts), "type": "STOP_LOSS", "level_idx": c["level_idx"],
+                                   "reason": "stop_loss_pct", "pnl": str(pnl)})
+                policy_cells = [dict(c, held_qty=float(c["held_qty"]),
+                                     entry_price=None if c["entry_price"] is None else float(c["entry_price"]),
+                                     pnl=float(c["pnl"]),
+                                     bought_at=None if c["bought_at"] is None else datetime.fromtimestamp(
+                                         int(candles.timestamp[int(c["bought_at"])]) + (int(c["bought_at"]) % 1), timezone.utc),
+                                     stop_loss_pct=float(c["stop_loss_pct"]) if c["stop_loss_pct"] is not None else None)
+                                for c in cells]
+                sigma_now = float(sigma[i])
+                if not math.isfinite(sigma_now):
+                    sigma_now = None
+                sigma_used = float("nan") if sigma_now is None else sigma_now
                 decision = evaluate_grid(status, effective, policy_cells, float(close), active_low,
-                                         active_high, float(capital), float(sigma[i]), paused_since,
+                                         active_high, float(capital), sigma_now, paused_since,
                                          datetime.fromtimestamp(int(ts), timezone.utc), pause_reasons)
                 action = decision.action
                 now = datetime.fromtimestamp(int(ts), timezone.utc)
@@ -116,7 +142,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                     adjust_decision_result = adjust_decision(
                         {"strategy": "smart", "status": status, "params": effective, "n_levels": n,
                          "range_low": active_low, "range_high": active_high, "capital_total": capital},
-                        policy_cells, float(close), float(sigma[i]), now, last_adjust_at)
+                        policy_cells, float(close), sigma_now, now, last_adjust_at)
                     if adjust_decision_result.action == "ADJUST":
                         action = "ADJUST"
                         decision = adjust_decision_result
@@ -139,19 +165,33 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                     status, paused_since, pause_reasons = "PAUSED", datetime.fromtimestamp(int(ts), timezone.utc), decision.reasons
                     for c in cells:
                         exchange.cancel(c["level_idx"], "BUY")
+                        if c["state"] == "BUY_OPEN":
+                            c["state"] = "IDLE"
                 elif action == "RESUME":
                     status, paused_since, pause_reasons = "ACTIVE", None, None
+                    resumed_this_pass = True
                 elif action == "CLOSE_REPOSITORY":
-                    status = "HOLDING"
                     for c in cells:
-                        exchange.cancel(c["level_idx"])
-                # Production stop-loss decision helper is shared; execution occurs at monitor close.
-                for candidate in stoploss_candidates(policy_cells, float(close)):
-                    c = cells[int(candidate["level_idx"])]
-                    exchange.cancel(c["level_idx"])
-                    pnl = exchange.market_sell(c, close)
-                    events.append({"ts": int(ts), "type": "STOP_LOSS", "level_idx": c["level_idx"],
-                                   "reason": "stop_loss_pct", "pnl": str(pnl)})
+                        if c["state"] == "SELL_OPEN" and c["held_qty"] > 0:
+                            if c["level_idx"] not in exchange.orders:
+                                exchange.place(c["level_idx"], "SELL", c["sell_price"], c["held_qty"], i + 1, i)
+                            exchange.cancel(c["level_idx"], "BUY")
+                        else:
+                            order = exchange.orders.get(c["level_idx"])
+                            if order is not None and order.side == "BUY":
+                                order_id = order.order_id
+                                exchange.cancel(c["level_idx"], "BUY")
+                                events.append({"ts": int(ts), "type": "BUY_CANCELED",
+                                               "level_idx": c["level_idx"], "order_id": order_id,
+                                               "reason": "CLOSE_REPOSITORY"})
+                            exchange.cancel(c["level_idx"])
+                            c.update(state="DONE", capital=Decimal(0))
+                    held = [c for c in cells if c["state"] == "SELL_OPEN" and c["held_qty"] > 0]
+                    status = "HOLDING" if held else "CLOSED"
+                    if held:
+                        active_low = float(min(c["price"] for c in held))
+                        active_high = float(max(c["sell_price"] for c in held))
+                        n = len(held)
                 if action == "ADJUST":
                     grid = {"n_levels": n, "range_low": active_low, "range_high": active_high,
                             "capital_total": capital, "params": effective}
@@ -159,13 +199,20 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                          decision.metrics["range_high"], decision.metrics["n_levels"],
                                          close, filters, type("Settings", (), {"grid_min_step_pct": .003,
                                          "capital_max_por_nivel_pct": .30})())
+                    if adjust.ok and adjust.mapping:
+                        free_capital = sum((c["capital"] for c in cells
+                                            if c["state"] in {"IDLE", "BUY_OPEN", "DONE"}
+                                            and c["held_qty"] <= 0), Decimal(0))
+                        assigned = sum((Decimal(item["capital"])
+                                        for item in adjust.mapping[:-1]), Decimal(0))
+                        adjust.mapping[-1]["capital"] = str(free_capital - assigned)
                     events.append({"ts": int(ts), "type": "ADJUST" if adjust.ok else "ADJUST_REJECTED",
                                    "reason": adjust.reason,
                                    "details": {**adjust.details, "decision": decision.metrics}})
                     if adjust.ok:
                         last_adjust_at = now
                         for c in cells:
-                            exchange.cancel(c["level_idx"])
+                            exchange.cancel(c["level_idx"], "BUY")
                         for idx in adjust.retire_level_idxs:
                             if idx < len(cells):
                                 cells[idx]["state"] = "DONE"
@@ -186,7 +233,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                      capital=Decimal(item["capital"]), qty=filters.round_qty_down(
                                Decimal(item["capital"]) / Decimal(item["price"])), state="IDLE")
                         active_low, active_high, n = float(adjust.lines[0]), float(adjust.lines[-1]), len(adjust.lines)-1
-            if status in {"ACTIVE", "PAUSED"}:
+            if status in {"ACTIVE", "PAUSED"} and not resumed_this_pass:
                 for c in cells:
                     idx = c["level_idx"]
                     if c["state"] == "SELL_OPEN" and idx not in exchange.orders:
@@ -194,13 +241,46 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                     elif (c["state"] in {"IDLE", "BUY_OPEN"} and idx not in exchange.orders
                           and status == "ACTIVE" and c["price"] < Decimal(str(close))):
                         c["state"] = "BUY_OPEN"
-                        exchange.place(idx, "BUY", c["price"], c["qty"], i + 1, i)
+                        try:
+                            exchange.place(idx, "BUY", c["price"], c["qty"], i + 1, i)
+                        except SimInsufficientFunds as exc:
+                            events.append({"ts": int(ts), "type": "BUY_REJECTED", "level_idx": idx,
+                                           "reason": str(exc)})
+                            c["state"] = "IDLE"
         if status == "PAUSED":
             paused += 1
         market_equity = exchange.usdt + exchange.base * Decimal(str(close))
         equity.append(float(market_equity))
         trapped_values.append(float(sum((c["held_qty"] * c["entry_price"]
                                          for c in cells if c["entry_price"] is not None), Decimal(0))))
+        if status == "HOLDING" and not any(c["state"] == "SELL_OPEN" and c["held_qty"] > 0
+                                             for c in cells):
+            status = "CLOSED"
+        if trace_callback is not None and i % resync_candles == 0:
+            projected_cells = cells
+            projected_orders = list(exchange.orders.values())
+            if status == "HOLDING":
+                held = [c for c in cells if c["state"] == "SELL_OPEN" and c["held_qty"] > 0]
+                level_map = {int(c["level_idx"]): new_idx for new_idx, c in enumerate(held)}
+                projected_cells = [{**c, "level_idx": level_map[int(c["level_idx"])]} for c in held]
+                projected_orders = [type(o)(level_map[o.cell], o.side, o.price, o.qty,
+                                             o.active_from, o.created_at, o.reserved_usdt, o.order_id)
+                                    for o in exchange.orders.values() if o.cell in level_map]
+                projected_orders.extend(o for o in exchange.orders.values() if o.side == "BUY")
+            trace_callback({"candle": i, "timestamp": int(ts), "status": status,
+                            "sigma_24h": (sigma_used if math.isfinite(sigma_used) else None),
+                            "range_low": active_low, "range_high": active_high, "n_levels": n,
+                            "cells": [{key: c.get(key) for key in ("level_idx", "state", "price", "sell_price",
+                                      "held_qty", "capital", "cycles_completed")} for c in projected_cells],
+                            "orders": [{"cell": o.cell, "side": o.side, "price": o.price,
+                                        "qty": o.qty, "order_id": o.order_id,
+                                        "created_at": o.created_at} for o in projected_orders],
+                            "equity": market_equity, "fees": exchange.fees,
+                            "balances": {"USDT": exchange.usdt, "XRP": exchange.base},
+                            "events": [dict(event) for event in events
+                                       if int(event.get("ts", -1)) == int(ts)
+                                       and event.get("type") in {"PAUSE", "RESUME", "ADJUST",
+                                           "ADJUST_REJECTED", "CLOSE_REPOSITORY", "STOP_LOSS"}]})
     # Open inventory after CLOSE is retained and valued at the last close.
     metric = calculate_metrics(equity, float(capital), cells, exchange, closes,
                                paused=paused, trapped_values=trapped_values)

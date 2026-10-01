@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.live
+
 from tests.test_grid_engine_live import (
     cancel_orders_created_since, live_context, live_range, verify_no_grid_orders,
 )
