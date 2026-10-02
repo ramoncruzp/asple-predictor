@@ -1,0 +1,81 @@
+/* Fase 17A: styles for the read-only Grids screen. Reuses the existing dark
+   palette (--bg, --surface, --border, --text, --muted, --blue, --green, --red,
+   --purple, --mono, --body from styles.css). No new fonts or CDN assets. */
+#grids-content{display:flex;flex-direction:column;gap:16px}
+.grids-error{padding:18px;color:var(--red)}
+.grids-warning{padding:12px 16px;border:1px solid #f0883e;background:rgba(240,136,62,.12);color:#f0883e;border-radius:6px;font-size:12px}
+.grids-totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;padding:16px}
+.grids-totals div{display:flex;flex-direction:column;gap:4px}
+.grids-totals span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.grids-totals b{font:600 18px var(--mono)}
+.grids-section-title{font-size:14px;margin:4px 0 0}
+.grids-list{display:flex;flex-direction:column;gap:10px}
+.grid-row-card{display:block;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;color:var(--text);text-decoration:none}
+.grid-row-card:hover{border-color:var(--blue)}
+.grid-row-top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.grid-id{font:700 13px var(--mono);color:var(--muted)}
+.grid-symbol{font-weight:700}
+.grid-strategy{color:var(--muted);font-size:12px;text-transform:uppercase}
+.status-badge{margin-left:auto;padding:3px 9px;border-radius:99px;font:600 10px var(--mono);letter-spacing:.04em}
+.status-active{background:rgba(63,185,80,.15);color:var(--green)}
+.status-paused{background:rgba(240,136,62,.15);color:#f0883e}
+.status-holding{background:rgba(188,140,255,.15);color:var(--purple)}
+.status-closing{background:rgba(248,81,73,.15);color:var(--red)}
+.status-closed,.status-error{background:#252b33;color:var(--muted)}
+.grid-row-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.grid-row-metrics div{display:flex;flex-direction:column;gap:2px}
+.grid-row-metrics span{color:var(--muted);font-size:10px;text-transform:uppercase}
+.grid-row-metrics b{font:600 14px var(--mono)}
+.pnl-positive{color:var(--green)}
+.pnl-negative{color:var(--red)}
+.back-link{color:var(--blue);text-decoration:none;font-size:12px}
+.grid-detail-header{display:flex;flex-wrap:wrap;align-items:center;gap:18px;padding:18px}
+.grid-detail-identity{display:flex;align-items:center;gap:10px}
+.grid-detail-identity h2{margin:0;font-size:18px}
+.badge-compound{padding:3px 8px;border-radius:99px;background:var(--surface2,#1d2430);color:var(--purple);font:600 10px var(--mono)}
+.grid-detail-price{margin-left:auto;font:700 28px var(--mono)}
+.grid-detail-price small{display:block;font:400 11px var(--body);color:var(--muted)}
+.grid-detail-controls{display:flex;gap:8px}
+.grid-detail-controls button[disabled]{opacity:.45;cursor:not-allowed}
+.recovery-banner{padding:14px 16px;border:1px solid var(--blue);background:rgba(47,129,247,.1);border-radius:8px;font-size:13px;line-height:1.5}
+.metric-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.metric-card{padding:14px}
+.metric-card span{display:block;color:var(--muted);font-size:11px;margin-bottom:6px}
+.metric-card b{font:700 18px var(--mono)}
+.tooltip-icon{display:inline-grid;place-items:center;width:14px;height:14px;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font-size:10px;cursor:help;margin-left:3px}
+.fee-estimate-note{padding:12px 16px;font-size:12px;color:var(--muted)}
+.inventory-block,.cells-block,.operations-block,.daily-block,.equity-block,.events-block{padding:16px}
+.inventory-block h3,.cells-block h3,.operations-block h3,.daily-block h3,.equity-block h3,.events-block h3{margin:0 0 12px;font-size:14px}
+.inventory-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+.inventory-grid div{display:flex;flex-direction:column;gap:3px}
+.inventory-grid span{color:var(--muted);font-size:11px}
+.inventory-grid b{font:600 14px var(--mono)}
+.progress-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.progress-block{padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;gap:4px}
+.progress-block span{color:var(--muted);font-size:11px}
+.progress-block b{font:700 16px var(--mono)}
+.cells-table td,.cells-table th{white-space:nowrap}
+.price-marker-row td{background:rgba(47,129,247,.12);color:var(--blue);font:700 12px var(--mono);text-align:center;padding:8px}
+.cell-state{font-size:12px}
+.cells-totals{display:flex;gap:20px;margin-top:10px;font-size:12px;color:var(--muted)}
+.daily-chart{display:flex;align-items:flex-end;gap:4px;height:70px;overflow-x:auto}
+.daily-bar-wrap{display:flex;align-items:flex-end;min-width:6px}
+.daily-bar{width:6px;border-radius:2px 2px 0 0}
+.daily-bar.pnl-positive{background:var(--green)}
+.daily-bar.pnl-negative{background:var(--red)}
+.equity-svg{width:100%;height:160px}
+.equity-line-realized{fill:none;stroke:var(--muted);stroke-width:2;stroke-dasharray:4 3}
+.equity-line-inventory{fill:none;stroke:var(--blue);stroke-width:2}
+.equity-legend{display:flex;gap:14px;margin-top:8px;font-size:11px;color:var(--muted)}
+.equity-legend span{display:flex;align-items:center;gap:6px}
+.equity-dot-realized,.equity-dot-inventory{width:8px;height:8px;border-radius:50%;display:inline-block}
+.equity-dot-realized{background:var(--muted)}
+.equity-dot-inventory{background:var(--blue)}
+.severity-error{color:var(--red)}
+.severity-warning{color:#f0883e}
+.severity-success{color:var(--green)}
+@media(max-width:700px){
+  .grid-detail-header{flex-direction:column;align-items:flex-start}
+  .grid-detail-price{margin-left:0}
+  .data-table{font-size:11px}
+}

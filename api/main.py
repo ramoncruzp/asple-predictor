@@ -2,6 +2,7 @@
 from __future__ import annotations
 import time
 import logging
+import threading
 import requests
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +20,7 @@ from models.shadow_predictor import ShadowPredictor
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grids, models_status, predictions, volatility
+from api.routes import coins, grid_advisor, grid_status, grids, models_status, predictions, volatility
 from models.volatility.live import VolPredictor
 from scheduler.vol_loop import VolLoop
 from grid.engine import GridEngine
@@ -125,13 +126,32 @@ async def lifespan(app: FastAPI):
         prediction_loop.stop(); verification_loop.stop()
 
 app = FastAPI(title="ASPLE Predictor API", version="1.0.0", lifespan=lifespan)
+PROCESS_STARTED_AT = time.monotonic()
+SLOW_REQUEST_THRESHOLD_SECONDS = 3.0
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.middleware("http")
+async def log_slow_requests(request: Request, call_next):
+    started, status_code = time.perf_counter(), 500
+    try:
+        response = await call_next(request); status_code = response.status_code; return response
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed > SLOW_REQUEST_THRESHOLD_SECONDS:
+            logging.getLogger("asple.slow").warning("%s %s status=%s duration_ms=%.1f active_threads=%d", request.method, request.url.path, status_code, elapsed * 1000, threading.active_count())
+
 app.include_router(predictions.router, prefix="/api/predictions", tags=["predictions"])
 app.include_router(models_status.router, prefix="/api/models", tags=["models"])
 app.include_router(grid_advisor.router, prefix="/api/grid", tags=["grid"])
 app.include_router(volatility.router, prefix="/api/volatility", tags=["volatility"])
 app.include_router(coins.router, prefix="/api/coins", tags=["coins"])
 app.include_router(grids.router, prefix="/api/grids", tags=["grids"])
+app.include_router(grid_status.router, tags=["grid-status"])
+
+@app.get("/api/health")
+async def health(request: Request):
+    started = getattr(request.app.state, "started_at", PROCESS_STARTED_AT)
+    return {"status": "ok", "uptime_s": max(0, int(time.monotonic() - started))}
 
 @app.get("/api/candles")
 def candles(symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):
