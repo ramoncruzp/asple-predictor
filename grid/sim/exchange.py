@@ -34,6 +34,9 @@ class SimExchange:
         self.next_order_id = 1
         self.realized = Decimal(0)
         self.events = []
+        self.dust_qty = Decimal(0)
+        self.dust_swept_usdt = Decimal(0)
+        self.dust_sweep_fee_usdt = Decimal(0)
 
     def place(self, cell, side, price, qty, active_from, created_at):
         self.cancel(cell)
@@ -75,8 +78,10 @@ class SimExchange:
                                      f"cell {idx}: free={self.usdt}, required={cost + fee}")
                 fee = (gross * self.fee_rate if self.buy_fee_asset == "XRP" else fee)
                 net = (gross - fee if self.buy_fee_asset == "XRP" else gross)
+                raw_net = gross - (fee if self.buy_fee_asset == "XRP" else Decimal(0))
                 if self.filters is not None:
-                    net = self.filters.round_qty_down(net)
+                    net = self.filters.round_qty_down(raw_net)
+                self.dust_qty += raw_net - net
                 self.usdt -= cost + (fee if self.buy_fee_asset == "USDT" else Decimal(0))
                 self.base += gross - (fee if self.buy_fee_asset == "XRP" else Decimal(0))
                 self.fees += fee * order.price if self.buy_fee_asset == "XRP" else fee
@@ -120,3 +125,19 @@ class SimExchange:
         cell.update(state="DONE", held_qty=Decimal(0), entry_price=None, entry_cost=Decimal(0),
                     entry_fee_usdt=Decimal(0), bought_at=None, pnl=cell["pnl"] + realized)
         return realized
+
+    def sweep_dust(self, price, filters):
+        from grid.policy import plan_dust_sweep
+        plan = plan_dust_sweep(self.dust_qty, price, filters, self.fee_rate * 100)
+        if not plan["sweepable"]:
+            return plan
+        qty = plan["qty"]
+        proceeds = qty * Decimal(str(price))
+        fee = proceeds * self.fee_rate if self.sell_fee_asset == "USDT" else qty * self.fee_rate
+        self.base -= qty + (fee if self.sell_fee_asset == "XRP" else Decimal(0))
+        self.usdt += proceeds - (fee if self.sell_fee_asset == "USDT" else Decimal(0))
+        self.fees += fee * Decimal(str(price)) if self.sell_fee_asset == "XRP" else fee
+        self.dust_qty -= qty
+        self.dust_swept_usdt += proceeds - (fee if self.sell_fee_asset == "USDT" else fee * Decimal(str(price)))
+        self.dust_sweep_fee_usdt += fee * Decimal(str(price)) if self.sell_fee_asset == "XRP" else fee
+        return {**plan, "proceeds_net": proceeds - (fee if self.sell_fee_asset == "USDT" else fee * Decimal(str(price)))}

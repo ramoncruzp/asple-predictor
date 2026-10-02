@@ -17,6 +17,8 @@ from grid.sim.data import CandleDataError, load_candles
 from grid.sim.runner import run_simulation
 from grid.sim.calibration import calibrate
 from grid.sim.sweep import run_sweep, write_artifacts
+from grid.sim.target_study import run_target_study, run_max_days_study
+import csv
 from config.settings import Settings
 from database.db_manager import DBManager
 
@@ -73,6 +75,19 @@ def parser():
     p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
     p.add_argument("--allow-gaps", action="store_true")
     p.add_argument("--out-dir", type=Path, default=ROOT / "data/cache/sim/structure_sweep")
+    p = sub.add_parser("target-study", help="descriptive target feasibility study")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
+    p.add_argument("--allow-gaps", action="store_true")
+    p.add_argument("--out-dir", type=Path, default=ROOT / "data/cache/sim/target_study")
+    p.add_argument("--stdout-only", action="store_true",
+                   help="print study summary without writing output artifacts")
+    p = sub.add_parser("max-days-study", help="90-day deadline sensitivity study")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--csv", type=Path, default=ROOT / "data/cache/xrp_5m.csv")
+    p.add_argument("--allow-gaps", action="store_true")
+    p.add_argument("--stdout-only", action="store_true")
     return root
 
 
@@ -117,6 +132,45 @@ def main(argv=None):
             return 0
         except (CandleDataError, OSError, ValueError, TypeError) as exc:
             print(f"sweep error: {exc}", file=sys.stderr)
+            return 3
+    if args.command == "target-study":
+        try:
+            candles = load_candles(args.csv, allow_gaps=args.allow_gaps)
+            digest = hashlib.sha256(args.csv.read_bytes()).hexdigest()
+            result = run_target_study(candles, seed=args.seed, workers=args.workers)
+            result["csv_sha256"] = digest
+            if not args.stdout_only:
+                args.out_dir.mkdir(parents=True, exist_ok=True)
+                (args.out_dir / "summary.json").write_text(
+                    json.dumps({key: value for key, value in result.items()
+                                if key not in {"rows", "baseline_rows"}},
+                               sort_keys=True, indent=2), encoding="utf-8")
+                with (args.out_dir / "windows.csv").open("w", newline="", encoding="utf-8") as stream:
+                    rows = result["rows"]
+                    writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else [])
+                    writer.writeheader()
+                    writer.writerows(rows)
+                with (args.out_dir / "baseline_windows.csv").open("w", newline="", encoding="utf-8") as stream:
+                    rows = result["baseline_rows"]
+                    writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else [])
+                    writer.writeheader()
+                    writer.writerows(rows)
+            print(json.dumps({key: value for key, value in result.items()
+                              if key not in {"rows", "baseline_rows"}}, sort_keys=True))
+            return 0
+        except (CandleDataError, OSError, ValueError, TypeError) as exc:
+            print(f"target study error: {exc}", file=sys.stderr)
+            return 3
+    if args.command == "max-days-study":
+        try:
+            candles = load_candles(args.csv, allow_gaps=args.allow_gaps)
+            digest = hashlib.sha256(args.csv.read_bytes()).hexdigest()
+            result = run_max_days_study(candles, seed=args.seed)
+            result["csv_sha256"] = digest
+            print(json.dumps({key: value for key, value in result.items() if key != "rows"}, sort_keys=True))
+            return 0
+        except (CandleDataError, OSError, ValueError, TypeError) as exc:
+            print(f"max-days study error: {exc}", file=sys.stderr)
             return 3
     try:
         if args.low is not None and args.high is None:

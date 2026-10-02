@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import warnings
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -14,7 +15,7 @@ from database.db_manager import DBManager
 from grid.engine import GridEngine
 from grid.monitor import GridMonitor
 from grid.levels import compute_lines, plan_cells
-from grid.policy import DEFAULT_SMART_PARAMS, validate_params
+from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
 from data.exchange_filters import SymbolFilters
 
 
@@ -48,10 +49,61 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
         grid["reserve"] = float(grid.get("reserve") or 0.0)
         grid["loans"] = db.list_grid_loans(int(grid["id"])) if hasattr(db, "list_grid_loans") else []
         grid["open_loans"] = [row for row in grid["loans"] if row.get("status") in {"OPEN", "PENDING"}]
+        snapshots = db.list_grid_snapshots(grid_id=int(grid["id"]), limit=100) if hasattr(db, "list_grid_snapshots") else []
         latest_adjust = db.get_last_event(int(grid["id"]), "GRID_ADJUSTED") \
             if hasattr(db, "get_last_event") else None
         grid["last_adjust_at"] = None if latest_adjust is None else latest_adjust.get("ts")
         grid["adjust_enabled"] = bool((grid.get("params") or {}).get("adjust_enabled", False))
+        grid["max_days"] = (grid.get("params") or {}).get("max_days")
+        params = grid.get("params") or {}
+        if grid.get("strategy") == "smart":
+            summaries = [row for row in snapshots if row.get("level_idx") is None]
+            latest = summaries[0] if summaries else {}
+            mid = latest.get("market_mid")
+            cells = grid["levels"]
+            realized = sum(float(row.get("pnl") or 0) for row in cells)
+            buy_events = (db.list_grid_events(grid_id=int(grid["id"]), event_type="BUY_FILLED", limit=5000)
+                          if hasattr(db, "list_grid_events") else [])
+            held_basis = 0.0
+            for cell in cells:
+                qty = float(cell.get("held_qty") or 0)
+                if qty <= 0:
+                    continue
+                current_buy_cid = cell.get("buy_client_order_id")
+                fill = next((event for event in buy_events
+                             if int(event.get("level_idx", -1)) == int(cell["level_idx"])
+                             and (not current_buy_cid or event.get("client_order_id") == current_buy_cid)), None)
+                details = (fill or {}).get("details") or {}
+                gross_qty = float(details.get("executed_qty") or 0)
+                if gross_qty > 0:
+                    held_basis += float(cell.get("entry_price") or 0) * gross_qty + float(details.get("fee_usdt") or 0)
+                else:
+                    held_basis += float(cell.get("entry_price") or 0) * qty * 1.001
+            cash_now = (float(grid.get("capital_total") or 0) + realized - held_basis
+                        + float(params.get("dust_cash_proceeds", 0)))
+            equity_now = (cash_now + sum(float(row.get("held_qty") or 0) * float(mid or 0) * .999
+                                         for row in cells)) if mid is not None else None
+            target_goals = []
+            if params.get("target_pct") is not None:
+                target_goals.append(float(grid.get("capital_total") or 0) * float(params["target_pct"]) / 100)
+            if params.get("target_usdt") is not None:
+                target_goals.append(float(params["target_usdt"]))
+            target_usdt = min(target_goals) if target_goals else None
+            close_plan = params.get("target_close_plan") or {}
+            if close_plan.get("phase") == "COMPLETE":
+                cash_now = close_plan.get("cash_total", cash_now)
+                equity_now = close_plan.get("equity_total_at_close", equity_now)
+            basis_value = cash_now if params.get("target_basis", "cash") == "cash" else equity_now
+            grid["target"] = {
+                "pct": params.get("target_pct"), "usdt": params.get("target_usdt"),
+                "basis": params.get("target_basis", "cash"), "cash_now": cash_now,
+                "equity_now": equity_now,
+                "cash_total": close_plan.get("cash_total", cash_now),
+                "equity_total_at_close": close_plan.get("equity_total_at_close", equity_now),
+                "progress_pct": (None if target_usdt is None or basis_value is None else
+                                 max(0.0, (basis_value - float(grid.get("capital_total") or 0))
+                                     / target_usdt * 100)),
+            }
         grid["calibrated"] = False
         calibration_id = grid.get("calibration_id")
         if calibration_id is not None and hasattr(db, "get_grid_calibration"):
@@ -61,7 +113,6 @@ def _status(context: dict[str, Any]) -> dict[str, Any]:
                 if grid["calibrated"]:
                     grid["calibration"] = {"id": int(calibration_id), "verdict": calibration.get("verdict"),
                                             "data_end": calibration.get("data_end")}
-        snapshots = db.list_grid_snapshots(grid_id=int(grid["id"]), limit=100) if hasattr(db, "list_grid_snapshots") else []
         summaries = [row for row in snapshots
                      if row.get("level_idx") is None]
         if summaries:
@@ -89,6 +140,10 @@ def main(argv: list[str] | None = None) -> int:
     open_parser.add_argument("--shift-half-step", action="store_true")
     open_parser.add_argument("--stop-loss-pct", type=Decimal)
     open_parser.add_argument("--param", action="append", default=[])
+    open_parser.add_argument("--target-pct", type=Decimal)
+    open_parser.add_argument("--target-usdt", type=Decimal)
+    open_parser.add_argument("--target-basis", choices=("cash", "equity"))
+    open_parser.add_argument("--max-days", type=Decimal, help="automatic repository close after N calendar days")
     open_parser.add_argument("--calibration", help="use latest or a validated calibration ID")
     open_parser.add_argument("--dry-run", action="store_true")
     open_parser.add_argument("--yes", action="store_true")
@@ -104,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     adjust.add_argument("--dry-run", action="store_true")
     adjust.add_argument("--yes", action="store_true")
     subparsers.add_parser("run-once", help="run one monitor pass without starting the scheduler")
+    dust = subparsers.add_parser("sweep-dust", help="preview or sweep one grid's recorded dust")
+    dust.add_argument("--grid", required=True, type=int)
+    dust.add_argument("--execute", action="store_true", help="send the market sell; default is dry-run")
     args = parser.parse_args(argv)
     if args.command == "close" and args.mode == "liquidate" and not args.yes:
         print("error: close --mode liquidate requiere --yes", file=sys.stderr)
@@ -115,6 +173,18 @@ def main(argv: list[str] | None = None) -> int:
         context = build_context()
         if args.command == "status":
             result = _status(context)
+        elif args.command == "sweep-dust":
+            db, exchange, engine = context["db"], context["exchange"], context["engine"]
+            grid = db.get_grid(args.grid)
+            if grid is None:
+                raise ValueError(f"grid {args.grid} does not exist")
+            filters = SymbolFilters.from_symbol_info(exchange.get_symbol_info(grid["symbol"]))
+            bid = exchange.get_book_ticker(grid["symbol"])["bid_price"]
+            if args.execute:
+                result = engine.sweep_grid_dust(args.grid, bid, reason="cli")
+            else:
+                result = {**plan_dust_sweep(grid.get("dust_qty") or 0, bid, filters, .1),
+                          "status": "DRY_RUN", "grid_id": args.grid, "bid": str(bid)}
         elif args.command == "loans":
             grid = context["db"].get_grid(args.grid_id)
             if grid is None:
@@ -172,6 +242,15 @@ def main(argv: list[str] | None = None) -> int:
                 params[key] = None if raw.casefold() == "none" else json.loads(raw)
             if args.strategy == "simple" and params:
                 raise ValueError("--param solo se admite con --strategy smart")
+            targets = {"target_pct": args.target_pct, "target_usdt": args.target_usdt,
+                       "target_basis": args.target_basis}
+            if args.strategy == "simple" and any(value is not None for value in targets.values()):
+                raise ValueError("--target-pct/--target-usdt/--target-basis solo se admiten con --strategy smart")
+            params.update({key: value for key, value in targets.items() if value is not None})
+            if args.max_days is not None:
+                if args.max_days <= 0:
+                    raise ValueError("--max-days debe ser mayor que cero")
+                params["max_days"] = args.max_days
             calibration_id = None
             calibration_params = {}
             if args.calibration is not None:
@@ -186,7 +265,18 @@ def main(argv: list[str] | None = None) -> int:
                 calibration_id = int(calibration["id"])
                 calibration_params = dict(calibration.get("params") or {})
             calibration_params.update(params)
-            effective = validate_params(calibration_params, args.n) if args.strategy == "smart" else None
+            effective = (validate_params(calibration_params, args.n)
+                         if args.strategy == "smart" or args.max_days is not None else None)
+            if effective and (effective.get("target_pct") is not None or effective.get("target_usdt") is not None):
+                target_goals = []
+                if effective.get("target_pct") is not None:
+                    target_goals.append(float(args.capital) * float(effective["target_pct"]) / 100)
+                if effective.get("target_usdt") is not None:
+                    target_goals.append(float(effective["target_usdt"]))
+                target_amount = min(target_goals)
+                round_trip_fee = float(args.capital) * 0.1 / 100 * 2
+                if target_amount < round_trip_fee:
+                    warnings.warn("target is below an approximate two-sided 0.1% fee on capital", RuntimeWarning)
             stop_loss = args.stop_loss_pct
             if stop_loss is not None and stop_loss <= 0:
                 raise ValueError("--stop-loss-pct debe ser mayor que cero")

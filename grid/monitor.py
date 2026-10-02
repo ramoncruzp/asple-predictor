@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from grid.policy import adjust_decision, evaluate_grid, stoploss_candidates, PolicyDecision
+from grid.policy import adjust_decision, evaluate_grid, evaluate_target, evaluate_max_days, plan_dust_sweep, stoploss_candidates, PolicyDecision
 from grid.volatility_provider import VolatilityProvider
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,8 @@ class GridMonitor:
             "symbol": grid["symbol"], "grid_status": grid["status"], "level_state": None,
             "buy_price": None, "sell_price": None, "held_qty": None, "cycles_completed": None,
             "pnl_realized": float(sum((_d(level.get("pnl")) for level in levels), Decimal(0))),
-            "fee_paid": float(sum((_d(level.get("fee_paid")) for level in levels), Decimal(0))),
+            "fee_paid": float(sum((_d(level.get("fee_paid")) for level in levels), Decimal(0))
+                              + _d((grid.get("params") or {}).get("dust_sweep_fee_usdt", 0))),
             "market_mid": mid, "unrealized_pnl": None, "open_orders_db": open_count,
             "inventory_value_usdt": float(inventory) if mid is not None else None,
             "in_repository": int(repository), "origin_grid_id": None,
@@ -203,7 +204,13 @@ class GridMonitor:
             normal_grids = self.db.list_grids_by_status({"ACTIVE", "PAUSED"})
             repositories = self.db.list_grids_by_status({"HOLDING"})
             closings = self.db.list_grids_by_status({"CLOSING"})
-            all_grids = normal_grids + repositories + closings
+            closed_targets = [grid for grid in self.db.list_grids_by_status({"CLOSED"})
+                              if (grid.get("params") or {}).get("target_close_plan") is not None
+                              and (grid.get("params") or {}).get("target_close_plan", {}).get("phase") != "COMPLETE"]
+            closed_max_days = [grid for grid in self.db.list_grids_by_status({"CLOSED"})
+                if (grid.get("params") or {}).get("max_days_close_plan", {}).get("phase") == "STARTED"
+                and self.db.get_last_event(int(grid["id"]), "MAX_DAYS_REACHED") is None]
+            all_grids = normal_grids + repositories + closings + closed_targets + closed_max_days
             mids = self._market_mids(all_grids)
             policy_enabled = bool(getattr(self.settings, "grid_policy_enabled", True))
             vol_cache: dict[str, Any] = {}
@@ -214,6 +221,38 @@ class GridMonitor:
                     return
                 self._emit({"event_type": "VOL_UNAVAILABLE", "grid_id": int(grid["id"]),
                             "reason": reason, "price": mids.get(grid["symbol"]), "details": {"reason": reason}})
+
+            def start_max_days_plan(grid: dict, levels: list[dict], expiry: dict, price: float) -> dict:
+                held = [row for row in levels if _d(row.get("held_qty")) > 0]
+                plan = {**expiry,
+                    "repository_cells": [int(row["level_idx"]) for row in held],
+                    "unrealized_pnl": sum(float(row.get("held_qty") or 0)
+                        * (float(price) * .999 - float(row.get("entry_price") or 0) * 1.001)
+                        for row in held), "phase": "STARTED"}
+                params = dict(grid.get("params") or {})
+                params["max_days_close_plan"] = plan
+                self.db.update_grid(int(grid["id"]), params=self.db._json(params))
+                return plan
+
+            def emit_max_days_reached(grid_id: int, price: float | None,
+                                      close_status: str) -> None:
+                if self.db.get_last_event(int(grid_id), "MAX_DAYS_REACHED") is not None:
+                    return
+                grid = self.db.get_grid(int(grid_id)) or {}
+                params = dict(grid.get("params") or {})
+                plan = dict(params.get("max_days_close_plan") or {})
+                swept = self.db.get_last_event(int(grid_id), "DUST_SWEPT")
+                swept_details = (swept or {}).get("details") or {}
+                details = {key: value for key, value in plan.items() if key != "phase"}
+                details.update({"dust_swept": swept_details.get("qty", "0")
+                                    if swept_details.get("reason") == "max_days" else "0",
+                                "dust_pending": str(grid.get("dust_qty", 0)),
+                                "close_status": close_status})
+                self._emit({"event_type": "MAX_DAYS_REACHED", "grid_id": int(grid_id),
+                    "reason": "max_days", "price": price, "details": details})
+                plan["phase"] = "EVENT_EMITTED"
+                params["max_days_close_plan"] = plan
+                self.db.update_grid(int(grid_id), params=self.db._json(params))
 
             def process_grid(grid: dict) -> None:
                 nonlocal failed
@@ -261,6 +300,12 @@ class GridMonitor:
                     elif status_before == "HOLDING":
                         self.engine.sync_repository(grid_id)
                     current = self.db.get_grid(grid_id) or current
+                    max_days_result = evaluate_max_days(current.get("params") or {}, current.get("created_at"), now)
+                    max_days_plan_started = ((current.get("params") or {}).get(
+                        "max_days_close_plan", {}).get("phase") == "STARTED")
+                    if max_days_plan_started:
+                        max_days_result = {**(current.get("params") or {}).get("max_days_close_plan", {}),
+                                           "expired": True}
 
                     if policy_enabled and mid is not None and current.get("strategy", "simple") == "smart" \
                             and current["status"] in {"ACTIVE", "PAUSED"}:
@@ -286,6 +331,106 @@ class GridMonitor:
                             float(current["capital_total"]), sigma, paused_since, now,
                             pause_reasons=pause_reasons,
                         )
+                        target_plan = None
+                        target_params = current.get("params") or {}
+                        if (decision.action != "CLOSE_REPOSITORY" and current.get("strategy") == "smart"
+                                and current["status"] in {"ACTIVE", "PAUSED"}
+                                and (target_params.get("target_pct") is not None
+                                     or target_params.get("target_usdt") is not None)):
+                            loans = self.db.list_grid_loans(grid_id) if hasattr(self.db, "list_grid_loans") else []
+                            saga_cells = [row for row in levels if float(row.get("capital_loan") or 0) > 0
+                                          or str(row.get("state", "")).upper().startswith("LOAN_")]
+                            blocking_loans = [loan for loan in loans if loan.get("status") in {"PENDING", "OPEN"}]
+                            skip_reason = ("open_or_pending_grid_loan" if blocking_loans else
+                                           "cell_in_loan_saga" if saga_cells else None)
+                            if skip_reason:
+                                recent = self.db.get_last_event(grid_id, "TARGET_SKIPPED")
+                                if not recent or (_utc(now) - _utc(recent["ts"])).total_seconds() >= 6 * 3600 \
+                                        or (recent.get("reason") != skip_reason):
+                                    cash_at_skip = float(current["capital_total"]) + sum(
+                                        float(row.get("pnl") or 0) - float(row.get("entry_price") or 0)
+                                        * float(row.get("held_qty") or 0) * 1.001 for row in levels)
+                                    equity_at_skip = cash_at_skip + sum(
+                                        float(row.get("held_qty") or 0) * float(mid or 0) * .999 for row in levels)
+                                    self._emit({"event_type": "TARGET_SKIPPED", "grid_id": grid_id,
+                                                "reason": skip_reason, "price": mid,
+                                                "details": {"target_basis": target_params.get("target_basis", "cash"),
+                                                            "pending_or_open_loans": len(blocking_loans),
+                                                            "saga_cells": [int(row["level_idx"]) for row in saga_cells],
+                                                            "cash_total": cash_at_skip,
+                                                            "equity_total_at_close": equity_at_skip}})
+                            else:
+                                book = self.exchange.get_book_ticker(current["symbol"])
+                                bid = float(book["bid_price"])
+                                filters, _, _ = self.engine._market_context(current["symbol"])
+                                eval_cells = []
+                                held_basis = 0.0
+                                for row in levels:
+                                    item = dict(row)
+                                    qty = float(row.get("held_qty") or 0)
+                                    basis_cost = float(row.get("entry_price") or 0) * qty
+                                    entry_fee = basis_cost * .001
+                                    try:
+                                        buy_cid = (row.get("buy_client_order_id") or row.get("client_order_id"))
+                                        if buy_cid:
+                                            buy_order = self.exchange.get_order(current["symbol"],
+                                                                                client_order_id=buy_cid)
+                                            buy_trades = self.exchange.get_my_trades(
+                                                current["symbol"], buy_order["order_id"])
+                                            quote = sum(float(trade.get("quoteQty") or
+                                                float(trade.get("qty", 0)) * float(trade.get("price", 0)))
+                                                for trade in buy_trades)
+                                            if quote > 0:
+                                                basis_cost = quote
+                                                entry_fee = float(self.engine._fee_value_usdt(buy_trades, current["symbol"]))
+                                    except Exception:
+                                        self.logger.debug("grid=%s level=%s target buy basis fallback",
+                                                          grid_id, row.get("level_idx"), exc_info=True)
+                                    item["entry_cost"] = basis_cost
+                                    item["entry_fee_usdt"] = entry_fee
+                                    held_basis += basis_cost + entry_fee
+                                    eval_cells.append(item)
+                                realized = sum(float(row.get("pnl") or 0) for row in levels)
+                                dust_in_cells = sum((_d(row.get("held_qty")) for row in levels
+                                                     if row.get("state") == "DONE"), Decimal(0))
+                                sweepable_dust_qty = max(Decimal(0),
+                                    _d(current.get("dust_qty")) - dust_in_cells)
+                                cash_now = (float(current["capital_total"]) + realized - held_basis
+                                            + float(target_params.get("dust_cash_proceeds", 0)))
+                                equity_now = cash_now + sum(float(row.get("held_qty") or 0) * bid * .999
+                                                            for row in levels)
+                                target_plan = evaluate_target(
+                                    target_params, current["capital_total"], cash_now, eval_cells,
+                                    bid, filters, .1, equity_now=equity_now,
+                                    dust={"dust_qty": sweepable_dust_qty})
+                                dust_threshold = target_params.get("dust_sweep_threshold_pct")
+                                if (dust_threshold is not None and not target_plan["reached"]
+                                        and decision.action != "CLOSE_REPOSITORY"):
+                                    dust_plan = plan_dust_sweep(sweepable_dust_qty, bid,
+                                                                filters, .1)
+                                    capital = float(current.get("capital_total") or 0)
+                                    if (capital > 0 and dust_plan["sweepable"]
+                                            and float(dust_plan["proceeds_net"]) / capital * 100
+                                            >= float(dust_threshold)):
+                                        self.engine.sweep_grid_dust(grid_id, bid, reason="threshold")
+                                target_plan["bid_used"] = bid
+                                target_plan["estimated_fees_usdt"] = sum(
+                                    float(row.get("held_qty") or 0) * bid * .001
+                                    for row in levels if float(row.get("held_qty") or 0) > 0)
+                                sell_indices = {int(row["level_idx"]) for row in target_plan["sell_cells"]}
+                                target_plan["repo_cells"] = [
+                                    {"level_idx": int(row["level_idx"]), "reason": "not_sold_by_target_plan"}
+                                    for row in levels if float(row.get("held_qty") or 0) > 0
+                                    and int(row["level_idx"]) not in sell_indices]
+                                target_plan["cash_total"] = target_plan["projected_cash"]
+                                target_plan["equity_total_at_close"] = target_plan["projected_cash"] + sum(
+                                    float(row.get("held_qty") or 0) * bid * .999
+                                    for row in levels if float(row.get("held_qty") or 0) > 0
+                                    and int(row["level_idx"]) not in sell_indices)
+                                metrics["target"] = {key: target_plan.get(key) for key in
+                                    ("reached", "basis", "cash_now", "projected_cash", "equity_now",
+                                     "target_usdt", "target_threshold", "reason", "cash_total",
+                                     "equity_total_at_close")}
                         # Adjustment has precedence over PAUSE, but CLOSE remains
                         # the highest priority. Legacy grids without the new
                         # adjust_enabled key stay on the 15B-1 policy path.
@@ -293,7 +438,13 @@ class GridMonitor:
                             current, levels, mid, sigma, now,
                             (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
                         )
-                        if decision.action != "CLOSE_REPOSITORY" and adjust.action == "ADJUST":
+                        if target_plan and target_plan["reached"]:
+                            decision = PolicyDecision("TARGET", (), {**decision.metrics, "target": target_plan})
+                        if max_days_result["expired"] and (max_days_plan_started
+                                or decision.action not in {"CLOSE_REPOSITORY", "TARGET"}):
+                            decision = PolicyDecision("MAX_DAYS", (), {**decision.metrics,
+                                "max_days": max_days_result})
+                        if decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"} and adjust.action == "ADJUST":
                             preview = self.engine.preview_adjust(
                                 grid_id, adjust.metrics["range_low"], adjust.metrics["range_high"],
                                 adjust.metrics["n_levels"],
@@ -301,7 +452,7 @@ class GridMonitor:
                             if not preview.get("ok"):
                                 adjust = PolicyDecision("BLOCKED", (preview.get("reason") or "invalid_plan",),
                                                         {**adjust.metrics, "plan": preview.get("plan")})
-                        if adjust.action == "ADJUST" and decision.action != "CLOSE_REPOSITORY":
+                        if adjust.action == "ADJUST" and decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}:
                             decision = adjust
                         elif adjust.action == "BLOCKED":
                             decision = decision if decision.action == "CLOSE_REPOSITORY" else decision
@@ -368,6 +519,41 @@ class GridMonitor:
                                             "reason": str(exc), "price": mid,
                                             "details": {"action": "CLOSE_REPOSITORY", **details}})
                                 self.logger.warning("grid=%s automatic close failed", grid_id, exc_info=True)
+                        elif decision.action == "MAX_DAYS":
+                            try:
+                                levels = self.db.get_grid_levels(grid_id)
+                                start_max_days_plan(current, levels, max_days_result, mid)
+                                result = self.engine.close_grid(grid_id, "repository", close_reason="max_days")
+                                emit_max_days_reached(grid_id, mid, result.get("status", "UNKNOWN"))
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "MAX_DAYS", **max_days_result}})
+                                self.logger.warning("grid=%s max-days close failed", grid_id, exc_info=True)
+                        elif decision.action == "TARGET":
+                            try:
+                                self.engine.close_grid_target(grid_id, decision.metrics["target"], mid)
+                            except Exception as exc:
+                                failed += 1
+                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                            "reason": str(exc), "price": mid,
+                                            "details": {"action": "TARGET", **decision.metrics["target"]}})
+                                self.logger.warning("grid=%s target close failed", grid_id, exc_info=True)
+                    current = self.db.get_grid(grid_id) or current
+                    if (current.get("status") in {"ACTIVE", "PAUSED"} and mid is not None):
+                        max_days_result = evaluate_max_days(current.get("params") or {},
+                            current.get("created_at"), now)
+                        max_days_plan_started = ((current.get("params") or {}).get(
+                            "max_days_close_plan", {}).get("phase") == "STARTED")
+                        if max_days_plan_started:
+                            max_days_result = {**(current.get("params") or {}).get("max_days_close_plan", {}),
+                                               "expired": True}
+                        if max_days_result["expired"]:
+                            levels = self.db.get_grid_levels(grid_id)
+                            start_max_days_plan(current, levels, max_days_result, mid)
+                            result = self.engine.close_grid(grid_id, "repository", close_reason="max_days")
+                            emit_max_days_reached(grid_id, mid, result.get("status", "UNKNOWN"))
                     final_grid = self.db.get_grid(grid_id) or current
                     params = final_grid.get("params") or {}
                     if (policy_enabled and status_before == "ACTIVE" and not adjusted_this_pass
@@ -399,18 +585,53 @@ class GridMonitor:
 
             for grid in all_grids:
                 checked += 1
+                if grid["status"] == "CLOSED":
+                    if ((grid.get("params") or {}).get("max_days_close_plan", {}).get("phase") == "STARTED"
+                            and self.db.get_last_event(int(grid["id"]), "MAX_DAYS_REACHED") is None):
+                        emit_max_days_reached(int(grid["id"]), mids.get(grid["symbol"]), "CLOSED")
+                    try:
+                        self.engine.close_grid_target(int(grid["id"]),
+                            (grid.get("params") or {}).get("target_close_plan") or {}, mids.get(grid["symbol"]))
+                    except Exception as exc:
+                        failed += 1
+                        self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
+                                    "reason": str(exc), "price": mids.get(grid["symbol"]),
+                                    "details": {"action": "TARGET_CLOSE_FINALIZE",
+                                        "cash_total": ((grid.get("params") or {}).get("target_close_plan") or {}).get("cash_total"),
+                                        "equity_total_at_close": ((grid.get("params") or {}).get("target_close_plan") or {}).get("equity_total_at_close")}})
+                    snapshot_grid(self.db.get_grid(int(grid["id"])) or grid, mids.get(grid["symbol"]))
+                    continue
                 if grid["status"] == "CLOSING":
+                    closing_params = (grid.get("params") or {})
+                    target_plan = closing_params.get("target_close_plan")
+                    if target_plan:
+                        try:
+                            self.engine.close_grid_target(int(grid["id"]), target_plan, mids.get(grid["symbol"]))
+                        except Exception as exc:
+                            failed += 1
+                            self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
+                                        "reason": str(exc), "price": mids.get(grid["symbol"]),
+                                        "details": {"action": "TARGET_CLOSE_RETRY",
+                                            "cash_total": target_plan.get("cash_total"),
+                                            "equity_total_at_close": target_plan.get("equity_total_at_close")}})
+                        refreshed = self.db.get_grid(int(grid["id"])) or grid
+                        snapshot_grid(refreshed, mids.get(grid["symbol"]))
+                        continue
                     close_event = self.db.get_last_event(int(grid["id"]), "GRID_CLOSE_STARTED")
                     close_details = (close_event or {}).get("details") or {}
                     if close_event and close_event.get("source") == "MONITOR" and close_details.get("mode"):
                         try:
-                            self.engine.close_grid(int(grid["id"]), close_details["mode"])
+                            self.engine.close_grid(int(grid["id"]), close_details["mode"],
+                                close_reason=close_details.get("close_reason", "grid_close"))
                         except Exception as exc:
                             failed += 1
                             self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
                                         "reason": str(exc), "price": mids.get(grid["symbol"]),
                                         "details": {"action": "CLOSE_RETRY", "mode": close_details["mode"]}})
                     refreshed = self.db.get_grid(int(grid["id"])) or grid
+                    if (refreshed.get("status") == "CLOSED"
+                            and (refreshed.get("params") or {}).get("max_days_close_plan", {}).get("phase") == "STARTED"):
+                        emit_max_days_reached(int(grid["id"]), mids.get(grid["symbol"]), "CLOSED")
                     if refreshed["status"] == "CLOSING":
                         self._close_pending(run_id, refreshed, now)
                         snapshot_grid(refreshed, mids.get(grid["symbol"]))

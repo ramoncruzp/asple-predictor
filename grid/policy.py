@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from math import erf, exp, isfinite, log, sqrt
 from typing import Any, Mapping
 
@@ -70,11 +71,35 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     if params is not None and not isinstance(params, Mapping):
         raise ValueError("params must be a mapping or None")
     supplied = dict(params or {})
-    unknown = sorted(set(supplied) - set(DEFAULT_SMART_PARAMS))
+    target_keys = {"target_pct", "target_usdt", "target_basis"}
+    optional_runtime_keys = {"dust_sweep_threshold_pct", "max_days"}
+    unknown = sorted(set(supplied) - set(DEFAULT_SMART_PARAMS) - target_keys - optional_runtime_keys)
     if unknown:
         raise ValueError(f"unknown smart parameter(s): {', '.join(unknown)}")
     result = dict(DEFAULT_SMART_PARAMS)
     result.update(supplied)
+    if "dust_sweep_threshold_pct" in supplied:
+        result["dust_sweep_threshold_pct"] = _number(
+            supplied["dust_sweep_threshold_pct"], "dust_sweep_threshold_pct", nullable=True)
+        if result["dust_sweep_threshold_pct"] is not None and not 0 <= result["dust_sweep_threshold_pct"] <= 100:
+            raise ValueError("dust_sweep_threshold_pct must be in [0, 100]")
+    if "max_days" in supplied:
+        result["max_days"] = _number(supplied["max_days"], "max_days")
+        if result["max_days"] <= 0:
+            raise ValueError("max_days must be greater than zero")
+
+    if target_keys & set(supplied):
+        result.setdefault("target_basis", "cash")
+        for key, maximum in (("target_pct", 100.0), ("target_usdt", None)):
+            if key not in result:
+                continue
+            result[key] = _number(result[key], key, nullable=True)
+            if result[key] is not None and (result[key] <= 0 or
+                    (maximum is not None and result[key] > maximum)):
+                raise ValueError(f"{key} must be in (0, {maximum}]" if maximum else f"{key} must be greater than zero")
+        result["target_basis"] = str(result["target_basis"]).lower()
+        if result["target_basis"] not in {"cash", "equity"}:
+            raise ValueError("target_basis must be cash or equity")
 
     for key in ("pause_enter_prob", "pause_exit_prob"):
         result[key] = _number(result[key], key, nullable=True)
@@ -154,6 +179,140 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
             raise ValueError(f"{key} must be an integer >= {minimum}")
         result[key] = int(value)
     return result
+
+
+def evaluate_target(
+    params: Mapping[str, Any] | None, capital_total: float, cash_now: float,
+    cells: list[dict], bid: float, filters: Any, fee_pct: float,
+    *, equity_now: float | None = None, dust: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Purely select profitable owned cells for an optional target close."""
+    effective = dict(params or {})
+    target_pct = effective.get("target_pct")
+    target_usdt = effective.get("target_usdt")
+    basis = str(effective.get("target_basis", "cash")).lower()
+    if basis not in {"cash", "equity"}:
+        raise ValueError("target_basis must be cash or equity")
+    capital = _number(capital_total, "capital_total")
+    cash = _number(cash_now, "cash_now")
+    bid = _number(bid, "bid")
+    fee = _number(fee_pct, "fee_pct") / 100.0
+    if capital <= 0 or bid <= 0 or not 0 <= fee < 1:
+        raise ValueError("capital, bid, or fee_pct is invalid")
+    goals = []
+    if target_pct is not None:
+        pct = _number(target_pct, "target_pct")
+        if not 0 < pct <= 100:
+            raise ValueError("target_pct must be in (0, 100]")
+        goals.append(capital * pct / 100.0)
+    if target_usdt is not None:
+        amount = _number(target_usdt, "target_usdt")
+        if amount <= 0:
+            raise ValueError("target_usdt must be greater than zero")
+        goals.append(amount)
+    if not goals:
+        return {"reached": False, "basis": basis, "cash_now": cash, "projected_cash": cash,
+                "equity_now": cash, "sell_cells": [], "repo_cells": [], "reason": "target_disabled"}
+    target_profit = min(goals)
+    threshold = capital + target_profit
+    fee_rate = fee
+    dust_qty = Decimal(0)
+    dust_proceeds = 0.0
+    if dust is not None:
+        dust_qty = Decimal(str(dust.get("dust_qty", 0)))
+        dust_plan = plan_dust_sweep(dust_qty, Decimal(str(bid)), filters, fee_pct)
+        dust_proceeds = float(dust_plan["proceeds_net"]) if dust_plan["sweepable"] else 0.0
+        cash += dust_proceeds
+    selected, candidates, repository = [], [], []
+    equity = cash
+    for cell in cells:
+        qty = _number(cell.get("held_qty", cell.get("qty", 0)), "held_qty")
+        if qty <= 0:
+            continue
+        proceeds = bid * qty * (1.0 - fee_rate)
+        basis_cost = _number(cell.get("entry_cost", 0), "entry_cost") + _number(
+            cell.get("entry_fee_usdt", 0), "entry_fee_usdt")
+        equity += proceeds
+        gain = proceeds - basis_cost
+        idx = int(cell.get("level_idx", 0))
+        sellable = True
+        try:
+            rounded = filters.round_qty_down(qty)
+            if rounded < filters.min_qty:
+                sellable = False
+            if getattr(filters, "max_qty", 0) and rounded > filters.max_qty:
+                sellable = False
+            if getattr(filters, "apply_min_to_market", False) and rounded * Decimal(str(bid)) < filters.min_notional:
+                sellable = False
+        except (AttributeError, TypeError, ValueError):
+            sellable = False
+        if gain > 0 and sellable:
+            candidates.append({"level_idx": idx, "qty": qty, "bid": bid,
+                               "gain_usdt": gain, "proceeds_usdt": proceeds})
+        else:
+            reason = "not_sellable" if not sellable else "not_profitable"
+            repository.append({"level_idx": idx, "reason": reason})
+    candidates.sort(key=lambda row: (-row["gain_usdt"], row["level_idx"]))
+    projected = cash
+    for row in candidates:
+        selected.append(row)
+        projected += row["proceeds_usdt"]
+        if projected >= threshold:
+            break
+    calculated_equity = cash + sum(
+        bid * _number(cell.get("held_qty", cell.get("qty", 0)), "held_qty") * (1.0-fee_rate)
+        for cell in cells if _number(cell.get("held_qty", cell.get("qty", 0)), "held_qty") > 0
+    )
+    equity_value = calculated_equity if equity_now is None else _number(equity_now, "equity_now")
+    projected_equity = equity_value
+    reached = (projected >= threshold) if basis == "cash" else (equity_value >= threshold)
+    if reached:
+        sold_idxs = {item["level_idx"] for item in selected}
+        repository.extend({"level_idx": int(cell.get("level_idx", 0)), "reason": "target_not_needed"}
+                          for cell in cells if _number(cell.get("held_qty", cell.get("qty", 0)), "held_qty") > 0
+                          and int(cell.get("level_idx", 0)) not in sold_idxs
+                          and int(cell.get("level_idx", 0)) not in {x["level_idx"] for x in repository})
+    else:
+        selected = []
+        projected = cash
+    return {"reached": reached, "basis": basis, "cash_now": cash,
+            "projected_cash": projected, "equity_now": equity_value,
+            "sell_cells": selected if reached else [], "repo_cells": repository,
+            "reason": "target_reached" if reached else "target_not_reached",
+            "target_usdt": target_profit, "target_threshold": threshold,
+            "projected_equity": projected_equity}
+
+
+def evaluate_max_days(params: Mapping[str, Any] | None, created_at: Any,
+                      now: Any) -> dict[str, Any]:
+    """Evaluate a wall-clock grid lifetime; paused time remains part of its age."""
+    raw = (params or {}).get("max_days")
+    if raw is None:
+        return {"expired": False, "age_days": None, "max_days": None}
+    maximum = _number(raw, "max_days")
+    if maximum <= 0:
+        raise ValueError("max_days must be greater than zero")
+    age = max(0.0, (_as_utc(now) - _as_utc(created_at)).total_seconds() / 86400.0)
+    return {"expired": age >= maximum, "age_days": age, "max_days": maximum}
+
+
+def plan_dust_sweep(dust_qty: Any, bid: Any, filters: Any, fee_pct: Any) -> dict[str, Any]:
+    """Pure plan for selling only the grid's recorded residual base asset."""
+    qty_owned = Decimal(str(dust_qty))
+    price = Decimal(str(bid))
+    fee = Decimal(str(fee_pct)) / Decimal(100)
+    if qty_owned < 0 or price <= 0 or not Decimal(0) <= fee < Decimal(1):
+        raise ValueError("dust_qty, bid, or fee_pct is invalid")
+    qty = filters.round_qty_down(qty_owned)
+    residual = qty_owned - qty
+    sweepable = qty >= filters.min_qty
+    if sweepable and getattr(filters, "apply_min_to_market", False):
+        sweepable = qty * price >= filters.min_notional
+    if getattr(filters, "max_qty", 0) and qty > filters.max_qty:
+        sweepable = False
+    proceeds = qty * price * (Decimal(1) - fee) if sweepable else Decimal(0)
+    return {"qty": qty, "sweepable": sweepable, "proceeds_net": proceeds,
+            "residual": residual}
 
 
 def adjust_decision(

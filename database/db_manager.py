@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -79,6 +80,7 @@ class DBManager:
             Column("strategy", String, nullable=False, default="simple", server_default="simple"),
             Column("params", Text),
             Column("calibration_id", Integer),
+            Column("dust_qty", String, nullable=False, default="0", server_default="0"),
         )
         self.grid_calibrations = Table(
             "grid_calibrations", self.metadata,
@@ -149,6 +151,12 @@ class DBManager:
             Column("borrower_cycles_at_open", Integer, nullable=False),
             Column("plan", Text, nullable=False), Column("details", Text, nullable=False),
         )
+        self.grid_dust_ledger = Table(
+            "grid_dust_ledger", self.metadata,
+            Column("grid_id", Integer, ForeignKey("grids.id"), primary_key=True),
+            Column("source_key", String, primary_key=True),
+            Column("qty", Float, nullable=False),
+        )
         Index("ix_grid_loans_grid_status", self.grid_loans.c.grid_id, self.grid_loans.c.status)
         self.grid_snapshots = Table(
             "grid_snapshots", self.metadata,
@@ -185,6 +193,7 @@ class DBManager:
             return
         additions = {
             "grids": {"strategy": "VARCHAR NOT NULL DEFAULT 'simple'", "params": "TEXT", "calibration_id": "INTEGER",
+                      "dust_qty": "VARCHAR NOT NULL DEFAULT '0'",
                       "reserve": "FLOAT NOT NULL DEFAULT 0"},
             "grid_levels": {
                 "entry_price": "FLOAT", "bought_at": "DATETIME", "stop_loss_pct": "FLOAT",
@@ -204,6 +213,7 @@ class DBManager:
                     if name not in existing:
                         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
             conn.execute(text("UPDATE grids SET strategy='simple' WHERE strategy IS NULL OR strategy=''"))
+            conn.execute(text("UPDATE grids SET dust_qty='0' WHERE dust_qty IS NULL"))
             conn.execute(text("UPDATE grids SET strategy='repository' WHERE status='HOLDING'"))
 
     @staticmethod
@@ -1036,6 +1046,76 @@ class DBManager:
         with self.engine.begin() as conn:
             conn.execute(self.grids.update().where(self.grids.c.id == grid_id).values(**fields))
         return self.get_grid(grid_id)
+
+    def add_grid_dust_once(self, grid_id: int, source_key: str, qty: Any) -> bool:
+        """Atomically add a dust delta once per fill/cell residue identity."""
+        delta = Decimal(str(qty))
+        if delta == 0:
+            return False
+        with self.engine.begin() as conn:
+            exists_row = conn.execute(select(self.grid_dust_ledger.c.source_key).where(
+                self.grid_dust_ledger.c.grid_id == int(grid_id),
+                self.grid_dust_ledger.c.source_key == str(source_key),
+            )).first()
+            if exists_row:
+                return False
+            current = conn.execute(select(self.grids.c.dust_qty).where(
+                self.grids.c.id == int(grid_id))).scalar_one_or_none()
+            updated = Decimal(str(current or 0)) + delta
+            conn.execute(self.grid_dust_ledger.insert().values(
+                grid_id=int(grid_id), source_key=str(source_key), qty=delta))
+            conn.execute(self.grids.update().where(self.grids.c.id == int(grid_id)).values(
+                dust_qty=str(updated)))
+        return True
+
+    def record_grid_buy_fill_dust(self, grid_id: int, level_idx: int, source_key: str,
+                                  qty: Any, level_fields: dict[str, Any]) -> bool:
+        """Commit the fill's cell inventory and its residual dust in one transaction."""
+        delta = Decimal(str(qty))
+        with self.engine.begin() as conn:
+            exists_row = conn.execute(select(self.grid_dust_ledger.c.source_key).where(
+                self.grid_dust_ledger.c.grid_id == int(grid_id),
+                self.grid_dust_ledger.c.source_key == str(source_key),
+            )).first()
+            if not exists_row:
+                current = conn.execute(select(self.grids.c.dust_qty).where(
+                    self.grids.c.id == int(grid_id))).scalar_one_or_none()
+                conn.execute(self.grid_dust_ledger.insert().values(
+                    grid_id=int(grid_id), source_key=str(source_key), qty=float(delta)))
+                conn.execute(self.grids.update().where(self.grids.c.id == int(grid_id)).values(
+                    dust_qty=str(Decimal(str(current or 0)) + delta)))
+            now = self._utc_now()
+            conn.execute(self.grid_levels.update().where(
+                self.grid_levels.c.grid_id == int(grid_id),
+                self.grid_levels.c.level_idx == int(level_idx),
+            ).values(**{**level_fields, "updated_at": now}))
+        return not bool(exists_row)
+
+    def settle_grid_dust_sweep(self, grid_id: int, client_order_id: str, qty: Any,
+                               proceeds_net: Any, fee_usdt: Any = 0) -> bool:
+        """Exactly-once dust debit and proceeds credit for a recovered market order."""
+        key, amount, proceeds, fee = (f"sweep:{client_order_id}", Decimal(str(qty)),
+                                      float(proceeds_net), float(fee_usdt))
+        with self.engine.begin() as conn:
+            exists_row = conn.execute(select(self.grid_dust_ledger.c.source_key).where(
+                self.grid_dust_ledger.c.grid_id == int(grid_id),
+                self.grid_dust_ledger.c.source_key == key,
+            )).first()
+            if exists_row:
+                return False
+            current = conn.execute(select(self.grids.c.dust_qty).where(
+                self.grids.c.id == int(grid_id))).scalar_one_or_none()
+            updated = max(Decimal(0), Decimal(str(current or 0)) - amount)
+            conn.execute(self.grid_dust_ledger.insert().values(
+                grid_id=int(grid_id), source_key=key, qty=-amount))
+            conn.execute(self.grids.update().where(self.grids.c.id == int(grid_id)).values(
+                dust_qty=str(updated)))
+            row = conn.execute(select(self.grids.c.params).where(self.grids.c.id == int(grid_id))).first()
+            params = json.loads(row[0]) if row and row[0] else {}
+            params["dust_cash_proceeds"] = float(params.get("dust_cash_proceeds", 0)) + proceeds
+            params["dust_sweep_fee_usdt"] = float(params.get("dust_sweep_fee_usdt", 0)) + fee
+            conn.execute(self.grids.update().where(self.grids.c.id == int(grid_id)).values(params=self._json(params)))
+        return True
 
     def update_level(self, grid_id: int, level_idx: int, **fields: Any) -> dict | None:
         allowed = {column.name for column in self.grid_levels.columns} - {"grid_id", "level_idx"}

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from data.exchange_filters import FilterViolation, SymbolFilters
 from data.testnet_client import TestnetOrderError
 from grid.compound import compound_amount
-from grid.policy import DEFAULT_SMART_PARAMS, validate_params
+from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.adjust import plan_adjust
 from grid import loans as loan_policy
@@ -275,7 +275,15 @@ class GridEngine:
             effective_params["stop_loss_pct"] = float(effective_stop)
         else:
             if params is not None:
-                raise GridConfigError("params are supported only for smart grids")
+                if "max_days" not in params or any(
+                        key not in {"max_days", *DEFAULT_SMART_PARAMS}
+                        or (key in DEFAULT_SMART_PARAMS and value != DEFAULT_SMART_PARAMS[key])
+                        for key, value in params.items()):
+                    raise GridConfigError("simple grids only support the max_days parameter")
+                try:
+                    effective_params = {"max_days": validate_params(params, n_levels)["max_days"]}
+                except ValueError as exc:
+                    raise GridConfigError(str(exc)) from exc
             effective_stop = stop_loss_pct
             if effective_stop is not None and float(effective_stop) <= 0:
                 raise GridConfigError("stop_loss_pct must be greater than zero")
@@ -426,9 +434,11 @@ class GridEngine:
         price: Decimal,
         filters: SymbolFilters,
         avg_price: Decimal,
+        *,
+        client_order_id: str | None = None,
     ) -> int:
         cycle = int(level["cycles_completed"])
-        cid = self._client_order_id(grid_id, int(level["level_idx"]), side, cycle)
+        cid = client_order_id or self._client_order_id(grid_id, int(level["level_idx"]), side, cycle)
         if side == "BUY":
             prior_cid = level.get("buy_client_order_id") or level.get("client_order_id")
             prior_cycle = re.fullmatch(rf"g{int(grid_id)}L{int(level['level_idx'])}B(\d+)", str(prior_cid or ""))
@@ -938,6 +948,7 @@ class GridEngine:
         )
         gross_qty = _d(order["executed_qty"])
         held_qty = filters.round_qty_down(gross_qty - base_fee)
+        dust_delta = (gross_qty - base_fee) - held_qty
         fills = [trade for trade in trades if _d(trade.get("qty", 0)) > 0]
         gross_quote = sum((_d(trade.get("quoteQty", _d(trade.get("qty", 0)) * _d(trade.get("price", 0)))) for trade in fills), Decimal(0))
         entry_price = gross_quote / gross_qty if gross_qty > 0 else _d(order.get("price", level["price"]))
@@ -946,6 +957,13 @@ class GridEngine:
         if level.get("sell_price") is None:
             self.db.set_level_fields(grid_id, idx, sell_price=float(sell_price))
         fee_usdt = self._fee_value_usdt(trades, symbol)
+        self.db.record_grid_buy_fill_dust(
+            grid_id, idx, f"buy:{int(order['order_id'])}", dust_delta,
+            {"held_qty": float(held_qty), "entry_price": float(entry_price),
+             "bought_at": bought_at,
+             "buy_client_order_id": level.get("buy_client_order_id") or level.get("client_order_id"),
+             "fee_paid": float(_d(level["fee_paid"]) + fee_usdt)},
+        )
         self._emit(
             "BUY_FILLED", grid_id, idx, client_order_id=level.get("client_order_id"),
             order_id=order["order_id"], details={
@@ -2104,6 +2122,74 @@ class GridEngine:
             price=None if price is None else float(price), details=details,
         )
 
+    def sweep_grid_dust(self, grid_id: int, bid: Any, *, reason: str = "manual") -> dict:
+        """Sell only this grid's recorded dust with a persisted recoverable intent."""
+        grid = self.db.get_grid(int(grid_id))
+        if grid is None:
+            raise ValueError(f"grid {grid_id} does not exist")
+        filters, _, _ = self._market_context(grid["symbol"])
+        dust_cells = sum((_d(row.get("held_qty")) for row in self.db.get_grid_levels(int(grid_id))
+                          if row.get("state") == "DONE" and _d(row.get("held_qty")) > 0), Decimal(0))
+        sweepable_qty = max(Decimal(0), _d(grid.get("dust_qty") or 0) - dust_cells)
+        plan = plan_dust_sweep(sweepable_qty, bid, filters,
+                               getattr(self.settings, "fee_pct", None) or .1)
+        if not plan["sweepable"]:
+            return {**plan, "status": "DEFERRED", "reason": "market_filters"}
+        params = dict(grid.get("params") or {})
+        intent = params.get("dust_sweep_intent")
+        if not intent:
+            seq = int(params.get("dust_sweep_seq", 0)) + 1
+            cid = f"gS{int(grid_id)}{seq}"
+            intent = {"client_order_id": cid, "qty": str(plan["qty"]), "reason": reason}
+            params.update(dust_sweep_seq=seq, dust_sweep_intent=intent)
+            self.db.update_grid(int(grid_id), params=self.db._json(params))
+        cid, qty = str(intent["client_order_id"]), _d(intent["qty"])
+        existing = self.exchange.find_order_by_client_id(grid["symbol"], cid)
+        try:
+            if existing:
+                order = self.exchange.get_order(grid["symbol"], order_id=existing["order_id"])
+            else:
+                accepted = self.exchange.place_order(grid["symbol"], "SELL", qty,
+                    order_type="MARKET", client_order_id=cid)
+                order = self.exchange.get_order(grid["symbol"], order_id=accepted["order_id"])
+            if str(order.get("status", "")).upper() != "FILLED":
+                if str(order.get("status", "")).upper() in {"REJECTED", "CANCELED", "EXPIRED"}:
+                    params = dict((self.db.get_grid(int(grid_id)) or {}).get("params") or {})
+                    params.pop("dust_sweep_intent", None)
+                    self.db.update_grid(int(grid_id), params=self.db._json(params))
+                    self._close_event("DUST_SWEEP_DEFERRED", int(grid_id),
+                                      {"client_order_id": cid, "reason": order.get("status")})
+                    return {"status": "DEFERRED", "client_order_id": cid,
+                            "reason": order.get("status")}
+                return {"status": "PENDING", "client_order_id": cid, "order_id": order.get("order_id")}
+            trades = self.exchange.get_my_trades(grid["symbol"], order["order_id"])
+            fee = self._fee_value_usdt(trades, grid["symbol"])
+            gross = _d(order.get("cummulative_quote_qty", 0))
+            avg = gross / qty if qty else _d(bid)
+            net = gross - fee
+            self.db.settle_grid_dust_sweep(int(grid_id), cid, qty, net, fee)
+            current = self.db.get_grid(int(grid_id))
+            params = dict(current.get("params") or {})
+            params.pop("dust_sweep_intent", None)
+            self.db.update_grid(int(grid_id), params=self.db._json(params))
+            details = {"qty": str(qty), "price_avg": str(avg), "fee_usdt": str(fee),
+                       "residual": str(self.db.get_grid(int(grid_id)).get("dust_qty", 0)),
+                       "proceeds_net": str(net), "reason": reason}
+            self._close_event("DUST_SWEPT", int(grid_id), details, client_order_id=cid,
+                              order_id=int(order["order_id"]), price=avg)
+            return {"status": "FILLED", **details, "client_order_id": cid}
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code == -2010 or "filter" in str(exc).casefold() or "notional" in str(exc).casefold():
+                current = self.db.get_grid(int(grid_id))
+                params = dict((current or {}).get("params") or {})
+                params.pop("dust_sweep_intent", None)
+                self.db.update_grid(int(grid_id), params=self.db._json(params))
+                self._close_event("DUST_SWEEP_DEFERRED", int(grid_id),
+                                  {"client_order_id": cid, "reason": str(exc)})
+                return {"status": "DEFERRED", "client_order_id": cid, "reason": str(exc)}
+            raise
+
     def _market_sell_owned_cell(
         self, grid: dict, level: dict, filters: SymbolFilters, avg_price: Decimal,
         *, emit_event: bool = True,
@@ -2113,10 +2199,11 @@ class GridEngine:
         qty = filters.round_qty_down(held_qty)
         if qty < filters.min_qty:
             result = {"level_idx": idx, "qty": str(held_qty), "status": "DUST"}
+            self.db.add_grid_dust_once(grid_id, f"cell:{idx}:{int(level.get('cycles_completed', 0))}", held_qty)
             current_grid = self.db.get_grid(grid_id)
             if (current_grid.get("strategy") == "smart"
                     and (current_grid.get("params") or {}).get("loans_enabled") is True):
-                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE"})
+                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE", "held_qty": 0.0})
             else:
                 self.db.update_level(grid_id, idx, state="DONE")
             self._close_event("CELL_DUST", grid_id, result, reason="below market minimum notional", level_idx=idx)
@@ -2125,10 +2212,11 @@ class GridEngine:
             raise FilterViolation("LOT_SIZE", f"market liquidation quantity {qty} exceeds maxQty")
         if filters.apply_min_to_market and qty * avg_price < filters.min_notional:
             result = {"level_idx": idx, "qty": str(held_qty), "status": "DUST"}
+            self.db.add_grid_dust_once(grid_id, f"cell:{idx}:{int(level.get('cycles_completed', 0))}", held_qty)
             current_grid = self.db.get_grid(grid_id)
             if (current_grid.get("strategy") == "smart"
                     and (current_grid.get("params") or {}).get("loans_enabled") is True):
-                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE"})
+                self._persist_done_to_reserve(grid_id, idx, "dust", {"state": "DONE", "held_qty": 0.0})
             else:
                 self.db.update_level(grid_id, idx, state="DONE")
             self._close_event("CELL_DUST", grid_id, result, reason="below market minimum notional", level_idx=idx)
@@ -2179,6 +2267,7 @@ class GridEngine:
             "qty": str(_d(market_order["executed_qty"])), "cycle_pnl": str(cycle_pnl),
             "pnl_realized": str(cycle_pnl), "cycles_completed": cycle, "status": "FILLED",
             "price": str(_d(market_order["cummulative_quote_qty"]) / _d(market_order["executed_qty"])),
+            "cash_proceeds_net": str(_d(market_order["cummulative_quote_qty"]) - sell_fee),
             "realized_pnl": str(cycle_pnl),
         }
         if emit_event:
@@ -2311,7 +2400,11 @@ class GridEngine:
                 )).inserted_primary_key[0])
                 conn.execute(self.db.grid_events.insert().values(
                     run_id=None, source="MONITOR" if self.event_sink is not None else "CLI", ts=db_now, grid_id=repository_id,
-                    event_type="REPOSITORY_CREATED", details=self.db._json({"symbol": symbol, "origin_grid_id": grid_id}),
+                    event_type="REPOSITORY_CREATED", details=self.db._json({
+                        "symbol": symbol, "origin_grid_id": grid_id,
+                        **({"cash_total": (grid.get("params") or {}).get("target_close_plan", {}).get("cash_total"),
+                            "equity_total_at_close": (grid.get("params") or {}).get("target_close_plan", {}).get("equity_total_at_close")}
+                           if (grid.get("params") or {}).get("target_close_plan") else {})}),
                 ))
             if repository_id is not None:
                 existing_rows = conn.execute(select(self.db.grid_levels).where(
@@ -2330,6 +2423,10 @@ class GridEngine:
                         "moved_at": now.isoformat(),
                         "market_mid": None if market_mid is None else str(market_mid),
                     }
+                    target_close = (grid.get("params") or {}).get("target_close_plan") or {}
+                    if target_close:
+                        detail.update({"cash_total": target_close.get("cash_total"),
+                                       "equity_total_at_close": target_close.get("equity_total_at_close")})
                     conn.execute(self.db.grid_events.insert().values(
                         run_id=None, source="MONITOR" if self.event_sink is not None else "CLI", ts=db_now, grid_id=repository_id,
                         level_idx=new_idx, client_order_id=level.get("client_order_id"),
@@ -2356,7 +2453,7 @@ class GridEngine:
                 "moved_cells": moved_cells, "unmanaged_inventory": unmanaged, "errors": [],
                 "pnl_realized": sum(float(row.get("pnl", 0)) for row in movable)}
 
-    def close_grid(self, grid_id: int, mode: str) -> dict:
+    def close_grid(self, grid_id: int, mode: str, *, close_reason: str = "grid_close") -> dict:
         mode = str(mode).lower()
         if mode not in {"cancel", "liquidate", "repository"}:
             raise ValueError("mode must be cancel, liquidate, or repository")
@@ -2367,7 +2464,12 @@ class GridEngine:
             raise ValueError(f"grid {grid_id} cannot close from status {grid['status']}")
         if grid.get("strategy") == "smart" and (grid.get("params") or {}).get("loans_enabled") is True:
             self.transfer_loans(int(grid_id), "before_close")
-        self._close_event("GRID_CLOSE_STARTED", grid_id, {"mode": mode})
+        start_details = {"mode": mode, "close_reason": close_reason}
+        target_plan = (grid.get("params") or {}).get("target_close_plan")
+        if target_plan:
+            start_details.update({"cash_total": target_plan.get("cash_total"),
+                                  "equity_total_at_close": target_plan.get("equity_total_at_close")})
+        self._close_event("GRID_CLOSE_STARTED", grid_id, start_details)
         try:
             self.sync_closing(grid_id)
         except Exception as exc:
@@ -2429,5 +2531,233 @@ class GridEngine:
                 "errors": errors,
                 "pnl_realized": sum(float(row.get("cycle_pnl", 0)) for row in liquidated),
             }
+        if result.get("status") == "CLOSED":
+            try:
+                _, _, close_bid = self._market_context(grid["symbol"])
+                result["dust_sweep"] = self.sweep_grid_dust(grid_id, close_bid, reason=close_reason)
+            except Exception as exc:
+                result.setdefault("errors", []).append({"reason": f"dust sweep failed: {exc}"})
+                self.db.update_grid(grid_id, status="CLOSING", fail_reason=str(exc))
+                result["status"] = "CLOSING"
+        if target_plan:
+            result.update({"cash_total": target_plan.get("cash_total"),
+                           "equity_total_at_close": target_plan.get("equity_total_at_close"),
+                           "target_missed_after_fills": target_plan.get("target_missed_after_fills", False)})
         self._close_event("GRID_CLOSED", grid_id, result)
         return result
+
+    def close_grid_target(self, grid_id: int, target: dict, price: float | None = None) -> dict:
+        """Write-ahead, resumable target close; market-sell winners then use the repository path."""
+        grid = self.db.get_grid(int(grid_id))
+        if grid is None:
+            raise ValueError(f"grid {grid_id} does not exist")
+        params = dict(grid.get("params") or {})
+        plan = dict(params.get("target_close_plan") or target)
+        if not params.get("target_close_plan"):
+            levels = self.db.get_grid_levels(int(grid_id))
+            sold = {int(row["level_idx"]) for row in plan.get("sell_cells", [])}
+            repo = [row for row in levels if _d(row.get("held_qty")) > 0 and
+                    int(row["level_idx"]) not in sold]
+            bid = _d(plan.get("bid_used", price or 0))
+            equity_at_close = _d(plan.get("projected_cash", 0)) + sum(
+                (_d(row.get("held_qty")) * bid * Decimal("0.999") for row in repo), Decimal(0))
+            plan.update({"reason": "TARGET_REACHED", "phase": "MARKED", "sold_done": [],
+                         "sale_failures": [], "actual_market_proceeds": [],
+                         "cash_total": float(plan.get("projected_cash", 0)),
+                         "equity_total_at_close": float(equity_at_close),
+                         "target_missed_after_fills": False})
+            params["target_close_plan"] = plan
+            self.db.update_grid(int(grid_id), status="CLOSING", fail_reason="TARGET_REACHED",
+                                params=self.db._json(params))
+            self._close_event("TARGET_REACHED", int(grid_id), {
+                "effective_params": {key: params.get(key) for key in
+                    ("target_pct", "target_usdt", "target_basis")},
+                "basis": plan.get("basis"), "capital_initial": grid.get("capital_total"),
+                "cash_now": plan.get("cash_now"), "projected_cash": plan.get("projected_cash"),
+                "cash_total": plan.get("cash_total"),
+                "equity_now": plan.get("equity_now"),
+                "equity_total_at_close": plan.get("equity_total_at_close"),
+                "sell_cells": plan.get("sell_cells", []), "repo_cells": [
+                    {"level_idx": int(row["level_idx"]), "reason": "not_sold_by_target_plan"}
+                    for row in repo], "estimated_fees_usdt": plan.get("estimated_fees_usdt", 0),
+                "bid_used": plan.get("bid_used", price),
+            }, reason="TARGET_REACHED", price=plan.get("bid_used", price))
+        else:
+            self.db.update_grid(int(grid_id), status="CLOSING", fail_reason="TARGET_REACHED")
+
+        grid = self.db.get_grid(int(grid_id))
+        plan = dict((grid.get("params") or {}).get("target_close_plan") or plan)
+        symbol = grid["symbol"]
+        filters, _, avg_price = self._market_context(symbol)
+        if plan.get("phase") == "MARKED":
+            for level in self.db.get_grid_levels(int(grid_id)):
+                if level.get("state") != "BUY_OPEN":
+                    continue
+                order_id = level.get("order_id")
+                if order_id is None and level.get("client_order_id"):
+                    found = self.exchange.find_order_by_client_id(symbol, level["client_order_id"])
+                    order_id = found["order_id"] if found else None
+                if order_id is not None:
+                    canceled = self.exchange.cancel_order(symbol, int(order_id))
+                    result_status = str(canceled.get("status", "")).upper()
+                    filled_during_cancel = result_status == "FILLED"
+                    if filled_during_cancel:
+                        self.sync_closing(int(grid_id))
+                    elif result_status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                        return {"status": "CLOSING", "phase": "CANCEL_BUYS", "errors": [
+                            {"level_idx": int(level["level_idx"]), "status": result_status}]}
+                    if not filled_during_cancel:
+                        self.db.update_level(int(grid_id), int(level["level_idx"]), state="IDLE", order_id=None)
+                else:
+                    self.db.update_level(int(grid_id), int(level["level_idx"]), state="IDLE", order_id=None)
+            plan["phase"] = "BUYS_CANCELED"
+            self._persist_target_plan(int(grid_id), plan)
+
+        if plan.get("phase") == "BUYS_CANCELED":
+            for selection in plan.get("sell_cells", []):
+                idx = int(selection["level_idx"])
+                if any(int(row.get("level_idx", -1)) == idx for row in plan.get("sale_failures", [])):
+                    continue
+                level = next((row for row in self.db.get_grid_levels(int(grid_id))
+                              if int(row["level_idx"]) == idx), None)
+                if level is None or _d(level.get("held_qty")) <= 0:
+                    continue
+                try:
+                    sold = self._market_sell_owned_cell(grid, level, filters, avg_price, emit_event=False)
+                    if sold.get("status") == "FILLED":
+                        plan.setdefault("sold_done", []).append(idx)
+                        plan.setdefault("actual_market_proceeds", []).append({
+                            "level_idx": idx, "proceeds_usdt": str(sold.get("cash_proceeds_net") or
+                                _d(sold.get("qty")) * _d(sold.get("price")))})
+                    else:
+                        plan.setdefault("sale_failures", []).append({"level_idx": idx, "reason": sold.get("status")})
+                except Exception as exc:
+                    cid = f"g{int(grid_id)}L{idx}X{int(level.get('cycles_completed', 0))}"
+                    found = self.exchange.find_order_by_client_id(symbol, cid)
+                    recovered_status = (str(self.exchange.get_order(symbol, order_id=found["order_id"])
+                                             .get("status", "")).upper() if found else "")
+                    if recovered_status == "FILLED":
+                        recovered = self._market_sell_owned_cell(grid, level, filters, avg_price, emit_event=False)
+                        plan.setdefault("sold_done", []).append(idx)
+                        plan.setdefault("actual_market_proceeds", []).append({
+                            "level_idx": idx, "proceeds_usdt": str(recovered.get("cash_proceeds_net") or
+                                _d(recovered.get("qty")) * _d(recovered.get("price")))})
+                        self._persist_target_plan(int(grid_id), plan)
+                        continue
+                    if recovered_status in {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}:
+                        plan["phase"] = "BUYS_CANCELED"
+                        self._persist_target_plan(int(grid_id), plan)
+                        return {"status": "CLOSING", "phase": "MARKET_SELL_PENDING",
+                                "level_idx": idx, "client_order_id": cid}
+                    if found and recovered_status not in {"REJECTED", "CANCELED", "EXPIRED"}:
+                        return {"status": "CLOSING", "phase": "MARKET_SELL_STATUS_UNKNOWN",
+                                "level_idx": idx, "client_order_id": cid,
+                                "order_status": recovered_status}
+                    plan.setdefault("sale_failures", []).append({"level_idx": idx, "reason": str(exc)})
+                    self._close_event("TARGET_MARKET_SELL_FAILED", int(grid_id),
+                                      {"level_idx": idx, "reason": str(exc),
+                                       "cash_total": plan.get("cash_total"),
+                                       "equity_total_at_close": plan.get("equity_total_at_close")}, reason="market_sell_failed",
+                                      level_idx=idx, price=plan.get("bid_used", price))
+                    self._persist_target_plan(int(grid_id), plan)
+                    current = next((row for row in self.db.get_grid_levels(int(grid_id))
+                                    if int(row["level_idx"]) == idx), None)
+                    if current and _d(current.get("held_qty")) > 0:
+                        self._place_level_intent(int(grid_id), current, "SELL", _d(current["held_qty"]),
+                                                 _d(current["sell_price"]), filters, avg_price)
+                self._persist_target_plan(int(grid_id), plan)
+            # The target close is already write-ahead persisted; sweep can be
+            # recovered by the same deterministic CID if the process restarts.
+            sweep = self.sweep_grid_dust(int(grid_id), plan.get("bid_used", price or 0), reason="target")
+            if sweep.get("status") == "PENDING":
+                return {"status": "CLOSING", "phase": "DUST_SWEEP_PENDING",
+                        "client_order_id": sweep.get("client_order_id")}
+            plan["phase"] = "MARKET_SELLS_DONE"
+            plan["cash_total"] = float(_d(plan.get("cash_now")) + sum(
+                (_d(row["proceeds_usdt"]) for row in plan.get("actual_market_proceeds", [])), Decimal(0)))
+            remaining_levels = self.db.get_grid_levels(int(grid_id))
+            remaining_value = sum((_d(row.get("held_qty")) * _d(plan.get("bid_used")) * Decimal("0.999")
+                                   for row in remaining_levels), Decimal(0))
+            plan["equity_total_at_close"] = float(_d(plan["cash_total"]) + remaining_value)
+            threshold = _d(plan.get("target_threshold", 0))
+            achieved_value = _d(plan["cash_total"] if plan.get("basis") == "cash"
+                                else plan["equity_total_at_close"])
+            plan["target_missed_after_fills"] = bool(plan.get("sale_failures")) and achieved_value < threshold
+            self._persist_target_plan(int(grid_id), plan)
+
+        if plan.get("phase") == "MARKET_SELLS_DONE":
+            for level in self.db.get_grid_levels(int(grid_id)):
+                if _d(level.get("held_qty")) <= 0:
+                    continue
+                rearm_cid = None
+                live = False
+                if level.get("state") == "SELL_OPEN" and level.get("order_id") is None \
+                        and level.get("client_order_id"):
+                    found = self.exchange.find_order_by_client_id(symbol, level["client_order_id"])
+                    if found:
+                        level = self.db.update_level(int(grid_id), int(level["level_idx"]),
+                                                     order_id=int(found["order_id"])) or level
+                        order_status = str(found.get("status", "")).upper()
+                        live = order_status in {"NEW", "PARTIALLY_FILLED"}
+                        if order_status == "FILLED":
+                            self.sync_closing(int(grid_id))
+                            refreshed = next((row for row in self.db.get_grid_levels(int(grid_id))
+                                              if int(row["level_idx"]) == int(level["level_idx"])), None)
+                            if not refreshed or _d(refreshed.get("held_qty")) <= 0:
+                                continue
+                            level = refreshed
+                    else:
+                        rearm_cid = str(level["client_order_id"])
+                if level.get("state") == "SELL_OPEN" and level.get("order_id") is not None:
+                    try:
+                        order = self.exchange.get_order(symbol, order_id=int(level["order_id"]))
+                        order_status = str(order.get("status", "")).upper()
+                        if order_status == "FILLED":
+                            self.sync_closing(int(grid_id))
+                            refreshed = next((row for row in self.db.get_grid_levels(int(grid_id))
+                                              if int(row["level_idx"]) == int(level["level_idx"])), None)
+                            if not refreshed or _d(refreshed.get("held_qty")) <= 0:
+                                continue
+                            level = refreshed
+                        else:
+                            live = order_status in {"NEW", "PARTIALLY_FILLED"}
+                    except Exception as exc:
+                        self._persist_target_plan(int(grid_id), plan)
+                        return {"status": "CLOSING", "phase": "REPOSITORY_SELL_STATUS_UNKNOWN",
+                                "level_idx": int(level["level_idx"]), "reason": str(exc)}
+                if not live:
+                    if rearm_cid is None:
+                        previous_cid = str(level.get("client_order_id") or "")
+                        rearm_cid = "gT" + hashlib.sha256(
+                            f"{grid_id}:{level['level_idx']}:{level['cycles_completed']}:{previous_cid}:target-repository".encode()
+                        ).hexdigest()[:30]
+                    self._place_level_intent(int(grid_id), level, "SELL", _d(level["held_qty"]),
+                                             _d(level["sell_price"]), filters, avg_price,
+                                             client_order_id=rearm_cid)
+                rearm_cid = None
+            plan["phase"] = "REPOSITORY"
+            self._persist_target_plan(int(grid_id), plan)
+
+        if plan.get("phase") == "REPOSITORY":
+            result = ({"status": "CLOSED", "mode": "repository", "recovered": True}
+                      if grid.get("status") == "CLOSED" else self.close_grid(int(grid_id), "repository"))
+            if result.get("status") == "CLOSED":
+                params = dict((self.db.get_grid(int(grid_id)) or {}).get("params") or {})
+                final_plan = dict(params.get("target_close_plan") or plan)
+                final_plan["phase"] = "COMPLETE"
+                final_plan["target_missed_after_fills"] = bool(final_plan.get("sale_failures"))
+                params["target_close_plan"] = final_plan
+                self.db.update_grid(int(grid_id), params=self.db._json(params),
+                                    fail_reason=("target_missed_after_fills" if final_plan["target_missed_after_fills"] else None))
+                result.update({"cash_total": final_plan.get("cash_total"),
+                               "equity_total_at_close": final_plan.get("equity_total_at_close"),
+                               "target_missed_after_fills": final_plan["target_missed_after_fills"]})
+            return result
+        return {"status": "CLOSING", "phase": plan.get("phase")}
+
+    def _persist_target_plan(self, grid_id: int, plan: dict) -> None:
+        grid = self.db.get_grid(int(grid_id))
+        params = dict((grid or {}).get("params") or {})
+        params["target_close_plan"] = plan
+        self.db.update_grid(int(grid_id), status="CLOSING", fail_reason="TARGET_REACHED",
+                            params=self.db._json(params))
