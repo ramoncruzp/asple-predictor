@@ -52,7 +52,12 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
     )
     edge = structure.get("net_edge_pct_per_cycle")
     structure_ok = bool(structure["feasible"] and edge is not None and float(edge) > 0)
-    spread_ok = bid > 0 and ask >= bid and spread_bps <= float(cfg["max_spread_bps"])
+    spread_ticks_min = (bid > 0 and ask >= bid and
+                        Decimal(str(ask)) - Decimal(str(bid)) <= filters.tick_size)
+    spread_ok = (bid > 0 and ask >= bid and
+                 (spread_bps <= float(cfg["max_spread_bps"]) or spread_ticks_min))
+    spread_reason = ("spread de 1 tick (mínimo posible)" if spread_ticks_min else
+                     "El spread debe estar bajo el máximo configurado.")
     hard = [
         ("active_registry", bool(market.get("active", False)), market.get("active"), True,
          "El símbolo debe estar activo en Coin Registry."),
@@ -62,7 +67,7 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
          float(market.get("volume_24h_quote", 0)), float(cfg["min_volume_24h"]),
          "El volumen quote de 24 h debe alcanzar el umbral configurado."),
         ("spread", spread_ok, spread_bps,
-         float(cfg["max_spread_bps"]), "El spread debe estar bajo el máximo configurado."),
+         float(cfg["max_spread_bps"]), spread_reason),
         ("structure", structure_ok, structure, "spacing/celda factibles y net edge > 0",
          "La estructura debe respetar spacing, filtros, polvo y margen neto por ciclo."),
         ("history", history_ok, {"5m": len(closes5), "1h": len(closes1)},
@@ -118,7 +123,13 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
         if float(structure["net_edge_pct_per_cycle"]) < .1:
             warnings.append("Margen neto descriptivo bajo; revisar comisiones y polvo por ciclo.")
         reasons.append("Elegible por condiciones observadas de costo y factibilidad; score descriptivo, no predictivo.")
-    return {"symbol": symbol, "eligible": eligible, "score": round(score, 6) if eligible else None,
+    edge_warning = ("Margen neto descriptivo bajo; revisar comisiones y polvo por ciclo."
+                    if edge is not None and float(edge) < .1 else None)
+    result = {"symbol": symbol, "eligible": eligible, "score": round(score, 6) if eligible else None,
             "hard_filters": hard_filters, "components": components, "reasons": reasons,
             "suggested_structure": structure, "historical_oscillation": oscillation,
-            "efficiency_ratio_30d": er if eligible else None, "warnings": warnings}
+            "efficiency_ratio_30d": er if eligible else None, "warnings": warnings,
+            }
+    if edge_warning is not None:
+        result["edge_warning"] = edge_warning
+    return result

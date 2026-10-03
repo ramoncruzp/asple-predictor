@@ -24,6 +24,36 @@ def _dec(value: Any) -> Decimal:
         raise ValueError(f"invalid decimal value: {value!r}") from exc
 
 
+def evaluate_levels(
+    n: int,
+    width_pct: float,
+    capital: Decimal | str | float,
+    mid: Decimal | str | float,
+    filters: SymbolFilters,
+    fee_pct: float,
+    min_spacing_pct: float,
+    min_cell_usdt: Decimal | str | float,
+) -> dict:
+    """Evaluate one level count using the same fee, spacing, cell and dust math."""
+    capital_d, mid_d = _dec(capital), _dec(mid)
+    min_cell_d = _dec(min_cell_usdt)
+    if min_cell_d < filters.min_notional:
+        min_cell_d = filters.min_notional
+    step_dust_usdt = float(filters.step_size) * float(mid_d)
+    spacing_pct = width_pct / n
+    cell_usdt = capital_d / Decimal(n)
+    dust_pct = (step_dust_usdt / float(cell_usdt) * 100.0) if cell_usdt > 0 else float("inf")
+    required_spacing = max(min_spacing_pct, 2.0 * fee_pct + dust_pct)
+    net_edge_pct = spacing_pct - 2.0 * fee_pct - dust_pct
+    return {
+        "n": n, "spacing_pct": spacing_pct, "cell_usdt": cell_usdt,
+        "dust_pct": dust_pct, "required_spacing": required_spacing,
+        "net_edge_pct": net_edge_pct,
+        "spacing_ok": spacing_pct >= required_spacing,
+        "cell_ok": cell_usdt >= min_cell_d,
+    }
+
+
 def suggest_structure(
     sigma_24h: float,
     capital: Decimal | str | float,
@@ -84,30 +114,16 @@ def suggest_structure(
     n_raw = max(MIN_LEVELS, min(MAX_LEVELS, int(floor(width_pct / min_spacing_pct))))
     reasons.append(f"ancho_total={width_pct:.4f}%; n_raw=floor(ancho/min_spacing_pct)={n_raw}")
 
-    step_dust_usdt = float(filters.step_size) * float(mid_d)
-
-    def _evaluate(n: int) -> dict:
-        spacing_pct = width_pct / n
-        cell_usdt = capital_d / Decimal(n)
-        dust_pct = (step_dust_usdt / float(cell_usdt) * 100.0) if cell_usdt > 0 else float("inf")
-        required_spacing = max(min_spacing_pct, 2.0 * fee_pct + dust_pct)
-        net_edge_pct = spacing_pct - 2.0 * fee_pct - dust_pct
-        return {
-            "n": n, "spacing_pct": spacing_pct, "cell_usdt": cell_usdt,
-            "dust_pct": dust_pct, "required_spacing": required_spacing,
-            "net_edge_pct": net_edge_pct,
-            "spacing_ok": spacing_pct >= required_spacing,
-            "cell_ok": cell_usdt >= min_cell_d,
-        }
-
     chosen = None
     for n in range(n_raw, MIN_LEVELS - 1, -1):
-        evaluation = _evaluate(n)
+        evaluation = evaluate_levels(n, width_pct, capital_d, mid_d, filters,
+                                     fee_pct, min_spacing_pct, min_cell_d)
         if evaluation["spacing_ok"] and evaluation["cell_ok"]:
             chosen = evaluation
             break
     if chosen is None:
-        floor_eval = _evaluate(MIN_LEVELS)
+        floor_eval = evaluate_levels(MIN_LEVELS, width_pct, capital_d, mid_d, filters,
+                                     fee_pct, min_spacing_pct, min_cell_d)
         reasons.append(
             f"infeasible: incluso con n_levels={MIN_LEVELS} el espaciado "
             f"({floor_eval['spacing_pct']:.4f}%) o la celda "

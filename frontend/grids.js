@@ -323,6 +323,17 @@
         </div>
         ${summary.inventory.unavailable_reason ? `<p class="muted">${esc(summary.inventory.unavailable_reason)}</p>` : ''}
       </div>
+      <div class="card measured-dust-block">
+        <h3>Polvo medido</h3>
+        <div class="inventory-grid">
+          <div><span>Cantidad</span><b>${summary.dust_qty == null ? 'no disponible' : `${fmtMoney(summary.dust_qty, 6)} ${esc(summary.symbol.replace(/USDT$/, ''))}`}</b></div>
+          <div><span>Valor</span><b>${summary.dust_value_usdt == null ? 'no disponible' : `${fmtMoney(summary.dust_value_usdt, 4)} USDT`}</b></div>
+          <div><span>Ciclos completados</span><b>${summary.cycles_completed == null ? 'no disponible' : esc(summary.cycles_completed)}</b></div>
+          <div><span>Polvo por ciclo</span><b>${summary.cycles_completed >= 1 && summary.dust_value_usdt != null ? `${fmtMoney(Number(summary.dust_value_usdt) / Number(summary.cycles_completed), 6)} USDT` : 'no disponible'}</b></div>
+          <div><span>Polvo por ciclo / celda</span><b>${summary.cycles_completed >= 1 && summary.dust_value_usdt != null && detail.n_levels && Number(summary.capital_total_usdt) > 0 ? `${fmtPct((Number(summary.dust_value_usdt) / Number(summary.cycles_completed)) / (Number(summary.capital_total_usdt) / Number(detail.n_levels)) * 100, 3)}` : 'no disponible'}</b></div>
+        </div>
+        <p class="muted">Medición real; compárala con la estimación del escáner.</p>
+      </div>
       ${(progressTarget || progressDays) ? `<div class="progress-row">${progressTarget}${progressDays}</div>` : ''}
       <div class="card cells-block">
         <h3>Escalera de bots</h3>

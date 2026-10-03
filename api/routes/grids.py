@@ -94,8 +94,12 @@ def _reject(db, status: int, message: str, symbol: str, body: OpenRequest):
 def scan(request: Request, body: ScanRequest):
     _authorize(request)
     try:
-        return request.app.state.grid_scan_service.scan(
+        service = request.app.state.grid_scan_service
+        result = service.scan(
             symbols=body.symbols, capital=body.capital, strategy=body.strategy, with_sim=body.with_sim)
+        fee_pct = float(getattr(getattr(service, "settings", None), "scanner_fee_pct",
+            getattr(request.app.state.settings, "scanner_fee_pct", 0.1)))
+        return {**result, "results": [{**row, "fee_pct": fee_pct} for row in result.get("results", [])]}
     except Exception as exc:
         raise HTTPException(503, f"No se pudo completar el scan: {exc}") from exc
 

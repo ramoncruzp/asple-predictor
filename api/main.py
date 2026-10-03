@@ -20,7 +20,7 @@ from models.shadow_predictor import ShadowPredictor
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, models_status, predictions, volatility
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, predictions, volatility
 from models.volatility.live import VolPredictor
 from scheduler.vol_loop import VolLoop
 from grid.engine import GridEngine
@@ -148,6 +148,7 @@ app.include_router(coins.router, prefix="/api/coins", tags=["coins"])
 app.include_router(grids.router, prefix="/api/grids", tags=["grids"])
 app.include_router(grid_status.router, tags=["grid-status"])
 app.include_router(grid_control.router, prefix="/api/grids", tags=["grid-control"])
+app.include_router(grid_structure.router, prefix="/api/grids", tags=["grid-structure"])
 app.include_router(grid_account.router)
 
 @app.get("/api/health")
