@@ -42,6 +42,18 @@ class FakeControlEngine:
     def __init__(self, db): self.db=db; self.calls=[]
     def _market_context(self, symbol):
         return (FakeExchange().filters, {}, 100)
+    def _build_profit_cells(self, grid_id, symbol, levels, *, use_cache=False,
+                            deadline=None, clock=None, on_fee_estimated=None):
+        cells = []
+        for row in levels:
+            if row.get("held_qty", 0) <= 0:
+                continue
+            cost = float(row["entry_price"] * row["held_qty"])
+            if on_fee_estimated is not None:
+                on_fee_estimated()
+            cells.append({"level_idx": row["level_idx"], "held_qty": float(row["held_qty"]),
+                          "entry_cost": cost, "entry_fee_usdt": cost * .001})
+        return cells
     def preview_adjust(self, *args): return {"ok":True,"plan":{"movable_cells":[1],"trapped_cells":[0]}}
     def pause_grid(self, *args): self.calls.append(("pause",args)); self.db.grid["status"]="PAUSED"; return {"ok":True}
     def resume_grid(self, *args): self.calls.append(("resume",args)); self.db.grid["status"]="ACTIVE"; return {"ok":True}
@@ -114,6 +126,25 @@ def test_close_mode_and_liquidation_confirmation_are_mandatory(tmp_path):
     assert wrong_text.status_code == 422
 
 
+def test_profit_repository_close_preview_reports_sell_and_repository_estimates(tmp_path):
+    client, _db, _exchange, _engine = build_client(tmp_path)
+    response = client.post("/api/grids/1/close", json={"mode":"profit_repository"})
+    assert response.status_code == 200, response.body
+    plan = response.body["plan"]
+    assert plan["mode"] == "profit_repository"
+    assert plan["cells_to_sell"] == 1 and plan["cells_to_repository"] == 0
+    assert float(plan["sell_gain_usdt"]) > 0
+    assert "bid_used" in plan and "estimated_commission_usdt" in plan
+    liquidate = client.post("/api/grids/1/close", json={"mode":"liquidate"})
+    assert liquidate.status_code == 200
+    assert liquidate.body["plan"]["cells_total"] == 1
+    assert liquidate.body["plan"]["cells_winning"] == 1
+    assert float(liquidate.body["plan"]["net_result_usdt"]) > 0
+    no_price, _, _, _ = build_client(tmp_path, client=FakeControlExchange(ticker_fail=True))
+    unavailable = no_price.post("/api/grids/1/close", json={"mode":"profit_repository"})
+    assert unavailable.status_code == 503
+
+
 def test_invalid_status_missing_grid_and_invalid_params_are_rejected(tmp_path):
     client, db, _, _ = build_client(tmp_path)
     db.grid["status"] = "PAUSED"
@@ -168,6 +199,7 @@ def test_confirmed_controls_dispatch_expected_engine_methods(tmp_path):
     cases = [
         ("resume", "PAUSED", {}, "resume"),
         ("close", "ACTIVE", {"mode":"repository"}, "close"),
+        ("close", "ACTIVE", {"mode":"profit_repository"}, "close"),
         ("adjust", "ACTIVE", {"new_low":89,"new_high":111,"n":10}, "adjust"),
         ("sweep-dust", "ACTIVE", {}, "sweep-dust"),
     ]

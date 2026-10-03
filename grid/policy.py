@@ -42,6 +42,48 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "loan_cap_pct": 30.0,
     "loan_min_amount": 1.0,
 }
+DEFAULT_GRID_FEE_PCT = 0.1
+PROFIT_CLOSE_RETRY_MAX = 8
+PROFIT_CLOSE_RETRY_BASE_SECONDS = 60
+PROFIT_CLOSE_RETRY_MAX_SECONDS = 900
+
+
+def profit_close_retry_delay(retry_count: int) -> int:
+    return min(PROFIT_CLOSE_RETRY_BASE_SECONDS * (2 ** max(0, int(retry_count))),
+               PROFIT_CLOSE_RETRY_MAX_SECONDS)
+
+
+def build_profit_cells(levels, load_buy_trades, fee_value_usdt,
+                       fee_pct: float = DEFAULT_GRID_FEE_PCT,
+                       on_fee_estimated=None):
+    """Build held-cell accounting from actual BUY fills, estimating fees only without fills."""
+    cells = []
+    for row in levels:
+        qty = float(row.get("held_qty") or 0)
+        if qty <= 0:
+            continue
+        fallback_cost = float(row.get("entry_price") or 0) * qty
+        entry_cost = fallback_cost
+        entry_fee = fallback_cost * float(fee_pct) / 100.0
+        estimated = True
+        cid = row.get("buy_client_order_id") or row.get("client_order_id")
+        if cid:
+            try:
+                trades = load_buy_trades(cid)
+                quote = sum(float(trade.get("quoteQty") or
+                    float(trade.get("qty", 0)) * float(trade.get("price", 0)))
+                    for trade in (trades or []))
+                if quote > 0:
+                    actual_fee = float(fee_value_usdt(trades))
+                    entry_cost, entry_fee = quote, actual_fee
+                    estimated = False
+            except Exception:
+                pass
+        if estimated and on_fee_estimated is not None:
+            on_fee_estimated()
+        cells.append({**row, "level_idx": int(row["level_idx"]), "held_qty": qty,
+                      "entry_cost": entry_cost, "entry_fee_usdt": entry_fee})
+    return cells
 
 
 @dataclass(frozen=True)
@@ -281,6 +323,47 @@ def evaluate_target(
             "reason": "target_reached" if reached else "target_not_reached",
             "target_usdt": target_profit, "target_threshold": threshold,
             "projected_equity": projected_equity}
+
+
+def plan_profit_close(cells: list[dict], bid: float, filters: Any, fee_pct: float) -> dict[str, Any]:
+    """Plan a close that market-sells every profitable sellable cell and repositories the rest."""
+    price = _number(bid, "bid")
+    fee = _number(fee_pct, "fee_pct") / 100.0
+    if price <= 0 or not 0 <= fee < 1:
+        raise ValueError("bid or fee_pct is invalid")
+    sell, repository = [], []
+    for cell in cells:
+        qty = _number(cell.get("held_qty", cell.get("qty", 0)), "held_qty")
+        if qty <= 0:
+            continue
+        basis = _number(cell.get("entry_cost", 0), "entry_cost") + _number(
+            cell.get("entry_fee_usdt", 0), "entry_fee_usdt")
+        proceeds = price * qty * (1.0 - fee)
+        gain = proceeds - basis
+        idx = int(cell.get("level_idx", 0))
+        try:
+            rounded = filters.round_qty_down(qty)
+            sellable = rounded >= filters.min_qty
+            if getattr(filters, "max_qty", 0) and rounded > filters.max_qty:
+                sellable = False
+            if getattr(filters, "apply_min_to_market", False) and rounded * Decimal(str(price)) < filters.min_notional:
+                sellable = False
+        except (AttributeError, TypeError, ValueError):
+            sellable = False
+        if gain > 0 and sellable:
+            sell.append({"level_idx": idx, "qty": qty, "bid": price,
+                         "gain_usdt": gain, "proceeds_usdt": proceeds})
+        else:
+            repository.append({"level_idx": idx,
+                "reason": "not_sellable" if not sellable else "not_profitable",
+                "loss_usdt": max(0.0, -gain)})
+    projected_cash = sum((row["proceeds_usdt"] for row in sell), 0.0)
+    net_gain = sum((row["gain_usdt"] for row in sell), 0.0)
+    net_loss = sum((row["loss_usdt"] for row in repository), 0.0)
+    fees = sum((price * row["qty"] * fee for row in sell), 0.0)
+    return {"sell_cells": sell, "repo_cells": repository, "projected_cash": projected_cash,
+            "net_gain_usdt": net_gain, "net_loss_usdt": net_loss,
+            "estimated_commission_usdt": fees, "bid_used": price}
 
 
 def evaluate_max_days(params: Mapping[str, Any] | None, created_at: Any,

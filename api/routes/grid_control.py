@@ -50,7 +50,7 @@ class EmptyBody(ActionBase):
 
 
 class CloseBody(ActionBase):
-    mode: Literal["cancel", "liquidate", "repository"]
+    mode: Literal["cancel", "liquidate", "repository", "profit_repository"]
     confirm_text: str | None = None
 
 

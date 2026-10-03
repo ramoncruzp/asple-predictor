@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, event, exists, func, select, text
 from sqlalchemy.exc import OperationalError
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
@@ -22,6 +22,15 @@ from config.models_config import (
 class DBManager:
     def __init__(self, db_url: str):
         self.engine = create_engine(db_url, future=True)
+        if (self.engine.dialect.name == "sqlite"
+                and self.engine.url.database not in {None, "", ":memory:"}):
+            @event.listens_for(self.engine, "connect")
+            def _configure_sqlite_connection(connection, _record):
+                cursor = connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.close()
         self.metadata = MetaData()
         self.predictions = Table("predictions", self.metadata,
             Column("id", Integer, primary_key=True), Column("prediction_id", String, unique=True, nullable=False),

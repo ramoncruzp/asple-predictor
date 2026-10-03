@@ -56,12 +56,19 @@ class Settings(BaseSettings):
     scanner_auto_open: bool = Field(False, validation_alias="SCANNER_AUTO_OPEN")
     scanner_auto_open_interval_hours: int = Field(6, gt=0, validation_alias="SCANNER_AUTO_OPEN_INTERVAL_HOURS")
     scanner_auto_open_max_per_run: int = Field(1, ge=0, validation_alias="SCANNER_AUTO_OPEN_MAX_PER_RUN")
-    scanner_auto_open_min_score: float = Field(0.6, ge=0, le=1, validation_alias="SCANNER_AUTO_OPEN_MIN_SCORE")
+    scanner_auto_open_min_score: float = Field(0.7, ge=0, le=1, validation_alias="SCANNER_AUTO_OPEN_MIN_SCORE")
+    same_coin_sell_tolerance_pct: float = Field(0.05, ge=0, validation_alias="SAME_COIN_SELL_TOLERANCE_PCT")
     scanner_auto_open_daily_cap: int = Field(2, ge=0, validation_alias="SCANNER_AUTO_OPEN_DAILY_CAP")
     scanner_auto_open_strategy: str = Field("simple", pattern="^(simple|smart)$", validation_alias="SCANNER_AUTO_OPEN_STRATEGY")
     scanner_auto_open_target_pct: float | None = Field(None, gt=0, le=100, validation_alias="SCANNER_AUTO_OPEN_TARGET_PCT")
     scanner_auto_open_max_days: float | None = Field(None, gt=0, validation_alias="SCANNER_AUTO_OPEN_MAX_DAYS")
     grid_api_token: str = Field("", validation_alias="GRID_API_TOKEN")
+    db_backup_enabled: bool = Field(True, validation_alias="DB_BACKUP_ENABLED")
+    db_backup_dir: str = Field("backups", validation_alias="DB_BACKUP_DIR")
+    db_backup_keep: int = Field(7, ge=1, validation_alias="DB_BACKUP_KEEP")
+    testnet_reset_min_unknown: int = Field(2, ge=1, validation_alias="TESTNET_RESET_MIN_UNKNOWN")
+    dust_alert_usdt: float = Field(1.0, ge=0, validation_alias="DUST_ALERT_USDT")
+    dust_alert_pct_capital: float = Field(1.0, ge=0, validation_alias="DUST_ALERT_PCT_CAPITAL")
 
     model_config = SettingsConfigDict(
         env_file=".env",

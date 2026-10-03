@@ -103,7 +103,7 @@ def _counts(db):
 def test_list_and_detail_return_distinct_data_for_two_grids_same_symbol(tmp_path):
     client, db, exchange, engine = make_app(tmp_path)
     first = engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=1000, strategy="simple")
-    second = engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=500,
+    second = engine.create_grid("XRPUSDT", Decimal(95), Decimal(105), 4, capital=500,
                                 strategy="smart", params={"compound_enabled": False})
 
     listing = client.get("/api/grids")
@@ -200,7 +200,7 @@ def test_price_as_of_present_when_testnet_client_available(tmp_path):
 def test_grid_list_deduplicates_and_caches_market_price_for_same_symbol(tmp_path):
     client, db, exchange, engine = make_app(tmp_path)
     engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=1000, strategy="simple")
-    engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=500,
+    engine.create_grid("XRPUSDT", Decimal(95), Decimal(105), 4, capital=500,
                        strategy="smart", params={"compound_enabled": False})
     original = exchange.get_book_ticker
     calls = []

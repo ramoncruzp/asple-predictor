@@ -18,12 +18,12 @@ def test_monitor_adjusts_smart_grid_and_leaves_simple_grid_unchanged():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     smart = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000,
                                strategy="smart", params={"pause_enter_prob": 0.99})
-    simple = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000)
+    simple = engine.create_grid("XRPUSDT", 95, 105, 4, capital=1000)
     exchange.move_price(109.49, 109.5, 109.495)
     run = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol()).run_once()
     assert run["status"] == "OK"
     assert db.get_grid(smart["id"])["range_low"] != 90
-    assert db.get_grid(simple["id"])["range_low"] == 90
+    assert db.get_grid(simple["id"])["range_low"] == 95
     assert db.get_last_event(smart["id"], "GRID_ADJUSTED")["source"] == "MONITOR"
 
 

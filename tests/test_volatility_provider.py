@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from math import exp, sqrt
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,7 +55,7 @@ def test_provider_returns_none_for_stale_forecast():
 def test_provider_returns_none_for_unsupported_symbol_or_missing_champion():
     provider = VolatilityProvider(FakeDB([forecast_row()]), clock=lambda: NOW)
     assert provider.get("BTCUSDT") is None
-    assert provider.last_reason == "unsupported_symbol"
+    assert provider.last_reason == "data_client_unavailable"
     assert VolatilityProvider(FakeDB([]), clock=lambda: NOW).get("XRPUSDT") is None
 
 
@@ -63,3 +64,80 @@ def test_provider_catches_and_logs_database_exception(caplog):
     assert provider.get("XRPUSDT") is None
     assert provider.last_reason == "exception"
     assert "volatility lookup failed" in caplog.text
+
+
+class FakeMarketData:
+    def __init__(self, closes):
+        self.closes = closes
+        self.calls = 0
+
+    def get_historical_klines(self, symbol, interval, lookback_days):
+        self.calls += 1
+        return SimpleNamespace(__getitem__=None) if False else CloseFrame(self.closes)
+
+
+class CloseFrame:
+    def __init__(self, closes): self.closes = closes
+    def __getitem__(self, name):
+        assert name == "close"
+        return SimpleNamespace(tolist=lambda: self.closes)
+
+
+def _closes(amplitude):
+    import math
+    values = [100.0]
+    for index in range(168):
+        values.append(values[-1] * math.exp(amplitude if index % 2 else -amplitude))
+    return values
+
+
+def test_realized_sigma_orders_agitated_above_calm_and_requires_100_bars():
+    calm = VolatilityProvider(FakeDB(), clock=lambda: NOW,
+                              data_client=FakeMarketData(_closes(.001))).get("BTCUSDT")
+    agitated = VolatilityProvider(FakeDB(), clock=lambda: NOW,
+                                  data_client=FakeMarketData(_closes(.02))).get("ETHUSDT")
+    assert calm.source == agitated.source == "realized"
+    assert agitated.sigma_24h > calm.sigma_24h
+    client = FakeMarketData(_closes(.01)[:80])
+    provider = VolatilityProvider(FakeDB(), clock=lambda: NOW, data_client=client)
+    assert provider.get("SOLUSDT") is None
+    assert provider.last_reason == "insufficient_bars"
+
+
+def test_realized_sigma_cache_observes_30_minute_ttl():
+    now = [NOW]
+    client = FakeMarketData(_closes(.01))
+    provider = VolatilityProvider(FakeDB(), clock=lambda: now[0], data_client=client)
+    first = provider.get("BTCUSDT")
+    assert provider.get("BTCUSDT") is first and client.calls == 1
+    now[0] += timedelta(minutes=31)
+    provider.get("BTCUSDT")
+    assert client.calls == 2
+
+
+def test_realized_failure_cache_retries_after_90_seconds():
+    now = [NOW]
+    class Recovering:
+        calls = 0
+        def get_historical_klines(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary")
+            return CloseFrame(_closes(.01))
+    client = Recovering()
+    provider = VolatilityProvider(FakeDB(), clock=lambda: now[0], data_client=client)
+    assert provider.get("BTCUSDT") is None
+    now[0] += timedelta(seconds=89)
+    assert provider.get("BTCUSDT") is None and client.calls == 1
+    now[0] += timedelta(seconds=2)
+    assert provider.get("BTCUSDT") is not None and client.calls == 2
+
+
+def test_realized_cache_is_safe_for_concurrent_callers():
+    from concurrent.futures import ThreadPoolExecutor
+    client = FakeMarketData(_closes(.01))
+    provider = VolatilityProvider(FakeDB(), clock=lambda: NOW, data_client=client)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        views = list(pool.map(lambda _index: provider.get("BTCUSDT"), range(24)))
+    assert all(view is not None for view in views)
+    assert client.calls == 1

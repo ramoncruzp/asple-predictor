@@ -24,11 +24,12 @@
     const n = value => value == null ? 'no disponible' : esc(value);
     const lines = [];
     if (plan.action === 'close') {
-      if (plan.mode === 'liquidate') lines.push(`Se venderán ${n(plan.held_qty)} unidades a mercado; PnL no realizado que se materializaría ≈ $${n(plan.unrealized_pnl_materialized)} USDT; comisión estimada ≈ $${n(plan.estimated_commission_usdt)} USDT.`);
+      if (plan.mode === 'liquidate') { const result = Number(plan.net_result_usdt); const label = result >= 0 ? 'GANANCIA' : 'PÉRDIDA'; lines.push(`<span class="${pnlClass(plan.net_result_usdt)}">Resultado estimado: ${label} $${n(Math.abs(result))} USDT; ${n(plan.cells_winning)} celdas ganadoras y ${n(plan.cells_losing)} perdedoras. Comisión estimada: $${n(plan.estimated_commission_usdt)} USDT.</span>`); }
+      else if (plan.mode === 'profit_repository') { lines.push(`${n(plan.cells_to_sell)} celdas a vender (ganancia neta estimada +$${n(plan.sell_gain_usdt)}); ${n(plan.cells_to_repository)} al repositorio (pérdida no realizada $${n(plan.repo_unrealized_usdt)}).`); lines.push('El inventario del repositorio mantiene exposición al precio; ambas cifras son estimaciones sujetas a ejecución y filtros.'); if (plan.estimated_fee_cells > 0) lines.push(`${n(plan.estimated_fee_cells)} celdas con comisi\u00f3n estimada.`); }
       else lines.push(`Se cancelarán ${n(plan.open_orders_to_cancel)} órdenes abiertas; quedarían ${n(plan.retained_qty)} unidades retenidas fuera del grid; valor ≈ $${n(plan.held_market_value_usdt)} USDT.`);
       if (plan.mode === 'repository') lines.push(`${n(plan.cells_to_repository)} celdas pasarían al repositorio; inventario no gestionado: ${n(plan.unmanaged_inventory_qty)}.`);
       lines.push(`La salida propuesta sería ${n(plan.resulting_status)}; revisa el resultado final en el estado del grid.`);
-      if (plan.mode === 'liquidate') lines.push(`Órdenes abiertas a cancelar: ${n(plan.open_orders_to_cancel)}.`);
+      if (plan.mode === 'liquidate' || plan.mode === 'profit_repository') lines.push(`Órdenes abiertas a cancelar: ${n(plan.open_orders_to_cancel)}; las ventas restantes y los resultados dependen de su ejecución.`);
       if (plan.mode === 'cancel') lines.push('No se venderá inventario a mercado; el saldo retenido quedará fuera del grid.');
     } else if (plan.action === 'pause') {
       lines.push(`Se cancelarían ${n(plan.open_buy_orders_to_cancel)} compras; permanecerían ${n(plan.open_sell_orders_remain)} ventas abiertas.`);
@@ -80,7 +81,7 @@
 
   function actionFields(action, card) {
     if (action === 'pause') return { reason: card.querySelector('[name="pause-reason"]')?.value || null };
-    if (action === 'close') return { mode: card.querySelector('[name="close-mode"]')?.value || 'repository' };
+    if (action === 'close') return { mode: card.querySelector('[name="close-mode"]:checked')?.value || 'repository' };
     if (action === 'adjust') return { new_low: Number(card.querySelector('[name="new-low"]')?.value), new_high: Number(card.querySelector('[name="new-high"]')?.value), n: Number(card.querySelector('[name="new-n"]')?.value) || null };
     if (action === 'params') {
       const read = name => { const value = card.querySelector(`[name="${name}"]`)?.value; return value === '' || value == null ? null : Number(value); };
@@ -94,7 +95,7 @@
 
   function formFor(action, summary) {
     if (action === 'pause') return '<label>Motivo breve<input name="pause-reason" maxlength="120"></label>';
-    if (action === 'close') return '<label>Modo<select name="close-mode"><option value="repository">Pasar celdas al repositorio</option><option value="cancel">Cancelar órdenes y dejar activo el inventario</option><option value="liquidate">Vender inventario a mercado</option></select></label>';
+    if (action === 'close') return '<fieldset class="grid-close-modes"><legend>Modo de cierre</legend><label><input type="radio" name="close-mode" value="liquidate"> Vender todo a mercado</label><label><input type="radio" name="close-mode" value="profit_repository"> Vender lo positivo y pasar lo negativo al grid especial</label><p>Otras opciones</p><label><input type="radio" name="close-mode" value="repository" checked> Pasar todas las celdas al repositorio</label><label><input type="radio" name="close-mode" value="cancel"> Solo cancelar órdenes (deja monedas sueltas)</label></fieldset>';
     if (action === 'adjust') return `<label>Rango mínimo<input name="new-low" type="number" min="0.00000001" step="any" value="${summary.range_low || ''}" required></label><label>Rango máximo<input name="new-high" type="number" min="0.00000001" step="any" value="${summary.range_high || ''}" required></label><label>Niveles (opcional)<input name="new-n" type="number" min="4" max="60"></label>`;
     if (action === 'params' && summary.strategy === 'simple') return '<label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label>';
     if (action === 'params' && summary.strategy !== 'simple') return '<p>Deja vacio para mantener. Testnet no representa el mercado real.</p><label>Meta %<input name="target-pct" type="number" min="0.000001" step="any"></label><label>Meta USDT<input name="target-usdt" type="number" min="0.000001" step="any"></label><label><input name="clear-target" type="checkbox"> Quitar meta actual</label><label><input name="set-target-basis" type="checkbox"> Cambiar base de meta</label><select name="target-basis"><option value="cash">Caja</option><option value="equity">Equity</option></select><label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label><label>Barrido de polvo (% capital)<input name="dust-threshold" type="number" min="0" step="any"></label>';
@@ -440,4 +441,7 @@
     }
     if (!silent) scheduleRefresh();
   };
+  if (window.__ASPLE_GRID_TEST__) {
+    window.__ASPLE_GRID_TEST__ = { formFor, planLines, actionFields, controlFlow };
+  }
 })();

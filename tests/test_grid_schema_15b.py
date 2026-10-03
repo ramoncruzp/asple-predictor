@@ -52,17 +52,17 @@ def test_15a_schema_migration_is_idempotent_and_preserves_existing_rows(tmp_path
         }
 
 
-def test_engine_guard_is_by_symbol_and_strategy_and_holding_does_not_block():
+def test_engine_guard_uses_sell_prices_across_strategies_and_counts_holding():
     engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
     simple = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000)
-    with pytest.raises(GridConfigError, match="open simple grid"):
+    with pytest.raises(GridConfigError, match="sell level conflict"):
         engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000)
-    smart = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000, strategy="smart")
+    smart = engine.create_grid("XRPUSDT", 95, 105, 4, capital=1000, strategy="smart")
     assert simple["strategy"] == "simple" and smart["strategy"] == "smart"
     db.update_grid(smart["id"], status="HOLDING")
     db.update_grid(simple["id"], status="CLOSED")
-    another_simple = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000)
-    assert another_simple["strategy"] == "simple"
+    with pytest.raises(GridConfigError, match="sell level conflict"):
+        engine.create_grid("XRPUSDT", 95, 105, 4, capital=1000)
 
 
 @pytest.mark.parametrize("params", [

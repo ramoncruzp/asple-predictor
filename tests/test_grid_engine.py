@@ -478,7 +478,7 @@ def test_cancel_reports_buy_that_fills_during_cancel_with_cell_and_quantity():
     assert fill["grid_id"] == grid["id"]
     assert fill["level_idx"] == 2
     assert Decimal(str(fill["executed_qty"])) == Decimal("2.0")
-    assert fill["has_sell"] is False
+    assert "has_sell" not in fill
 
 
 def test_failed_grid_creation_resets_canceled_buy_cells_to_idle_and_keeps_client_id():

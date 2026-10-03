@@ -79,6 +79,11 @@ EVENT_LABELS: dict[str, str] = {
     "CLOSE_REPOSITORY": "Cierre a repositorio",
     "invariant_violation": "Violación de invariante detectada",
     "TESTNET_RESET_DETECTED": "Reinicio de Testnet detectado",
+    "BUY_PARTIAL_SETTLED": "Compra parcial contabilizada",
+    "TESTNET_RESET_RECOVERED": "Testnet recuperado tras posible reinicio",
+    "DUST_RECONCILIATION": "Conciliación de polvo",
+    "PROFIT_CLOSE": "Cierre inteligente por rentabilidad",
+    "PROFIT_CLOSE_MARKET_SELL_FAILED": "Falló venta de celda rentable; inventario protegido",
 }
 
 SEVERITY_BY_EVENT = {
@@ -90,6 +95,9 @@ SEVERITY_BY_EVENT = {
     "GRID_OPEN_REJECTED": "warning", "TESTNET_RESET_DETECTED": "warning",
     "BUY_FILLED": "info", "SELL_FILLED": "success", "TARGET_REACHED": "success",
     "GRID_PAUSED": "info", "GRID_RESUMED": "info", "GRID_ADJUSTED": "info",
+    "BUY_PARTIAL_SETTLED": "info", "TESTNET_RESET_RECOVERED": "info",
+    "DUST_RECONCILIATION": "info", "PROFIT_CLOSE": "success",
+    "PROFIT_CLOSE_MARKET_SELL_FAILED": "warning",
 }
 
 OPEN_STATUSES = {"OPENING", "ACTIVE", "PAUSED", "CLOSING"}
@@ -516,7 +524,9 @@ def events_view(events: list[dict]) -> list[dict]:
         result.append({
             "ts": _utc(event["ts"]).isoformat(), "type": event_type,
             "message": EVENT_LABELS.get(event_type, event_type),
-            "severity": SEVERITY_BY_EVENT.get(event_type, "info"),
+            "severity": ((event.get("details") or {}).get("severity")
+                         if event_type == "DUST_RECONCILIATION" else None)
+                        or SEVERITY_BY_EVENT.get(event_type, "info"),
             "reason": event.get("reason"), "grid_id": event.get("grid_id"),
             "level_idx": event.get("level_idx"),
         })

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from api.routes.grids import _authorize
 from grid.status_view import daily_profit_view, grid_summary
+from grid.reconciliation import expected_inventory_by_asset
 
 router = APIRouter(prefix="/api/account", tags=["grid-account"])
 logger = logging.getLogger(__name__)
@@ -165,14 +166,7 @@ def summary(request: Request):
                            "usdt_free": str(Decimal(str(balances.get("USDT", {}).get("free", 0)))),
                            "usdt_locked": str(Decimal(str(balances.get("USDT", {}).get("locked", 0)))),
                            "equity_usdt": str(equity), "price_as_of": now.isoformat()}
-    held_by_asset = {}
-    for grid in grids:
-        if grid["status"] in {"CLOSED", "ERROR"}: continue
-        asset = str(grid["symbol"]).removesuffix("USDT")
-        qty = Decimal(str(grid.get("dust_qty") or 0)) + sum(
-            (Decimal(str(level.get("held_qty") or 0)) for level in db.get_grid_levels(int(grid["id"]))
-             if str(level.get("state", "")).upper() != "DONE"), Decimal(0))
-        held_by_asset[asset] = held_by_asset.get(asset, Decimal(0)) + qty
+    held_by_asset, _grid_ids_by_asset = expected_inventory_by_asset(db, grids)
     reconciliation = []
     if balances is not None:
         for asset in sorted((set(balances) | set(held_by_asset)) - {"USDT"}):

@@ -332,6 +332,7 @@ def test_engine_target_cancel_failure_falls_back_to_sell_repository_and_records_
     assert result["target_missed_after_fills"] is True
     failure = db.get_last_event(grid["id"], "TARGET_MARKET_SELL_FAILED")
     assert failure is not None
+    assert db.get_grid(grid["id"])["fail_reason"] == "TARGET_REACHED"
     repos = db.list_grids_by_status({"HOLDING"})
     assert repos and any(row["held_qty"] > 0 for row in db.get_grid_levels(repos[0]["id"]))
 
@@ -393,6 +394,21 @@ def test_engine_target_repository_receives_unsold_inventory_and_cancels_all_buys
     held = db.get_grid_levels(repository["id"])
     assert len(held) == 1 and held[0]["held_qty"] > 0
     assert held[0]["sell_price"] > 0
+
+
+def test_target_close_protects_partial_buy_filled_during_cancel():
+    engine, db, exchange, grid = _engine_target_case()
+    racing = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    exchange.fill(racing["order_id"], partial=True)
+    result = engine.close_grid_target(grid["id"], _plan_for_grid(db, grid), 100)
+    repository = next(row for row in db.list_grids_by_status({"HOLDING"})
+                      if row["symbol"] == grid["symbol"])
+    settled = next(row for row in db.get_grid_levels(repository["id"])
+                   if row["level_idx"] == racing["level_idx"])
+    event = db.list_grid_events(grid_id=grid["id"], event_type="BUY_PARTIAL_SETTLED")[-1]
+    assert result["status"] == "CLOSED"
+    assert settled["state"] == "SELL_OPEN" and settled["held_qty"] > 0
+    assert event["details"]["path"] == "close_grid_target"
 
 
 def test_engine_target_restart_after_cancel_boundary_is_idempotent():

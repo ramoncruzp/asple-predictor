@@ -10,6 +10,225 @@ from grid.engine import GridEngine
 from grid.monitor import GridMonitor
 from database.db_manager import DBManager
 from tests.test_grid_engine import create, make_engine
+from data.testnet_client import TestnetOrderError as _TestnetOrderError
+
+
+@pytest.mark.parametrize("path", ["paused", "cancel", "repository"])
+def test_canceled_partial_buy_is_accounted_and_protected(path):
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy_level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    exchange.fill(buy_level["order_id"], partial=True)
+    original_cancel = exchange.cancel_order
+    def cancel(symbol, order_id):
+        order = original_cancel(symbol, order_id)
+        order["status"] = "CANCELED"
+        exchange.orders[int(order_id)]["status"] = "CANCELED"
+        return order
+    exchange.cancel_order = cancel
+    if path == "paused":
+        db.update_grid(grid["id"], status="PAUSED")
+        engine.sync_paused(grid["id"])
+    elif path == "cancel":
+        engine.cancel_grid_orders(grid["id"], finalize=False)
+    else:
+        db.update_grid(grid["id"], status="CLOSING")
+        engine._close_repository(grid["id"])
+    if path != "repository":
+        level = next(row for row in db.get_grid_levels(grid["id"])
+                     if int(row["level_idx"]) == int(buy_level["level_idx"]))
+        assert Decimal(str(level["held_qty"])) > 0
+        assert level["state"] != "IDLE"
+    else:
+        repo = next(row for row in db.list_grids_by_status({"HOLDING"}) if row["symbol"] == "XRPUSDT")
+        moved = db.get_grid_levels(repo["id"])[0]
+        assert Decimal(str(moved["held_qty"])) > 0
+    events = db.list_grid_events(grid_id=grid["id"], event_type="BUY_PARTIAL_SETTLED")
+    assert len(events) == 1
+    assert events[0]["details"]["path"] == {"paused": "sync_paused", "cancel": "cancel_grid_orders",
+                                               "repository": "close_repository"}[path]
+
+
+def test_zero_execution_cancelled_buy_keeps_existing_state():
+    engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    before = dict(level)
+    assert not engine._settle_canceled_buy_partial(grid, level,
+        {"order_id": level["order_id"], "status": "CANCELED", "executed_qty": 0}, "test")
+    assert db.get_grid_levels(grid["id"])[int(level["level_idx"])] == before
+    assert not db.list_grid_events(grid_id=grid["id"], event_type="BUY_PARTIAL_SETTLED")
+
+
+def test_final_cancel_accounts_partial_buy_without_placing_sell():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    exchange.fill(level["order_id"], partial=True)
+    partial_qty = exchange.orders[level["order_id"]]["executed_qty"]
+    original_cancel = exchange.cancel_order
+
+    def cancel(symbol, order_id):
+        result = original_cancel(symbol, order_id)
+        result["status"] = "CANCELED"
+        exchange.orders[int(order_id)]["status"] = "CANCELED"
+        return result
+
+    exchange.cancel_order = cancel
+    create_count = len(exchange.create_calls)
+    result = engine.cancel_grid_orders(grid["id"], finalize=True)
+    settled = db.get_grid_levels(grid["id"])[int(level["level_idx"])]
+    assert result["status"] == "CANCELLED"
+    assert settled["state"] == "ERROR" and Decimal(str(settled["held_qty"])) > 0
+    assert Decimal(str(settled["held_qty"])) == partial_qty
+    assert result["remaining_inventory"] == result["unmanaged_inventory"]
+    assert result["remaining_inventory"][0]["level_idx"] == level["level_idx"]
+    assert Decimal(str(result["remaining_inventory"][0]["held_qty"])) == partial_qty
+    assert len(exchange.create_calls) == create_count
+
+
+def test_final_cancel_accounts_buy_filled_before_cancel_without_new_sell():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    exchange.fill(level["order_id"])
+    create_count = len(exchange.create_calls)
+    result = engine.cancel_grid_orders(grid["id"], finalize=True)
+    settled = db.get_grid_levels(grid["id"])[int(level["level_idx"])]
+    assert result["status"] == "CANCELLED"
+    assert settled["state"] == "ERROR" and Decimal(str(settled["held_qty"])) > 0
+    assert len(exchange.create_calls) == create_count
+    assert result["unmanaged_inventory"][0]["level_idx"] == level["level_idx"]
+
+
+def test_cancel_does_not_clobber_sell_open_level_with_historical_filled_buy():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = next(row for row in exchange.get_open_orders("XRPUSDT") if row["side"] == "BUY")
+    exchange.fill(buy["order_id"])
+    engine.sync_grid(grid["id"])
+    level = next(row for row in db.get_grid_levels(grid["id"])
+                 if row.get("buy_client_order_id") == buy["client_order_id"])
+    assert level["state"] == "SELL_OPEN"
+    sell_id = int(level["order_id"])
+    # Simulate the cancel loop holding a stale BUY snapshot while storage has the SELL.
+    original_levels = db.get_grid_levels
+    first_read = {"pending": True}
+
+    def stale_first_read(grid_id):
+        rows = original_levels(grid_id)
+        if first_read["pending"]:
+            first_read["pending"] = False
+            rows = [dict(row) for row in rows]
+            stale = rows[int(level["level_idx"])]
+            stale.update(state="BUY_OPEN", order_id=int(buy["order_id"]),
+                         client_order_id=buy["client_order_id"])
+        return rows
+
+    db.get_grid_levels = stale_first_read
+    result = engine.cancel_grid_orders(grid["id"], finalize=False)
+    after = db.get_grid_levels(grid["id"])[int(level["level_idx"])]
+    db.get_grid_levels = original_levels
+    assert after["state"] == "SELL_OPEN"
+    assert after["held_qty"] == level["held_qty"]
+    assert after["order_id"] == sell_id
+    assert sell_id in exchange.orders and exchange.orders[sell_id]["status"] == "NEW"
+    assert not result["filled_during_cancel"]
+
+
+@pytest.mark.parametrize("path", ["partial_response", "cancel_exception"])
+def test_cancel_summary_only_captures_partial_buy_when_settlement_succeeds(path):
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = next(row for row in db.get_grid_levels(grid["id"]) if row["state"] == "BUY_OPEN")
+    exchange.fill(level["order_id"], partial=True)
+    original_cancel = exchange.cancel_order
+
+    def cancel_with_state_race(symbol, order_id):
+        result = original_cancel(symbol, order_id)
+        db.update_level(grid["id"], int(level["level_idx"]), state="SELL_OPEN")
+        if path == "cancel_exception":
+            exchange.orders[int(order_id)]["status"] = "FILLED"
+            raise RuntimeError("cancel response interrupted")
+        return result
+
+    exchange.cancel_order = cancel_with_state_race
+    result = engine.cancel_grid_orders(grid["id"], finalize=False)
+    assert result["filled_during_cancel"] == []
+    assert db.list_grid_events(grid_id=grid["id"], event_type="BUY_PARTIAL_SETTLED") == []
+
+
+def test_monitor_detects_testnet_reset_once_and_skips_affected_grid():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    before_levels = db.get_grid_levels(grid["id"])
+    before_writes = list(exchange.create_calls)
+    exchange.get_open_orders = lambda symbol=None: []
+    exchange.get_order = lambda *args, **kwargs: (_ for _ in ()).throw(_TestnetOrderError(-2013, "unknown"))
+    monitor = GridMonitor(db, exchange, engine, monitor_settings())
+    monitor.run_once()
+    monitor.run_once()
+    events = db.list_grid_events(event_type="TESTNET_RESET_DETECTED")
+    assert len(events) == 1
+    restarted = GridMonitor(db, exchange, engine, monitor_settings())
+    restarted.run_once()
+    assert len(db.list_grid_events(event_type="TESTNET_RESET_DETECTED")) == 1
+    assert restarted.testnet_reset_suspected is True and restarted.testnet_reset_since is not None
+    assert db.get_grid_levels(grid["id"]) == before_levels
+    assert exchange.create_calls == before_writes
+
+
+def test_monitor_does_not_call_a_single_missing_order_a_reset():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    ids = {int(row["order_id"]) for row in db.get_grid_levels(grid["id"]) if row.get("order_id")}
+    missing_id = min(ids)
+    original_get_order = exchange.get_order
+    original_open_orders = exchange.get_open_orders
+    exchange.get_open_orders = lambda symbol=None: [row for row in original_open_orders(symbol)
+                                                    if int(row["order_id"]) != missing_id]
+    exchange.get_order = lambda symbol, order_id=None, client_order_id=None: (
+        (_ for _ in ()).throw(_TestnetOrderError(-2013, "unknown"))
+        if int(order_id) == missing_id else original_get_order(symbol, order_id, client_order_id))
+    monitor = GridMonitor(db, exchange, engine, monitor_settings())
+    monitor.run_once()
+    assert not db.list_grid_events(event_type="TESTNET_RESET_DETECTED")
+
+
+def test_monitor_treats_terminal_order_absent_from_open_orders_as_legitimate():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    orders = exchange.get_open_orders("XRPUSDT")
+    terminal_id = int(orders[0]["order_id"])
+    exchange.get_open_orders = lambda symbol=None: []
+    original_get_order = exchange.get_order
+    def get_order(symbol, order_id=None, client_order_id=None):
+        if int(order_id) == terminal_id:
+            return {**original_get_order(symbol, order_id, client_order_id), "status": "FILLED"}
+        raise _TestnetOrderError(-2013, "unknown")
+    exchange.get_order = get_order
+    monitor = GridMonitor(db, exchange, engine, monitor_settings())
+    monitor.run_once()
+    assert not db.list_grid_events(event_type="TESTNET_RESET_DETECTED")
+
+
+def test_monitor_closes_reset_episode_when_missing_orders_recover():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    original_get_order = exchange.get_order
+    exchange.get_open_orders = lambda symbol=None: []
+    exchange.get_order = lambda *args, **kwargs: (_ for _ in ()).throw(_TestnetOrderError(-2013, "unknown"))
+    monitor = GridMonitor(db, exchange, engine, monitor_settings())
+    monitor.run_once()
+    assert monitor.testnet_reset_suspected
+    exchange.get_order = original_get_order
+    monitor.run_once()
+    assert not monitor.testnet_reset_suspected and monitor.testnet_reset_since is None
+    assert len(db.list_grid_events(event_type="TESTNET_RESET_RECOVERED")) == 1
+    exchange.get_open_orders = lambda symbol=None: []
+    exchange.get_order = lambda *args, **kwargs: (_ for _ in ()).throw(_TestnetOrderError(-2013, "unknown"))
+    monitor.run_once()
+    assert len(db.list_grid_events(event_type="TESTNET_RESET_DETECTED")) == 2
 
 
 def test_engine_event_sink_receives_events_and_sink_failure_is_isolated(caplog):
@@ -72,17 +291,60 @@ def monitor_settings():
     )
 
 
-def test_monitor_run_records_heartbeat_snapshots_without_noise():
+def test_monitor_run_records_heartbeat_snapshots_and_dust_baseline():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     copied = create(engine)
     monitor = GridMonitor(db, exchange, engine, monitor_settings())
     result = monitor.run_once("SCHEDULED")
     assert result["status"] == "OK" and result["grids_checked"] == 1
-    assert result["events_written"] == 0
+    assert result["events_written"] == 1
+    event = db.list_grid_events(event_type="DUST_RECONCILIATION")[0]
+    assert event["grid_id"] is None and event["details"]["severity"] == "info"
+    assert event["details"]["drift"] is None
     assert db.get_monitor_run(result["run_id"])["status"] == "OK"
     snapshots = db.list_grid_snapshots(grid_id=copied["id"], run_id=result["run_id"])
     assert len(snapshots) == 6
     assert sum(row["level_idx"] is None for row in snapshots) == 1
+
+
+def test_dust_reconciliation_uses_drift_to_ignore_constant_foreign_balance():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    times = [datetime(2026, 10, 3, 12, tzinfo=timezone.utc)]
+    exchange.get_balance = lambda asset=None: {asset: {"free": 1000, "locked": 0}}
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), clock=lambda: times[0])
+    mids = {grid["symbol"]: 1.0}
+    monitor._reconcile_registered_dust([grid], mids, times[0])
+    first = db.list_grid_events(event_type="DUST_RECONCILIATION")[0]["details"]
+    assert first["drift"] is None and first["severity"] == "info"
+    times[0] += timedelta(hours=1)
+    monitor._reconcile_registered_dust([grid], mids, times[0])
+    stable = db.list_grid_events(event_type="DUST_RECONCILIATION")[0]["details"]
+    assert Decimal(stable["drift"]) == 0 and stable["severity"] == "info"
+    exchange.get_balance = lambda asset=None: {asset: {"free": 1002, "locked": 0}}
+    times[0] += timedelta(hours=1)
+    monitor._reconcile_registered_dust([grid], mids, times[0])
+    changed = db.list_grid_events(event_type="DUST_RECONCILIATION")[0]["details"]
+    assert Decimal(changed["drift"]) == 2 and changed["severity"] == "warning"
+    second_grid = {**grid, "id": grid["id"] + 99}
+    original_levels = db.get_grid_levels
+    db.get_grid_levels = lambda grid_id: [] if int(grid_id) == second_grid["id"] else original_levels(grid_id)
+    times[0] += timedelta(hours=1)
+    monitor._reconcile_registered_dust([grid, second_grid], mids, times[0])
+    changed_set = db.list_grid_events(event_type="DUST_RECONCILIATION")[0]
+    assert changed_set["details"]["grid_ids"] == sorted([grid["id"], second_grid["id"]])
+    assert changed_set["details"]["drift"] is None and changed_set["reason"] == "baseline"
+
+
+def test_dust_reconciliation_is_hourly_and_balance_errors_are_omitted(caplog):
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), clock=lambda: now)
+    exchange.get_balance = lambda _asset=None: (_ for _ in ()).throw(RuntimeError("offline"))
+    monitor._reconcile_registered_dust([grid], {grid["symbol"]: 1.0}, now)
+    assert not db.list_grid_events(event_type="DUST_RECONCILIATION")
+    assert "balance unavailable" in caplog.text
 
 
 def test_monitor_isolates_grid_sync_failure_and_keeps_other_grids_running():

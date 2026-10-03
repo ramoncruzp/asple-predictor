@@ -10,9 +10,19 @@ function tooltip(content) { return `<span class="tooltip-wrap"><span class="tool
 function modelHeader(key) { return `${escapeHtml(getModelName(key))} ${tooltip(MODEL_TOOLTIPS[key] || '')}`; }
 class ApiClient {
   constructor(baseUrl = API_BASE) { this.baseUrl = baseUrl; }
-  async get(path, params = {}, timeoutMs = 10000) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { const response = await fetch(url, { signal: controller.signal }); if (!response.ok) throw new Error(`HTTP ${response.status}`); return await response.json(); } finally { clearTimeout(timer); } }
-  async post(path, body) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(this.baseUrl + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
-  async delete(path) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(this.baseUrl + path, { method: 'DELETE', signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
+  async _fetch(url, options = {}) {
+    const headers = { ...(options.headers || {}), ...(window.gridApiToken ? { 'X-API-Token': window.gridApiToken } : {}) };
+    let response = await fetch(url, { ...options, headers });
+    if (response.status === 403 && !window.gridApiToken && !window.gridTokenPromptDeclined && typeof window.prompt === 'function') {
+      const token = window.prompt('La API requiere X-API-Token. El token se conserva solo en memoria de esta pestaña.');
+      if (token) { window.gridApiToken = token; response = await fetch(url, { ...options, headers: { ...headers, 'X-API-Token': token } }); }
+      else window.gridTokenPromptDeclined = true;
+    }
+    return response;
+  }
+  async get(path, params = {}, timeoutMs = 10000) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { const response = await this._fetch(url, { signal: controller.signal }); if (!response.ok) throw new Error(`HTTP ${response.status}`); return await response.json(); } finally { clearTimeout(timer); } }
+  async post(path, body) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await this._fetch(this.baseUrl + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
+  async delete(path) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await this._fetch(this.baseUrl + path, { method: 'DELETE', signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
   status() { return this.get('/api/health', {}, 8000); }
   candles(symbol, interval) { return this.get('/api/candles', { symbol, interval: interval.toLowerCase() }); }
   consensus(symbol, interval) { return this.get('/api/predictions/consensus', { symbol, interval: interval.toLowerCase() }); }

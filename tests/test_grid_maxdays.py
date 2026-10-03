@@ -62,9 +62,44 @@ def test_closed_grid_does_not_emit_max_days_again_after_restart():
     monitor.run_once("SCHEDULED")
     assert db.get_grid(grid["id"])["status"] == "CLOSED"
     assert len(db.list_grid_events(grid_id=grid["id"], event_type="MAX_DAYS_REACHED")) == 1
+    assert not db.list_grid_events(grid_id=grid["id"], event_type="TARGET_REACHED")
+    assert db.get_grid(grid["id"])["status"] == "CLOSED"
+    assert not [event for event in db.list_grid_events(grid_id=grid["id"], event_type="POLICY_ACTION_FAILED")
+                if (event.get("details") or {}).get("action") == "TARGET_CLOSE_FINALIZE"]
     restarted = _monitor_target(engine, db, exchange)
     restarted.run_once("SCHEDULED")
     assert len(db.list_grid_events(grid_id=grid["id"], event_type="MAX_DAYS_REACHED")) == 1
+
+
+def test_close_grid_target_rejects_empty_plan_without_database_changes():
+    engine, db, exchange, grid, monitor, _ = _expiring_grid()
+    before_grid = db.get_grid(grid["id"])
+    before_events = db.list_grid_events(grid_id=grid["id"])
+    with pytest.raises(ValueError, match="requires a target_close_plan"):
+        engine.close_grid_target(grid["id"], {})
+    assert db.get_grid(grid["id"]) == before_grid
+    assert db.list_grid_events(grid_id=grid["id"]) == before_events
+
+
+def test_closed_max_days_start_plan_emits_only_max_days_event():
+    engine, db, exchange, grid, monitor, _ = _expiring_grid()
+    params = dict(db.get_grid(grid["id"]).get("params") or {})
+    params["max_days_close_plan"] = {"phase": "STARTED", "age_days": 2, "max_days": 1}
+    db.update_grid(grid["id"], status="CLOSED", params=db._json(params))
+    close_target_calls = []
+    real_close_target = engine.close_grid_target
+    def track_real_close_target(*args, **kwargs):
+        close_target_calls.append(args)
+        return real_close_target(*args, **kwargs)
+    engine.close_grid_target = track_real_close_target
+    monitor.run_once("SCHEDULED")
+    assert close_target_calls == []
+    assert db.get_grid(grid["id"])["status"] == "CLOSED"
+    assert len(db.list_grid_events(grid_id=grid["id"], event_type="MAX_DAYS_REACHED")) == 1
+    assert not db.list_grid_events(grid_id=grid["id"], event_type="TARGET_REACHED")
+    assert not [event for event in db.list_grid_events(grid_id=grid["id"], event_type="POLICY_ACTION_FAILED")
+                if (event.get("details") or {}).get("action") == "TARGET_CLOSE_FINALIZE"]
+    assert (db.get_grid(grid["id"]).get("params") or {}).get("max_days_close_plan", {}).get("phase") == "EVENT_EMITTED"
 
 
 def test_holding_repository_is_not_reprocessed_as_an_expiring_grid():

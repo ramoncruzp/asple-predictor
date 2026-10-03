@@ -14,6 +14,7 @@ from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.policy import validate_params
 from grid.scan_service import EXECUTION_WARNING
 from grid.structure import suggest_structure
+from grid.guards import sell_level_conflicts, sell_level_conflict_message
 
 router = APIRouter()
 
@@ -56,22 +57,7 @@ class OpenRequest(BaseModel):
         return self
 
 
-def _authorize(request: Request) -> None:
-    settings = request.app.state.settings
-    expected = str(getattr(settings, "grid_api_token", "") or "").strip()
-    supplied = request.headers.get("X-API-Token", "")
-    if expected:
-        if not hmac.compare_digest(expected, supplied):
-            raise HTTPException(403, "Credencial X-API-Token inválida o ausente.")
-        return
-    host = request.client.host if request.client else ""
-    try:
-        is_loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        is_loopback = False
-    if not is_loopback:
-        raise HTTPException(403, "Grid API solo acepta conexiones loopback si GRID_API_TOKEN no está configurado.")
-
+from api.auth import authorize as _authorize
 
 def _scan_snapshot(request: Request, symbol: str) -> dict | None:
     last = getattr(request.app.state.grid_scan_service, "last_scan", None)
@@ -115,8 +101,6 @@ def open_grid(request: Request, body: OpenRequest):
     coin = db.get_coin(symbol)
     if not coin or int(coin.get("active", 0)) != 1:
         _reject(db, 422, "El símbolo debe estar activo en Coin Registry.", symbol, body)
-    if db.has_open_grid(symbol):
-        _reject(db, 409, f"Ya existe un grid abierto o en repositorio para {symbol}.", symbol, body)
     maximum = int(request.app.state.settings.max_grids_simultaneos)
     if db.count_open_grids() >= maximum:
         _reject(db, 409, f"Se alcanzó max_grids_simultaneos ({maximum}).", symbol, body)
@@ -134,6 +118,10 @@ def open_grid(request: Request, body: OpenRequest):
         params["max_days"] = float(body.max_days)
     if body.strategy == "simple" and (body.target_pct is not None or body.target_usdt is not None):
         _reject(db, 422, "Los objetivos de cierre requieren strategy=smart en el motor actual.", symbol, body)
+    if body.strategy == "smart":
+        provider = getattr(request.app.state, "vol_provider", None)
+        if provider is None or provider.get(symbol) is None:
+            _reject(db, 422, f"smart requiere sigma disponible para {symbol}.", symbol, body)
     if params:
         try:
             validate_params(params, body.n_levels or 10)
@@ -169,6 +157,17 @@ def open_grid(request: Request, body: OpenRequest):
                 {"bid_price": Decimal(str(market["bid"])), "ask_price": Decimal(str(market["ask"])),
                  "avg_price": mid}, filters,
                 request.app.state.settings)
+            existing_levels = []
+            for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"):
+                for existing in db.list_grids_by_status({status}):
+                    if existing.get("symbol") == symbol:
+                        existing_levels.extend(db.get_grid_levels(int(existing["id"])))
+            conflicts = sell_level_conflicts(
+                [cell.sell_price for cell in cells], existing_levels, filters.tick_size,
+                getattr(request.app.state.settings, "same_coin_sell_tolerance_pct", 0.05),
+            )
+            if conflicts:
+                _reject(db, 409, sell_level_conflict_message(conflicts), symbol, body)
             return {"dry_run": True, "symbol": symbol, "strategy": body.strategy,
                 "capital": str(body.capital), "range_low": str(lines[0]), "range_high": str(lines[-1]),
                 "n_levels": n, "levels": [str(value) for value in lines],
@@ -184,6 +183,8 @@ def open_grid(request: Request, body: OpenRequest):
                            "order_filters_valid": True, "free_balance_checked": False,
                            "exchange_will_be_called": False}, "data_source": "Binance public spot market data (read-only)",
                 "warning": EXECUTION_WARNING}
+        except HTTPException:
+            raise
         except Exception as exc:
             _reject(db, 422, f"No se pudo construir el plan: {exc}", symbol, body)
     if engine is None or client is None:
@@ -202,7 +203,8 @@ def open_grid(request: Request, body: OpenRequest):
                 "warning": EXECUTION_WARNING}
     except GridConfigError as exc:
         message = str(exc).casefold()
-        status = 409 if ("maximum simultaneous" in message or "already exists" in message) else 422
+        status = 409 if ("maximum simultaneous" in message or "already exists" in message
+                         or "sell level conflict" in message) else 422
         _reject(db, status, str(exc), symbol, body)
     except Exception as exc:
         _reject(db, 422, f"No se pudo abrir el grid: {exc}", symbol, body)

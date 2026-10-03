@@ -32,6 +32,24 @@ def test_close_grid_liquidate_sells_only_owned_held_quantity_and_is_idempotent()
     assert not exchange.get_open_orders("XRPUSDT")
 
 
+def test_close_grid_liquidate_sells_partial_buy_canceled_with_error_state():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    buy = next(row for row in exchange.get_open_orders("XRPUSDT") if row["side"] == "BUY")
+    exchange.fill(buy["order_id"], partial=True)
+    result = engine.close_grid(grid["id"], "liquidate")
+    level_idx = int(buy["client_order_id"].split("L", 1)[1].split("B", 1)[0])
+    level = db.get_grid_levels(grid["id"])[level_idx]
+    market_sells = [row for row in exchange.orders.values()
+                    if row.get("type") == "MARKET" and row.get("side") == "SELL"]
+    assert result["status"] == "CLOSED"
+    assert result["liquidated_cells"]
+    assert len(market_sells) == 1
+    assert market_sells[0]["quantity"] == buy["quantity"] / 2
+    assert level["state"] == "DONE" and Decimal(str(level["held_qty"])) == 0
+    assert not result.get("unmanaged_inventory")
+
+
 def test_close_grid_rejects_invalid_mode_and_repeated_closed_grid():
     engine, _, _ = make_engine()
     grid = create(engine)
@@ -111,7 +129,8 @@ def test_repository_reports_unmanaged_inventory_and_reuses_existing_symbol_repos
     repository_id = closed_first["repository_grid_id"]
     assert len(db.get_grid_levels(repository_id)) == 1
 
-    second = create(engine)
+    exchange.move_price(120, 120.01, 120)
+    second = engine.create_grid("XRPUSDT", 110, 130, 5, capital=1000)
     buy2 = next(order for order in exchange.get_open_orders("XRPUSDT") if order["client_order_id"] == f"g{second['id']}L2B0")
     exchange.fill(buy2["order_id"])
     engine.sync_grid(second["id"])

@@ -11,8 +11,12 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from grid.policy import adjust_decision, evaluate_grid, evaluate_target, evaluate_max_days, plan_dust_sweep, stoploss_candidates, PolicyDecision
+from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_decision,
+                         build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
+                         plan_dust_sweep, profit_close_retry_delay, stoploss_candidates, PolicyDecision)
 from grid.volatility_provider import VolatilityProvider
+from grid.reconciliation import expected_inventory_by_asset
+from data.testnet_client import TestnetOrderError
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +43,14 @@ class GridMonitor:
         self.settings = settings
         self.scheduler = scheduler or BackgroundScheduler()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self.vol_provider = vol_provider or VolatilityProvider(db, clock=self.clock)
+        self.vol_provider = vol_provider or getattr(engine, "vol_provider", None) or VolatilityProvider(db, clock=self.clock)
         self.logger = logging.getLogger(__name__)
         self._run_id: int | None = None
         self._event_count = 0
+        self.testnet_reset_suspected = False
+        self.testnet_reset_since: datetime | None = None
+        self._testnet_reset_grid_ids: set[int] = set()
+        self._last_dust_reconciliation_at: datetime | None = None
         self.ops_lock = threading.RLock()
 
     def _emit(self, event: dict) -> None:
@@ -86,6 +94,119 @@ class GridMonitor:
                 self.logger.warning("grid snapshot mid unavailable for %s", symbol, exc_info=True)
                 mids[symbol] = None
         return mids
+
+    def _reconcile_registered_dust(self, grids: list[dict], mids: dict[str, float | None], now: datetime) -> None:
+        open_grids = [grid for grid in grids if grid.get("status") in {"ACTIVE", "PAUSED", "CLOSING", "HOLDING"}]
+        if not open_grids:
+            return
+        current = _utc(now)
+        if (self._last_dust_reconciliation_at is not None and
+                (current - self._last_dust_reconciliation_at).total_seconds() < 3600):
+            return
+        self._last_dust_reconciliation_at = current
+        expected, ids_by_asset = expected_inventory_by_asset(self.db, open_grids)
+        for asset, quantity in expected.items():
+            grid_ids = ids_by_asset.get(asset, [])
+            try:
+                balance = self.exchange.get_balance(asset).get(asset, {})
+                real = _d(balance.get("free", 0)) + _d(balance.get("locked", 0))
+            except Exception:
+                self.logger.warning("dust reconciliation balance unavailable for %s", asset, exc_info=True)
+                continue
+            symbol = next((str(grid["symbol"]) for grid in open_grids
+                           if str(grid["symbol"]).removesuffix("USDT") == asset), None)
+            price = None if symbol is None else mids.get(symbol)
+            diff = real - quantity
+            diff_usdt = None if price is None else float(diff * _d(price))
+            prior = next((event for event in self.db.list_grid_events(
+                event_type="DUST_RECONCILIATION", limit=5000)
+                if ((event.get("details") or {}).get("asset") == asset
+                    and (event.get("details") or {}).get("grid_ids") == grid_ids)), None)
+            previous_details = (prior or {}).get("details") or {}
+            prev_diff = None if prior is None else _d(previous_details.get("diff"))
+            drift = None if prev_diff is None else diff - prev_diff
+            drift_usdt = None if drift is None or price is None else float(drift * _d(price))
+            capital = sum(_d(grid.get("capital_total")) for grid in open_grids
+                          if str(grid["symbol"]).removesuffix("USDT") == asset)
+            absolute_limit = _d(getattr(self.settings, "dust_alert_usdt", 1.0))
+            pct = _d(getattr(self.settings, "dust_alert_pct_capital", 1.0))
+            pct_limit = capital * pct / Decimal(100)
+            warning = drift_usdt is not None and (
+                abs(_d(drift_usdt)) >= absolute_limit or abs(_d(drift_usdt)) >= pct_limit)
+            self._emit({"event_type": "DUST_RECONCILIATION", "grid_id": None,
+                "reason": "baseline" if prior is None else "drift" if warning else "no_material_drift",
+                "price": price, "details": {"asset": asset, "real": str(real),
+                    "expected": str(quantity), "diff": str(diff), "diff_usdt": diff_usdt,
+                    "grid_ids": grid_ids, "prev_diff": None if prev_diff is None else str(prev_diff),
+                    "drift": None if drift is None else str(drift), "drift_usdt": drift_usdt,
+                    "severity": "warning" if warning else "info"}})
+
+    def _check_testnet_reset(self, grids: list[dict]) -> set[int]:
+        def finish_episode() -> None:
+            if self.testnet_reset_suspected:
+                self._emit({"event_type": "TESTNET_RESET_RECOVERED", "grid_id": None,
+                            "reason": "tracked orders are present or no longer unknown", "details": {}})
+            self.testnet_reset_suspected = False
+            self.testnet_reset_since = None
+            self._testnet_reset_grid_ids.clear()
+
+        tracked = []
+        for grid in grids:
+            if grid.get("status") not in {"ACTIVE", "PAUSED", "CLOSING", "HOLDING"}:
+                continue
+            for level in self.db.get_grid_levels(int(grid["id"])):
+                if level.get("state") in {"BUY_OPEN", "SELL_OPEN"} and level.get("order_id") is not None:
+                    tracked.append((grid, level))
+        if not tracked:
+            finish_episode()
+            return set()
+        open_by_symbol = {}
+        try:
+            for symbol in sorted({grid["symbol"] for grid, _ in tracked}):
+                open_by_symbol[symbol] = {int(order["order_id"]) for order in self.exchange.get_open_orders(symbol)}
+        except Exception:
+            self.logger.warning("Testnet reset check could not read open orders", exc_info=True)
+            return set(self._testnet_reset_grid_ids) if self.testnet_reset_suspected else set()
+        missing, existing_absent, affected, samples = [], [], set(), {}
+        inconclusive = False
+        for grid, level in tracked:
+            order_id = int(level["order_id"])
+            symbol = grid["symbol"]
+            if order_id in open_by_symbol[symbol]:
+                continue
+            try:
+                self.exchange.get_order(symbol, order_id=order_id)
+                existing_absent.append(order_id)
+            except Exception as exc:
+                if getattr(exc, "code", None) == -2013:
+                    missing.append((grid, order_id))
+                    affected.add(int(grid["id"]))
+                    samples.setdefault(symbol, []).append(order_id)
+                else:
+                    inconclusive = True
+        if inconclusive:
+            return set(self._testnet_reset_grid_ids) if self.testnet_reset_suspected else set()
+        threshold = max(1, int(getattr(self.settings, "testnet_reset_min_unknown", 2)))
+        suspected = len(missing) >= threshold and not existing_absent
+        if suspected:
+            if not self.testnet_reset_suspected:
+                detected = self.db.list_grid_events(event_type="TESTNET_RESET_DETECTED", limit=1)
+                recovered = self.db.list_grid_events(event_type="TESTNET_RESET_RECOVERED", limit=1)
+                active_record = bool(detected and (not recovered or
+                    _utc(detected[0]["ts"]) > _utc(recovered[0]["ts"])))
+                if active_record:
+                    self.testnet_reset_since = detected[0]["ts"]
+                else:
+                    self.testnet_reset_since = self.clock()
+                    self._emit({"event_type": "TESTNET_RESET_DETECTED", "grid_id": None,
+                        "reason": "multiple tracked orders are absent from Testnet",
+                        "details": {"unknown_orders": len(missing), "symbols": sorted(samples),
+                                    "sample_order_ids": {key: values[:10] for key, values in samples.items()}}})
+            self.testnet_reset_suspected = True
+            self._testnet_reset_grid_ids = affected
+            return set(affected)
+        finish_episode()
+        return set()
 
     def _repository_origins(self, grid_id: int) -> dict[int, tuple[dict, datetime]]:
         events = self.db.list_grid_events(grid_id=grid_id, event_type="CELL_MOVED_TO_REPOSITORY", limit=5000)
@@ -216,6 +337,7 @@ class GridMonitor:
                 if (grid.get("params") or {}).get("max_days_close_plan", {}).get("phase") == "STARTED"
                 and self.db.get_last_event(int(grid["id"]), "MAX_DAYS_REACHED") is None]
             all_grids = normal_grids + repositories + closings + closed_targets + closed_max_days
+            reset_blocked_grids = self._check_testnet_reset(all_grids)
             mids = self._market_mids(all_grids)
             policy_enabled = bool(getattr(self.settings, "grid_policy_enabled", True))
             vol_cache: dict[str, Any] = {}
@@ -368,33 +490,13 @@ class GridMonitor:
                                 book = self.exchange.get_book_ticker(current["symbol"])
                                 bid = float(book["bid_price"])
                                 filters, _, _ = self.engine._market_context(current["symbol"])
-                                eval_cells = []
-                                held_basis = 0.0
-                                for row in levels:
-                                    item = dict(row)
-                                    qty = float(row.get("held_qty") or 0)
-                                    basis_cost = float(row.get("entry_price") or 0) * qty
-                                    entry_fee = basis_cost * .001
-                                    try:
-                                        buy_cid = (row.get("buy_client_order_id") or row.get("client_order_id"))
-                                        if buy_cid:
-                                            buy_order = self.exchange.get_order(current["symbol"],
-                                                                                client_order_id=buy_cid)
-                                            buy_trades = self.exchange.get_my_trades(
-                                                current["symbol"], buy_order["order_id"])
-                                            quote = sum(float(trade.get("quoteQty") or
-                                                float(trade.get("qty", 0)) * float(trade.get("price", 0)))
-                                                for trade in buy_trades)
-                                            if quote > 0:
-                                                basis_cost = quote
-                                                entry_fee = float(self.engine._fee_value_usdt(buy_trades, current["symbol"]))
-                                    except Exception:
-                                        self.logger.debug("grid=%s level=%s target buy basis fallback",
-                                                          grid_id, row.get("level_idx"), exc_info=True)
-                                    item["entry_cost"] = basis_cost
-                                    item["entry_fee_usdt"] = entry_fee
-                                    held_basis += basis_cost + entry_fee
-                                    eval_cells.append(item)
+                                eval_cells = build_profit_cells(
+                                    levels,
+                                    lambda cid: self.exchange.get_my_trades(current["symbol"],
+                                        self.exchange.get_order(current["symbol"], client_order_id=cid)["order_id"]),
+                                    lambda trades: self.engine._fee_value_usdt(trades, current["symbol"]))
+                                held_basis = sum(float(row["entry_cost"]) + float(row["entry_fee_usdt"])
+                                                 for row in eval_cells)
                                 realized = sum(float(row.get("pnl") or 0) for row in levels)
                                 dust_in_cells = sum((_d(row.get("held_qty")) for row in levels
                                                      if row.get("state") == "DONE"), Decimal(0))
@@ -406,7 +508,7 @@ class GridMonitor:
                                                             for row in levels)
                                 target_plan = evaluate_target(
                                     target_params, current["capital_total"], cash_now, eval_cells,
-                                    bid, filters, .1, equity_now=equity_now,
+                                    bid, filters, DEFAULT_GRID_FEE_PCT, equity_now=equity_now,
                                     dust={"dust_qty": sweepable_dust_qty})
                                 dust_threshold = target_params.get("dust_sweep_threshold_pct")
                                 if (dust_threshold is not None and not target_plan["reached"]
@@ -473,7 +575,10 @@ class GridMonitor:
                                     "reason": blocked_reason, "price": mid,
                                     "details": {**adjust.metrics, "blocked_reason": blocked_reason}})
                         metrics = decision.metrics
-                        details = {**decision.metrics, "reasons": list(decision.reasons)}
+                        vol_source = None if view is None else getattr(view, "source", "model")
+                        details = {**decision.metrics, "reasons": list(decision.reasons),
+                                   "vol_source": vol_source}
+                        metrics = {**metrics, "vol_source": vol_source}
                         if decision.action == "PAUSE":
                             try:
                                 result = self.engine.pause_grid(grid_id, ",".join(decision.reasons), details)
@@ -590,26 +695,51 @@ class GridMonitor:
 
             for grid in all_grids:
                 checked += 1
+                if int(grid["id"]) in reset_blocked_grids:
+                    snapshot_grid(grid, mids.get(grid["symbol"]))
+                    continue
                 if grid["status"] == "CLOSED":
                     if ((grid.get("params") or {}).get("max_days_close_plan", {}).get("phase") == "STARTED"
                             and self.db.get_last_event(int(grid["id"]), "MAX_DAYS_REACHED") is None):
                         emit_max_days_reached(int(grid["id"]), mids.get(grid["symbol"]), "CLOSED")
-                    try:
-                        self.engine.close_grid_target(int(grid["id"]),
-                            (grid.get("params") or {}).get("target_close_plan") or {}, mids.get(grid["symbol"]))
-                    except Exception as exc:
-                        failed += 1
-                        self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
-                                    "reason": str(exc), "price": mids.get(grid["symbol"]),
-                                    "details": {"action": "TARGET_CLOSE_FINALIZE",
-                                        "cash_total": ((grid.get("params") or {}).get("target_close_plan") or {}).get("cash_total"),
-                                        "equity_total_at_close": ((grid.get("params") or {}).get("target_close_plan") or {}).get("equity_total_at_close")}})
+                    target_plan = (grid.get("params") or {}).get("target_close_plan")
+                    if target_plan:
+                        try:
+                            self.engine.close_grid_target(int(grid["id"]), target_plan, mids.get(grid["symbol"]))
+                        except Exception as exc:
+                            failed += 1
+                            self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": int(grid["id"]),
+                                        "reason": str(exc), "price": mids.get(grid["symbol"]),
+                                        "details": {"action": "TARGET_CLOSE_FINALIZE",
+                                            "cash_total": target_plan.get("cash_total"),
+                                            "equity_total_at_close": target_plan.get("equity_total_at_close")}})
                     snapshot_grid(self.db.get_grid(int(grid["id"])) or grid, mids.get(grid["symbol"]))
                     continue
                 if grid["status"] == "CLOSING":
                     closing_params = (grid.get("params") or {})
                     target_plan = closing_params.get("target_close_plan")
                     if target_plan:
+                        if (target_plan.get("reason") == "PROFIT_CLOSE"
+                                and target_plan.get("phase") == "BUYS_CANCELED"
+                                and target_plan.get("sale_failures")):
+                            retry_count = int(target_plan.get("retry_count", 0))
+                            if retry_count >= PROFIT_CLOSE_RETRY_MAX:
+                                if grid.get("fail_reason") != "PROFIT_CLOSE_RETRY_EXHAUSTED":
+                                    self.engine._mark_profit_close_retry_exhausted(
+                                        int(grid["id"]), dict(target_plan))
+                                snapshot_grid(self.db.get_grid(int(grid["id"])) or grid,
+                                              mids.get(grid["symbol"]))
+                                continue
+                            last_retry_at = target_plan.get("last_retry_at")
+                            if last_retry_at:
+                                try:
+                                    retry_at = datetime.fromisoformat(str(last_retry_at).replace("Z", "+00:00"))
+                                    elapsed = (_utc(now) - _utc(retry_at)).total_seconds()
+                                    if elapsed < profit_close_retry_delay(retry_count):
+                                        snapshot_grid(grid, mids.get(grid["symbol"]))
+                                        continue
+                                except (TypeError, ValueError):
+                                    pass
                         try:
                             self.engine.close_grid_target(int(grid["id"]), target_plan, mids.get(grid["symbol"]))
                         except Exception as exc:
@@ -645,6 +775,7 @@ class GridMonitor:
                     continue
                 process_grid(grid)
 
+            self._reconcile_registered_dust(all_grids, mids, now)
             status = "OK" if failed == 0 else "PARTIAL"
         except Exception as exc:
             unexpected = exc

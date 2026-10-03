@@ -18,6 +18,18 @@ def _grid(**overrides):
     return base
 
 
+def test_new_phase_events_have_clear_labels_and_dynamic_dust_severity():
+    now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+    events = sv.events_view([
+        {"ts": now, "event_type": "BUY_PARTIAL_SETTLED", "details": {}},
+        {"ts": now, "event_type": "TESTNET_RESET_RECOVERED", "details": {}},
+        {"ts": now, "event_type": "DUST_RECONCILIATION", "details": {"severity": "warning"}},
+    ])
+    assert events[0]["message"] == "Compra parcial contabilizada" and events[0]["severity"] == "info"
+    assert events[1]["severity"] == "info"
+    assert events[2]["severity"] == "warning"
+
+
 def _level(level_idx, price, sell_price, *, capital=100.0, state="IDLE", held_qty=0.0,
            entry_price=None, cycles_completed=0, pnl=0.0, fee_paid=0.0):
     return {"level_idx": level_idx, "price": price, "sell_price": sell_price, "capital": capital,

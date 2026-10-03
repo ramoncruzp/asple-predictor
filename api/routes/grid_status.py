@@ -201,6 +201,10 @@ def monitor_status(request: Request):
     last_run = db.get_last_monitor_run()
     return {
         "last_run": last_run,
+        "testnet_reset_suspected": bool(getattr(getattr(request.app.state, "grid_monitor", None),
+                                                  "testnet_reset_suspected", False)),
+        "testnet_reset_since": getattr(getattr(request.app.state, "grid_monitor", None),
+                                        "testnet_reset_since", None),
         "gap_minutes_configured": int(request.app.state.settings.grid_monitor_gap_minutes),
         "contract_version": None,
         "contract_version_unavailable_reason": (

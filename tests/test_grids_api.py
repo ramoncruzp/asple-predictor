@@ -70,6 +70,7 @@ def app(tmp_path, *, token="", maximum=5, balance="100000"):
     api.include_router(router, prefix="/api/grids")
     api.state.db, api.state.settings = db, settings
     api.state.grid_engine, api.state.testnet_client = engine, exchange
+    api.state.vol_provider = SimpleNamespace(get=lambda symbol: SimpleNamespace(sigma_24h=.01))
     api.state.grid_scan_service = service
     return LocalClient(api), db, exchange
 
@@ -192,6 +193,15 @@ def test_smart_target_params_are_validated_and_passed_to_existing_engine(tmp_pat
     assert event["details"]["params"]["target_pct"] == 5
 
 
+def test_smart_open_rejects_missing_sigma_in_dry_run_and_confirm(tmp_path):
+    client, _db, _exchange = app(tmp_path)
+    client.app.state.vol_provider = SimpleNamespace(get=lambda symbol: None)
+    preview = client.post("/api/grids/open", json=payload(strategy="smart"))
+    confirm = client.post("/api/grids/open", json=payload(strategy="smart", dry_run=False, confirm=True))
+    assert preview.status_code == 422 and "sigma disponible" in preview.json()["detail"]
+    assert confirm.status_code == 422 and "sigma disponible" in confirm.json()["detail"]
+
+
 def test_public_binance_string_book_shape_scans_dry_runs_and_reuses_plan(tmp_path):
     class Raw:
         def get_symbol_info(self, symbol):
@@ -252,7 +262,7 @@ def test_engine_error_texts_for_api_status_mapping_are_stable(tmp_path):
         capital_max_por_nivel_pct=.30, grid_min_step_pct=.003)
     engine = GridEngine(db, exchange, settings)
     engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=1000)
-    with pytest.raises(GridConfigError, match="^an open simple grid already exists for XRPUSDT$"):
+    with pytest.raises(GridConfigError, match="^sell level conflict:"):
         engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5, capital=1000)
     db2 = DBManager(f"sqlite:///{tmp_path / 'cap.db'}")
     db2.add_or_reactivate_coin("XRPUSDT")

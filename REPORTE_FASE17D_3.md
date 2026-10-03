@@ -1,0 +1,24 @@
+# Fase 17D-3 — Correcciones de auditoría
+
+## Cambios
+
+- `grid/engine.py:1030-1054,2077-2165`: el asentamiento de BUY parcial vuelve a leer el nivel y valida estado, order ID y CID antes de modificar inventario. Las dos ramas FILLED de `cancel_grid_orders` también verifican el registro vigente. Una compra parcial cancelada al liquidar se vende por mercado por su cantidad poseída; no queda inventario sin informar.
+- `grid/policy.py:45-68`, `grid/engine.py:439-448,2583-2588`, `grid/monitor.py:491-510` y `grid/control_service.py:169-170`: un constructor compartido prepara celdas usando precio/cantidad y comisión de trades BUY reales; estima 0,1 % por lado solo si no hay trades almacenados. Preview y ejecución usan el mismo bid y constructor; la ejecución vuelve a calcular el precio. `evaluate_target` y `plan_profit_close` mantienen su semántica.
+- `grid/engine.py:2684-2720,2723-2728,2798-2818,2901`: el tipo de cierre deriva del `reason` del plan (`PROFIT_CLOSE` o `TARGET_REACHED`). Un rechazo de venta de `PROFIT_CLOSE` conserva el grid en CLOSING y su motivo, registra `PROFIT_CLOSE_MARKET_SELL_FAILED` y queda reintentable por el monitor. El cierre TARGET conserva `TARGET_REACHED` y `TARGET_MARKET_SELL_FAILED`.
+- El monitor ya lee ambos umbrales de polvo con fallback `1.0` en `grid/monitor.py:130-131`. Los defaults de `config/settings.py:71-72` siguen en 1.0; no se modificaron en esta fase. La búsqueda documental no encontró afirmaciones de 2.0 que hubiera que corregir.
+
+## Pruebas y mutaciones
+
+- Pruebas enfocadas: **96 passed**. Incluyen BUY parcial en ERROR con cantidad exacta en `remaining_inventory`; SELL_OPEN con BUY histórico FILLED; liquidación parcial; paridad de preview/ejecución cuando la comisión real cambia una celda de ganadora a perdedora; fallback estimado sin trades; evaluación del monitor con comisión real; fallos de ambos tipos de cierre y reintento de `PROFIT_CLOSE` desde el monitor. El fake API incorpora el método del motor usado por el preview (`tests/test_grid_control_api.py:45`).
+- Mutaciones temporales restauradas y comprobadas: **4/4 muertas**. (1) Quitar conjuntamente las guardas del caller y del helper: falla `test_cancel_does_not_clobber_sell_open_level_with_historical_filled_buy`; quitar una sola sobrevivía por la guarda redundante restante. (2) Fijar el evento a TARGET: falla `test_profit_close_market_sell_failure_keeps_profit_reason_and_event`. (3) Volver el motor a comisión estimada: falla `test_actual_buy_fee_drives_identical_profit_preview_and_execution`. (4) Cambiar el default porcentual a 2.0: falla `test_dust_alert_defaults_are_one_percent_of_capital_and_one_usdt`.
+- UI enfocada: `pytest tests/ui/test_grids_control_ui.py -v -rs`: **3 passed**. `node --check frontend/grids.js` y `node --check frontend/app.js`: ambos terminan con código 0. No se ejecutó navegador; la suite de UI automatizada disponible usa Node y stubs.
+- Suite segura completa, `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest -q -rs -m "not live" --basetemp .pytest-17d3-offline-final`: **714 passed, 1 skipped, 18 deselected, 7 warnings**. El skip es `tests/ui/test_grids_ui.py:16`, falta `playwright.sync_api`; los 18 excluidos tienen marca `live`.
+- La petición de suite literal `pytest -q -rs` se intentó una vez con `ASPLE_OFFLINE=1`: **712 passed, 2 skipped, 19 failed**. La salida mostró intentos a `api.binance.com` y `testnet.binance.vision` bloqueados por Windows (`WinError 10013`); no se estableció conexión ni se colocaron órdenes. También fallaron entonces dos previews con `FakeControlEngine` sin el método compartido; se añadió el stub y la suite segura posterior pasó. No repetí el comando literal para evitar nuevas solicitudes de red. Los dos skips de esa ejecución fueron el de Playwright indicado arriba y `tests/test_grid_monitor_live.py:337`, escenario live no viable sin reservar saldo/forzar ciclo.
+
+## Archivos y estado
+
+Archivos de producción tocados en esta fase: `grid/engine.py`, `grid/monitor.py`, `grid/policy.py`, `grid/control_service.py`. Tests tocados: `tests/test_grid_close.py`, `tests/test_grid_control_api.py`, `tests/test_grid_monitor.py`, `tests/test_grid_target.py`; los tests en `tests/test_grid_profit_close.py` y `tests/test_settings_phase17d.py` ya eran untracked antes de 17D-3. `REPORTE_FASE17D_3.md` es nuevo. `tests/ui/` también era untracked antes de esta fase y no se modificó.
+
+Los archivos de texto/código editados en esta fase están en UTF-8 sin BOM y con cero bytes CR. `git diff --numstat` y `git diff --ignore-cr-at-eol --numstat` no identifican archivos tracked cuyo único cambio sea CRLF. `diff.txt` y `diff_appjs.txt` ya existían como untracked: no se tocaron ni se eliminaron. `tests/ui/__pycache__/` está ignorado por `.gitignore:4`; `git status --short tests/ui` muestra `?? tests/ui/`.
+
+Sin stage, commit ni push. Sin uso exitoso de Binance/Testnet y sin prueba en navegador. Se preservaron los demás cambios tracked/untracked previos.

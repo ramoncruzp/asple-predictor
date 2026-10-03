@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
-from grid.policy import DEFAULT_SMART_PARAMS, validate_params, plan_dust_sweep
+from grid.policy import DEFAULT_GRID_FEE_PCT, DEFAULT_SMART_PARAMS, validate_params, plan_dust_sweep, plan_profit_close
 
 _LOCK_INIT = threading.Lock()
 CONTROL_LOCK_TIMEOUT_SECONDS = 15.0
@@ -135,11 +135,11 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
                     below_all_levels=bool(levels and bid < min(_d(x.get("price")) for x in levels)))
     elif action == "close":
         mode = params.get("mode")
-        if mode not in {"cancel", "liquidate", "repository"}: reject(422, "mode es obligatorio: cancel, liquidate o repository.")
+        if mode not in {"cancel", "liquidate", "repository", "profit_repository"}: reject(422, "mode es obligatorio: cancel, liquidate, repository o profit_repository.")
         if mode == "liquidate" and (confirm_text != "LIQUIDAR" or not confirm):
             if not dry_run: reject(422, "Liquidate requiere confirm_text=LIQUIDAR.")
-        plan["open_orders_to_cancel"] = len(buy_orders) if mode == "repository" else len(open_orders)
-        plan["open_sell_orders_remain"] = len(sell_orders) if mode == "repository" else 0
+        plan["open_orders_to_cancel"] = len(buy_orders) if mode in {"repository", "profit_repository"} else len(open_orders)
+        plan["open_sell_orders_remain"] = len(sell_orders) if mode in {"repository", "profit_repository"} else 0
         repository_cells = [row for row in levels if row.get("state") == "SELL_OPEN"
                             and row.get("order_id") is not None and _d(row.get("held_qty")) > 0]
         unmanaged_qty = sum((_d(row.get("held_qty")) for row in levels
@@ -153,6 +153,37 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
                     unmanaged_inventory_qty=str(unmanaged_qty) if mode == "repository" else "0",
                     unrealized_pnl_materialized=str(unrealized or 0) if mode == "liquidate" else "0",
                     resulting_status="CLOSED")
+        held_cells = [row for row in levels if _d(row.get("held_qty")) > 0]
+        if mode == "liquidate":
+            results = [(bid * _d(row.get("held_qty")) * Decimal("0.999")
+                        - _d(row.get("entry_price")) * _d(row.get("held_qty")) * Decimal("1.001"))
+                       for row in held_cells]
+            plan.update(cells_total=len(held_cells),
+                        cells_winning=sum(value > 0 for value in results),
+                        cells_losing=sum(value <= 0 for value in results),
+                        net_result_usdt=str(sum(results, Decimal(0))))
+        elif mode == "profit_repository":
+            if bid <= 0: raise HTTPException(503, "No hay bid fiable para estimar el cierre inteligente.")
+            try:
+                filters, _snapshot, _avg = engine._market_context(grid["symbol"])
+                preview_clock = getattr(engine, "_monotonic", time.monotonic)
+                estimated_fee_cells = [0]
+                cells = engine._build_profit_cells(
+                    grid_id, grid["symbol"], held_cells, use_cache=True,
+                    deadline=preview_clock() + 6.0, clock=preview_clock,
+                    on_fee_estimated=lambda: estimated_fee_cells.__setitem__(
+                        0, estimated_fee_cells[0] + 1))
+                selected = plan_profit_close(cells, float(bid), filters, DEFAULT_GRID_FEE_PCT)
+            except Exception as exc:
+                raise HTTPException(503, "Filtros de mercado Testnet no disponibles.") from exc
+            plan.update(cells_to_sell=len(selected["sell_cells"]),
+                sell_gain_usdt=str(selected["net_gain_usdt"]),
+                cells_to_repository=len(selected["repo_cells"]),
+                repo_unrealized_usdt=str(selected["net_loss_usdt"]),
+                estimated_commission_usdt=str(selected["estimated_commission_usdt"]),
+                estimated_fee_cells=estimated_fee_cells[0],
+                bid_used=str(selected["bid_used"]),
+                sell_plan=selected["sell_cells"], repository_plan=selected["repo_cells"])
     elif action == "adjust":
         try: result = engine.preview_adjust(grid_id, params["new_low"], params["new_high"], params.get("n"))
         except Exception as exc: raise HTTPException(422, "No se pudo validar el rango.") from exc
