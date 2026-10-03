@@ -23,7 +23,7 @@ const sandbox = {
   console, URL, AbortController, fetch: async () => { throw new Error('not used'); },
   setTimeout, clearTimeout, localStorage: { getItem: () => null, setItem() {} }
 };
-vm.runInNewContext(source + '\nglobalThis.__test = { buildGridSymbolOptions, GRID_SYMBOL_FALLBACK, advanceApiHealth, formatPrice, timeSinceSuccess };', sandbox);
+vm.runInNewContext(source + '\nglobalThis.__test = { buildGridSymbolOptions, GRID_SYMBOL_FALLBACK, advanceApiHealth, apiHealthLabel, formatPrice, timeSinceSuccess };', sandbox);
 """
     result = subprocess.run([NODE, "-e", harness + "\n" + assertions, str(APP_JS)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -45,14 +45,20 @@ assert(escaped.options.includes('&lt;IMG&gt;USDT'));
 
 def test_api_health_chip_hysteresis_and_success_recovery():
     _run_node(r"""
-const { advanceApiHealth, timeSinceSuccess } = sandbox.__test;
+const { advanceApiHealth, apiHealthLabel, timeSinceSuccess } = sandbox.__test;
+assert.strictEqual(apiHealthLabel({ status: 'checking' }), 'Comprobando…');
+assert.strictEqual(apiHealthLabel({ status: 'online' }), 'API Online');
 let state = { failures: 0, status: 'online', lastSuccessAt: 1000 };
 state = advanceApiHealth(state, false, 31000); assert.strictEqual(state.status, 'slow'); assert.strictEqual(state.failures, 1);
 state = advanceApiHealth(state, false, 61000); assert.strictEqual(state.status, 'slow'); assert.strictEqual(state.failures, 2);
 state = advanceApiHealth(state, false, 91000); assert.strictEqual(state.status, 'offline'); assert.strictEqual(state.failures, 3);
 assert.strictEqual(state.lastSuccessAt, 1000);
 state = advanceApiHealth(state, true, 92000); assert.strictEqual(state.status, 'online'); assert.strictEqual(state.failures, 0); assert.strictEqual(state.lastSuccessAt, 92000);
+assert.strictEqual(apiHealthLabel(state), 'API Online');
 assert.strictEqual(timeSinceSuccess(1000, 92000), 'hace 1 min');
+const healthSource = require('fs').readFileSync(process.argv[1], 'utf8');
+assert(healthSource.includes("setOffline(state.status === 'offline')"));
+assert(healthSource.includes("state.status === 'checking' ? 'Comprobando…'"));
 """)
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -9,6 +10,7 @@ from typing import Any
 
 import numpy as np
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, exists, func, select, text
+from sqlalchemy.exc import OperationalError
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
@@ -1046,6 +1048,42 @@ class DBManager:
         with self.engine.begin() as conn:
             conn.execute(self.grids.update().where(self.grids.c.id == grid_id).values(**fields))
         return self.get_grid(grid_id)
+
+    def merge_grid_params(self, grid_id: int, updates: dict, *, remove: set[str] = frozenset(),
+                          allowed: frozenset[str]) -> dict:
+        """Merge live parameters atomically while preserving concurrent counters/plans."""
+        updates = dict(updates or {})
+        remove = set(remove or ())
+        if not (set(updates) | remove) <= set(allowed):
+            raise ValueError("grid params contain keys outside the allowed set")
+        for attempt in range(5):
+            try:
+                with self.engine.begin() as conn:
+                    statement = select(self.grids.c.params).where(
+                        self.grids.c.id == int(grid_id)).with_for_update()
+                    row = conn.execute(statement).first()
+                    if row is None:
+                        raise ValueError(f"grid {grid_id} does not exist")
+                    previous = row[0]
+                    try:
+                        params = json.loads(previous) if previous else {}
+                    except (TypeError, json.JSONDecodeError):
+                        params = {}
+                    if not isinstance(params, dict):
+                        raise ValueError("grid params are not a JSON object")
+                    params.update({key: value for key, value in updates.items() if key not in remove})
+                    for key in remove:
+                        params.pop(key, None)
+                    result = conn.execute(self.grids.update().where(
+                        self.grids.c.id == int(grid_id), self.grids.c.params == previous
+                    ).values(params=self._json(params)))
+                    if result.rowcount:
+                        return params
+            except OperationalError:
+                if attempt == 4:
+                    raise
+            time.sleep(0.01 * (attempt + 1))
+        raise RuntimeError("concurrent grid parameter updates did not converge")
 
     def add_grid_dust_once(self, grid_id: int, source_key: str, qty: Any) -> bool:
         """Atomically add a dust delta once per fill/cell residue identity."""

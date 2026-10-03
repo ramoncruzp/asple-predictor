@@ -43,6 +43,7 @@ class GridMonitor:
         self.logger = logging.getLogger(__name__)
         self._run_id: int | None = None
         self._event_count = 0
+        self.ops_lock = threading.RLock()
 
     def _emit(self, event: dict) -> None:
         if event.get("persisted"):
@@ -165,6 +166,10 @@ class GridMonitor:
         })
 
     def run_once(self, trigger: str = "SCHEDULED") -> dict:
+        with self.ops_lock:
+            return self._run_once_locked(trigger)
+
+    def _run_once_locked(self, trigger: str = "SCHEDULED") -> dict:
         trigger = str(trigger).upper()
         started_clock = time.monotonic()
         run = self.db.start_monitor_run(trigger)

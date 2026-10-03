@@ -23,13 +23,104 @@
 
   async function apiGet(path) {
     const base = (window.API_BASE || window.location.origin);
-    const response = await fetch(base + path);
+    const response = await fetch(base + path, { headers: window.gridApiToken ? { 'X-API-Token': window.gridApiToken } : {} });
     if (!response.ok) {
       const error = new Error(`HTTP ${response.status}`);
       error.status = response.status;
       throw error;
     }
     return response.json();
+  }
+
+  async function apiPost(path, body) {
+    const response = await fetch((window.API_BASE || window.location.origin) + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(window.gridApiToken ? { 'X-API-Token': window.gridApiToken } : {}) },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { const error = new Error(data.detail || `HTTP ${response.status}`); error.status = response.status; throw error; }
+    return data;
+  }
+
+  function actionFields(action, card) {
+    if (action === 'pause') return { reason: card.querySelector('[name="pause-reason"]')?.value || null };
+    if (action === 'close') return { mode: card.querySelector('[name="close-mode"]')?.value || 'repository' };
+    if (action === 'adjust') return { new_low: Number(card.querySelector('[name="new-low"]')?.value), new_high: Number(card.querySelector('[name="new-high"]')?.value), n: Number(card.querySelector('[name="new-n"]')?.value) || null };
+    if (action === 'params') {
+      const read = name => { const value = card.querySelector(`[name="${name}"]`)?.value; return value === '' || value == null ? null : Number(value); };
+      const result = { target_pct: read('target-pct'), target_usdt: read('target-usdt'), max_days: read('max-days'), dust_sweep_threshold_pct: read('dust-threshold') };
+      if (card.querySelector('[name="clear-target"]')?.checked) { result.target_pct = null; result.target_usdt = null; }
+      if (card.querySelector('[name="clear-max-days"]')?.checked) result.max_days = null;
+      return result;
+    }
+    return {};
+  }
+
+  function formFor(action, summary) {
+    if (action === 'pause') return '<label>Motivo breve<input name="pause-reason" maxlength="120"></label>';
+    if (action === 'close') return '<label>Modo<select name="close-mode"><option value="repository">Pasar celdas al repositorio</option><option value="cancel">Cancelar órdenes y dejar activo el inventario</option><option value="liquidate">Vender inventario a mercado</option></select></label>';
+    if (action === 'adjust') return `<label>Rango mínimo<input name="new-low" type="number" min="0.00000001" step="any" value="${summary.range_low || ''}" required></label><label>Rango máximo<input name="new-high" type="number" min="0.00000001" step="any" value="${summary.range_high || ''}" required></label><label>Niveles (opcional)<input name="new-n" type="number" min="4" max="60"></label>`;
+    if (action === 'params' && summary.strategy === 'simple') return '<label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label>';
+    if (action === 'params' && summary.strategy !== 'simple') return '<p>Deja vacio para mantener. Testnet no representa el mercado real.</p><label>Meta %<input name="target-pct" type="number" min="0.000001" step="any"></label><label>Meta USDT<input name="target-usdt" type="number" min="0.000001" step="any"></label><label><input name="clear-target" type="checkbox"> Quitar meta actual</label><label><input name="set-target-basis" type="checkbox"> Cambiar base de meta</label><select name="target-basis"><option value="cash">Caja</option><option value="equity">Equity</option></select><label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label><label>Barrido de polvo (% capital)<input name="dust-threshold" type="number" min="0" step="any"></label>';
+    if (action === 'params') return '<p>Deja vacío para mantener. Testnet no representa el mercado real.</p><label>Meta %<input name="target-pct" type="number" min="0.000001" step="any"></label><label>Meta USDT<input name="target-usdt" type="number" min="0.000001" step="any"></label><label><input name="clear-target" type="checkbox"> Quitar meta actual</label><label>Plazo máximo (días)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label><label>Barrido de polvo (% capital)<input name="dust-threshold" type="number" min="0" step="any"></label>';
+    return '';
+  }
+
+  async function controlFlow(gridId, action, summary, container) {
+    if (action === 'unsupported') {
+      showActionDialog(container, 'Capital y compuesto', '<p>No se puede cambiar el capital ni el interés compuesto en un grid abierto. Ciérralo y abre uno nuevo.</p><button type="button" class="button secondary" data-close-new>Ir a cerrar este grid</button>');
+      document.getElementById('grid-action-dialog').querySelector('[data-close-new]').onclick = () => {
+        document.getElementById('grid-action-dialog').hidden = true;
+        controlFlow(gridId, 'close', summary, container);
+      };
+      return;
+    }
+    const path = `/api/grids/${gridId}/${action}`;
+    const gather = () => actionFields(action, document.getElementById('grid-action-dialog'));
+    const initialFields = formFor(action, summary);
+    showActionDialog(container, `Preparar ${action}`, `${initialFields}<p class="muted">Las cifras son una estimación de Testnet; Testnet no representa el mercado real.</p>`, async () => {
+      const input = gather();
+      if (action === 'params') {
+        const modal = document.getElementById('grid-action-dialog');
+        const clearTarget = modal.querySelector('[name="clear-target"]')?.checked;
+        const clearDays = modal.querySelector('[name="clear-max-days"]')?.checked;
+        if (modal.querySelector('[name="set-target-basis"]')?.checked) input.target_basis = modal.querySelector('[name="target-basis"]').value;
+        Object.keys(input).forEach(key => { if (input[key] === null && !(clearTarget && ['target_pct','target_usdt'].includes(key)) && !(clearDays && key === 'max_days')) delete input[key]; });
+      }
+      const first = await apiPost(path, { ...input, dry_run: true, confirm: false });
+      const preview = JSON.stringify(first.plan, null, 2);
+      const liquidation = action === 'close' && input.mode === 'liquidate';
+      showActionDialog(container, 'Revisar plan', `<p>El plan cuantificado propuesto. Testnet no representa el mercado real.</p><pre>${esc(preview)}</pre>${liquidation ? '<label>Escribe LIQUIDAR<input name="liquidate-confirm" autocomplete="off"></label>' : ''}`, async () => {
+        if (liquidation && document.getElementById('grid-action-dialog').querySelector('[name="liquidate-confirm"]').value !== 'LIQUIDAR') throw new Error('Escribe LIQUIDAR para confirmar la venta a mercado.');
+        const result = await apiPost(path, { ...input, ...(liquidation ? { confirm_text: 'LIQUIDAR' } : {}), dry_run: false, confirm: true });
+        showActionDialog(container, 'Acción enviada', `<p>Resultado: ${esc(JSON.stringify(result.result || result))}</p><p>Testnet no representa el mercado real.</p>`);
+        await window.loadGridsScreen?.(`grids/${gridId}`, true);
+      });
+    });
+  }
+
+  function showActionDialog(container, title, body, onConfirm) {
+    let modal = document.getElementById('grid-action-dialog');
+    if (!modal) { modal = document.createElement('section'); modal.id = 'grid-action-dialog'; modal.className = 'grid-action-dialog'; modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); document.body.appendChild(modal); }
+    modal.innerHTML = `<div class="grid-action-panel"><h2 id="grid-action-title">${esc(title)}</h2><div class="grid-action-body">${body}</div><p class="grid-action-error" role="alert"></p><div class="grid-action-buttons"><button type="button" class="button secondary" data-action-cancel>Cancelar</button>${onConfirm ? '<button type="button" class="button primary" data-action-confirm>Continuar</button>' : ''}</div></div>`;
+    modal.setAttribute('aria-labelledby', 'grid-action-title');
+    modal.hidden = false;
+    document.querySelectorAll('[data-grid-controls] button').forEach(button => { button.disabled = true; });
+    modal.querySelector('[data-action-cancel]').onclick = () => { modal.hidden = true; document.querySelectorAll('[data-grid-controls] button').forEach(button => { button.disabled = false; }); };
+    modal.onkeydown = event => { if (event.key === 'Escape') modal.querySelector('[data-action-cancel]')?.click(); };
+    const confirm = modal.querySelector('[data-action-confirm]');
+    if (confirm) confirm.onclick = async () => {
+      const errorBox = modal.querySelector('.grid-action-error'); errorBox.textContent = '';
+      try { confirm.disabled = true; await onConfirm(); }
+      catch (error) {
+        if (error.status === 403) {
+          modal.querySelector('.grid-action-body').innerHTML += '<label>Token API (solo memoria de pestaña)<input type="password" name="api-token" autocomplete="off"></label><button type="button" class="button secondary" data-token-save>Reintentar con token</button>';
+          modal.querySelector('[data-token-save]').onclick = async () => { window.gridApiToken = modal.querySelector('[name="api-token"]').value; modal.hidden = true; await onConfirm(); };
+        }
+        errorBox.textContent = error.message || 'La acción no se pudo completar.';
+      } finally { if (confirm.isConnected) confirm.disabled = false; }
+    };
+    modal.querySelector('input,select,button')?.focus();
   }
 
   const STATUS_LABELS = { ACTIVE: 'Activo', PAUSED: 'Pausado', OPENING: 'Abriendo', CLOSING: 'Cerrando',
@@ -43,8 +134,9 @@
 
   function renderError(container, error) {
     if (error && error.status === 403) {
-      container.innerHTML = '<div class="card grids-error">La API de grids requiere un token (X-API-Token) '
-        + 'configurado en el servidor. Esta pantalla aun no pide ni guarda el token.</div>';
+      container.innerHTML = '<div class="card grids-error">La API requiere X-API-Token. Token guardado solo en memoria de esta pestana. '
+        + '<label>Token API<input id="grids-api-token" type="password" autocomplete="off"></label><button class="button secondary" id="grids-token-save">Reintentar</button></div>';
+      container.querySelector('#grids-token-save').onclick = () => { window.gridApiToken = container.querySelector('#grids-api-token').value; window.loadGridsScreen?.((location.hash || '#grids').slice(1)); };
       return;
     }
     container.innerHTML = `<div class="card grids-error">No se pudo cargar la informacion de grids: ${esc(error && error.message)}</div>`;
@@ -156,9 +248,14 @@
           ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
           ${summary.price_as_of ? `<small class="muted">al ${esc(new Date(summary.price_as_of).toLocaleTimeString())}</small>` : '<small class="muted">sin precio actual</small>'}</div>
-        <div class="grid-detail-controls">
-          <button class="button secondary" disabled title="disponible en 17B">Pausar</button>
-          <button class="button secondary" disabled title="disponible en 17B">Detener</button>
+        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}">
+          ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="pause">Pausar</button>' : ''}
+          ${summary.status === 'PAUSED' ? '<button class="button secondary" data-grid-action="resume">Reanudar</button>' : ''}
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="close">Cerrar</button>' : ''}
+          ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
+          ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button>' : ''}
+          <button class="button secondary" data-grid-action="unsupported">Capital y compuesto</button>
         </div>
       </div>
       ${recovery}
@@ -248,6 +345,18 @@
       }
     }
   }
+
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-grid-action]');
+    if (!button) return;
+    const controls = button.closest('[data-grid-controls]');
+    const gridId = controls?.dataset.gridControls;
+    const summary = { id: gridId, status: controls?.dataset.status, strategy: controls?.dataset.strategy,
+      range_low: controls?.dataset.low, range_high: controls?.dataset.high };
+    const parent = document.getElementById('grids-content');
+    button.disabled = true;
+    controlFlow(gridId, button.dataset.gridAction, summary, parent).catch(error => showActionDialog(parent, 'Error de acción', `<p>${esc(error.message)}</p>`));
+  });
 
   function scheduleRefresh() {
     if (refreshTimer) clearInterval(refreshTimer);
