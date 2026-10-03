@@ -20,6 +20,42 @@
   function esc(value) {
     return String(value ?? '—').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
   }
+  function planLines(plan) {
+    const n = value => value == null ? 'no disponible' : esc(value);
+    const lines = [];
+    if (plan.action === 'close') {
+      if (plan.mode === 'liquidate') lines.push(`Se venderán ${n(plan.held_qty)} unidades a mercado; PnL no realizado que se materializaría ≈ $${n(plan.unrealized_pnl_materialized)} USDT; comisión estimada ≈ $${n(plan.estimated_commission_usdt)} USDT.`);
+      else lines.push(`Se cancelarán ${n(plan.open_orders_to_cancel)} órdenes abiertas; quedarían ${n(plan.retained_qty)} unidades retenidas fuera del grid; valor ≈ $${n(plan.held_market_value_usdt)} USDT.`);
+      if (plan.mode === 'repository') lines.push(`${n(plan.cells_to_repository)} celdas pasarían al repositorio; inventario no gestionado: ${n(plan.unmanaged_inventory_qty)}.`);
+      lines.push(`La salida propuesta sería ${n(plan.resulting_status)}; revisa el resultado final en el estado del grid.`);
+      if (plan.mode === 'liquidate') lines.push(`Órdenes abiertas a cancelar: ${n(plan.open_orders_to_cancel)}.`);
+      if (plan.mode === 'cancel') lines.push('No se venderá inventario a mercado; el saldo retenido quedará fuera del grid.');
+    } else if (plan.action === 'pause') {
+      lines.push(`Se cancelarían ${n(plan.open_buy_orders_to_cancel)} compras; permanecerían ${n(plan.open_sell_orders_remain)} ventas abiertas.`);
+      lines.push(`Inventario retenido: ${n(plan.held_qty)}; valoración: $${n(plan.held_market_value_usdt)} USDT.`);
+      lines.push(`La acción dejaría el grid en ${n(plan.resulting_status)}; motivo: ${n(plan.reason)}.`);
+    } else if (plan.action === 'resume') {
+      lines.push(`El grid pasaría a ACTIVE con precio de referencia ${n(plan.bid)} USDT.`);
+      lines.push(`Fuera del rango: ${plan.outside_range ? 'sí' : 'no'}; por debajo de todos los niveles: ${plan.below_all_levels ? 'sí' : 'no'}.`);
+      lines.push(`Inventario mantenido en cuenta: ${n(plan.held_qty)} unidades.`);
+    } else if (plan.action === 'adjust') {
+      const a = plan.adjustment || {};
+      lines.push(`Celdas que cambiarían de asignación: ${n((a.mapping || []).length)}; celdas cubiertas: ${n((a.covered || []).length)}; niveles que se retirarían: ${n((a.retire_level_idxs || []).length)}.`);
+      lines.push(`Nuevo rango solicitado: ${n((plan.requested_range || {}).low)}–${n((plan.requested_range || {}).high)} USDT.`);
+      lines.push(`Capital por celda estimado: ${n(a.capital_per_cell)} USDT; resultado: ${n(plan.adjustment_reason || 'propuesta disponible')}.`);
+    } else if (plan.action === 'sweep-dust') {
+      const d = plan.dust || {};
+      lines.push(`Cantidad candidata a barrido: ${n(d.qty)}; residuo que permanecería: ${n(d.residual)}.`);
+      lines.push(`Barrido permitido por filtros: ${d.sweepable == null ? 'no disponible' : (d.sweepable ? 'sí' : 'no')}; resultado neto estimado: $${n(d.proceeds_net)} USDT.`);
+      lines.push(`Bid de referencia: ${n(plan.bid_used)} USDT; filtros Testnet aplicados.`);
+    } else if (plan.action === 'params') {
+      lines.push(`Parámetros que se actualizarían: ${n(Object.keys(plan.updates || {}).join(', ') || 'ninguno')}.`);
+      lines.push(`Parámetros que se quitarían: ${n((plan.remove || []).join(', ') || 'ninguno')}.`);
+      lines.push('Las cifras pertenecen a la configuración del grid; verifica el estado después de guardar.');
+    }
+    if (plan.price_note) lines.push(`Nota: ${esc(plan.price_note)}; la valoración no está disponible.`);
+    return lines.map(line => `<li>${line}</li>`).join('');
+  }
 
   async function apiGet(path) {
     const base = (window.API_BASE || window.location.origin);
@@ -90,10 +126,16 @@
       const first = await apiPost(path, { ...input, dry_run: true, confirm: false });
       const preview = JSON.stringify(first.plan, null, 2);
       const liquidation = action === 'close' && input.mode === 'liquidate';
-      showActionDialog(container, 'Revisar plan', `<p>El plan cuantificado propuesto. Testnet no representa el mercado real.</p><pre>${esc(preview)}</pre>${liquidation ? '<label>Escribe LIQUIDAR<input name="liquidate-confirm" autocomplete="off"></label>' : ''}`, async () => {
+      showActionDialog(container, 'Revisar plan', `<p>Plan estimado en Testnet. Testnet no representa el mercado real.</p><ul>${planLines(first.plan)}</ul><details><summary>Detalle técnico</summary><pre>${esc(preview)}</pre></details>${liquidation ? '<label>Escribe LIQUIDAR<input name="liquidate-confirm" autocomplete="off"></label>' : ''}`, async () => {
         if (liquidation && document.getElementById('grid-action-dialog').querySelector('[name="liquidate-confirm"]').value !== 'LIQUIDAR') throw new Error('Escribe LIQUIDAR para confirmar la venta a mercado.');
         const result = await apiPost(path, { ...input, ...(liquidation ? { confirm_text: 'LIQUIDAR' } : {}), dry_run: false, confirm: true });
-        showActionDialog(container, 'Acción enviada', `<p>Resultado: ${esc(JSON.stringify(result.result || result))}</p><p>Testnet no representa el mercado real.</p>`);
+        if (result.outcome === 'partial') {
+          const errors = (result.errors || []).map(error => `<li>${esc(typeof error === 'string' ? error : JSON.stringify(error))}</li>`).join('') || '<li>El motor no informó detalles.</li>';
+          const partialMessage = action === 'close' ? `El grid NO quedó cerrado: estado ${result.status_after || 'CLOSING'}` : `La acción ${action} quedó incompleta: estado ${result.status_after || 'sin confirmar'}`;
+          showActionDialog(container, 'Acción incompleta', `<div class="grid-action-partial" role="alert"><strong>${esc(partialMessage)}</strong><ul>${errors}</ul><p>Reintenta la acción o revisa Testnet.</p></div><details><summary>Detalle técnico</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details><p>Testnet no representa el mercado real.</p>`);
+        } else {
+          showActionDialog(container, 'Acción completada', `<p>Estado: ${esc(result.status_after || result.status || 'completado')}</p><details><summary>Detalle técnico</summary><pre>${esc(JSON.stringify(result.result || result, null, 2))}</pre></details><p>Testnet no representa el mercado real.</p>`);
+        }
         await window.loadGridsScreen?.(`grids/${gridId}`, true);
       });
     });

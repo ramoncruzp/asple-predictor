@@ -80,3 +80,4 @@
   .grid-detail-price{margin-left:0}
   .data-table{font-size:11px}
 }
+.grid-action-partial{border:1px solid var(--red);background:color-mix(in srgb,var(--red) 12%,transparent);color:var(--red);padding:12px;border-radius:6px}.grid-action-partial ul{margin:.5rem 0}.grid-action-body details{margin-top:10px}.grid-action-body details pre{max-height:35vh;overflow:auto}

@@ -110,3 +110,50 @@ def test_account_keeps_same_symbol_grids_separate_and_reports_reconciliation_sig
     assert reconciliation["XRP"]["severity"] == "unassigned"
     assert reconciliation["ETH"]["severity"] == "inconsistency"
     assert reconciliation["ABC"]["severity"] == "ok"
+
+
+def test_account_reconciliation_excludes_usdt_and_does_not_double_count_done_dust(tmp_path):
+    client, db = make_client(tmp_path, AccountClient())
+    grid = db.create_grid_with_levels({"symbol":"XRPUSDT","range_low":90,"range_high":110,
+        "n_levels":4,"capital_total":100,"status":"ACTIVE","strategy":"smart","dust_qty":"0.25"},
+        [{"level_idx":0,"price":90,"sell_price":91,"capital":100,"state":"DONE","held_qty":"0.25","entry_price":90}])
+    db.update_grid(grid["id"], dust_qty="0.25")
+    db.update_level(grid["id"], 0, held_qty="0.25", state="DONE")
+    result = client.get("/api/account/summary").body
+    assets = {row["asset"]: row for row in result["reconciliation"]["assets"]}
+    assert "USDT" not in assets
+    assert assets["XRP"]["assigned_to_grids"] == "0.25"
+    assert assets["XRP"]["difference"] == "3.75"
+
+
+def test_capital_share_excludes_closed_grids(tmp_path):
+    client, db = make_client(tmp_path, AccountClient())
+    for status in ("ACTIVE", "CLOSED"):
+        db.create_grid_with_levels({"symbol":"XRPUSDT","range_low":90,"range_high":110,
+            "n_levels":4,"capital_total":100,"status":status,"strategy":"smart"},
+            [{"level_idx":0,"price":90,"sell_price":91,"capital":100,"state":"IDLE","held_qty":0}])
+    result = client.get("/api/account/summary").body
+    opened = result["grids"]["open"][0]
+    closed = result["grids"]["closed"][0]
+    assert opened["capital_share_pct"] == 100
+    assert opened["capital_share_basis"] == "abiertos+repositorio"
+    assert closed["capital_share_pct"] is None
+
+
+def test_daily_event_stream_is_loaded_once_per_grid(tmp_path):
+    client, db = make_client(tmp_path, AccountClient())
+    grid = db.create_grid_with_levels({"symbol":"XRPUSDT","range_low":90,"range_high":110,
+        "n_levels":4,"capital_total":100,"status":"ACTIVE","strategy":"smart"},
+        [{"level_idx":0,"price":90,"sell_price":91,"capital":100,"state":"IDLE","held_qty":0}])
+    db.add_grid_event(run_id=None, source="CLI", grid_id=grid["id"], event_type="SELL_FILLED",
+                      price=91, details={"net_pnl_usdt":1.25})
+    calls = []
+    original = db.list_grid_events
+    def counted(*args, **kwargs):
+        calls.append(kwargs.get("grid_id"))
+        return original(*args, **kwargs)
+    db.list_grid_events = counted
+    result = client.get("/api/account/summary")
+    assert result.status_code == 200
+    assert calls == [grid["id"]]
+    assert result.body["gains"]["daily"]["7d"] == result.body["gains"]["daily"]["30d"]

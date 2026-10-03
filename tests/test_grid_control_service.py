@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 from grid.monitor import GridMonitor
+from grid import control_service
 
 from tests.test_grid_control_api import build_client
 
@@ -37,18 +38,34 @@ def test_control_action_and_monitor_pass_share_the_same_lock(tmp_path):
     assert not monitor_thread.is_alive()
 
 
-def test_control_lock_timeout_returns_conflict(tmp_path):
+def test_control_lock_timeout_returns_conflict(tmp_path, monkeypatch):
     client, _, _, _ = build_client(tmp_path)
+    monkeypatch.setattr(control_service, "CONTROL_LOCK_TIMEOUT_SECONDS", .05)
     lock = threading.RLock()
     client.app.state.grid_monitor = SimpleNamespace(ops_lock=lock)
     held = threading.Event()
     def hold_lock():
         with lock:
             held.set()
-            time.sleep(1.2)
+            time.sleep(.2)
     holder = threading.Thread(target=hold_lock)
     holder.start(); assert held.wait(1)
     response = client.post("/api/grids/1/pause", json={"dry_run":False,"confirm":True})
-    holder.join(timeout=2)
+    holder.join(timeout=1)
     assert response.status_code == 409
-    assert "reintenta" in response.body["detail"]
+    assert "otra operación" in response.body["detail"]
+
+
+def test_control_wait_that_resolves_within_timeout_succeeds(tmp_path, monkeypatch):
+    client, _, _, _ = build_client(tmp_path)
+    monkeypatch.setattr(control_service, "CONTROL_LOCK_TIMEOUT_SECONDS", .2)
+    lock = threading.RLock()
+    client.app.state.grid_monitor = SimpleNamespace(ops_lock=lock)
+    def short_hold():
+        with lock: time.sleep(.03)
+    holder = threading.Thread(target=short_hold)
+    holder.start()
+    time.sleep(.005)
+    response = client.post("/api/grids/1/pause", json={"dry_run":False,"confirm":True})
+    holder.join(timeout=1)
+    assert response.status_code == 200

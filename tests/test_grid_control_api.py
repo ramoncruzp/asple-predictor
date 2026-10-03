@@ -30,9 +30,11 @@ class FakeControlDB:
 
 
 class FakeControlExchange:
-    def __init__(self, testnet=True): self.client = SimpleNamespace(testnet=testnet); self.calls = []
+    def __init__(self, testnet=True, ticker_fail=False): self.client = SimpleNamespace(testnet=testnet); self.calls = []; self.ticker_fail=ticker_fail
     def get_open_orders(self, symbol): return [{"side":"BUY"}, {"side":"SELL"}]
-    def get_book_ticker(self, symbol): return {"bid_price": 100, "ask_price": 101}
+    def get_book_ticker(self, symbol):
+        if self.ticker_fail: raise RuntimeError("ticker unavailable")
+        return {"bid_price": 100, "ask_price": 101}
 
 
 class FakeControlEngine:
@@ -88,6 +90,7 @@ def test_execution_requires_both_flags_and_writes_audit_event(tmp_path):
     assert engine.calls[0][0] == "pause"
     assert db.events[-1]["event_type"] == "GRID_ACTION_API"
     assert db.events[-1]["details"]["who"] == "api"
+    assert db.events[-1]["details"]["outcome"] == "completed"
 
 
 def test_control_guards_testnet_auth_state_and_schema(tmp_path):
@@ -122,7 +125,7 @@ def test_invalid_status_missing_grid_and_invalid_params_are_rejected(tmp_path):
     db.grid["status"] = "CLOSING"
     assert client.post("/api/grids/1/params", json={"max_days":3}).status_code == 409
     db.grid["status"] = "ACTIVE"
-    db.grid["params"]["max_days_close_plan"] = {"phase":"STARTED"}
+    db.grid["params"]["target_close_plan"] = {"phase":"MARKED"}
     assert client.post("/api/grids/1/params", json={"max_days":3}).status_code == 409
 
 
@@ -135,12 +138,12 @@ def test_params_runtime_key_is_forbidden_simple_grid_only_allows_max_days(tmp_pa
 
 def test_null_params_remove_meta_without_clobbering_runtime_state(tmp_path):
     client, db, _, _ = build_client(tmp_path)
-    db.grid["params"].update({"target_pct":2,"max_days":30,"target_close_plan":{"phase":"DONE"}})
+    db.grid["params"].update({"target_pct":2,"max_days":30,"target_close_plan":{"phase":"COMPLETE"}})
     response = client.post("/api/grids/1/params", json={"target_pct":None,"max_days":None,
         "dry_run":False,"confirm":True})
     assert response.status_code == 200, response.body
     assert "target_pct" not in db.grid["params"] and "max_days" not in db.grid["params"]
-    assert db.grid["params"]["target_close_plan"] == {"phase":"DONE"}
+    assert db.grid["params"]["target_close_plan"] == {"phase":"COMPLETE"}
 
 
 def test_non_loopback_without_api_token_is_forbidden(tmp_path):
@@ -178,3 +181,74 @@ def test_confirmed_controls_dispatch_expected_engine_methods(tmp_path):
     response = client.post("/api/grids/1/params", json={"max_days":30,"dry_run":False,"confirm":True})
     assert response.status_code == 200
     assert db.grid["params"]["max_days"] == 30
+
+
+def test_close_partial_outcome_and_audit_event(tmp_path):
+    client, db, _, engine = build_client(tmp_path)
+    def partial(*args, **kwargs):
+        engine.db.grid["status"] = "CLOSING"
+        return {"status":"CLOSING", "errors":[{"reason":"cancel rejected"}]}
+    engine.close_grid = partial
+    response = client.post("/api/grids/1/close", json={"mode":"cancel","dry_run":False,"confirm":True})
+    assert response.status_code == 200
+    assert response.body["outcome"] == "partial"
+    assert response.body["status_after"] == "CLOSING"
+    assert response.body["errors"] == [{"reason":"cancel rejected"}]
+    assert db.events[-1]["details"]["outcome"] == "partial"
+    db.grid["status"] = "ACTIVE"
+    def closed_with_error(*a, **k):
+        db.grid["status"] = "CLOSED"
+        return {"status":"CLOSED", "errors":[{"reason":"residual failure"}]}
+    engine.close_grid = closed_with_error
+    response = client.post("/api/grids/1/close", json={"mode":"cancel","dry_run":False,"confirm":True})
+    assert response.body["outcome"] == "partial"
+    db.grid["status"] = "ACTIVE"
+    engine.close_grid = lambda *a, **k: (db.grid.update(status="CLOSED") or {"status":"CLOSED"})
+    response = client.post("/api/grids/1/close", json={"mode":"cancel","dry_run":False,"confirm":True})
+    assert response.body["outcome"] == "completed"
+
+
+def test_optional_price_for_pause_and_cancel_but_required_for_liquidation(tmp_path):
+    exchange = FakeControlExchange(ticker_fail=True)
+    client, _, _, _ = build_client(tmp_path, client=exchange)
+    pause = client.post("/api/grids/1/pause", json={"dry_run":True})
+    assert pause.status_code == 200
+    assert pause.body["plan"]["held_market_value_usdt"] is None
+    assert pause.body["plan"]["unrealized_pnl_usdt"] is None
+    cancel = client.post("/api/grids/1/close", json={"mode":"cancel","dry_run":True})
+    assert cancel.status_code == 200
+    assert cancel.body["plan"]["held_market_value_usdt"] is None
+    liquidate = client.post("/api/grids/1/close", json={"mode":"liquidate","dry_run":True})
+    assert liquidate.status_code == 503
+
+
+def test_rejected_control_is_audited_but_dry_run_is_not(tmp_path):
+    client, db, _, _ = build_client(tmp_path)
+    preview = client.post("/api/grids/1/pause", json={"dry_run":True})
+    assert preview.status_code == 200
+    assert db.events == []
+    db.grid["status"] = "PAUSED"
+    rejected = client.post("/api/grids/1/pause", json={"dry_run":False,"confirm":True})
+    assert rejected.status_code == 409
+    assert len(db.events) == 1
+    assert db.events[0]["event_type"] == "GRID_ACTION_REJECTED"
+    assert db.events[0]["details"]["who"] == "api"
+    assert "parameters" not in db.events[0]["details"]
+    db.grid["status"] = "ACTIVE"
+    invalid_params = client.post("/api/grids/1/params", json={"target_pct":2,"target_usdt":4})
+    assert invalid_params.status_code == 422
+    assert len(db.events) == 2
+    assert db.events[-1]["event_type"] == "GRID_ACTION_REJECTED"
+
+
+def test_invalid_parameter_value_is_audited(tmp_path):
+    client, db, _, _ = build_client(tmp_path)
+    response = client.post("/api/grids/1/params", json={"max_days":0})
+    assert response.status_code == 422
+    assert len(db.events) == 1
+    assert db.events[0]["event_type"] == "GRID_ACTION_REJECTED"
+    assert db.events[0]["details"]["who"] == "api"
+    malformed = client.post("/api/grids/1/params", json={"max_days":"not-a-number"})
+    assert malformed.status_code == 422
+    assert len(db.events) == 2
+    assert db.events[-1]["details"]["reason"] == "request validation failed"

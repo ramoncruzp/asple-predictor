@@ -3,13 +3,36 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from api.routes.grids import _authorize
 from grid.control_service import run_action
 
-router = APIRouter()
+class AuditedValidationRoute(APIRoute):
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                return await original(request)
+            except RequestValidationError:
+                _authorize(request)
+                grid_id = request.path_params.get("grid_id")
+                db = getattr(request.app.state, "db", None)
+                if grid_id is not None and db is not None and db.get_grid(int(grid_id)) is not None:
+                    action = str(request.path_params.get("action") or request.scope.get("endpoint").__name__)
+                    db.add_grid_event(run_id=None, source="CLI", grid_id=int(grid_id),
+                        event_type="GRID_ACTION_REJECTED", reason=action,
+                        details={"who":"api", "action":action, "reason":"request validation failed"})
+                raise
+
+        return handler
+
+
+router = APIRouter(route_class=AuditedValidationRoute)
 
 
 class ActionBase(BaseModel):
@@ -38,11 +61,12 @@ class AdjustBody(ActionBase):
 
 
 class ParamsBody(ActionBase):
-    target_pct: float | None = Field(default=None, gt=0, le=100)
-    target_usdt: float | None = Field(default=None, gt=0)
-    target_basis: Literal["cash", "equity"] | None = None
-    max_days: float | None = Field(default=None, gt=0)
-    dust_sweep_threshold_pct: float | None = Field(default=None, ge=0)
+    # Business constraints run in control_service so rejected values can be audited.
+    target_pct: float | None = None
+    target_usdt: float | None = None
+    target_basis: str | None = None
+    max_days: float | None = None
+    dust_sweep_threshold_pct: float | None = None
 
 
 def _dispatch(request: Request, grid_id: int, action: str, body: BaseModel):

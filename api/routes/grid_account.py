@@ -125,25 +125,25 @@ def summary(request: Request):
                          "unrealized_usdt": view["inventory"]["unrealized_pnl_usdt"],
                          "total_with_inventory_usdt": view["total_with_inventory_usdt"],
                          "capital_share_pct": None})
-    capital = sum(Decimal(str(row["capital_usdt"])) for row in per_grid)
+    share_rows = [row for row in per_grid if row["status"] not in {"CLOSED", "ERROR"}]
+    capital = sum(Decimal(str(row["capital_usdt"])) for row in share_rows)
     for row in per_grid:
+        row["capital_share_basis"] = "abiertos+repositorio"
         row["capital_share_pct"] = (float(Decimal(str(row["capital_usdt"])) / capital * 100)
-                                     if capital else None)
+                                     if capital and row in share_rows else None)
     # Aggregate daily rows from each grid's own event stream; identities stay grid-scoped.
     daily_by_window = {}
+    events_all = [event for grid in grids
+                  for event in db.list_grid_events(grid_id=int(grid["id"]), limit=5000)]
     for days in (7, 30):
-        events_all, net_all = [], Decimal(0)
         cutoff = now - timedelta(days=days)
-        for grid in grids:
-            events = db.list_grid_events(grid_id=int(grid["id"]), limit=5000)
-            for event in events:
-                event_ts = event.get("ts")
-                if event_ts is not None:
-                    event_ts = event_ts.replace(tzinfo=timezone.utc) if event_ts.tzinfo is None else event_ts.astimezone(timezone.utc)
-                    if event_ts >= cutoff: events_all.append(event)
-            net_all += Decimal(str(next((g["net_realized_usdt"] or 0 for g in summaries
-                                          if g["id"] == int(grid["id"])), 0)))
-        daily_by_window[f"{days}d"] = daily_profit_view(events_all, net_realized_usdt=None,
+        in_window = []
+        for event in events_all:
+            event_ts = event.get("ts")
+            if event_ts is not None:
+                event_ts = event_ts.replace(tzinfo=timezone.utc) if event_ts.tzinfo is None else event_ts.astimezone(timezone.utc)
+                if event_ts >= cutoff: in_window.append(event)
+        daily_by_window[f"{days}d"] = daily_profit_view(in_window, net_realized_usdt=None,
                                                         reconcile_available=False)["daily"]
     account_balance = None
     if balances is not None:
@@ -170,11 +170,12 @@ def summary(request: Request):
         if grid["status"] in {"CLOSED", "ERROR"}: continue
         asset = str(grid["symbol"]).removesuffix("USDT")
         qty = Decimal(str(grid.get("dust_qty") or 0)) + sum(
-            (Decimal(str(level.get("held_qty") or 0)) for level in db.get_grid_levels(int(grid["id"]))), Decimal(0))
+            (Decimal(str(level.get("held_qty") or 0)) for level in db.get_grid_levels(int(grid["id"]))
+             if str(level.get("state", "")).upper() != "DONE"), Decimal(0))
         held_by_asset[asset] = held_by_asset.get(asset, Decimal(0)) + qty
     reconciliation = []
     if balances is not None:
-        for asset in sorted(set(balances) | set(held_by_asset)):
+        for asset in sorted((set(balances) | set(held_by_asset)) - {"USDT"}):
             exchange_qty = Decimal(str(balances.get(asset, {}).get("free", 0))) + Decimal(str(balances.get(asset, {}).get("locked", 0)))
             diff = exchange_qty - held_by_asset.get(asset, Decimal(0))
             reconciliation.append({"asset": asset, "balance_exchange": str(exchange_qty),
@@ -194,7 +195,7 @@ def summary(request: Request):
                       "repository": [x for x in per_grid if x["status"] == "HOLDING"],
                       "closed": [x for x in per_grid if x["status"] in {"CLOSED", "ERROR"}]},
             "reconciliation": {"assets": reconciliation,
-                "grid_capital_usdt": str(capital),
+                "grid_capital_usdt": str(capital), "capital_share_basis": "abiertos+repositorio",
                 "usdt_free": None if account_balance is None else account_balance["usdt_free"],
                 "free_minus_grid_capital_usdt": None if account_balance is None else str(
                     Decimal(str(account_balance["usdt_free"])) - capital)}}
