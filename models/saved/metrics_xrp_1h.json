@@ -1,0 +1,29 @@
+{
+  "symbol": "XRPUSDT",
+  "interval": "1h",
+  "days": 730,
+  "first_candle": "2024-09-27T22:00:00+00:00",
+  "last_candle": "2026-09-27T20:00:00+00:00",
+  "n_candles": 17519,
+  "trained_at": "2026-09-27T21:48:10.017370+00:00",
+  "models": {
+    "model_a": {
+      "accuracy": 0.6825335892514396,
+      "precision": 0.35315315315315315,
+      "recall": 0.29518072289156627,
+      "f1": 0.32157506152584087,
+      "roc_auc": 0.6235653588077193,
+      "positive_rate_test": 0.25489443378119003,
+      "baseline_accuracy": 0.74510556621881,
+      "signal_coverage": 0.799232245681382,
+      "signal_accuracy": 0.7300672430355427,
+      "n_train": 12189,
+      "n_val": 2612,
+      "n_test": 2605,
+      "trained_at": "2026-09-27T21:48:09.313061+00:00",
+      "best_iteration": 196,
+      "final_fit_rows": 17414,
+      "cumulative_accuracy_source": "signal_accuracy"
+    }
+  }
+}

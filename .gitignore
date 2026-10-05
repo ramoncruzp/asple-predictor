@@ -21,3 +21,17 @@ tmp/
 lightning_logs/
 data/cache/
 backups/
+
+# Restos de trabajo local
+Claude outputs/
+_archivo_limpieza_*/
+.pytest-*/
+pytest_*.txt
+diff*.txt
+demo_*.txt
+rojo_*.txt
+reporte_etapa_*.md
+models/saved/*.pt
+models/saved/*.joblib
+models/saved/*.log
+models/saved/vol/*.joblib
