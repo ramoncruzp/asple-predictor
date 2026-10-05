@@ -75,6 +75,31 @@ class GridAutoOpen:
             try:
                 structure = row["suggested_structure"]
                 if not structure.get("feasible"):
+                    self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN",
+                        details={"slot": slot, "phase": "FAILED", "who": "auto", "symbol": symbol,
+                                 "reason": "structure_infeasible", "scan": row, "params": params})
+                    continue
+                minimum_margin = float(getattr(cfg, "grid_min_margin_after_fees_pct",
+                                                getattr(cfg, "grid_min_net_margin_pct", .7)))
+                fee = float(row.get("fee_pct", getattr(cfg, "scanner_fee_pct", .1)))
+                spacing = structure.get("spacing_pct")
+                gross_margin = None if spacing is None else float(spacing) - 2 * fee
+                net_margin = structure.get("net_edge_pct_per_cycle")
+                dust_pct = structure.get("dust_estimate_pct")
+                dust_warning = bool(gross_margin is not None and dust_pct is not None
+                                    and float(dust_pct) > gross_margin * .5)
+                warning_text = ("El polvo estimado es alto para esta celda; sube el capital por celda o reduce niveles. "
+                    "Es un tope pesimista, aún no medido en Testnet." if dust_warning else None)
+                reasons = []
+                if gross_margin is None or gross_margin < minimum_margin:
+                    reasons.append("margin_after_fees_below_minimum")
+                if reasons:
+                    self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN",
+                        details={"slot": slot, "phase": "FAILED", "who": "auto", "symbol": symbol,
+                                  "reason": reasons, "minimum_pct": minimum_margin,
+                                  "actual_pct": gross_margin, "net_after_dust_pct": net_margin,
+                                  "dust_estimate_pct": dust_pct, "dust_warning": dust_warning,
+                                  "dust_warning_message": warning_text, "scan": row, "params": params})
                     continue
                 result = self.engine.create_grid(symbol, structure["range_low"], structure["range_high"],
                     int(structure["n_levels"]), capital=Decimal(str(cfg.usdt_por_grid)),
@@ -82,7 +107,10 @@ class GridAutoOpen:
                 grid_id = int(result["id"])
                 self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN", grid_id=grid_id,
                     details={"slot": slot, "phase": "COMPLETED", "who": "auto", "symbol": symbol,
-                        "scan": row, "params": params, "strategy": strategy})
+                        "scan": row, "params": params, "strategy": strategy,
+                        "margin_after_fees_pct": gross_margin, "net_after_dust_pct": net_margin,
+                        "dust_estimate_pct": dust_pct, "dust_warning": dust_warning,
+                        "dust_warning_message": warning_text})
                 opened.append({"symbol": symbol, "grid_id": grid_id})
             except Exception as exc:
                 self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN",

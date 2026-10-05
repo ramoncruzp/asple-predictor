@@ -63,6 +63,17 @@ def create_coin(request: Request, body: CoinCreate):
         raise HTTPException(
             status_code=422, detail=f"El símbolo {symbol} no está en estado TRADING (status={status})."
         )
+    testnet = getattr(request.app.state, "testnet_client", None)
+    if testnet is None:
+        raise HTTPException(status_code=503, detail="No hay cliente Testnet para validar el símbolo.")
+    try:
+        testnet_info = testnet.get_symbol_info(symbol)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Testnet no respondió al validar el símbolo.") from exc
+    if not testnet_info:
+        raise HTTPException(status_code=422, detail=f"{symbol} existe en Binance pero no en Testnet.")
+    if testnet_info.get("status") != "TRADING":
+        raise HTTPException(status_code=422, detail=f"{symbol} existe en Binance pero no está disponible para operar en Testnet.")
     existing = db.get_coin(symbol)
     if existing is not None and existing["active"] == 1:
         raise HTTPException(status_code=409, detail=f"{symbol} ya está activo.")
@@ -96,7 +107,9 @@ def _assert_no_open_grid(db: Any, symbol: str) -> None:
 @router.get("")
 def list_coins(request: Request):
     db, client = request.app.state.db, request.app.state.client
-    coins = db.get_active_coins()
+    include_inactive = request.query_params.get("include_inactive", "false").lower() == "true"
+    coins = db.get_all_coins() if include_inactive else db.get_active_coins()
+    open_grids = {row["symbol"]: row for row in db.list_open_grids()}
     result = []
     for coin in coins:
         symbol = coin["symbol"]
@@ -116,5 +129,17 @@ def list_coins(request: Request):
             "price": price,
             "volume_24h_quote": volume,
             "change_pct_24h": change,
+            "active": bool(coin["active"]),
+            "open_grid_id": open_grids.get(symbol, {}).get("id"),
+            "volatility_model": _champion_name(db, symbol),
         })
     return result
+
+
+def _champion_name(db: Any, symbol: str) -> str | None:
+    try:
+        rows = db.get_vol_battle(symbol, 4)
+        champions = [row for row in rows if row.get("is_champion")]
+        return champions[0].get("model_name") if champions else "realizada" if rows else None
+    except Exception:
+        return None

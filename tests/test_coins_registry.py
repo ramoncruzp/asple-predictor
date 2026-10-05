@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi import FastAPI
@@ -41,11 +42,21 @@ class FakeMarketClient:
         return self.supported
 
 
+class FakeTestnetClient:
+    def __init__(self, statuses=None):
+        self.statuses = statuses or {}
+
+    def get_symbol_info(self, symbol):
+        status = self.statuses.get(symbol)
+        return {"symbol": symbol, "status": status} if status else None
+
+
 def make_app(fake_client, tmp_path):
     app = FastAPI()
     app.include_router(coins_module.router, prefix="/api/coins")
     app.state.db = DBManager(f"sqlite:///{tmp_path}/test.db")
     app.state.client = fake_client
+    app.state.testnet_client = FakeTestnetClient(fake_client.statuses)
     coins_module._AVAILABLE_CACHE["symbols"] = None
     coins_module._AVAILABLE_CACHE["fetched_at"] = 0.0
     return app
@@ -68,6 +79,7 @@ def _request(app, method, path, body=None):
             messages.append(message)
 
         headers = [(b"content-type", b"application/json")] if body is not None else []
+        parsed_path = urlsplit(path)
         await app(
             {
                 "type": "http",
@@ -75,9 +87,9 @@ def _request(app, method, path, body=None):
                 "http_version": "1.1",
                 "method": method,
                 "scheme": "http",
-                "path": path,
-                "raw_path": path.encode(),
-                "query_string": b"",
+                "path": parsed_path.path,
+                "raw_path": parsed_path.path.encode(),
+                "query_string": parsed_path.query.encode(),
                 "root_path": "",
                 "headers": headers,
                 "client": ("testclient", 50000),
@@ -138,6 +150,16 @@ def test_post_nonexistent_returns_404_without_row(tmp_path):
 
     assert status == 404
     assert app.state.db.get_coin("ABCUSDT") is None
+
+
+def test_post_rejects_symbol_missing_from_testnet(tmp_path):
+    fake = FakeMarketClient(statuses={"SOLUSDT": "TRADING"})
+    app = make_app(fake, tmp_path)
+    app.state.testnet_client = FakeTestnetClient()
+    status, data = post(app, "/api/coins", {"symbol": "SOLUSDT"})
+    assert status == 422
+    assert "existe en Binance pero no en Testnet" in data["detail"]
+    assert app.state.db.get_coin("SOLUSDT") is None
 
 
 def test_post_upstream_runtime_error_returns_503_without_row(tmp_path):
@@ -248,6 +270,19 @@ def test_get_lists_only_active_with_fake_stats(tmp_path):
     assert data[0]["price"] == 150.0
     assert data[0]["volume_24h_quote"] == 1000.0
     assert data[0]["change_pct_24h"] == 2.5
+    assert data[0]["active"] is True
+    assert data[0]["open_grid_id"] is None
+
+
+def test_get_can_include_inactive_coins(tmp_path):
+    fake = FakeMarketClient(statuses={"SOLUSDT": "TRADING"})
+    app = make_app(fake, tmp_path)
+    post(app, "/api/coins", {"symbol": "SOLUSDT"})
+    delete(app, "/api/coins/SOLUSDT")
+    status, data = get(app, "/api/coins?include_inactive=true")
+    assert status == 200
+    assert data[0]["symbol"] == "SOLUSDT"
+    assert data[0]["active"] is False
 
 
 def test_get_with_stats_failure_returns_null_fields(tmp_path):

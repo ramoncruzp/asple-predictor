@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat
 
 from api.routes.grids import _authorize
 from grid.control_service import run_action
@@ -67,6 +67,9 @@ class ParamsBody(ActionBase):
     target_basis: str | None = None
     max_days: float | None = None
     dust_sweep_threshold_pct: float | None = None
+    compound_enabled: StrictBool | None = None
+    compound_ratio: StrictFloat | None = None
+    compound_max_growth_pct: StrictFloat | None = None
 
 
 def _dispatch(request: Request, grid_id: int, action: str, body: BaseModel):

@@ -8,7 +8,7 @@ from grid.engine import GridEngine
 from tests.grid_fakes import FakeExchange
 
 
-def make_compound_engine(*, params=None, fee_rate="0.001", fee_asset="XRP"):
+def make_compound_engine(*, params=None, fee_rate="0.001", fee_asset="XRP", strategy="smart"):
     db = DBManager("sqlite:///:memory:")
     db.add_or_reactivate_coin("XRPUSDT")
     exchange = FakeExchange(fee_rate=fee_rate, fee_asset=fee_asset)
@@ -19,7 +19,7 @@ def make_compound_engine(*, params=None, fee_rate="0.001", fee_asset="XRP"):
     engine = GridEngine(db, exchange, settings)
     smart_params = {"compound_enabled": True, **(params or {})}
     grid = engine.create_grid("XRPUSDT", 80, 120, 5, capital=1000,
-                              strategy="smart", params=smart_params)
+                              strategy=strategy, params=smart_params)
     return engine, db, exchange, grid
 
 
@@ -122,8 +122,11 @@ def test_compound_ratio_half_is_applied_to_cycle_profit():
     assert_capital_ledger(db, grid["id"])
 
 
-def test_growth_cap_limits_compound_to_configured_base_percentage():
-    engine, db, exchange, grid = make_compound_engine(params={"compound_max_growth_pct": 2.0})
+@pytest.mark.parametrize("strategy", ["smart", "simple"])
+def test_growth_cap_limits_compound_to_configured_base_percentage(strategy):
+    engine, db, exchange, grid = make_compound_engine(
+        params={"compound_max_growth_pct": 2.0}, strategy=strategy
+    )
     _summary, after = _filled_cycle(engine, db, exchange, grid)
     assert after["capital_compound"] <= after["capital_base"] * 0.02
     assert after["capital_compound"] == pytest.approx(4.0)
@@ -142,14 +145,28 @@ def test_compound_is_off_by_default_and_for_legacy_params(params):
     assert_capital_ledger(db, grid["id"])
 
 
-def test_simple_grid_never_compounds_even_if_legacy_row_has_flag():
-    engine, db, exchange, grid = make_compound_engine(params={"compound_enabled": False})
-    db.update_grid(grid["id"], strategy="simple", params=db._json({"compound_enabled": True}))
+def test_simple_grid_compounds_profit_and_increases_next_buy_quantity():
+    engine, db, exchange, grid = make_compound_engine(strategy="simple")
+    before = db.get_grid_levels(grid["id"])[2]
+    before_qty = exchange.get_order("XRPUSDT", order_id=before["order_id"])["quantity"]
     _summary, after = _filled_cycle(engine, db, exchange, grid)
     assert after["pnl"] > 0
-    assert after["capital_compound"] == 0 and after["capital"] == after["capital_base"]
-    assert db.get_last_event(grid["id"], "COMPOUND_APPLIED") is None
+    assert after["capital_compound"] == pytest.approx(after["pnl"])
+    assert after["capital"] == pytest.approx(after["capital_base"] + after["capital_compound"])
+    assert exchange.get_order("XRPUSDT", order_id=after["order_id"])["quantity"] > before_qty
+    assert db.get_last_event(grid["id"], "COMPOUND_APPLIED") is not None
     assert_capital_ledger(db, grid["id"])
+
+
+@pytest.mark.parametrize("params", [None, {"compound_enabled": False}])
+def test_simple_grid_without_enabled_compound_keeps_capital_unchanged(params):
+    engine, db, exchange, grid = make_compound_engine(strategy="simple", params=params)
+    db.update_grid(grid["id"], params=db._json(params))
+    before = db.get_grid_levels(grid["id"])[2]
+    _summary, after = _filled_cycle(engine, db, exchange, grid)
+    assert after["capital_compound"] == 0
+    assert after["capital"] == before["capital"]
+    assert db.get_last_event(grid["id"], "COMPOUND_APPLIED") is None
 
 
 def test_paused_sell_compounds_then_resume_rearms_with_new_capital():
@@ -204,8 +221,9 @@ def test_repository_sell_path_never_compounds_and_keeps_cell_capital():
     assert db.get_last_event(repo["id"], "COMPOUND_APPLIED") is None
 
 
-def test_insufficient_free_usdt_skips_compound_without_failing_sync():
-    engine, db, exchange, grid = make_compound_engine()
+@pytest.mark.parametrize("strategy", ["smart", "simple"])
+def test_insufficient_free_usdt_skips_compound_without_failing_sync(strategy):
+    engine, db, exchange, grid = make_compound_engine(strategy=strategy)
     events = []
     engine.event_sink = events.append
     before = db.get_grid_levels(grid["id"])[2]

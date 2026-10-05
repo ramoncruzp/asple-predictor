@@ -92,6 +92,7 @@ class GridScanService:
         cfg = {"min_volume_24h": self._setting("scanner_min_volume_24h", SCANNER_DEFAULTS["min_volume_24h"]),
                "max_spread_bps": self._setting("scanner_max_spread_bps", SCANNER_DEFAULTS["max_spread_bps"]),
                "min_spacing_pct": self._setting("scanner_min_spacing_pct", .8),
+               "min_margin_after_fees_pct": self._setting("grid_min_margin_after_fees_pct", .7),
                "fee_pct": self._setting("scanner_fee_pct", .1),
                "min_cell_floor_usdt": self._setting("scanner_min_cell_floor_usdt", 5.5),
                "history_days": self._setting("scanner_history_days", 30),

@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from ipaddress import ip_address
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from api.routes.grids import _authorize
 from grid.status_view import daily_profit_view, grid_summary
@@ -15,6 +21,108 @@ from grid.reconciliation import expected_inventory_by_asset
 router = APIRouter(prefix="/api/account", tags=["grid-account"])
 logger = logging.getLogger(__name__)
 GRID_STATES = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING", "CLOSED", "ERROR"}
+
+
+class TestnetCredentials(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key: SecretStr = Field(min_length=1)
+    api_secret: SecretStr = Field(min_length=1)
+
+
+def _assert_loopback(request: Request) -> None:
+    if request.headers.get("x-forwarded-for") is not None:
+        raise HTTPException(status_code=403, detail="Solo se permite desde una conexión local directa.")
+    host = request.client.host if request.client else ""
+    try:
+        local = ip_address(host).is_loopback
+    except ValueError:
+        local = False
+    if not local:
+        raise HTTPException(status_code=403, detail="Solo se permite desde una conexión local directa.")
+
+
+def _has_blocking_grid_work(db) -> bool:
+    statuses = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING", "CLOSED", "ERROR"}
+    grids = db.list_grids_by_status(statuses)
+    if any(str(grid.get("status", "")).upper() in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}
+           for grid in grids):
+        return True
+    for grid in grids:
+        loans = db.list_grid_loans(int(grid["id"]))
+        if any(str(loan.get("status", "")).upper() in {"PENDING", "OPEN"} for loan in loans):
+            return True
+    return False
+
+
+def _replace_env_credentials(path: Path, api_key: str, api_secret: str) -> None:
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    replacements = {"TESTNET_API_KEY": api_key, "TESTNET_SECRET": api_secret}
+    lines = original.splitlines(keepends=True)
+    found = set()
+    output = []
+    for line in lines:
+        stripped = line.lstrip()
+        name = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else ""
+        if name not in replacements:
+            output.append(line)
+            continue
+        newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        indent = line[:len(line) - len(stripped)]
+        value = replacements[name].replace("\\", "\\\\").replace('"', '\\"')
+        output.append(f'{indent}{name}="{value}"{newline}')
+        found.add(name)
+    for name, value in replacements.items():
+        if name not in found:
+            if output and not output[-1].endswith(("\n", "\r")):
+                output.append("\n")
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            output.append(f'{name}="{escaped}"\n')
+    updated = "".join(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
+            temp_name = handle.name
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+@router.post("/testnet-credentials")
+def update_testnet_credentials(request: Request, body: TestnetCredentials):
+    _authorize(request)
+    _assert_loopback(request)
+    db = request.app.state.db
+    if _has_blocking_grid_work(db):
+        raise HTTPException(status_code=409, detail="No se pueden cambiar claves mientras haya grids, cierres o reposiciones pendientes.")
+    key, secret = body.api_key.get_secret_value(), body.api_secret.get_secret_value()
+    validator = getattr(request.app.state, "testnet_credentials_validator", None)
+    try:
+        if validator is not None:
+            validator(key, secret)
+        else:
+            from data.testnet_client import TestnetClient
+            settings = request.app.state.settings
+            candidate = TestnetClient(key, secret, production_api_key=getattr(settings, "binance_api_key", None))
+            candidate._run_read(candidate.client.get_account)
+    except Exception as exc:
+        logger.warning("Testnet credential validation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Testnet rechazó las credenciales; verifica la clave, el secreto y sus permisos.") from None
+    env_path = Path(os.environ.get("ASPLE_ENV_FILE", ".env")).expanduser().resolve()
+    try:
+        _replace_env_credentials(env_path, key, secret)
+    except Exception as exc:
+        logger.error("Could not atomically save Testnet credentials (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="No se pudieron guardar las credenciales; el archivo original permanece intacto.") from None
+    return {"saved": True, "key_suffix": key[-4:], "message": "Reinicia el servidor para aplicar el cambio."}
 
 
 def _client(request):
@@ -167,6 +275,8 @@ def summary(request: Request):
                            "usdt_locked": str(Decimal(str(balances.get("USDT", {}).get("locked", 0)))),
                            "equity_usdt": str(equity), "price_as_of": now.isoformat()}
     held_by_asset, _grid_ids_by_asset = expected_inventory_by_asset(db, grids)
+    registered_assets = {str(row["symbol"]).removesuffix("USDT")
+                         for row in db.get_all_coins()} if hasattr(db, "get_all_coins") else set()
     reconciliation = []
     if balances is not None:
         for asset in sorted((set(balances) | set(held_by_asset)) - {"USDT"}):
@@ -175,6 +285,7 @@ def summary(request: Request):
             reconciliation.append({"asset": asset, "balance_exchange": str(exchange_qty),
                 "assigned_to_grids": str(held_by_asset.get(asset, 0)), "difference": str(diff),
                 "severity": "ok" if diff == 0 else "unassigned" if diff > 0 else "inconsistency",
+                "relevant": asset in registered_assets or asset in held_by_asset,
                 "explanation": "saldo no asignado a ningún grid" if diff > 0 else
                     "los grids dicen tener más de lo que hay en la cuenta" if diff < 0 else "conciliado"})
     result = {"balance": account_balance, "unavailable_reason": unavailable,

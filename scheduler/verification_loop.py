@@ -9,21 +9,22 @@ from config.models_config import SHADOW_MODEL_NAME
 class VerificationLoop:
     MODELS = [SHADOW_MODEL_NAME]
 
-    def __init__(self, learning_engine, scheduler=None):
+    def __init__(self, learning_engine, scheduler=None, model_names=None):
         self.learning_engine = learning_engine
+        self.model_names = list(model_names or self.MODELS)
         self.scheduler = scheduler or BackgroundScheduler()
         self.logger = logging.getLogger(__name__)
 
     def run_verification_cycle(self):
         verified = self.learning_engine.verify_pending_predictions()
         self.logger.info("Verified %d pending predictions", verified)
-        for model_name in self.MODELS:
+        for model_name in self.model_names:
             self.learning_engine.update_condition_accuracy(model_name)
         self.check_retraining_needed()
         return verified
 
     def check_retraining_needed(self):
-        for model_name in self.MODELS:
+        for model_name in self.model_names:
             if self.learning_engine.should_retrain(model_name):
                 self.logger.info("REENTRENAMIENTO RECOMENDADO para %s", model_name)
 

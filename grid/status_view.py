@@ -276,6 +276,8 @@ def grid_summary(
         "id": int(grid["id"]), "symbol": grid["symbol"], "strategy": grid.get("strategy", "simple"),
         "status": grid["status"], "created_at": created_at.isoformat(),
         "age_days": age_seconds / 86400.0, "compound_enabled": bool(params.get("compound_enabled", False)),
+        "compound_ratio": float(params.get("compound_ratio", 1.0)),
+        "compound_max_growth_pct": float(params.get("compound_max_growth_pct", 100.0)),
         "price": price, "price_as_of": price_as_of.isoformat() if price_as_of else None,
         "capital_total_usdt": _f(capital_total), "capital_deployed_usdt": _f(capital_deployed),
         "capital_deployed_pct": (float(capital_deployed / capital_total) * 100.0) if capital_total > 0 else None,

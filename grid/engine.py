@@ -288,15 +288,26 @@ class GridEngine:
                 raise GridConfigError(f"smart requiere sigma disponible para {symbol}")
         else:
             if params is not None:
-                if "max_days" not in params or any(
-                        key not in {"max_days", *DEFAULT_SMART_PARAMS}
-                        or (key in DEFAULT_SMART_PARAMS and value != DEFAULT_SMART_PARAMS[key])
+                simple_keys = {"max_days", "compound_enabled", "compound_ratio",
+                               "compound_max_growth_pct", *DEFAULT_SMART_PARAMS}
+                if any(
+                        key not in simple_keys
+                        or (key in DEFAULT_SMART_PARAMS and key not in {
+                            "compound_enabled", "compound_ratio", "compound_max_growth_pct"
+                        } and value != DEFAULT_SMART_PARAMS[key])
                         for key, value in params.items()):
-                    raise GridConfigError("simple grids only support the max_days parameter")
+                    raise GridConfigError(
+                        "simple grids only support max_days and compound parameters"
+                    )
                 try:
-                    effective_params = {"max_days": validate_params(params, n_levels)["max_days"]}
+                    validated_params = validate_params(params, n_levels)
                 except ValueError as exc:
                     raise GridConfigError(str(exc)) from exc
+                effective_params = {
+                    key: validated_params[key]
+                    for key in params
+                    if key in {"max_days", "compound_enabled", "compound_ratio", "compound_max_growth_pct"}
+                }
             effective_stop = stop_loss_pct
             if effective_stop is not None and float(effective_stop) <= 0:
                 raise GridConfigError("stop_loss_pct must be greater than zero")
@@ -1150,8 +1161,7 @@ class GridEngine:
         params = grid.get("params") or {}
         grid_status = str(grid.get("status", "")).upper()
         compound_allowed = (
-            str(grid.get("strategy", "simple")).lower() == "smart"
-            and params.get("compound_enabled", False) is True
+            params.get("compound_enabled", False) is True
             and grid_status in {"ACTIVE", "PAUSED"}
             and post_sell_state != "DONE"
             and (rearm or grid_status == "PAUSED")

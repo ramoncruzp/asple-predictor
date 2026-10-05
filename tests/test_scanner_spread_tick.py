@@ -40,6 +40,7 @@ def test_scanner_score_defaults_are_pinned_and_low_edge_warning_travels(monkeypa
     assert cfg["weights"] == {"cost_headroom":.35,"liquidity":.20,"historical_oscillation":.35,"trend_penalty":.10}
     import grid.scanner as scanner
     original=scanner.suggest_structure
-    monkeypatch.setattr(scanner,"suggest_structure",lambda *a,**k:{**original(*a,**k),"net_edge_pct_per_cycle":.05})
+    monkeypatch.setattr(scanner,"suggest_structure",lambda *a,**k:{**original(*a,**k),
+        "edge_gross_pct":.05,"net_edge_pct_per_cycle":-.2})
     result=scanner.score_symbol(market(),FILTERS)
     assert result["edge_warning"] and "bajo" in result["edge_warning"]

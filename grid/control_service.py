@@ -201,18 +201,22 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
         sweepable = max(Decimal(0), _d(grid.get("dust_qty")) - cell_dust)
         plan["dust"] = plan_dust_sweep(sweepable, bid, filters, .1)
     elif action == "params":
-        allowed = {"target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct"}
+        allowed = {"target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct",
+                   "compound_enabled", "compound_ratio", "compound_max_growth_pct"}
         updates = {key: value for key, value in params.items() if key in allowed}
         if not updates or set(params) != set(updates): reject(422, "Parámetros no permitidos.")
         if updates.get("target_pct") is not None and updates.get("target_usdt") is not None:
             reject(422, "target_pct y target_usdt son mutuamente excluyentes.")
-        if grid.get("strategy") == "simple" and set(updates) - {"max_days"}:
-            reject(422, "El motor simple solo admite max_days.")
+        if grid.get("strategy") == "simple" and set(updates) - {
+            "max_days", "compound_enabled", "compound_ratio", "compound_max_growth_pct"
+        }:
+            reject(422, "El motor simple solo admite plazo e interés compuesto.")
         remove = {key for key, value in updates.items() if value is None}
         if updates.get("target_pct") is not None: remove.add("target_usdt")
         if updates.get("target_usdt") is not None: remove.add("target_pct")
         business_keys = set(DEFAULT_SMART_PARAMS) | {"target_pct", "target_usdt", "target_basis",
-                                                      "max_days", "dust_sweep_threshold_pct"}
+                                                       "max_days", "dust_sweep_threshold_pct", "compound_enabled",
+                                                       "compound_ratio", "compound_max_growth_pct"}
         merged = {k:v for k,v in (grid.get("params") or {}).items() if k in business_keys}
         merged.update({k:v for k,v in updates.items() if v is not None})
         for key in remove: merged.pop(key, None)
@@ -236,7 +240,9 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
             elif action == "sweep-dust": result = engine.sweep_grid_dust(grid_id, bid, reason="api")
             else:
                 db.merge_grid_params(grid_id, plan["updates"], remove=set(plan["remove"]),
-                                     allowed=frozenset({"target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct"}))
+                                      allowed=frozenset({"target_pct", "target_usdt", "target_basis", "max_days",
+                                                         "dust_sweep_threshold_pct", "compound_enabled",
+                                                         "compound_ratio", "compound_max_growth_pct"}))
                 result = {"ok": True, "params": db.get_grid(grid_id).get("params")}
             if isinstance(result, dict) and result.get("ok") is False:
                 raise RuntimeError(result.get("reason") or "acción rechazada por el motor")

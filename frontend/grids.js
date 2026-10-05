@@ -3,11 +3,11 @@
 (function () {
   let refreshTimer = null;
 
-  function fmtMoney(value, digits = 4) {
+  function fmtMoney(value, digits = 2) {
     if (value === null || value === undefined) return '—';
     const num = Number(value);
     if (!Number.isFinite(num)) return '—';
-    return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: 8 });
+    return window.ASPLEFormat?.formatNumber(num, digits) ?? num.toFixed(digits);
   }
   function fmtPct(value, digits = 2) {
     if (value === null || value === undefined) return '—';
@@ -83,6 +83,10 @@
     if (action === 'pause') return { reason: card.querySelector('[name="pause-reason"]')?.value || null };
     if (action === 'close') return { mode: card.querySelector('[name="close-mode"]:checked')?.value || 'repository' };
     if (action === 'adjust') return { new_low: Number(card.querySelector('[name="new-low"]')?.value), new_high: Number(card.querySelector('[name="new-high"]')?.value), n: Number(card.querySelector('[name="new-n"]')?.value) || null };
+    if (action === 'compound') {
+      const read = name => Number(card.querySelector(`[name="${name}"]`)?.value);
+      return { compound_enabled: !!card.querySelector('[name="compound-enabled"]')?.checked, compound_ratio: read('compound-ratio') / 100, compound_max_growth_pct: read('compound-cap') };
+    }
     if (action === 'params') {
       const read = name => { const value = card.querySelector(`[name="${name}"]`)?.value; return value === '' || value == null ? null : Number(value); };
       const result = { target_pct: read('target-pct'), target_usdt: read('target-usdt'), max_days: read('max-days'), dust_sweep_threshold_pct: read('dust-threshold') };
@@ -94,6 +98,7 @@
   }
 
   function formFor(action, summary) {
+    if (action === 'compound') return `<p>Requiere USDT libre; el cambio se aplica a ciclos futuros y no modifica \u00f3rdenes abiertas. Testnet no est\u00e1 validado.</p><label><input name="compound-enabled" type="checkbox" ${summary.compound_enabled ? 'checked' : ''}> Activar inter\u00e9s compuesto</label><label>Reinversi\u00f3n de ganancia (%)<input name="compound-ratio" type="number" min="1" max="100" step="any" value="${Number(summary.compound_ratio ?? 1) * 100}" required></label><label>Tope de crecimiento del capital (%)<input name="compound-cap" type="number" min="0.01" step="any" value="${Number(summary.compound_max_growth_pct ?? 100)}" required></label><p class="muted">El capital asignado no se puede cambiar mientras el grid est\u00e1 abierto.</p>`;
     if (action === 'pause') return '<label>Motivo breve<input name="pause-reason" maxlength="120"></label>';
     if (action === 'close') return '<fieldset class="grid-close-modes"><legend>Modo de cierre</legend><label><input type="radio" name="close-mode" value="liquidate"> Vender todo a mercado</label><label><input type="radio" name="close-mode" value="profit_repository"> Vender lo positivo y pasar lo negativo al grid especial</label><p>Otras opciones</p><label><input type="radio" name="close-mode" value="repository" checked> Pasar todas las celdas al repositorio</label><label><input type="radio" name="close-mode" value="cancel"> Solo cancelar órdenes (deja monedas sueltas)</label></fieldset>';
     if (action === 'adjust') return `<label>Rango mínimo<input name="new-low" type="number" min="0.00000001" step="any" value="${summary.range_low || ''}" required></label><label>Rango máximo<input name="new-high" type="number" min="0.00000001" step="any" value="${summary.range_high || ''}" required></label><label>Niveles (opcional)<input name="new-n" type="number" min="4" max="60"></label>`;
@@ -104,18 +109,11 @@
   }
 
   async function controlFlow(gridId, action, summary, container) {
-    if (action === 'unsupported') {
-      showActionDialog(container, 'Capital y compuesto', '<p>No se puede cambiar el capital ni el interés compuesto en un grid abierto. Ciérralo y abre uno nuevo.</p><button type="button" class="button secondary" data-close-new>Ir a cerrar este grid</button>');
-      document.getElementById('grid-action-dialog').querySelector('[data-close-new]').onclick = () => {
-        document.getElementById('grid-action-dialog').hidden = true;
-        controlFlow(gridId, 'close', summary, container);
-      };
-      return;
-    }
-    const path = `/api/grids/${gridId}/${action}`;
+    const apiAction = action === 'compound' ? 'params' : action;
+    const path = `/api/grids/${gridId}/${apiAction}`;
     const gather = () => actionFields(action, document.getElementById('grid-action-dialog'));
     const initialFields = formFor(action, summary);
-    showActionDialog(container, `Preparar ${action}`, `${initialFields}<p class="muted">Las cifras son una estimación de Testnet; Testnet no representa el mercado real.</p>`, async () => {
+    showActionDialog(container, action === 'compound' ? 'Inter\u00e9s compuesto' : `Preparar ${action}`, `${initialFields}<p class="muted">Las cifras son una estimación de Testnet; Testnet no representa el mercado real.</p>`, async () => {
       const input = gather();
       if (action === 'params') {
         const modal = document.getElementById('grid-action-dialog');
@@ -191,7 +189,7 @@
       <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${statusLabel(grid.status)}</span></div>
       <div class="grid-row-metrics">
         <div><span>Neta realizada</span><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></div>
-        <div><span>Total con inventario</span><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></div>
+        <div><span>Total con inventario ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></div>
         <div><span>Desplegado</span><b>${fmtPct(grid.capital_deployed_pct, 1)}</b></div>
         <div><span>Precio</span><b class="mono">${grid.price === null ? 'sin precio' : fmtMoney(grid.price, 6)}</b></div>
       </div></a>`;
@@ -207,13 +205,13 @@
       ${warning}
       <div class="grids-totals card">
         <div><span>Ganancia neta total (realizada)</span><b class="${pnlClass(totals.net_realized_usdt)}">${fmtMoney(totals.net_realized_usdt, 2)}</b></div>
-        <div><span>Total con inventario</span><b class="${pnlClass(totals.total_with_inventory_usdt)}">${fmtMoney(totals.total_with_inventory_usdt, 2)}</b></div>
+        <div><span>Total con inventario ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(totals.total_with_inventory_usdt)}">${fmtMoney(totals.total_with_inventory_usdt, 2)}</b></div>
         <div><span>Capital en grids</span><b>${fmtMoney(totals.capital_in_grids_usdt, 2)}</b></div>
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
       <h2 class="grids-section-title">Grids abiertos</h2>
-      <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos.</p>'}</div>
+      <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
     `;
   }
@@ -230,10 +228,10 @@
   }
 
   function buildEquitySvg(points) {
-    if (!points.length) return '<p class="muted">Sin datos de equity aun</p>';
+    if (!points.length) return '<p class="muted">Sin datos a\u00fan</p>';
     const width = 600, height = 160, pad = 10;
     const values = points.flatMap((p) => [p.with_inventory_usdt, p.realized_usdt]).filter((v) => v !== null && v !== undefined);
-    if (!values.length) return '<p class="muted">Sin datos de equity aun</p>';
+    if (!values.length) return '<p class="muted">Sin datos a\u00fan</p>';
     const min = Math.min(...values), max = Math.max(...values);
     const range = (max - min) || 1;
     const x = (i) => pad + (i / Math.max(1, points.length - 1)) * (width - 2 * pad);
@@ -276,12 +274,12 @@
       </div>`;
     }).join('');
     const opsRows = (operations.operations || []).map((op) => `<tr>
-      <td>${esc(new Date(op.ts).toLocaleString())}</td><td>${esc(op.kind || 'ciclo')}</td><td>${op.level_idx}</td>
+      <td>${esc(window.ASPLEFormat?.formatDateTime(op.ts) ?? op.ts)}</td><td>${esc(op.kind || 'ciclo')}</td><td>${op.level_idx}</td>
       <td class="mono" title="${op.prices_approx ? 'precio aproximado por un ajuste de celda' : 'precio de orden/celda'}">${fmtMoney(op.buy_price_approx, 6)}${op.prices_approx ? ' ~' : ''}</td><td class="mono" title="${op.prices_approx ? 'precio aproximado por un ajuste de celda' : 'precio de orden/celda'}">${fmtMoney(op.sell_price_approx, 6)}${op.prices_approx ? ' ~' : ''}</td>
       <td class="mono">${fmtMoney(op.sell_qty, 4)}</td><td class="${pnlClass(op.net_pnl_usdt)}">${fmtMoney(op.net_pnl_usdt, 4)}</td>
       <td>${op.duration_hours === null ? '—' : op.duration_hours.toFixed(1) + ' h'}</td></tr>`).join('');
     const eventRows = (events.events || []).map((ev) => `<tr class="severity-${esc(ev.severity)}">
-      <td>${esc(new Date(ev.ts).toLocaleString())}</td><td>${esc(ev.message)}</td><td class="muted">${esc(ev.reason || '')}</td></tr>`).join('');
+      <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(ev.reason || '')}</td></tr>`).join('');
 
     container.innerHTML = `
       <a class="back-link" href="#grids">&larr; Volver a Grids</a>
@@ -290,15 +288,14 @@
           <span class="status-badge ${statusClass(summary.status)}">${statusLabel(summary.status)}</span>
           ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
-          ${summary.price_as_of ? `<small class="muted">al ${esc(new Date(summary.price_as_of).toLocaleTimeString())}</small>` : '<small class="muted">sin precio actual</small>'}</div>
-        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}">
+          ${summary.price_as_of ? `<small class="muted">al ${esc(window.ASPLEFormat?.formatDateTime(summary.price_as_of) ?? summary.price_as_of)}</small>` : '<small class="muted">sin precio actual</small>'}</div>
+        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="pause">Pausar</button>' : ''}
           ${summary.status === 'PAUSED' ? '<button class="button secondary" data-grid-action="resume">Reanudar</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="close">Cerrar</button>' : ''}
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
-          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button>' : ''}
-          <button class="button secondary" data-grid-action="unsupported">Capital y compuesto</button>
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
         </div>
       </div>
       ${recovery}
@@ -319,7 +316,7 @@
           <div><span>Costo</span><b>${fmtMoney(summary.inventory.cost_usdt, 2)}</b></div>
           <div><span>Valor de mercado</span><b>${summary.inventory.market_value_usdt === null ? '—' : fmtMoney(summary.inventory.market_value_usdt, 2)}</b></div>
           <div><span>No realizado</span><b class="${pnlClass(summary.inventory.unrealized_pnl_usdt)}">${summary.inventory.unrealized_pnl_usdt === null ? '—' : fmtMoney(summary.inventory.unrealized_pnl_usdt, 2)}</b></div>
-          <div><span>Total con inventario</span><b class="${pnlClass(summary.total_with_inventory_usdt)}">${summary.total_with_inventory_usdt === null ? '—' : fmtMoney(summary.total_with_inventory_usdt, 2)}</b></div>
+          <div><span>Total con inventario ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(summary.total_with_inventory_usdt)}">${summary.total_with_inventory_usdt === null ? '—' : fmtMoney(summary.total_with_inventory_usdt, 2)}</b></div>
           <div><span>Polvo</span><b class="mono">${fmtMoney(summary.dust_qty, 6)} ${summary.dust_value_usdt !== null ? `(${fmtMoney(summary.dust_value_usdt, 4)} USDT)` : ''}</b></div>
         </div>
         ${summary.inventory.unavailable_reason ? `<p class="muted">${esc(summary.inventory.unavailable_reason)}</p>` : ''}
@@ -342,7 +339,7 @@
           <thead><tr><th>Nivel</th><th>Compra</th><th>Venta</th><th>Capital</th><th>Estado</th><th>PNL vivo</th><th>Distancia a fill</th></tr></thead>
           <tbody>${cells.rows.map(cellRowHtml).join('') || '<tr><td colspan="7">Sin celdas</td></tr>'}</tbody>
         </table>
-        <div class="cells-totals"><span>Esperado por ciclo: <b>${fmtMoney(cells.expected_profit_per_cycle_usdt, 4)}</b></span>
+        <div class="cells-totals"><span>Esperado por ciclo, todas las celdas (USDT) ${tooltip('Suma te\u00f3rica de la ganancia de una vuelta de cada celda, despu\u00e9s de comisiones estimadas; no es una predicci\u00f3n.')}: <b>${fmtMoney(cells.expected_profit_per_cycle_usdt, 4)}</b></span>
           <span>PNL vivo total: <b class="${pnlClass(cells.live_pnl_total_usdt)}">${fmtMoney(cells.live_pnl_total_usdt, 4)}</b></span></div>
       </div>
       <div class="card operations-block">
@@ -354,14 +351,14 @@
       </div>
       <div class="card daily-block">
         <h3>Ganancia diaria</h3>
-        <div class="daily-chart" style="align-items:flex-start;position:relative;background:linear-gradient(to bottom,transparent 29px,var(--muted) 30px,transparent 31px)">${dailyBars || '<p class="muted">Sin datos aun</p>'}</div>
+        <div class="daily-chart" style="align-items:flex-start;position:relative;background:linear-gradient(to bottom,transparent 29px,var(--muted) 30px,transparent 31px)">${dailyBars || '<span class="muted" style="text-decoration:none">Sin datos a\u00fan</span>'}</div>
         ${(daily.unattributed_usdt !== null && Math.abs(daily.unattributed_usdt) > 1e-9) || daily.truncated
           ? `<p class="muted">No atribuido al diario: ${fmtMoney(daily.unattributed_usdt, 2)} USDT${daily.unattributed_note ? ` (${esc(daily.unattributed_note)})` : ''}${daily.truncated ? ' · consulta truncada a los últimos 5000 eventos' : ''}</p>` : ''}
       </div>
       <div class="card equity-block">
         <h3>Curva de equity</h3>
         ${buildEquitySvg(equity.points || [])}
-        <p class="muted">${esc(equity.note || 'valor de mercado incluyendo posiciones retenidas')}</p>
+        <span class="muted" title="${esc(equity.note || 'Realizado de resumen (o de celdas si falta) + no realizado de celdas')}" aria-label="C\u00e1lculo de equity">i</span>
       </div>
       <div class="card events-block">
         <h3>Eventos del bot</h3>
@@ -406,7 +403,10 @@
     const controls = button.closest('[data-grid-controls]');
     const gridId = controls?.dataset.gridControls;
     const summary = { id: gridId, status: controls?.dataset.status, strategy: controls?.dataset.strategy,
-      range_low: controls?.dataset.low, range_high: controls?.dataset.high };
+      range_low: controls?.dataset.low, range_high: controls?.dataset.high,
+      compound_enabled: controls?.dataset.compoundEnabled === 'true',
+      compound_ratio: Number(controls?.dataset.compoundRatio),
+      compound_max_growth_pct: Number(controls?.dataset.compoundCap) };
     const parent = document.getElementById('grids-content');
     button.disabled = true;
     controlFlow(gridId, button.dataset.gridAction, summary, parent).catch(error => showActionDialog(parent, 'Error de acción', `<p>${esc(error.message)}</p>`));

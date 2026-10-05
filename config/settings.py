@@ -1,6 +1,6 @@
 """Application settings loaded from environment variables and .env."""
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SCANNER_DEFAULTS = {
@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     max_grids_simultaneos: int = Field(5, validation_alias="MAX_GRIDS_SIMULTANEOS")
     capital_max_por_nivel_pct: float = Field(0.30, validation_alias="CAPITAL_MAX_POR_NIVEL_PCT")
     grid_min_step_pct: float = Field(0.003, validation_alias="GRID_MIN_STEP_PCT")
+    # GRID_MIN_NET_MARGIN_PCT remains a deprecated environment alias for compatibility.
+    grid_min_margin_after_fees_pct: float = Field(0.7, ge=0, validation_alias=AliasChoices("GRID_MIN_MARGIN_AFTER_FEES_PCT", "GRID_MIN_NET_MARGIN_PCT"))
     grid_monitor_interval: int = Field(900, validation_alias="GRID_MONITOR_INTERVAL")
     grid_monitor_gap_minutes: int = Field(20, validation_alias="GRID_MONITOR_GAP_MINUTES")
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")

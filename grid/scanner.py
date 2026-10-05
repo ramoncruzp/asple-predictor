@@ -49,9 +49,11 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
     structure = suggest_structure(
         sigma, Decimal(str(market.get("capital", 100))), Decimal(str(mid or 1)), filters, fee,
         min_spacing_pct=float(cfg["min_spacing_pct"]), min_cell_usdt=cell_floor,
+        min_margin_after_fees_pct=float(cfg.get("min_margin_after_fees_pct",
+            cfg.get("grid_min_margin_after_fees_pct", .7))),
     )
-    edge = structure.get("net_edge_pct_per_cycle")
-    structure_ok = bool(structure["feasible"] and edge is not None and float(edge) > 0)
+    gross_edge = structure.get("edge_gross_pct")
+    structure_ok = bool(structure["feasible"])
     spread_ticks_min = (bid > 0 and ask >= bid and
                         Decimal(str(ask)) - Decimal(str(bid)) <= filters.tick_size)
     spread_ok = (bid > 0 and ask >= bid and
@@ -68,8 +70,8 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
          "El volumen quote de 24 h debe alcanzar el umbral configurado."),
         ("spread", spread_ok, spread_bps,
          float(cfg["max_spread_bps"]), spread_reason),
-        ("structure", structure_ok, structure, "spacing/celda factibles y net edge > 0",
-         "La estructura debe respetar spacing, filtros, polvo y margen neto por ciclo."),
+        ("structure", structure_ok, structure, "estructura factible",
+         "La estructura debe cumplir espaciado minimo, margen tras comisiones y minimo de celda."),
         ("history", history_ok, {"5m": len(closes5), "1h": len(closes1)},
          {"5m": min_5m, "1h": min_1h}, "Se requieren 30 días de historia utilizable en 5m y 1h."),
     ]
@@ -95,7 +97,8 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
         oscillation = {"crossings": crossings,
                        "time_in_range_pct": 100 * sum(inside) / len(inside)}
         net = float(structure["net_edge_pct_per_cycle"])
-        cost_value = min(1.0, max(0.0, net / max(2 * fee, 0.1)))
+        gross = float(structure["edge_gross_pct"])
+        cost_value = min(1.0, max(0.0, gross / max(2 * fee, 0.1)))
         spread_quality = max(0.0, min(1.0, 1 - spread_bps / float(cfg["max_spread_bps"])))
         volume_factor = min(1.0, max(0.0, log10(max(float(market["volume_24h_quote"]),
             float(cfg["min_volume_24h"])) / float(cfg["min_volume_24h"]))))
@@ -105,8 +108,9 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
         weight_sum = sum(float(value) for value in cfg["weights"].values())
         if weight_sum <= 0:
             raise ValueError("at least one scanner score weight must be positive")
-        vals = [("cost_headroom", cost_value, "Holgura descriptiva sobre comisiones y polvo.",
-                 {"net_edge_pct_per_cycle": net, "fee_pct": fee}),
+        vals = [("cost_headroom", cost_value, "Holgura descriptiva sobre comisiones; polvo informativo.",
+                 {"edge_gross_pct": gross, "net_edge_pct_per_cycle": net,
+                  "dust_estimate_pct": structure.get("dust_estimate_pct"), "fee_pct": fee}),
                 ("liquidity", liquidity_value, "Escala de spread y volumen observados; Testnet puede diferir.",
                  {"spread_bps": spread_bps, "volume_24h_quote": float(market["volume_24h_quote"])}),
                 ("historical_oscillation", oscillation_value, "Cruces históricos y tiempo dentro del rango sugerido.",
@@ -120,11 +124,11 @@ def score_symbol(market: dict, filters: Any, params: dict | None = None) -> dict
             components.append({"name": name, "value": round(value, 6), "weight": weight,
                                "contribution": round(contribution, 6), "measured": measured,
                                "explanation": explanation})
-        if float(structure["net_edge_pct_per_cycle"]) < .1:
-            warnings.append("Margen neto descriptivo bajo; revisar comisiones y polvo por ciclo.")
+        if gross < .1:
+            warnings.append("Margen tras comisiones descriptivo bajo; el polvo se informa aparte.")
         reasons.append("Elegible por condiciones observadas de costo y factibilidad; score descriptivo, no predictivo.")
-    edge_warning = ("Margen neto descriptivo bajo; revisar comisiones y polvo por ciclo."
-                    if edge is not None and float(edge) < .1 else None)
+    edge_warning = ("Margen tras comisiones descriptivo bajo; el polvo se informa aparte."
+                    if gross_edge is not None and float(gross_edge) < .1 else None)
     result = {"symbol": symbol, "eligible": eligible, "score": round(score, 6) if eligible else None,
             "hard_filters": hard_filters, "components": components, "reasons": reasons,
             "suggested_structure": structure, "historical_oscillation": oscillation,

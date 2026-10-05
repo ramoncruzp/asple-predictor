@@ -93,6 +93,87 @@ def test_account_routes_are_get_only(tmp_path):
     assert guarded.get("/api/account/summary").status_code == 403
 
 
+def _credential_client(tmp_path, *, validator=None, host=("127.0.0.1", 51000)):
+    local, db = make_client(tmp_path, AccountClient())
+    local.app.state.testnet_credentials_validator = validator or (lambda key, secret: None)
+    local.host = host[0]
+    return local, db
+
+
+def test_testnet_credential_update_is_atomic_preserves_env_and_redacts_secret(tmp_path, monkeypatch, caplog):
+    env_path = tmp_path / "settings.env"
+    original = "# keep this comment\nOTHER=value\nTESTNET_API_KEY=old-key\nTESTNET_SECRET=old-secret\n"
+    env_path.write_text(original, encoding="utf-8", newline="")
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(env_path))
+    client, _ = _credential_client(tmp_path)
+    response = client.post("/api/account/testnet-credentials", json={
+        "api_key": "new-key-secret-sentinel", "api_secret": "new-secret-sentinel"})
+    assert response.status_code == 200
+    assert response.body == {"saved": True, "key_suffix": "inel", "message": "Reinicia el servidor para aplicar el cambio."}
+    assert env_path.with_name("settings.env.bak").read_text(encoding="utf-8") == original
+    saved = env_path.read_text(encoding="utf-8")
+    assert "# keep this comment\nOTHER=value\n" in saved
+    assert 'TESTNET_API_KEY="new-key-secret-sentinel"' in saved
+    assert 'TESTNET_SECRET="new-secret-sentinel"' in saved
+    assert "new-key-secret-sentinel" not in str(response.body) and "new-secret-sentinel" not in str(response.body)
+    assert "new-key-secret-sentinel" not in caplog.text and "new-secret-sentinel" not in caplog.text
+
+
+def test_testnet_credential_update_rejects_invalid_key_without_echo(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(tmp_path / "unused.env"))
+    def reject(key, secret):
+        raise RuntimeError(f"invalid {key} {secret}")
+    client, _ = _credential_client(tmp_path, validator=reject)
+    response = client.post("/api/account/testnet-credentials", json={
+        "api_key": "invalid-key-sentinel", "api_secret": "invalid-secret-sentinel"})
+    assert response.status_code == 422
+    assert "invalid-key-sentinel" not in str(response.body) and "invalid-secret-sentinel" not in str(response.body)
+    assert "invalid-key-sentinel" not in caplog.text and "invalid-secret-sentinel" not in caplog.text
+    assert not (tmp_path / "unused.env").exists()
+
+
+def test_testnet_credential_update_requires_direct_loopback(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(tmp_path / "unused.env"))
+    client, _ = _credential_client(tmp_path, host=("192.0.2.5", 51000))
+    response = client.post("/api/account/testnet-credentials", json={"api_key": "key", "api_secret": "secret"})
+    assert response.status_code == 403
+    loopback, _ = _credential_client(tmp_path)
+    forwarded = loopback._call("POST", "/api/account/testnet-credentials", json={"api_key": "key", "api_secret": "secret"},
+                               headers={"X-Forwarded-For": "127.0.0.1"})
+    assert forwarded.status_code == 403
+
+
+def test_testnet_credential_update_blocked_by_open_grid(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(tmp_path / "unused.env"))
+    client, db = _credential_client(tmp_path)
+    db.list_grids_by_status = lambda statuses: [{"id": 1, "status": "ACTIVE"}]
+    response = client.post("/api/account/testnet-credentials", json={"api_key": "key", "api_secret": "secret"})
+    assert response.status_code == 409
+    assert not (tmp_path / "unused.env").exists()
+
+
+def test_testnet_credential_update_blocked_by_pending_replenishment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(tmp_path / "unused.env"))
+    client, db = _credential_client(tmp_path)
+    db.list_grids_by_status = lambda statuses: [{"id": 7, "status": "CLOSED"}]
+    db.list_grid_loans = lambda grid_id: [{"status": "PENDING"}]
+    response = client.post("/api/account/testnet-credentials", json={"api_key": "key", "api_secret": "secret"})
+    assert response.status_code == 409
+    assert not (tmp_path / "unused.env").exists()
+
+
+def test_testnet_credential_update_interrupted_replace_keeps_original(tmp_path, monkeypatch):
+    env_path = tmp_path / "settings.env"
+    original = "OTHER=preserved\n"
+    env_path.write_text(original, encoding="utf-8", newline="")
+    monkeypatch.setenv("ASPLE_ENV_FILE", str(env_path))
+    client, _ = _credential_client(tmp_path)
+    monkeypatch.setattr("api.routes.grid_account.os.replace", lambda *_: (_ for _ in ()).throw(OSError("interrupted")))
+    response = client.post("/api/account/testnet-credentials", json={"api_key": "key", "api_secret": "secret"})
+    assert response.status_code == 500
+    assert env_path.read_text(encoding="utf-8") == original
+
+
 def test_account_keeps_same_symbol_grids_separate_and_reports_reconciliation_signs(tmp_path):
     client, db = make_client(tmp_path, AccountClient())
     for symbol, status, qty, pnl in (("XRPUSDT","ACTIVE",2,5), ("XRPUSDT","HOLDING",1,9),
@@ -108,6 +189,7 @@ def test_account_keeps_same_symbol_grids_separate_and_reports_reconciliation_sig
     assert all(row["total_with_inventory_usdt"] == row["realized_usdt"] + row["unrealized_usdt"] for row in xrp)
     reconciliation = {row["asset"]:row for row in result["reconciliation"]["assets"]}
     assert reconciliation["XRP"]["severity"] == "unassigned"
+    assert reconciliation["XRP"]["relevant"] is True
     assert reconciliation["ETH"]["severity"] == "inconsistency"
     assert reconciliation["ABC"]["severity"] == "ok"
 

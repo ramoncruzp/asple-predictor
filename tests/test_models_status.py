@@ -20,7 +20,7 @@ class FakeDB:
         }
 
 
-def test_status_only_lists_models_loaded_in_app_state():
+def test_status_lists_unavailable_shadow_models_without_claiming_they_loaded():
     app = FastAPI()
     app.state.db = FakeDB()
     app.state.models = {"model_a": FakeModel()}
@@ -28,4 +28,8 @@ def test_status_only_lists_models_loaded_in_app_state():
 
     response = status(request)
 
-    assert [model["model_name"] for model in response["models"]] == ["model_a"]
+    assert [model["model_name"] for model in response["models"]] == ["model_a", "model_b", "model_c"]
+    assert response["models"][0]["available"] is True
+    assert response["models"][1]["available"] is False
+    assert response["models"][2]["available"] is False
+    assert response["models"][1]["validation_status"] == "not_validated"

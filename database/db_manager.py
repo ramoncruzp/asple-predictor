@@ -594,6 +594,57 @@ class DBManager:
             ),
         } for row in rows]
 
+    def get_champion_vol_forecast_before(
+        self, symbol: str, horizon_h: int, as_of: datetime
+    ) -> dict | None:
+        """Return the latest champion forecast timestamped no later than a prediction."""
+        statement = select(
+            self.vol_forecasts.c.forecast_at,
+            self.vol_forecasts.c.model_name,
+            self.vol_forecasts.c.pred_logvol_cal,
+        ).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+            self.vol_forecasts.c.is_champion == 1,
+            self.vol_forecasts.c.forecast_at <= self._utc(as_of),
+        ).order_by(self.vol_forecasts.c.forecast_at.desc()).limit(1)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        return dict(row) if row else None
+
+    def get_volatility_coverage(self, symbol: str, interval: str, model_name: str = "model_a") -> dict:
+        """Measure verified 4h returns inside the forecast-time 1σ/2σ bands."""
+        rows = self.get_predictions_with_outcomes(
+            symbol=symbol, interval=interval, model_name=model_name, limit=5000
+        )
+        n = inside_1sigma = inside_2sigma = 0
+        for row in rows:
+            if row.get("verified_at") is None or row.get("price_at_verification") is None:
+                continue
+            try:
+                market = json.loads(row.get("market_condition") or "{}")
+                forecast = market.get("volatility_4h") or {}
+                bands = (forecast["range_1sigma"], forecast["range_2sigma"])
+                price = float(row["price_at_verification"])
+                if not all(len(band) == 2 for band in bands):
+                    continue
+                n += 1
+                inside_1sigma += int(float(bands[0][0]) <= price <= float(bands[0][1]))
+                inside_2sigma += int(float(bands[1][0]) <= price <= float(bands[1][1]))
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "model_name": model_name,
+            "n": n,
+            "inside_1sigma": inside_1sigma,
+            "inside_2sigma": inside_2sigma,
+            "coverage_1sigma": inside_1sigma / n if n else None,
+            "coverage_2sigma": inside_2sigma / n if n else None,
+            "sample_sufficient": n >= 30,
+        }
+
     def get_latest_vol_forecasts(self, symbol: str) -> list[dict]:
         latest_at = select(func.max(self.vol_forecasts.c.forecast_at)).where(
             self.vol_forecasts.c.symbol == symbol
@@ -615,6 +666,13 @@ class DBManager:
         statement = select(self.coins_registry).where(
             self.coins_registry.c.active == 1
         ).order_by(self.coins_registry.c.added_at)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def get_all_coins(self) -> list[dict]:
+        statement = select(self.coins_registry).order_by(
+            self.coins_registry.c.active.desc(), self.coins_registry.c.added_at
+        )
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
 

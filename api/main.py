@@ -17,11 +17,12 @@ from database.db_manager import DBManager
 from database.learning_engine import LearningEngine
 from models.model_a_xgboost import ModelA
 from models.shadow_predictor import ShadowPredictor
-from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
 from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, predictions, volatility
 from models.volatility.live import VolPredictor
+from models.shadow_loader import load_optional_shadow_models
 from scheduler.vol_loop import VolLoop
 from scheduler.backup_loop import BackupLoop
 from api.auth import authorize
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
     secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client, db = BinanceClient(key, secret), DBManager(settings.database_url)
     db.seed_coin_if_missing(ACTIVE_SYMBOL, "Símbolo activo del predictor (sembrado)")
+    model_a_load_started = time.perf_counter()
     model_a = ModelA()
     artifact = Path(SHADOW_ARTIFACT)
     try:
@@ -48,8 +50,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("No se pudo cargar el modelo sombra Model A desde %s", artifact)
         raise
-    ensemble = ShadowPredictor(model_a, db)
-    prediction_loop, verification_loop = PredictionLoop(client, ensemble, db_manager=db), VerificationLoop(LearningEngine(db, client))
+    shadow_models, model_load_report = load_optional_shadow_models()
+    ensemble = ShadowPredictor(
+        model_a, db, shadow_models=shadow_models,
+        shadow_thresholds={name: MODELS_CONFIG[name]["signal_threshold"] for name in shadow_models},
+        validation_status={name: MODELS_CONFIG[name]["validation_status"] for name in shadow_models},
+    )
+    prediction_loop = PredictionLoop(client, ensemble, db_manager=db)
+    verification_loop = VerificationLoop(LearningEngine(db, client), model_names=["model_a", *shadow_models])
     volatility_manifest = Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json"
     vol_predictor = None
     vol_loop = None
@@ -111,7 +119,13 @@ async def lifespan(app: FastAPI):
     app.state.grid_engine, app.state.testnet_client = grid_engine, testnet_client
     app.state.vol_provider = grid_vol_provider
     app.state.grid_auto_open = grid_auto_open
-    app.state.models, app.state.ensemble = {"model_a": model_a}, ensemble
+    app.state.models, app.state.ensemble = {"model_a": model_a, **shadow_models}, ensemble
+    app.state.model_load_report = {
+        "model_a": {"available": True, "artifact": str(artifact),
+                    "duration_ms": round((time.perf_counter() - model_a_load_started) * 1000, 2),
+                    "rss_delta_bytes": None},
+        **model_load_report,
+    }
     app.state.prediction_loop, app.state.verification_loop = prediction_loop, verification_loop
     app.state.vol_predictor, app.state.vol_loop = vol_predictor, vol_loop
     app.state.grid_monitor = grid_monitor

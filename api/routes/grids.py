@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.policy import validate_params
 from grid.scan_service import EXECUTION_WARNING
-from grid.structure import suggest_structure
+from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
+                            minimum_cell_threshold, minimum_cell_warning,
+                            evaluate_levels, evaluate_preview_position, suggest_structure)
 from grid.guards import sell_level_conflicts, sell_level_conflict_message
 
 router = APIRouter()
@@ -21,6 +23,59 @@ router = APIRouter()
 
 def _mid(market: dict) -> Decimal:
     return (Decimal(str(market["bid"])) + Decimal(str(market["ask"]))) / Decimal(2)
+
+
+def _margin_guard(request, low, high, n, capital, mid, filters):
+    settings = request.app.state.settings
+    fee = float(getattr(settings, "scanner_fee_pct", .1))
+    minimum = float(getattr(settings, "grid_min_margin_after_fees_pct", getattr(settings, "grid_min_net_margin_pct", 0.7)))
+    width_pct = float((Decimal(str(high)) - Decimal(str(low))) / Decimal(str(mid)) * 100)
+    min_cell = max(Decimal(str(getattr(filters, "min_notional", 5))) * Decimal("1.1"), Decimal("5"))
+    evaluation = evaluate_levels(int(n), width_pct, Decimal(str(capital)), Decimal(str(mid)), filters,
+                                 fee, float(getattr(settings, "scanner_min_spacing_pct", .8)), min_cell)
+    gross = float(evaluation["edge_gross_pct"])
+    net = float(evaluation["net_edge_pct"])
+    dust_warning = float(evaluation["dust_pct"]) > gross * .5
+    reasons = []
+    if not evaluation["cell_ok"]: reasons.append("cell_below_minimum")
+    if gross < minimum: reasons.append("margin_after_fees_below_minimum")
+    return {"minimum_pct": minimum, "actual_pct": gross, "edge_gross_pct": gross,
+            "net_after_dust_pct": net, "dust_estimate_pct": float(evaluation["dust_pct"]),
+            "dust_warning": dust_warning,
+            "dust_warning_message": ("El polvo estimado es alto para esta celda; sube el capital por celda o reduce niveles. Es un tope pesimista, aún no medido en Testnet." if dust_warning else None),
+            "reasons": reasons,
+            "allowed": bool(evaluation["cell_ok"] and gross >= minimum),
+            "cell_ok": bool(evaluation["cell_ok"])}
+
+
+def _preview_testnet_price(engine, symbol, low, high, public_price):
+    unavailable = "No se pudo leer el precio de Testnet; la apertura puede fallar."
+    try:
+        if engine is None:
+            raise RuntimeError("Testnet exchange unavailable")
+        book = engine.exchange.get_book_ticker(symbol)
+        bid = Decimal(str(book["bid_price"]))
+        ask = Decimal(str(book["ask_price"]))
+    except Exception:
+        return None, None, {"allowed": None, "reason": unavailable}
+    empty_sides = []
+    if bid <= 0:
+        empty_sides.append("compras")
+    if ask <= 0:
+        empty_sides.append("ventas")
+    if empty_sides:
+        side_text = " y ".join(empty_sides)
+        reason = (f"El libro de Testnet de {symbol} no tiene {side_text} en este momento "
+                  f"(bid {bid} / ask {ask}); la apertura fallar\u00eda. "
+                  "Prueba con una moneda m\u00e1s l\u00edquida o reintenta.")
+        return None, False, {"allowed": False, "reason": reason}
+    price = (bid + ask) / Decimal(2)
+    in_range = low < price < high
+    if in_range:
+        return price, True, {"allowed": True, "reason": None}
+    reason = (f"Precio Testnet {price} fuera del rango [{low} – {high}]; "
+              f"precio público {public_price}.")
+    return price, False, {"allowed": False, "reason": reason}
 
 
 class ScanRequest(BaseModel):
@@ -66,11 +121,19 @@ def _scan_snapshot(request: Request, symbol: str) -> dict | None:
     return next((row for row in last["results"] if row.get("symbol") == symbol and row.get("eligible")), None)
 
 
-def _reject(db, status: int, message: str, symbol: str, body: OpenRequest):
+def _reject(db, status: int, message: str, symbol: str, body: OpenRequest,
+            testnet_snapshot: dict | None = None):
     try:
+        details = {"who": "api", "symbol": symbol, "strategy": body.strategy,
+            "capital": str(body.capital), "params": body.params or {}, "dry_run": body.dry_run,
+            "range_low": str(body.range_low) if body.range_low is not None else None,
+            "range_high": str(body.range_high) if body.range_high is not None else None,
+            "n_levels": body.n_levels}
+        if testnet_snapshot is not None:
+            details.update({key: str(value) if value is not None else None
+                            for key, value in testnet_snapshot.items()})
         db.add_grid_event(run_id=None, source="CLI", event_type="GRID_OPEN_REJECTED",
-            reason=message, details={"who": "api", "symbol": symbol, "strategy": body.strategy,
-                "capital": str(body.capital), "params": body.params or {}, "dry_run": body.dry_run})
+            reason=message, details=details)
     except Exception:
         pass
     raise HTTPException(status, message)
@@ -127,8 +190,10 @@ def open_grid(request: Request, body: OpenRequest):
             validate_params(params, body.n_levels or 10)
         except (ValueError, TypeError) as exc:
             _reject(db, 422, f"Parámetros de grid inválidos: {exc}", symbol, body)
-        if body.strategy == "simple" and set(params) != {"max_days"}:
-            _reject(db, 422, "El motor simple solo admite max_days; use strategy=smart para otros parámetros.", symbol, body)
+        if body.strategy == "simple" and set(params) - {
+            "max_days", "compound_enabled", "compound_ratio", "compound_max_growth_pct"
+        }:
+            _reject(db, 422, "El motor simple solo admite plazo e interés compuesto; use strategy=smart para otros parámetros.", symbol, body)
     if body.dry_run and body.confirm:
         _reject(db, 422, "confirm solo se acepta junto con dry_run=false.", symbol, body)
     if not body.dry_run and not body.confirm:
@@ -146,17 +211,30 @@ def open_grid(request: Request, body: OpenRequest):
             structure = suggest_structure(sigma, body.capital, mid,
                 filters, float(request.app.state.settings.scanner_fee_pct),
                 min_spacing_pct=float(request.app.state.settings.scanner_min_spacing_pct),
-                min_cell_usdt=max(filters.min_notional * Decimal("1.1"), Decimal("5.5")))
+                min_cell_usdt=max(filters.min_notional * Decimal("1.1"), Decimal("5.5")),
+                min_margin_after_fees_pct=float(getattr(request.app.state.settings,
+                    "grid_min_margin_after_fees_pct", getattr(request.app.state.settings,
+                    "grid_min_net_margin_pct", .7))))
             low = body.range_low or structure["range_low"]
             high = body.range_high or structure["range_high"]
             n = body.n_levels or structure["n_levels"]
             if not structure["feasible"] and (body.range_low is None or body.range_high is None or body.n_levels is None):
                 raise ValueError("No hay estructura factible; proporcione rango y niveles manualmente.")
             lines = compute_lines(low, high, n, filters)
+            margin_guard = _margin_guard(request, low, high, n, body.capital, mid, filters)
             cells = plan_cells(lines, body.capital,
                 {"bid_price": Decimal(str(market["bid"])), "ask_price": Decimal(str(market["ask"])),
                  "avg_price": mid}, filters,
                 request.app.state.settings)
+            cell_rows, cell_metrics_summary = evaluate_cell_margins(
+                cells, filters, getattr(request.app.state.settings, "scanner_fee_pct", .1))
+            minimum_cell = minimum_cell_threshold(
+                filters, max(filters.min_notional * Decimal("1.1"), Decimal("5.5")))
+            dust_min_cell = minimum_cell_for_dust_limit(filters, mid)
+            active_orders = sum(cell.initial_state in {"BUY_OPEN", "SELL_OPEN"} for cell in cells)
+            position = evaluate_preview_position(mid, lines[0], lines[-1])
+            testnet_price, testnet_in_range, testnet_price_guard = _preview_testnet_price(
+                engine, symbol, lines[0], lines[-1], mid)
             existing_levels = []
             for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"):
                 for existing in db.list_grids_by_status({status}):
@@ -170,13 +248,16 @@ def open_grid(request: Request, body: OpenRequest):
                 _reject(db, 409, sell_level_conflict_message(conflicts), symbol, body)
             return {"dry_run": True, "symbol": symbol, "strategy": body.strategy,
                 "capital": str(body.capital), "range_low": str(lines[0]), "range_high": str(lines[-1]),
-                "n_levels": n, "levels": [str(value) for value in lines],
+                "n_levels": n, "levels": [str(value) for value in lines], "current_price": str(mid),
+                "testnet_price": str(testnet_price) if testnet_price is not None else None,
+                "testnet_in_range": testnet_in_range, "testnet_price_guard": testnet_price_guard,
+                "initial_order_count": active_orders, **position,
                 "suggested_structure": structure,
+                "min_cell_warning": minimum_cell_warning(body.capital, n, minimum_cell),
+                "dust_target_pct": "0.1", "dust_min_cell_usdt": str(dust_min_cell),
+                "margin_guard": margin_guard,
                 "cell_usdt": str(body.capital / Decimal(n)), "filters": filters.__dict__,
-                "cells": [{"level_idx": cell.level_idx, "buy_price": str(cell.buy_price),
-                           "sell_price": str(cell.sell_price), "capital": str(cell.capital),
-                           "quantity": str(cell.qty), "initial_state": cell.initial_state}
-                          for cell in cells],
+                "cells": cell_rows, "cell_metrics_summary": cell_metrics_summary,
                 "params": params,
                 "guards": {"registry_active": True, "symbol_slot_available": True,
                            "max_grids_simultaneos": maximum, "target_params_valid": True,
@@ -193,6 +274,43 @@ def open_grid(request: Request, body: OpenRequest):
     if client is None or testnet_flag is not True:
         _reject(db, 503, "Apertura rechazada: el cliente de ejecución no confirma Testnet.", symbol, body)
     try:
+        market, filters = request.app.state.grid_scan_service._market(
+            symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
+            float(request.app.state.settings.scanner_timeout_seconds))
+        margin_guard = _margin_guard(request, body.range_low, body.range_high, body.n_levels,
+                                     body.capital, _mid(market), filters)
+    except Exception as exc:
+        _reject(db, 503, f"No se pudo comprobar el margen mínimo tras comisiones en el mercado público: {type(exc).__name__}.", symbol, body)
+    if not margin_guard["allowed"]:
+        _reject(db, 422, f"Apertura bloqueada: {'; '.join(margin_guard['reasons'])}; margen tras comisiones {margin_guard['actual_pct']:.3f}% (m\u00ednimo {margin_guard['minimum_pct']:.3f}%) o celda bajo el m\u00ednimo del exchange.", symbol, body)
+    try:
+        book = engine.exchange.get_book_ticker(symbol)
+        testnet_bid = Decimal(str(book["bid_price"]))
+        testnet_ask = Decimal(str(book["ask_price"]))
+    except Exception as exc:
+        _reject(db, 503, f"No se pudo leer el libro de Testnet antes de abrir ({type(exc).__name__}).", symbol, body)
+    empty_sides = []
+    if testnet_bid <= 0:
+        empty_sides.append("compras")
+    if testnet_ask <= 0:
+        empty_sides.append("ventas")
+    testnet_mid = ((testnet_bid + testnet_ask) / Decimal(2)
+                   if not empty_sides else None)
+    testnet_snapshot = {"bid": testnet_bid, "ask": testnet_ask, "mid": testnet_mid}
+    if empty_sides:
+        sides = " y ".join(empty_sides)
+        _reject(db, 422,
+            f"Apertura bloqueada: el libro de Testnet de {symbol} no tiene {sides} "
+            f"(bid {testnet_bid}, ask {testnet_ask}, mid no calculado); "
+            f"el libro est\u00e1 vac\u00edo; rango {body.range_low} a {body.range_high}.",
+            symbol, body, testnet_snapshot)
+    if not (body.range_low < testnet_mid < body.range_high):
+        _reject(db, 422,
+            f"Apertura bloqueada: precio medio de Testnet fuera del rango "
+            f"(bid {testnet_bid}, ask {testnet_ask}, mid {testnet_mid}, "
+            f"rango {body.range_low} a {body.range_high}).",
+            symbol, body, testnet_snapshot)
+    try:
         effective = {**params}
         result = engine.create_grid(symbol, body.range_low, body.range_high, body.n_levels,
             capital=body.capital, strategy=body.strategy, params=effective or None)
@@ -205,6 +323,6 @@ def open_grid(request: Request, body: OpenRequest):
         message = str(exc).casefold()
         status = 409 if ("maximum simultaneous" in message or "already exists" in message
                          or "sell level conflict" in message) else 422
-        _reject(db, status, str(exc), symbol, body)
+        _reject(db, status, str(exc), symbol, body, testnet_snapshot)
     except Exception as exc:
-        _reject(db, 422, f"No se pudo abrir el grid: {exc}", symbol, body)
+        _reject(db, 422, f"No se pudo abrir el grid: {exc}", symbol, body, testnet_snapshot)

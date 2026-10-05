@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query, Request
-from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, SHADOW_MODEL_NAME
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_MODEL_NAME
 router = APIRouter()
 
 MODEL_DISPLAY_NAMES = {
@@ -14,17 +14,39 @@ MODEL_DISPLAY_NAMES = {
 def status(request: Request):
     db, items = request.app.state.db, []
     loaded_models = request.app.state.models
-    for name, model in loaded_models.items():
+    load_report = getattr(request.app.state, "model_load_report", {})
+    for name, configuration in MODELS_CONFIG.items():
+        if not configuration.get("enabled", False):
+            continue
+        model = loaded_models.get(name)
         display_name = MODEL_DISPLAY_NAMES.get(name, name)
-        info = model.get_model_info()
         stats = db.get_battle_stats(name)
+        report = load_report.get(name, {})
+        if model is None:
+            items.append({
+                **stats, "display_name": display_name, "nombre": display_name,
+                "accuracy_30d": stats["accuracy"],
+                "verified_predictions": stats["verified_count"],
+                "last_trained": None, "available": False,
+                "unavailable_reason": report.get("reason", "Modelo no cargado"),
+                "validation_status": configuration.get("validation_status", "not_validated"),
+                "signal_threshold": configuration.get("signal_threshold"),
+                "load_duration_ms": report.get("duration_ms"),
+                "rss_delta_bytes": report.get("rss_delta_bytes"),
+            })
+            continue
+        info = model.get_model_info()
         items.append({
-            **stats,
-            "display_name": display_name,
+            **stats, "display_name": display_name,
             "nombre": info.get("nombre", display_name),
             "accuracy_30d": stats["accuracy"],
             "verified_predictions": stats["verified_count"],
             "last_trained": info.get("ultima_actualizacion"),
+            "available": True,
+            "validation_status": configuration.get("validation_status", "not_validated"),
+            "signal_threshold": configuration.get("signal_threshold"),
+            "load_duration_ms": report.get("duration_ms"),
+            "rss_delta_bytes": report.get("rss_delta_bytes"),
         })
     ranked = [item for item in items if item["accuracy_30d"] is not None]
     winner = max(ranked, key=lambda item: item["accuracy_30d"], default=None)

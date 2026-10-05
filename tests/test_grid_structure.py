@@ -4,6 +4,8 @@ audit (`grid.sim.structure_study`)."""
 from __future__ import annotations
 
 from decimal import Decimal
+from dataclasses import replace
+from math import asinh
 
 import numpy as np
 import pytest
@@ -114,6 +116,45 @@ def test_invalid_arguments_raise_value_error():
         suggest_structure(0.03, 1000, 1.5, FILTERS, -0.1)
     with pytest.raises(ValueError):
         suggest_structure(0.03, 1000, 1.5, FILTERS, 0.1, min_spacing_pct=0)
+
+
+def _ada_gross_floor_structure(capital):
+    width_pct = 18 * .942
+    sigma = asinh(width_pct / 200) / 2
+    cell = capital / 18
+    step_size = Decimal(str(.46 * cell / (100 * 100)))
+    filters = replace(FILTERS, step_size=step_size)
+    return suggest_structure(sigma, capital, 100, filters, .1,
+        min_spacing_pct=.8, min_cell_usdt=5.5, min_margin_after_fees_pct=.7)
+
+
+def test_ada_100_usdt_18_levels_meets_gross_target_with_informational_dust():
+    result = _ada_gross_floor_structure(100)
+    assert result["feasible"] is True
+    assert result["n_levels"] == 18
+    assert result["edge_gross_pct"] == pytest.approx(.742, abs=.001)
+    assert result["dust_estimate_pct"] == pytest.approx(.46, abs=.001)
+    assert result["net_edge_pct_per_cycle"] == pytest.approx(.282, abs=.002)
+    assert result["cell_usdt"] >= Decimal("5.5")
+
+
+def test_structure_selection_uses_gross_floor_independent_of_net_dust():
+    result = _ada_gross_floor_structure(1000)
+    assert result["feasible"] is True
+    assert result["n_levels"] == 18
+    assert result["edge_gross_pct"] >= .7
+    assert result["net_edge_pct_per_cycle"] < .7
+
+
+def test_margin_after_fees_below_minimum_is_infeasible():
+    width_pct = 3.5
+    sigma = asinh(width_pct / 200) / 2
+    filters = replace(FILTERS, step_size=Decimal("0.000001"))
+    result = suggest_structure(sigma, 1000, 100, filters, .1,
+        min_spacing_pct=.8, min_cell_usdt=5.5, min_margin_after_fees_pct=.7)
+    assert result["feasible"] is False
+    assert result["n_levels"] is None
+    assert any("margen tras comisiones" in reason for reason in result["reasons"])
 
 
 # --- Phase 15E-2: statistical-control helpers in grid.sim.structure_study ---

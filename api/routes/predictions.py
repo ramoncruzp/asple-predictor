@@ -52,3 +52,10 @@ def consensus(request: Request, symbol: str = ACTIVE_SYMBOL, interval: str = ACT
 @router.get("/history")
 def history(request: Request, symbol: str | None = None, model: str | None = None, days: int = Query(30, ge=1, le=365)):
     return request.app.state.db.get_predictions_with_outcomes(symbol=symbol, model_name=model, days=days, limit=1000)
+
+
+@router.get("/volatility-coverage")
+def volatility_coverage(request: Request, symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):
+    symbol = symbol.strip().upper().replace("/", "")
+    interval = interval.strip().lower()
+    return request.app.state.db.get_volatility_coverage(symbol, interval)

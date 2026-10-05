@@ -539,7 +539,7 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
     monkeypatch.setattr(main_module, "BinanceClient", lambda *args: object())
     monkeypatch.setattr(main_module, "DBManager", lambda *args: DummyDB())
     monkeypatch.setattr(main_module, "ModelA", DummyModel)
-    monkeypatch.setattr(main_module, "ShadowPredictor", lambda *args: object())
+    monkeypatch.setattr(main_module, "ShadowPredictor", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "PredictionLoop", DummyLoop)
     monkeypatch.setattr(main_module, "VerificationLoop", DummyLoop)
     monkeypatch.setattr(main_module, "VolLoop", DummyLoop)

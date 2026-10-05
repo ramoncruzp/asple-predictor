@@ -10,7 +10,7 @@ from grid.auto_open import GridAutoOpen
 def row(symbol):
     return {"symbol": symbol, "eligible": True, "score": .9,
         "suggested_structure": {"feasible": True, "range_low": Decimal("90"),
-            "range_high": Decimal("110"), "n_levels": 5}}
+            "range_high": Decimal("110"), "n_levels": 5, "spacing_pct": 1.2, "net_edge_pct_per_cycle": 1.0}}
 
 
 class DB:
@@ -88,6 +88,20 @@ def test_caps_and_max_grids_are_respected_and_slot_is_idempotent():
     assert db.events[-1]["details"]["who"] == "auto"
 
 
+def test_auto_open_rejects_structure_below_configured_gross_margin_after_fees():
+    cfg=settings(grid_min_margin_after_fees_pct=.7)
+    db=DB();scanner=Scanner();scanner.scan=lambda **kwargs:{"results":[{
+        **row("XRPUSDT"),"suggested_structure":{**row("XRPUSDT")["suggested_structure"],
+            "spacing_pct":.5,"net_edge_pct_per_cycle":.3}}]}
+    engine=Engine(db);service=GridAutoOpen(scanner,db,engine,Testnet(),cfg,settings_factory=lambda:cfg)
+    result=service.run_once()
+    assert result["opened"]==[] and engine.calls==[]
+    failure=[event for event in db.events if event["event_type"]=="AUTO_OPEN"][-1]
+    assert "margin_after_fees_below_minimum" in failure["details"]["reason"]
+    assert failure["details"]["minimum_pct"]==.7
+    service.stop()
+
+
 def test_daily_cap_counts_persisted_completions_and_non_testnet_is_rejected():
     db = DB()
     db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN", ts=datetime.now(timezone.utc),
@@ -100,4 +114,21 @@ def test_daily_cap_counts_persisted_completions_and_non_testnet_is_rejected():
     service, scanner, engine, _ = setup(client=SimpleNamespace(client=SimpleNamespace(testnet=False)))
     assert "Testnet" in service.run_once()["error"]
     assert scanner.calls == 0 and engine.calls == []
+    service.stop()
+
+
+def test_auto_open_allows_nonpositive_estimated_net_and_records_dust_warning():
+    cfg=settings(grid_min_margin_after_fees_pct=.7)
+    db=DB();scanner=Scanner()
+    scanner.scan=lambda **kwargs:{"results":[{**row("XRPUSDT"),"fee_pct":.1,
+        "suggested_structure":{**row("XRPUSDT")["suggested_structure"],
+            "spacing_pct":1.0,"dust_estimate_pct":.81,"net_edge_pct_per_cycle":0.0}}]}
+    engine=Engine(db);service=GridAutoOpen(scanner,db,engine,Testnet(),cfg,settings_factory=lambda:cfg)
+    result=service.run_once()
+    assert len(result["opened"])==1 and len(engine.calls)==1
+    completed=[e for e in db.events if e["event_type"]=="AUTO_OPEN"][-1]
+    assert completed["details"]["net_after_dust_pct"]==0.0
+    assert completed["details"]["dust_estimate_pct"] is not None
+    assert completed["details"]["dust_warning"] is True
+    assert "aún no medido" in completed["details"]["dust_warning_message"]
     service.stop()

@@ -15,15 +15,16 @@ def test_grid_controls_require_preview_then_explicit_confirmation_and_do_not_tou
     assert "LIQUIDAR" in source
     assert "setOffline(" not in source
     assert "APP.apiHealthState" not in source
-    for action in ("pause", "resume", "close", "adjust", "sweep-dust", "params"):
+    for action in ("pause", "resume", "close", "adjust", "sweep-dust", "params", "compound"):
         assert f'data-grid-action="{action}"' in source
 
 
-def test_grid_controls_show_non_supported_capital_and_compound_change():
+def test_grid_controls_show_compound_editable_and_capital_note():
     source = (ROOT / "frontend" / "grids.js").read_text(encoding="utf-8")
-    assert "Capital y compuesto" in source
-    assert "Ciérralo y abre uno nuevo" in source
-
+    assert "Inter\\u00e9s compuesto" in source
+    assert "El capital asignado no se puede cambiar mientras el grid est\\u00e1 abierto." in source
+    assert "Capital y compuesto" not in source
+    assert "Ci\u00e9rralo y abre uno nuevo" not in source
 
 def test_profit_repository_preview_is_confirmed_only_after_dry_run_and_escapes_values():
     node = shutil.which("node")

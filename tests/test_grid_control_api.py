@@ -160,11 +160,22 @@ def test_invalid_status_missing_grid_and_invalid_params_are_rejected(tmp_path):
     assert client.post("/api/grids/1/params", json={"max_days":3}).status_code == 409
 
 
-def test_params_runtime_key_is_forbidden_simple_grid_only_allows_max_days(tmp_path):
+def test_params_simple_grid_accepts_compound_and_rejects_other_smart_keys(tmp_path):
     client, db, _, _ = build_client(tmp_path)
     db.grid["strategy"] = "simple"
     assert client.post("/api/grids/1/params", json={"target_pct":2}).status_code == 422
     assert client.post("/api/grids/1/params", json={"dust_sweep_seq":9}).status_code == 422
+    preview = client.post("/api/grids/1/params", json={"compound_enabled":True,
+        "compound_ratio":0.5,"compound_max_growth_pct":25,"dry_run":True,"confirm":False})
+    assert preview.status_code == 200, preview.body
+    assert preview.body["plan"]["updates"]["compound_ratio"] == 0.5
+    updated = client.post("/api/grids/1/params", json={"compound_enabled":True,
+        "compound_ratio":0.5,"compound_max_growth_pct":25,"dry_run":False,"confirm":True})
+    assert updated.status_code == 200, updated.body
+    assert db.grid["params"]["compound_enabled"] is True
+    assert db.grid["params"]["compound_ratio"] == 0.5
+    assert client.post("/api/grids/1/params", json={"compound_enabled":"true"}).status_code == 422
+    assert client.post("/api/grids/1/params", json={"compound_ratio":0}).status_code == 422
 
 
 def test_null_params_remove_meta_without_clobbering_runtime_state(tmp_path):
