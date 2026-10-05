@@ -9,13 +9,14 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, event, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, case, create_engine, event, exists, func, select, text
 from sqlalchemy.exc import OperationalError
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
     SHADOW_KILL_MIN_LIFT_PTS,
     SHADOW_KILL_MIN_MEAN_RETURN,
     SHADOW_KILL_MIN_SIGNALS,
+    VOL_HORIZONS, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT, VOL_WIDEN_K_ACTIVE,
 )
 
 
@@ -65,6 +66,34 @@ class DBManager:
                 "symbol", "horizon_h", "model_name", "forecast_at",
                 name="uq_vol_forecasts_identity",
             ),
+        )
+        self.vol_widen_suggestions = Table(
+            "vol_widen_suggestions", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String, nullable=False),
+            Column("horizon_h", Integer, nullable=False),
+            Column("computed_at", DateTime(timezone=True), nullable=False),
+            Column("kind", String, nullable=False, default="suggestion"),
+            Column("n", Integer, nullable=False, default=0),
+            Column("n_effective", Float, nullable=False, default=0.0),
+            Column("k_global", Float), Column("k2_global", Float),
+            Column("k_raw", Float), Column("bias_log", Float), Column("vol_scale_suggested", Float),
+            Column("k_stress_raw", Float), Column("k_stress_smoothed", Float),
+            Column("k_stress_q68", Float), Column("k_base_q68", Float),
+            Column("stress_count", Integer), Column("base_count", Integer),
+            Column("ci_low", Float), Column("ci_high", Float), Column("ci_width", Float),
+            Column("k_global_ci_low", Float), Column("k_global_ci_high", Float),
+            Column("k_global_ci_width", Float),
+            Column("k_stress_ci_low", Float), Column("k_stress_ci_high", Float),
+            Column("k_stress_ci_width", Float),
+            Column("k_active", Float), Column("status", String),
+            Column("disagreement_threshold_suggested", Float),
+            Column("disagreement_pct_active", Float),
+            Column("stress_threshold", Float), Column("dispersion_n", Integer),
+            Column("disagreement_n", Integer), Column("disagreement_status", String),
+            Column("disagreement_progress", Float), Column("progress_pct", Float),
+            Column("days_estimated", Float),
+            Column("audit_actor", String), Column("audit_before", Text), Column("audit_after", Text),
         )
         self.coins_registry = Table(
             "coins_registry", self.metadata,
@@ -185,6 +214,8 @@ class DBManager:
             Column("trapped_capital_pct", Float), Column("free_cells", Integer),
         )
         self.metadata.create_all(self.engine)
+        self._migrate_widen_columns()
+        self._seed_widen_defaults()
         self._migrate_grid_columns()
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
@@ -197,6 +228,40 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
+
+    def _migrate_widen_columns(self) -> None:
+        """Add the 19C-3b suggestion fields without changing existing records."""
+        additions = {"k_raw": "FLOAT", "bias_log": "FLOAT", "vol_scale_suggested": "FLOAT"}
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name == "sqlite":
+                present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('vol_widen_suggestions')")}
+                for name, sql_type in additions.items():
+                    if name not in present:
+                        conn.exec_driver_sql(f"ALTER TABLE vol_widen_suggestions ADD COLUMN {name} {sql_type}")
+            elif self.engine.dialect.name == "postgresql":
+                for name, sql_type in additions.items():
+                    conn.exec_driver_sql(f"ALTER TABLE vol_widen_suggestions ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+
+    def _seed_widen_defaults(self) -> None:
+        """Persist configured per-horizon defaults once, without altering other tables."""
+        with self.engine.begin() as conn:
+            for horizon in VOL_HORIZONS:
+                exists = conn.execute(select(self.vol_widen_suggestions.c.id).where(
+                    self.vol_widen_suggestions.c.symbol == VOL_SYMBOL,
+                    self.vol_widen_suggestions.c.horizon_h == int(horizon),
+                    self.vol_widen_suggestions.c.kind == "settings",
+                ).limit(1)).first()
+                if exists:
+                    continue
+                created = datetime.now(timezone.utc)
+                if self.engine.dialect.name == "sqlite":
+                    created = created.replace(tzinfo=None)
+                conn.execute(self.vol_widen_suggestions.insert().values(
+                    symbol=VOL_SYMBOL, horizon_h=int(horizon), computed_at=created,
+                    kind="settings", k_active=VOL_WIDEN_K_ACTIVE,
+                    disagreement_pct_active=VOL_WIDEN_DISAGREEMENT_PCT,
+                    status="settings", audit_actor="config:default",
+                ))
 
     def _migrate_grid_columns(self) -> None:
         """Idempotently add the approved 15B columns to existing SQLite databases."""
@@ -655,6 +720,209 @@ class DBManager:
         ).order_by(self.vol_forecasts.c.horizon_h, self.vol_forecasts.c.model_name)
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def get_vol_model_stats_rows(self, symbol: str, horizon_h: int) -> list[dict]:
+        """Return a bounded rolling window plus all rows still awaiting maturity."""
+        from models.volatility.model_stats import N_MIN, ROLLING_VERIFICATIONS
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=int(horizon_h))
+        if self.engine.dialect.name == "sqlite":
+            cutoff = cutoff.replace(tzinfo=None)
+        ranked = select(
+            self.vol_forecasts.c.id,
+            func.row_number().over(
+                partition_by=self.vol_forecasts.c.model_name,
+                order_by=self.vol_forecasts.c.forecast_at.desc(),
+            ).label("rn"),
+        ).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+        ).subquery()
+        statement = select(
+            self.vol_forecasts.c.id, self.vol_forecasts.c.symbol,
+            self.vol_forecasts.c.horizon_h, self.vol_forecasts.c.model_name,
+            self.vol_forecasts.c.forecast_at, self.vol_forecasts.c.made_at,
+            self.vol_forecasts.c.pred_logvol_raw, self.vol_forecasts.c.pred_logvol_cal,
+            self.vol_forecasts.c.var_factor, self.vol_forecasts.c.is_champion,
+            self.vol_forecasts.c.realized_logvol, self.vol_forecasts.c.verified_at,
+        ).join(ranked, ranked.c.id == self.vol_forecasts.c.id).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+            (ranked.c.rn <= ROLLING_VERIFICATIONS + N_MIN)
+            | self.vol_forecasts.c.realized_logvol.is_(None)
+            | self.vol_forecasts.c.verified_at.is_(None)
+            | (self.vol_forecasts.c.forecast_at > cutoff),
+        ).order_by(self.vol_forecasts.c.forecast_at, self.vol_forecasts.c.model_name)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def get_vol_model_stats_aggregates(self, symbol: str, horizon_h: int, sigma_refs: dict,
+                                       now: datetime) -> dict[str, dict]:
+        """SQL aggregates preserve all-history metrics without transferring full rows."""
+        f = self.vol_forecasts.c
+        mature_cutoff = now - timedelta(hours=int(horizon_h))
+        if self.engine.dialect.name == "sqlite":
+            mature_cutoff = mature_cutoff.replace(tzinfo=None)
+        err = f.pred_logvol_cal - f.realized_logvol
+        pred_var = func.exp(2.0 * f.pred_logvol_cal)
+        actual_var = func.exp(2.0 * f.realized_logvol)
+        ratio_each = pred_var / actual_var
+        columns = [f.model_name.label("model_name"), func.count().label("n"),
+                   func.avg(err).label("bias_mean"), func.avg(err * err).label("mse"),
+                   func.avg(func.abs(err)).label("mae"), func.avg(pred_var).label("pred_var"),
+                   func.avg(actual_var).label("actual_var"),
+                   func.avg(ratio_each - func.ln(ratio_each) - 1.0).label("qlike"),
+                   func.sum(case((err > 0, 1), else_=0)).label("over_n"),
+                   func.sum(case((err < 0, 1), else_=0)).label("under_n")]
+        for model, sigma in sigma_refs.items():
+            if sigma is not None:
+                columns.extend([
+                    func.sum(case((func.abs(err) <= float(sigma), 1), else_=0)).label(f"{model}_hit1"),
+                    func.sum(case((func.abs(err) <= 2 * float(sigma), 1), else_=0)).label(f"{model}_hit2"),
+                ])
+        statement = select(*columns).where(
+            f.symbol == symbol, f.horizon_h == int(horizon_h),
+            f.realized_logvol.is_not(None), f.verified_at.is_not(None),
+            f.forecast_at <= mature_cutoff, f.verified_at <= now,
+        ).group_by(f.model_name)
+        with self.engine.connect() as conn:
+            result = {}
+            for row in conn.execute(statement).mappings():
+                model = row["model_name"]
+                n = int(row["n"])
+                sigma = sigma_refs.get(model)
+                hit1 = int(row.get(f"{model}_hit1") or 0) if sigma is not None else 0
+                hit2 = int(row.get(f"{model}_hit2") or 0) if sigma is not None else 0
+                ratio = (float(row["pred_var"]) / float(row["actual_var"])) if row["actual_var"] else None
+                result[model] = {
+                    "n": n, "mse": float(row["mse"]), "mae": float(row["mae"]),
+                    "qlike": float(row["qlike"]), "var_ratio": ratio,
+                    "bias_mean": float(row["bias_mean"]),
+                    "over_pct": int(row["over_n"] or 0) * 100.0 / n,
+                    "under_pct": int(row["under_n"] or 0) * 100.0 / n,
+                    "success_1sigma": hit1, "success_2sigma": hit2,
+                    "failures": n - hit2 if sigma is not None else 0,
+                    "coverage_1sigma": hit1 / n if sigma is not None else None,
+                    "coverage_2sigma": hit2 / n if sigma is not None else None,
+                    "sigma_ref": sigma,
+                }
+        return result
+
+    def get_vol_model_stats_dispersion_rows(self, symbol: str, horizon_h: int) -> list[dict]:
+        """Narrow all-history projection used only for exact dispersion buckets."""
+        f = self.vol_forecasts.c
+        statement = select(f.forecast_at, f.horizon_h, f.model_name,
+                           f.pred_logvol_cal, f.realized_logvol, f.verified_at,
+                           f.pred_logvol_raw).where(
+            f.symbol == symbol, f.horizon_h == int(horizon_h),
+            f.pred_logvol_cal.is_not(None),
+        ).order_by(f.forecast_at, f.model_name)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def get_latest_vol_model_stats_forecast_at(self, symbol: str, horizon_h: int):
+        f = self.vol_forecasts.c
+        statement = select(func.max(f.forecast_at)).where(
+            f.symbol == symbol, f.horizon_h == int(horizon_h),
+        )
+        with self.engine.connect() as conn:
+            return conn.execute(statement).scalar_one_or_none()
+
+    def get_widen_factor_rows(self, symbol: str, horizon_h: int, as_of: datetime) -> list[dict]:
+        """Read the narrow projection needed for exact causal widening quantiles."""
+        f = self.vol_forecasts.c
+        cutoff = self._utc(as_of)
+        if self.engine.dialect.name == "sqlite":
+            cutoff = cutoff.replace(tzinfo=None)
+        statement = select(f.forecast_at, f.horizon_h, f.model_name, f.pred_logvol_raw,
+                           f.pred_logvol_cal,
+                           f.realized_logvol, f.verified_at, f.is_champion).where(
+            f.symbol == symbol, f.horizon_h == int(horizon_h), f.forecast_at <= cutoff,
+        ).order_by(f.forecast_at, f.model_name)
+        with self.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def count_new_widen_verifications(self, symbol: str, horizon_h: int, champion: str,
+                                      after: datetime | None, as_of: datetime) -> int:
+        f = self.vol_forecasts.c
+        mature_before = self._utc(as_of) - timedelta(hours=int(horizon_h))
+        verified_before = self._utc(as_of)
+        after_value = self._utc(after) if after is not None else None
+        if self.engine.dialect.name == "sqlite":
+            mature_before, verified_before = mature_before.replace(tzinfo=None), verified_before.replace(tzinfo=None)
+            if after_value is not None:
+                after_value = after_value.replace(tzinfo=None)
+        conditions = [f.symbol == symbol, f.horizon_h == int(horizon_h),
+                      f.model_name == champion, f.realized_logvol.is_not(None),
+                      f.verified_at.is_not(None), f.forecast_at <= mature_before,
+                      f.verified_at <= verified_before]
+        if after_value is not None:
+            conditions.append(f.verified_at > after_value)
+        with self.engine.connect() as conn:
+            return int(conn.execute(select(func.count()).select_from(self.vol_forecasts)
+                                    .where(*conditions)).scalar_one())
+
+    def get_widen_factor_history(self, symbol: str, horizon_h: int, limit: int = 100):
+        statement = select(self.vol_widen_suggestions).where(
+            self.vol_widen_suggestions.c.symbol == symbol,
+            self.vol_widen_suggestions.c.horizon_h == int(horizon_h),
+            self.vol_widen_suggestions.c.kind == "suggestion",
+        ).order_by(self.vol_widen_suggestions.c.computed_at.desc()).limit(int(limit))
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        return list(reversed(rows))
+
+    def get_latest_widen_factor(self, symbol: str, horizon_h: int):
+        statement = select(self.vol_widen_suggestions).where(
+            self.vol_widen_suggestions.c.symbol == symbol,
+            self.vol_widen_suggestions.c.horizon_h == int(horizon_h),
+            self.vol_widen_suggestions.c.kind == "suggestion",
+        ).order_by(self.vol_widen_suggestions.c.computed_at.desc()).limit(1)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        return dict(row) if row else None
+
+    def get_widen_factor_audit_history(self, symbol: str, horizon_h: int, limit: int = 100):
+        statement = select(self.vol_widen_suggestions).where(
+            self.vol_widen_suggestions.c.symbol == symbol,
+            self.vol_widen_suggestions.c.horizon_h == int(horizon_h),
+            self.vol_widen_suggestions.c.kind.in_(["apply", "auto_apply"]),
+        ).order_by(self.vol_widen_suggestions.c.computed_at.desc()).limit(int(limit))
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(statement).mappings().all()]
+        return list(reversed(rows))
+
+    def get_widen_active_values(self, symbol: str, horizon_h: int, default_k: float,
+                                default_disagreement: float):
+        statement = select(self.vol_widen_suggestions).where(
+            self.vol_widen_suggestions.c.symbol == symbol,
+            self.vol_widen_suggestions.c.horizon_h == int(horizon_h),
+            self.vol_widen_suggestions.c.kind.in_(["apply", "auto_apply"]),
+        ).order_by(self.vol_widen_suggestions.c.computed_at.desc()).limit(1)
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        if not row:
+            statement = select(self.vol_widen_suggestions).where(
+                self.vol_widen_suggestions.c.symbol == symbol,
+                self.vol_widen_suggestions.c.horizon_h == int(horizon_h),
+                self.vol_widen_suggestions.c.kind == "settings",
+            ).order_by(self.vol_widen_suggestions.c.computed_at.desc()).limit(1)
+            with self.engine.connect() as conn:
+                row = conn.execute(statement).mappings().first()
+            if not row:
+                return {"k_active": float(default_k),
+                        "disagreement_pct_active": float(default_disagreement)}
+        return {"k_active": float(row["k_active"] if row["k_active"] is not None else default_k),
+                "disagreement_pct_active": float(row["disagreement_pct_active"]
+                    if row["disagreement_pct_active"] is not None else default_disagreement)}
+
+    def save_widen_factor_record(self, values: dict) -> int:
+        record = dict(values)
+        record["computed_at"] = self._utc(record["computed_at"])
+        if self.engine.dialect.name == "sqlite":
+            record["computed_at"] = record["computed_at"].replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            result = conn.execute(self.vol_widen_suggestions.insert().values(**record))
+            return int(result.inserted_primary_key[0])
 
     def get_coin(self, symbol: str) -> dict | None:
         statement = select(self.coins_registry).where(self.coins_registry.c.symbol == symbol)

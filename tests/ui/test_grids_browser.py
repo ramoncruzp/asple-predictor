@@ -37,7 +37,7 @@ def test_close_dialog_options_are_visible_in_required_order(live_server, ui_page
 
 
 def test_coins_screen_shows_grid_metadata_and_reactivation(live_server, ui_page):
-    ui_page.route("**/api/coins?include_inactive=true", lambda route: route.fulfill(json=[{
+    ui_page.route("**/api/coins" + chr(63) + "include_inactive=true", lambda route: route.fulfill(json=[{
         "symbol": "SOLUSDT", "active": False, "added_at": "2026-10-01T12:00:00Z",
         "notes": None, "price": 150, "volume_24h_quote": 250000,
         "change_pct_24h": 1.2, "is_predictor_symbol": False,
@@ -68,16 +68,27 @@ def test_empty_grids_state_links_to_creation_screens(live_server, ui_page):
 
 def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_page):
     advisor = {"symbol":"XRPUSDT","current_price":100,"recommended_floor":80.123456,"recommended_ceiling":120.987654,
-        "range_pct":40,"suggested_grids":20,"capital":1000,"capital_per_grid":50,"spacing_pct":2,
+        "range_pct":40,"range_mode":"centrado","recommended_range":"centrado",
+        "range_centered":{"floor":90,"ceiling":111,"touch_probability_each_side_72h":.3,"sigma_widened":True,"sigma_widen_factor":1.25},
+        "range_structural":{"floor":80.123456,"ceiling":120.987654},
+        "range_preference_note":"El precio está a menos de 1 ATR de un borde estructural; se prefiere el rango centrado.",
+        "suggested_grids":20,"capital":1000,"capital_per_grid":50,"spacing_pct":2,
         "margin_target_pct":.7,"fee_pct":.1,"dust_estimate_pct":.2,"net_margin_pct":1.6,
         "net_per_cycle_usdt":.8,"target_met":True,"estimated_cycles_to_target":9,"min_cell_usdt":"5",
         "min_cell_warning":None,"range_warning":False,"risk":{"label":"Moderado","max_range_pct":45,
             "meaning":"Equilibrio","capital_below_price_pct":50,"unrealized_loss_at_floor_usdt":120},
-        "simulations":{"label":"histórico, no promesa de resultado","strategies":{"simple":{"pnl_total_net_usdt":10,"cycles_completed":4},
+        "simulations":{"label":"histórico, no promesa de resultado","sim_start":"2026-10-01T00:00:00+00:00","sim_days":12,"window_warning":"Ventana corta (menos de 30 días): poca evidencia.","strategies":{"simple":{"pnl_total_net_usdt":10,"cycles_completed":4},
             "smart":{"pnl_total_net_usdt":12,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
             "atr":2,"support_touches":3,"resistance_touches":4},"prediction_signal":None,
         "disclaimer":"Estimación teórica."}
-    ui_page.route("**/api/grid/recommend**", lambda route: route.fulfill(json=advisor))
+    def fulfill_advisor(route):
+        payload = dict(advisor)
+        if "range_mode=estructural" in route.request.url:
+            payload.update(range_mode="estructural", recommended_range="estructural",
+                recommended_floor=payload["range_structural"]["floor"],
+                recommended_ceiling=payload["range_structural"]["ceiling"])
+        route.fulfill(json=payload)
+    ui_page.route("**/api/grid/recommend**", fulfill_advisor)
     ui_page.add_init_script("Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText: text => {window.__copiedText=text; return Promise.resolve();}}})")
     ui_page.goto(f"{live_server.url}/#grid")
     ui_page.locator("#grid-margin-target").fill("0.7")
@@ -87,6 +98,16 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator(".advisor-cascade")).to_contain_text("comisiones")
     expect(ui_page.locator(".advisor-risk")).to_contain_text("Pérdida no realizada estimada al piso")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("histórico, no promesa de resultado")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Inicio histórico: 2026-10-01T00:00:00+00:00")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Ventana corta")
+    expect(ui_page.locator(".advisor-range-mode")).to_contain_text("probabilidad de salir por cada lado en 72 h")
+    expect(ui_page.locator(".advisor-range-mode")).to_contain_text("La volatilidad está ensanchada ×1.25: la probabilidad real de salir por cada lado es menor que la indicada.")
+    expect(ui_page.locator(".advisor-range-mode")).to_contain_text("se prefiere el rango centrado")
+    expect(ui_page.locator(".advisor-range-mode")).to_contain_text("Este grid compra solo cuando el precio baja")
+    expect(ui_page.locator("#grid-range-mode")).to_have_value("centrado")
+    with ui_page.expect_request(lambda request: "/api/grid/recommend" in request.url and "range_mode=estructural" in request.url):
+        ui_page.locator("#grid-range-mode").select_option("estructural")
+    expect(ui_page.locator(".advisor-range-mode")).to_contain_text("Rango recomendado: Estructural")
     ui_page.locator("#copy-grid").click()
     copied = ui_page.evaluate("window.__copiedText")
     assert "Piso 80.123456" in copied and "Techo 120.987654" in copied
@@ -99,6 +120,90 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator("#sc-levels")).to_have_value("20")
     expect(ui_page.locator("#sc-margin-target")).to_have_value("0.7")
     expect(ui_page.locator("#sc-spacing")).to_have_value("2")
+    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-create-strategy")).to_have_value("smart")
+    ui_page.evaluate("sessionStorage.setItem('asple-advisor-open', JSON.stringify({symbol:'XRPUSDT'}))")
+    ui_page.reload()
+    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-create-strategy")).to_have_value("smart")
+    ui_page.evaluate("sessionStorage.setItem('asple-advisor-open', JSON.stringify({symbol:'XRPUSDT',strategy:'simple'}))")
+    ui_page.reload()
+    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-create-strategy")).to_have_value("simple")
+    assert_no_js_errors(ui_page)
+
+
+def test_dashboard_shows_model_stats_accumulating_and_active(live_server, ui_page):
+    ui_page.route("**/api/volatility/forecast**", lambda route: route.fulfill(json={
+        "symbol": "XRPUSDT", "price": 1.0, "regime": "NORMAL",
+        "forecasts": [{"horizon_h": h, "champion": "GBM", "stale": False,
+                       "move_1sigma_pct": 1.0, "range_1sigma": [0.99, 1.01],
+                       "range_2sigma": [0.98, 1.02]} for h in (1, 2, 4, 24)],
+    }))
+    model_names = ["Persistence", "EWMA", "HAR", "HAR_range", "HAR_asym", "GBM", "NexoHAR", "GARCH_t"]
+    ui_page.route("**/api/volatility/model-stats**", lambda route: route.fulfill(json={
+        "symbol": "XRPUSDT", "horizons": [{"symbol": "XRPUSDT", "horizon_h": h, "n_min": 30,
+            "adaptive": {"source": "val", "confidence": "baja", "eligible": []},
+            "forward": {"n": 30, "n_efectivas": 7.5},
+            "dispersion": [{"level": level, "stats": {"n": 0}, "estado": "acumulando"}
+                           for level in ("alta", "media", "baja")],
+            "dispersion_iqr_error_spearman": None,
+            "models": [{"model_name": name, "n_predicciones": 30 if name == "GBM" else 8,
+                "n_verificadas": 30 if name == "GBM" else 8,
+                "estado": "activo" if name == "GBM" else "acumulando",
+                "all": {"success_1sigma": 20, "success_2sigma": 28, "failures": 2,
+                        "coverage_1sigma": .667, "coverage_2sigma": .933,
+                        "bias_mean": .001, "over_pct": 60.0, "under_pct": 40.0,
+                        "mse": .002}, "bias_alert": name == "GBM", "peso_actual": 0.0}
+                for name in model_names]} for h in (1, 2, 4, 24)]
+    }))
+    ui_page.goto(f"{live_server.url}/#dashboard")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Modelos y ponderación 4h")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("GBM")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Errores dentro de 1\u03c3 / 2\u03c3 (log-vol)")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Sobre/Sub %")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("60.0% / 40.0%")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Sesgo sostenido (revisar)")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("n efectivas=7.5")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Activo")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Acumulando datos (8/30)")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Campeón por dispersión")
+    assert_no_js_errors(ui_page)
+
+
+def test_widen_suggestion_ui_only_applies_available_after_confirmation(live_server, ui_page):
+    state = {"available": False, "applied": []}
+    ui_page.route("**/api/volatility/forecast**", lambda route: route.fulfill(json={
+        "symbol": "XRPUSDT", "price": 1.0, "regime": "NORMAL", "forecasts": []}))
+    def stats(route):
+        status = "disponible" if state["available"] else "acumulando"
+        route.fulfill(json={"symbol": "XRPUSDT", "horizons": [{
+            "symbol": "XRPUSDT", "horizon_h": h, "adaptive": {"source": "val", "confidence": "baja"},
+            "forward": {"n": 0, "n_efectivas": 0}, "models": [], "dispersion": [],
+            "widen_factor": {"horizon_h": h, "status": status, "k_active": 1.25,
+                "k_stress_smoothed": 1.38 if state["available"] else 1.31, "k_raw": 1.12,
+                "ci_low": 1.1, "ci_high": 1.62, "progress_pct": 62,
+                "n": 620, "n_effective": 25.8, "days_estimated": 12,
+                "disagreement_status": "acumulando"}
+        } for h in (1, 2, 4, 24)]})
+    ui_page.route("**/api/volatility/model-stats**", stats)
+    def apply(route):
+        state["applied"].append(route.request.post_data_json)
+        route.fulfill(json={"applied": True})
+    ui_page.route("**/api/volatility/widen-factor/apply**", apply)
+    ui_page.on("dialog", lambda dialog: dialog.accept())
+    ui_page.goto(f"{live_server.url}/#dashboard")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Factor de ampliación")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("provisional")
+    assert ui_page.locator("#vol-model-stats .apply-widen-suggestion").count() == 0
+    state["available"] = True
+    ui_page.reload()
+    button = ui_page.locator("#vol-model-stats .apply-widen-suggestion").first
+    expect(button).to_be_visible()
+    with ui_page.expect_response("**/api/volatility/widen-factor/apply"):
+        button.click()
+    assert len(state["applied"]) == 1
+    assert state["applied"][0] == {"horizon_h": 4, "k": 1.38, "confirm": True}
     assert_no_js_errors(ui_page)
 
 
@@ -143,7 +248,11 @@ def test_grid_advisor_volatility_button_recalculates_xrp_model_forecast(live_ser
     advisor = {"symbol":"XRPUSDT","current_price":1.2,"recommended_floor":1.0,"recommended_ceiling":1.4,
         "range_pct":33.3,"suggested_grids":8,"capital_per_grid":125,"spacing_pct":5,"fee_pct":.1,
         "dust_estimate_pct":.1,"net_margin_pct":4.7,"net_per_cycle_usdt":5.8,"margin_target_pct":.7,
-        "target_met":True,"estimated_cycles_to_target":2,"risk":{},"analysis":{},"simulations":{"strategies":{}},"prediction_signal":None}
+        "target_met":True,"estimated_cycles_to_target":2,"risk":{},"analysis":{},"simulations":{"strategies":{}},"prediction_signal":None,
+        "volatility_advisory":{"vol_source_effective":"consenso","vol_source_requested":"auto","confidence":"baja",
+            "range_widened":True,"show_comparison":True,"champion_sigma_24h":.03,"consensus_sigma_24h":.04,
+            "accumulating_models":[{"model_name":"NexoHAR","n_verificadas":14,"n_min":30}],
+            "bias_alerts":[{"model_name":"NexoHAR","direction":"sobreestima"}]}}
     ui_page.route("**/api/grid/recommend**", lambda route: route.fulfill(json=advisor))
     calls=[]
     def forecast(route):
@@ -153,6 +262,13 @@ def test_grid_advisor_volatility_button_recalculates_xrp_model_forecast(live_ser
     ui_page.goto(f"{live_server.url}/#grid")
     ui_page.evaluate("loadGrid({preventDefault(){},target:document.querySelector('#grid-form')})")
     expect(ui_page.locator("#calculate-grid-volatility")).to_be_visible()
+    expect(ui_page.locator("#grid-result")).to_contain_text("consenso")
+    expect(ui_page.locator("#grid-result")).to_contain_text("confianza baja")
+    expect(ui_page.locator("#grid-result")).to_contain_text("Los modelos discrepan: rango ampliado")
+    expect(ui_page.locator("#grid-result")).to_contain_text("Este modelo lleva sesgo sostenido (revisar)")
+    expect(ui_page.locator("#grid-result")).to_contain_text("sobreestima")
+    expect(ui_page.locator("#grid-result")).to_contain_text("NexoHAR (14/30)")
+    expect(ui_page.locator("#grid-result")).to_contain_text("σ campeón: 3.000% · σ consenso: 4.000%")
     ui_page.locator("#calculate-grid-volatility").click()
     expect(ui_page.locator("#grid-volatility-status")).to_contain_text("pron\u00f3stico de modelos XRP")
     expect(ui_page.locator("#grid-volatility-status")).to_contain_text("1.05")
@@ -406,6 +522,61 @@ def test_liquidate_requires_typed_confirmation_and_posts_preview_first(
     assert health_before == (ui_page.locator("#api-chip").get_attribute("class"),
                              ui_page.locator("#api-chip").inner_text())
     assert_no_js_errors(ui_page)
+
+
+def test_completed_action_result_is_translated_and_closable(live_server, ui_page):
+    _open_close_dialog(ui_page, live_server)
+    with ui_page.expect_request(lambda request: _is_close_post(request, live_server.grid_id)):
+        ui_page.get_by_role("button", name="Continuar", exact=True).click()
+    expect(ui_page.locator("#grid-action-title")).to_have_text("Revisar plan")
+    with ui_page.expect_request(lambda request: _is_close_post(request, live_server.grid_id)):
+        ui_page.get_by_role("button", name="Continuar", exact=True).click()
+    expect(ui_page.locator("#grid-action-title")).to_have_text("Acción completada")
+    expect(ui_page.locator(".grid-action-body")).to_contain_text("Estado: Cerrado")
+    close = ui_page.locator("#grid-action-dialog").get_by_role("button", name="Cerrar", exact=True)
+    expect(close).to_be_visible()
+    close.click()
+    expect(ui_page.get_by_role("dialog")).to_be_hidden()
+    controls = ui_page.locator("[data-grid-controls] button")
+    for index in range(controls.count()):
+        expect(controls.nth(index)).to_be_enabled()
+
+
+def test_incomplete_action_result_uses_close_button_and_escape(live_server, ui_page):
+    def partial_close(route):
+        body = json.loads(route.request.post_data)
+        if body.get("dry_run"):
+            route.continue_()
+        else:
+            route.fulfill(json={"outcome": "partial", "status_after": "CLOSING",
+                                "errors": ["orden pendiente"]})
+
+    ui_page.route(f"**/api/grids/{live_server.grid_id}/close", partial_close)
+    _open_close_dialog(ui_page, live_server)
+    with ui_page.expect_request(lambda request: _is_close_post(request, live_server.grid_id)):
+        ui_page.get_by_role("button", name="Continuar", exact=True).click()
+    expect(ui_page.locator("#grid-action-title")).to_have_text("Revisar plan")
+    with ui_page.expect_request(lambda request: _is_close_post(request, live_server.grid_id)):
+        ui_page.get_by_role("button", name="Continuar", exact=True).click()
+    expect(ui_page.locator("#grid-action-title")).to_have_text("Acción incompleta")
+    expect(ui_page.locator(".grid-action-body")).to_contain_text("Cerrando")
+    expect(ui_page.locator("#grid-action-dialog").get_by_role("button", name="Cerrar", exact=True)).to_be_visible()
+    ui_page.keyboard.press("Escape")
+    expect(ui_page.get_by_role("dialog")).to_be_hidden()
+    expect(ui_page.locator("[data-grid-controls] button").first).to_be_enabled()
+
+
+def test_action_api_error_result_uses_close_button_and_escape(live_server, ui_page):
+    ui_page.route(f"**/api/grids/{live_server.grid_id}/close",
+        lambda route: route.fulfill(status=500, json={"detail": "fallo simulado"}))
+    _open_close_dialog(ui_page, live_server)
+    with ui_page.expect_request(lambda request: _is_close_post(request, live_server.grid_id)):
+        ui_page.get_by_role("button", name="Continuar", exact=True).click()
+    expect(ui_page.locator("#grid-action-title")).to_have_text("Error de acción")
+    expect(ui_page.locator("#grid-action-dialog").get_by_role("button", name="Cerrar", exact=True)).to_be_visible()
+    ui_page.keyboard.press("Escape")
+    expect(ui_page.get_by_role("dialog")).to_be_hidden()
+    expect(ui_page.locator("[data-grid-controls] button").first).to_be_enabled()
 
 
 def test_profit_repository_preview_shows_counts_gain_and_estimated_fee(live_server, ui_page):

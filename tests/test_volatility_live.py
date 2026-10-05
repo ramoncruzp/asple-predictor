@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from api.routes.volatility import forecast as api_forecast
 from api.routes.volatility import history as api_history
 from api.routes.volatility import battle as api_battle
-from config.models_config import VOL_CHAMPIONS
+from config.models_config import VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS
 from database.db_manager import DBManager
 from data.volatility import aggregate_intraday_to_hourly
 from models.volatility.live import VolPredictor
@@ -191,6 +191,114 @@ def test_api_forecast_calculates_sigma_ranges_regime_and_stale():
     np.testing.assert_allclose(first["range_2sigma"], [100.0 * exp(-2 * sigma_h), 100.0 * exp(2 * sigma_h)])
     assert first["stale"] is True
     assert result["regime"] == "AGITADO"
+
+
+def test_api_forecast_adds_weighted_consensus_without_changing_champion_fields(tmp_path, monkeypatch):
+    import json
+    import api.routes.volatility as volatility_route
+
+    monkeypatch.setattr(volatility_route, "VOL_ARTIFACT_DIR", tmp_path)
+    now = datetime.now(timezone.utc)
+    rows = []
+    for horizon, champion in VOL_CHAMPIONS.items():
+        for model_name in VOL_MODELS:
+            rows.append({
+                "horizon_h": horizon, "model_name": model_name,
+                "is_champion": model_name == champion,
+                "forecast_at": now, "made_at": now,
+                "pred_logvol_cal": float(np.log(0.01 + 0.001 * VOL_MODELS.index(model_name))),
+            })
+    weights = {name: (1.0 if name == "EWMA" else 0.0) for name in VOL_MODELS}
+    report = {
+        "report": {"horizons": {
+            str(horizon): {
+                "eligible_models": ["EWMA"], "weights": weights,
+                "ensemble_results_test": {"P": {"validation_status": "not_validated"}},
+            } for horizon in VOL_HORIZONS
+        }}
+    }
+    (tmp_path / "consensus_xrp.json").write_text(json.dumps(report), encoding="utf-8")
+
+    class FakeDB:
+        def get_latest_vol_forecasts(self, symbol):
+            return rows
+
+    predictor = SimpleNamespace(symbol="XRPUSDT", manifest={"regime_percentiles_24h": {}})
+    request = _request_with_state(
+        vol_predictor=predictor, vol_loop=SimpleNamespace(latest={"price": 100.0}), db=FakeDB()
+    )
+    result = api_forecast(request)
+    first = result["forecasts"][0]
+    expected_sigma = 0.011 * sqrt(first["horizon_h"])
+    assert first["consensus"]["method"] == "weighted"
+    assert np.isclose(first["consensus"]["sigma_pct"], expected_sigma * 100)
+    np.testing.assert_allclose(
+        first["consensus"]["range_1sigma"],
+        [100 * exp(-expected_sigma), 100 * exp(expected_sigma)],
+    )
+    assert first["consensus"]["eligible_models"] == ["EWMA"]
+    assert first["consensus"]["weights"] == weights
+    assert {"horizon_h", "champion", "forecast_at", "made_at", "vol_per_hour",
+            "move_1sigma_pct", "range_1sigma", "range_2sigma", "stale"} <= first.keys()
+
+
+def test_api_forecast_returns_null_consensus_when_file_missing_and_unchanged_for_other_symbol(tmp_path, monkeypatch):
+    import api.routes.volatility as volatility_route
+
+    monkeypatch.setattr(volatility_route, "VOL_ARTIFACT_DIR", tmp_path)
+    now = datetime.now(timezone.utc)
+    rows = [{
+        "horizon_h": horizon, "model_name": champion, "is_champion": True,
+        "forecast_at": now, "made_at": now, "pred_logvol_cal": float(np.log(0.01)),
+    } for horizon, champion in VOL_CHAMPIONS.items()]
+
+    class FakeDB:
+        def get_latest_vol_forecasts(self, symbol):
+            return rows
+
+    request = _request_with_state(
+        vol_predictor=SimpleNamespace(symbol="XRPUSDT", manifest={}),
+        vol_loop=SimpleNamespace(latest={"price": 100.0}), db=FakeDB(),
+    )
+    result = api_forecast(request)
+    assert result["forecasts"][0]["consensus"] is None
+    assert "no disponible" in result["forecasts"][0]["reason"]
+    with pytest.raises(HTTPException) as error:
+        api_forecast(request, symbol="ADAUSDT")
+    assert error.value.status_code == 404
+
+
+def test_api_forecast_returns_null_consensus_when_eligible_predictions_are_stale(tmp_path, monkeypatch):
+    import api.routes.volatility as volatility_route
+
+    monkeypatch.setattr(volatility_route, "VOL_ARTIFACT_DIR", tmp_path)
+    names = VOL_MODELS
+    (tmp_path / "consensus_xrp.json").write_text(json.dumps({
+        "report": {"horizons": {
+            str(horizon): {
+                "eligible_models": ["EWMA"],
+                "weights": {name: (1.0 if name == "EWMA" else 0.0) for name in names},
+                "ensemble_results_test": {"P": {"validation_status": "not_validated"}},
+            } for horizon in VOL_HORIZONS
+        }}
+    }), encoding="utf-8")
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    rows = [{
+        "horizon_h": horizon, "model_name": model, "is_champion": model == VOL_CHAMPIONS[horizon],
+        "forecast_at": old, "made_at": old, "pred_logvol_cal": float(np.log(0.01)),
+    } for horizon in VOL_HORIZONS for model in names]
+
+    class FakeDB:
+        def get_latest_vol_forecasts(self, symbol):
+            return rows
+
+    request = _request_with_state(
+        vol_predictor=SimpleNamespace(symbol="XRPUSDT", manifest={}),
+        vol_loop=SimpleNamespace(latest={"price": 100.0}), db=FakeDB(),
+    )
+    first = api_forecast(request)["forecasts"][0]
+    assert first["consensus"] is None
+    assert "obsoletas" in first["reason"]
 
 
 def test_api_battle_hides_live_metrics_until_minimum_and_history_delegates():

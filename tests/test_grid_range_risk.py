@@ -19,3 +19,10 @@ def test_barrier_touch_is_symmetric_and_increases_with_volatility_and_time():
     expected_72 = erfc(abs(log(90/100)) / (.02*sqrt(3)*sqrt(2)))
     assert low[72]["touch_floor"] == pytest.approx(expected_72)
     assert all(0 <= row["stay_lower_bound"] <= 1 for row in low.values())
+
+
+def test_range_risk_rows_carry_volatility_source_metadata():
+    row = estimate_range_risk(100, 90, 110, .03, (24,),
+        vol_source_effective="consenso", vol_source_requested="auto")[24]
+    assert row["vol_source_effective"] == "consenso"
+    assert row["vol_source_requested"] == "auto"

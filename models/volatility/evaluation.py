@@ -31,11 +31,13 @@ def moving_block_bootstrap_difference(
         starts = rng.integers(0, n, size=blocks_needed)
         indices = ((starts[:, None] + offsets[None, :]) % n).reshape(-1)[:n]
         means[sample] = difference[indices].mean()
+    p_value = float((np.count_nonzero(means <= 0.0) + 1) / (n_bootstrap + 1))
     return {
         "mean_difference": float(difference.mean()),
         "ci95_low": float(np.quantile(means, 0.025)),
         "ci95_high": float(np.quantile(means, 0.975)),
         "beats": bool(np.quantile(means, 0.025) > 0.0),
+        "p_value_one_sided": p_value,
         "n_rows": int(n),
         "block_size": int(block_size),
         "n_bootstrap": int(n_bootstrap),

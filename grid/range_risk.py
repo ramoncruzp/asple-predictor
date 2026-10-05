@@ -14,7 +14,9 @@ def _phi(x: float) -> float:
 
 
 def estimate_range_risk(price: float, floor: float, ceiling: float, sigma_24h: float,
-                        horizons_hours=HORIZONS_HOURS) -> dict:
+                        horizons_hours=HORIZONS_HOURS, *,
+                        vol_source_effective: str = "realizada",
+                        vol_source_requested: str = "auto") -> dict:
     """Estimate floor/ceiling touch and range exit bounds for each horizon."""
     s, f, c, sigma = map(float, (price, floor, ceiling, sigma_24h))
     if not (0 < f < s < c) or sigma < 0:
@@ -28,5 +30,7 @@ def estimate_range_risk(price: float, floor: float, ceiling: float, sigma_24h: f
         p_exit = min(1.0, p_floor + p_ceiling)
         result[int(hours)] = {"touch_floor": p_floor, "touch_ceiling": p_ceiling,
                               "exit_upper_bound": p_exit,
-                              "stay_lower_bound": max(0.0, 1.0 - p_exit)}
+                              "stay_lower_bound": max(0.0, 1.0 - p_exit),
+                              "vol_source_effective": vol_source_effective,
+                              "vol_source_requested": vol_source_requested}
     return result

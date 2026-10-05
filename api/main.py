@@ -17,7 +17,8 @@ from database.db_manager import DBManager
 from database.learning_engine import LearningEngine
 from models.model_a_xgboost import ModelA
 from models.shadow_predictor import ShadowPredictor
-from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_ARTIFACT, VOL_ARTIFACT_DIR
+from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
+                                  SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
 from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, predictions, volatility
@@ -25,6 +26,7 @@ from models.volatility.live import VolPredictor
 from models.shadow_loader import load_optional_shadow_models
 from scheduler.vol_loop import VolLoop
 from scheduler.backup_loop import BackupLoop
+from scheduler.widen_factor_loop import WidenFactorLoop
 from api.auth import authorize
 from grid.engine import GridEngine
 from grid.monitor import GridMonitor
@@ -78,6 +80,7 @@ async def lifespan(app: FastAPI):
         )
     grid_monitor = None
     backup_loop = BackupLoop(db, settings)
+    widen_factor_loop = WidenFactorLoop(db, hour_utc=VOL_WIDEN_COMPUTE_HOUR_UTC)
     testnet_client = None
     grid_engine = None
     grid_vol_provider = VolatilityProvider(db, data_client=client)
@@ -130,11 +133,13 @@ async def lifespan(app: FastAPI):
     app.state.vol_predictor, app.state.vol_loop = vol_predictor, vol_loop
     app.state.grid_monitor = grid_monitor
     app.state.backup_loop = backup_loop
+    app.state.widen_factor_loop = widen_factor_loop
     app.state.started_at = time.monotonic()
     prediction_loop.start()
     verification_loop.start()
     if vol_loop is not None:
         vol_loop.start()
+        widen_factor_loop.start()
     backup_loop.start()
     if grid_monitor is not None:
         grid_monitor.start()
@@ -147,6 +152,7 @@ async def lifespan(app: FastAPI):
         grid_auto_open.stop()
         if vol_loop is not None:
             vol_loop.stop()
+            widen_factor_loop.stop()
         backup_loop.stop()
         prediction_loop.stop(); verification_loop.stop()
 

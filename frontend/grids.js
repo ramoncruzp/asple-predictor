@@ -130,10 +130,10 @@
         const result = await apiPost(path, { ...input, ...(liquidation ? { confirm_text: 'LIQUIDAR' } : {}), dry_run: false, confirm: true });
         if (result.outcome === 'partial') {
           const errors = (result.errors || []).map(error => `<li>${esc(typeof error === 'string' ? error : JSON.stringify(error))}</li>`).join('') || '<li>El motor no informó detalles.</li>';
-          const partialMessage = action === 'close' ? `El grid NO quedó cerrado: estado ${result.status_after || 'CLOSING'}` : `La acción ${action} quedó incompleta: estado ${result.status_after || 'sin confirmar'}`;
+          const partialMessage = action === 'close' ? `El grid NO quedó cerrado: estado ${statusLabel(result.status_after || 'CLOSING')}` : `La acción ${action} quedó incompleta: estado ${statusLabel(result.status_after || 'sin confirmar')}`;
           showActionDialog(container, 'Acción incompleta', `<div class="grid-action-partial" role="alert"><strong>${esc(partialMessage)}</strong><ul>${errors}</ul><p>Reintenta la acción o revisa Testnet.</p></div><details><summary>Detalle técnico</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details><p>Testnet no representa el mercado real.</p>`);
         } else {
-          showActionDialog(container, 'Acción completada', `<p>Estado: ${esc(result.status_after || result.status || 'completado')}</p><details><summary>Detalle técnico</summary><pre>${esc(JSON.stringify(result.result || result, null, 2))}</pre></details><p>Testnet no representa el mercado real.</p>`);
+          showActionDialog(container, 'Acción completada', `<p>Estado: ${esc(statusLabel(result.status_after || result.status || 'completado'))}</p><details><summary>Detalle técnico</summary><pre>${esc(JSON.stringify(result.result || result, null, 2))}</pre></details><p>Testnet no representa el mercado real.</p>`);
         }
         await window.loadGridsScreen?.(`grids/${gridId}`, true);
       });
@@ -143,7 +143,7 @@
   function showActionDialog(container, title, body, onConfirm) {
     let modal = document.getElementById('grid-action-dialog');
     if (!modal) { modal = document.createElement('section'); modal.id = 'grid-action-dialog'; modal.className = 'grid-action-dialog'; modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); document.body.appendChild(modal); }
-    modal.innerHTML = `<div class="grid-action-panel"><h2 id="grid-action-title">${esc(title)}</h2><div class="grid-action-body">${body}</div><p class="grid-action-error" role="alert"></p><div class="grid-action-buttons"><button type="button" class="button secondary" data-action-cancel>Cancelar</button>${onConfirm ? '<button type="button" class="button primary" data-action-confirm>Continuar</button>' : ''}</div></div>`;
+    modal.innerHTML = `<div class="grid-action-panel"><h2 id="grid-action-title">${esc(title)}</h2><div class="grid-action-body">${body}</div><p class="grid-action-error" role="alert"></p><div class="grid-action-buttons"><button type="button" class="button secondary" data-action-cancel>${onConfirm ? 'Cancelar' : 'Cerrar'}</button>${onConfirm ? '<button type="button" class="button primary" data-action-confirm>Continuar</button>' : ''}</div></div>`;
     modal.setAttribute('aria-labelledby', 'grid-action-title');
     modal.hidden = false;
     document.querySelectorAll('[data-grid-controls] button').forEach(button => { button.disabled = true; });
@@ -157,8 +157,12 @@
         if (error.status === 403) {
           modal.querySelector('.grid-action-body').innerHTML += '<label>Token API (solo memoria de pestaña)<input type="password" name="api-token" autocomplete="off"></label><button type="button" class="button secondary" data-token-save>Reintentar con token</button>';
           modal.querySelector('[data-token-save]').onclick = async () => { window.gridApiToken = modal.querySelector('[name="api-token"]').value; modal.hidden = true; await onConfirm(); };
+          errorBox.textContent = error.message || 'La acción no se pudo completar.';
+        } else if (error.status) {
+          showActionDialog(container, 'Error de acción', `<p>${esc(error.message || 'La acción no se pudo completar.')}</p>`);
+        } else {
+          errorBox.textContent = error.message || 'La acción no se pudo completar.';
         }
-        errorBox.textContent = error.message || 'La acción no se pudo completar.';
       } finally { if (confirm.isConnected) confirm.disabled = false; }
     };
     modal.querySelector('input,select,button')?.focus();

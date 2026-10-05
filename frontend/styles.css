@@ -13,3 +13,5 @@
 .grid-svg{display:block;width:100%;max-width:100%}
 
 #shadow-status.muted-shadow{opacity:.45}
+
+.vol-model-stats{margin-top:1.25rem;overflow-x:auto}.vol-model-stats h3,.vol-model-stats h4{margin:.8rem 0}.vol-model-stats .table-card{margin:.5rem 0}.vol-model-stats td,.vol-model-stats th{white-space:nowrap}.vol-model-stats .vol-consensus-row{background:rgba(47,129,247,.08)}.vol-model-stats .vol-bias-alert{display:block;color:#858b94;background:#f0f1f3;border-radius:.25rem;padding:.1rem .3rem;margin-top:.2rem;font-size:.75rem}
