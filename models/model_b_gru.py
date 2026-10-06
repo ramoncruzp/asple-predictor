@@ -31,6 +31,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.preprocessing import MinMaxScaler
 
+TORCH_IMPORT_ERROR = None
 try:
     import torch
     import torch.nn as nn
@@ -39,6 +40,7 @@ try:
 except (ImportError, OSError) as e:
     print(f"[ModelB-GRU] PyTorch no disponible: {e}")
     TORCH_AVAILABLE = False
+    TORCH_IMPORT_ERROR = str(e)
     torch = None
     nn = None
     DataLoader = None

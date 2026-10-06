@@ -36,7 +36,11 @@ def load_optional_shadow_models(artifact_dir="models/saved", model_factories=Non
             result = model.load(str(path))
             if result is False:
                 if name == "model_b":
-                    raise RuntimeError("PyTorch (torch) no est\u00e1 disponible en este entorno")
+                    model_module = importlib.import_module(module_name)
+                    torch_error = getattr(model_module, "TORCH_IMPORT_ERROR", None)
+                    if torch_error:
+                        raise RuntimeError(f"torch no cargó: {torch_error}")
+                    raise RuntimeError("load() devolvió False")
                 raise RuntimeError(f"{name} no pudo cargar el artefacto")
             loaded[name] = model
             item["available"] = True

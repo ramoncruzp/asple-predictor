@@ -1,5 +1,10 @@
 """Run one real XRP/USDT Model A shadow prediction and persist it."""
 
+try:
+    import torch  # noqa: F401 - debe cargarse antes que otras librerias nativas (WinError 1114 en c10.dll)
+except (ImportError, OSError):
+    pass
+
 import json
 from datetime import datetime, timezone
 

@@ -1,5 +1,11 @@
 """ASPLE Predictor FastAPI application."""
 from __future__ import annotations
+
+try:
+    import torch  # noqa: F401 - debe cargarse antes que otras librerias nativas (WinError 1114 en c10.dll)
+except (ImportError, OSError):
+    pass
+
 import time
 import logging
 import threading

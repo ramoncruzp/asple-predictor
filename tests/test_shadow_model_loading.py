@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from database.db_manager import DBManager
 from models.shadow_loader import load_optional_shadow_models
@@ -125,11 +126,18 @@ class FalseLoaderModel:
     def load(self, path):
         return False
 
-def test_model_b_false_load_reports_missing_pytorch_precisely(tmp_path):
+@pytest.mark.parametrize(
+    ("torch_import_error", "expected_reason"),
+    [("WinError 1114 x", "WinError 1114 x"), (None, "load() devolvió False")],
+)
+def test_model_b_false_load_reports_actual_reason(tmp_path, monkeypatch, torch_import_error, expected_reason):
+    from models import model_b_gru
+
     (tmp_path / "model_b_xrp_1h.pt").write_bytes(b"stub")
+    monkeypatch.setattr(model_b_gru, "TORCH_IMPORT_ERROR", torch_import_error)
     _, report = load_optional_shadow_models(tmp_path, model_factories={"model_b": FalseLoaderModel})
     assert report["model_b"]["available"] is False
-    assert report["model_b"]["reason"] == "RuntimeError: PyTorch (torch) no est\u00e1 disponible en este entorno"
+    assert expected_reason in report["model_b"]["reason"]
 
 def test_model_b_version_incompatibility_is_not_swallowed(tmp_path):
     (tmp_path / "model_b_xrp_1h.pt").write_bytes(b"stub")
