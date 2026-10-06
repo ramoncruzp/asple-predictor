@@ -105,7 +105,7 @@
     const items = filterHistoryWindow(rows);
     if (!window.LightweightCharts || !items.length) { empty.textContent = items.length ? 'Gráfico no disponible' : 'Aún no hay resultados verificados en esta ventana.'; empty.classList.remove('hidden'); return; }
     // Reuses the Battle de Volatilidad chart implementation, now rendered in Modelos.
-    APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#30363d' } });
+    APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 8, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#30363d' } });
     const forecast = APP.volHistoryChart.addLineSeries({ color: '#2F81F7', lineWidth: 2, title: `Pronóstico ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } }), realized = APP.volHistoryChart.addLineSeries({ color: '#3FB950', lineWidth: 2, title: `Realizado ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } });
     const points = key => items.filter(row => row.forecast_at && row[key] != null).map(row => ({ time: Math.floor(new Date(row.forecast_at).getTime() / 1000), value: Number(row[key]) })).filter(row => Number.isFinite(row.time) && Number.isFinite(row.value)).sort((a,b) => a.time-b.time);
     forecast.setData(points('pred_vol_pct')); const actual = points('realized_vol_pct'); realized.setData(actual);
@@ -174,7 +174,8 @@
 
   function renderDirectionRow(name, model, counts, shadow, winner, scope = {}) {
     const available = !!model && model.available !== false;
-    const status = !model ? 'No disponible: no aparece en /api/models/status'
+    const status = !model && ['model_d', 'ensemble'].includes(name) ? 'No habilitado (sin configuraci\u00F3n)'
+      : !model ? 'No disponible: no aparece en /api/models/status'
       : !available ? `No disponible: ${model?.unavailable_reason || 'motivo no informado'}`
       : shadow?.model_name === name ? `Sombra \u00B7 ${name === 'model_a' ? 'XRPUSDT 1h' : `${shadow.symbol || 'XRPUSDT'} ${shadow.interval || '1h'}`}`
       : model?.validation_status === 'champion' ? 'Campe\u00F3n'

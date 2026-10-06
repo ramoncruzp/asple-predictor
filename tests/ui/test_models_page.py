@@ -35,6 +35,17 @@ def test_models_page_renders_no_model_notice(ui_page, live_server):
     assert "volatilidad realizada" in rendered
 
 
+def test_unconfigured_tft_and_ensemble_have_configuration_notice(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => ({
+      tft:window.ModelsPageTest.renderDirectionRow('model_d',null,{}, {},null),
+      ensemble:window.ModelsPageTest.renderDirectionRow('ensemble',null,{}, {},null)
+    })""")
+    assert "No habilitado (sin configuración)" in result["tft"]
+    assert "No habilitado (sin configuración)" in result["ensemble"]
+    assert "No disponible: no aparece" not in result["tft"] + result["ensemble"]
+
+
 def test_models_page_renders_no_signal_evidence_and_low_effective_sample(ui_page, live_server):
     _page_with_empty_api(ui_page, live_server)
     rendered = ui_page.evaluate("""() => ({
