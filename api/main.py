@@ -27,9 +27,10 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
                                   SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, predictions, volatility
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility
 from models.volatility.live import VolPredictor
 from models.shadow_loader import load_optional_shadow_models
+from models.training_jobs import TrainingJobService
 from scheduler.vol_loop import VolLoop
 from scheduler.backup_loop import BackupLoop
 from scheduler.widen_factor_loop import WidenFactorLoop
@@ -47,6 +48,11 @@ async def lifespan(app: FastAPI):
     key = "" if settings.binance_api_key.startswith("tu_") else settings.binance_api_key
     secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client, db = BinanceClient(key, secret), DBManager(settings.database_url)
+    training_job_service = TrainingJobService(db, root=Path(__file__).resolve().parents[1])
+    try:
+        training_job_service.recover_interrupted()
+    except Exception:
+        logging.getLogger(__name__).exception("No se pudieron recuperar los trabajos de entrenamiento interrumpidos; continúa el arranque")
     db.seed_coin_if_missing(ACTIVE_SYMBOL, "Símbolo activo del predictor (sembrado)")
     model_a_load_started = time.perf_counter()
     model_a = ModelA()
@@ -120,6 +126,7 @@ async def lifespan(app: FastAPI):
     if not settings.grid_monitor_enabled:
         logging.getLogger(__name__).warning("Grid monitor disabled by GRID_MONITOR_ENABLED")
     app.state.settings, app.state.db, app.state.client = settings, db, client
+    app.state.training_job_service = training_job_service
     public_market_client = BinanceClient("", "")
     grid_scan_service = GridScanService(db, public_market_client, settings)
     grid_auto_open = GridAutoOpen(grid_scan_service, db, grid_engine, testnet_client, settings)
@@ -191,6 +198,7 @@ async def log_slow_requests(request: Request, call_next):
 
 app.include_router(predictions.router, prefix="/api/predictions", tags=["predictions"])
 app.include_router(models_status.router, prefix="/api/models", tags=["models"])
+app.include_router(model_training.router, prefix="/api/models", tags=["model-training"])
 app.include_router(grid_advisor.router, prefix="/api/grid", tags=["grid"])
 app.include_router(volatility.router, prefix="/api/volatility", tags=["volatility"])
 app.include_router(coins.router, prefix="/api/coins", tags=["coins"])

@@ -100,6 +100,70 @@ def test_models_page_weights_and_shared_live_rank(ui_page, live_server):
     assert result["belowBattleRank"] == "—"
 
 
+def test_training_ui_confirmations_escaping_and_polling_lifecycle(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => {
+      const unsafe='<img src=x onerror=alert(1)>';
+      const jobs=window.ModelsPageTest.renderTrainingJobs([{id:7,models:['b'],status:'error',phase:'error',error:unsafe}]);
+      const root=document.createElement('div'); root.innerHTML=jobs;
+      window.ModelsPageTest.configureTrainingPolling(true);
+      const started=window.ModelsPageTest.isTrainingPolling();
+      window.ModelsPageTest.configureTrainingPolling(false);
+      return {jobs,images:root.querySelectorAll('img').length,text:root.textContent,started,stopped:!window.ModelsPageTest.isTrainingPolling(),
+        active:window.ModelsPageTest.activeTraining({status:'entrenando'}),finished:window.ModelsPageTest.activeTraining({status:'listo'})};
+    }""")
+    assert "&lt;img" in result["jobs"]
+    assert result["images"] == 0
+    assert "<img" in result["text"]
+    assert result["started"] is True and result["stopped"] is True
+    assert result["active"] is True and result["finished"] is False
+
+
+def test_model_a_training_confirmation_requires_checkbox_and_letter(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    ui_page.locator("#models-training-models button[data-model='a']").click()
+    expect(ui_page.locator("#models-train-dialog")).to_be_visible()
+    expect(ui_page.locator("#models-train-confirm")).to_be_disabled()
+    ui_page.locator("#models-train-reset-check").check()
+    expect(ui_page.locator("#models-train-confirm")).to_be_disabled()
+    ui_page.locator("#models-train-reset-text").fill("A")
+    expect(ui_page.locator("#models-train-confirm")).to_be_enabled()
+    expect(ui_page.locator("#models-train-dialog")).to_contain_text("~35–40 min")
+    ui_page.locator("#models-train-close").click()
+
+
+def test_training_dates_are_human_readable_and_compare_instants(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => ({
+      same:window.ModelsPageTest.trainingTimesDiffer('2026-10-06T12:00:00+00:00','2026-10-06T08:00:00-04:00'),
+      recent:window.ModelsPageTest.trainingTimesDiffer('2026-10-06T12:00:03Z','2026-10-06T12:00:00+00:00'),
+      sameRow:window.ModelsPageTest.renderDirectionRow('model_b',{display_name:'GRU',available:true,artifact_trained_at:'2026-10-06T12:00:00+00:00',last_trained:'2026-10-06T08:00:00-04:00'}, {}, {}, null),
+      recentRow:window.ModelsPageTest.renderDirectionRow('model_b',{display_name:'GRU',available:true,artifact_trained_at:'2026-10-06T12:00:03Z',last_trained:'2026-10-06T12:00:00+00:00'}, {}, {}, null),
+      jobs:window.ModelsPageTest.renderTrainingJobs([{created_at:'2026-10-06T12:00:00+00:00',models:['b'],status:'listo',phase:'listo'}])
+    })""")
+    assert result["same"] is False
+    assert result["recent"] is True
+    assert "Entrenado en disco" not in result["sameRow"]
+    assert "Entrenado en disco" in result["recentRow"]
+    assert "2026-10-06T12:00:00" not in result["jobs"]
+    assert "model_b" not in result["jobs"]
+
+
+def test_training_poll_timers_are_cleared_when_job_finishes(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => {
+      const scheduled=[], cleared=[]; let next=0;
+      window.setInterval=callback=>{const id=++next;scheduled.push({id,callback});return id;};
+      window.clearInterval=id=>cleared.push(id);
+      window.ModelsPageTest.configureTrainingPolling(true);
+      window.ModelsPageTest.configureTrainingPolling(false);
+      return {scheduled:scheduled.map(item=>item.id),cleared,active:window.ModelsPageTest.isTrainingPolling()};
+    }""")
+    assert len(result["scheduled"]) == 2
+    assert result["cleared"] == result["scheduled"]
+    assert result["active"] is False
+
+
 def test_models_page_coverage_horizon_qlike_and_csv_escape(ui_page, live_server):
     _page_with_empty_api(ui_page, live_server)
     rendered = ui_page.evaluate("""() => ({

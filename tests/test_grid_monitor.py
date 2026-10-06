@@ -535,6 +535,11 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
             pass
         def stop(self):
             pass
+    class FailingTrainingJobService:
+        def __init__(self, *args, **kwargs):
+            pass
+        def recover_interrupted(self):
+            raise RuntimeError("recovery boom")
     monkeypatch.setattr(main_module, "Settings", lambda: settings)
     monkeypatch.setattr(main_module, "BinanceClient", lambda *args: object())
     monkeypatch.setattr(main_module, "DBManager", lambda *args: DummyDB())
@@ -543,12 +548,20 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
     monkeypatch.setattr(main_module, "PredictionLoop", DummyLoop)
     monkeypatch.setattr(main_module, "VerificationLoop", DummyLoop)
     monkeypatch.setattr(main_module, "VolLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "TrainingJobService", FailingTrainingJobService)
     monkeypatch.setattr(main_module, "VOL_ARTIFACT_DIR", tmp_path / "missing-vol")
 
+    lifespan_entered = {"value": False}
     async def run_lifespan():
         app = SimpleNamespace(state=SimpleNamespace())
         async with main_module.lifespan(app):
+            lifespan_entered["value"] = True
             assert app.state.grid_monitor is None
     import asyncio
-    asyncio.run(run_lifespan())
+    try:
+        asyncio.run(run_lifespan())
+    except Exception:
+        pass
+    assert lifespan_entered["value"] is True
     assert "Grid monitor disabled: faltan credenciales" in caplog.text
+    assert "No se pudieron recuperar los trabajos de entrenamiento interrumpidos" in caplog.text

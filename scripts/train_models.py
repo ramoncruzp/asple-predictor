@@ -27,6 +27,32 @@ MODEL_MODULES = {
     "b": ("models.model_b_gru", "ModelB"),
     "c": ("models.model_c_prophet", "ModelC"),
 }
+RUN_METADATA_FIELDS = ("n_candles", "first_candle", "last_candle", "days")
+
+
+def merge_training_metrics(existing, run_metadata, trained_models):
+    """Merge this run's model entries into valid prior metrics without losing peers."""
+    prior = existing if isinstance(existing, dict) else {}
+    prior_models = prior.get("models") if isinstance(prior.get("models"), dict) else {}
+    merged = dict(prior)
+    merged.update(run_metadata)
+    merged["models"] = {**prior_models, **trained_models}
+    return merged
+
+
+def replace_training_outputs(temporary_artifacts, artifact_paths, temporary_metrics_path, metrics_path):
+    """Publish all weights first and the metrics manifest last."""
+    for key, temporary_path in temporary_artifacts.items():
+        os.replace(temporary_path, artifact_paths[key])
+    os.replace(temporary_metrics_path, metrics_path)
+
+
+def read_existing_metrics(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
 
 
 def _binance_client_class():
@@ -42,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", default="a,b,c", help="Lista separada por comas: a,b,c")
     parser.add_argument("--save-candles", type=Path, help="Guarda las velas cerradas usadas en CSV")
     parser.add_argument("--candles", type=Path, help="Carga velas de un CSV en vez de Binance")
+    parser.add_argument("--progress", action="store_true", help="Imprime eventos de progreso para el monitor de trabajos")
     parser.add_argument(
         "--force", action="store_true", help="Permite sobrescribir artefactos 4h existentes"
     )
@@ -63,6 +90,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    def progress(value):
+        if args.progress:
+            print(f"PROGRESS:{value}", flush=True)
+
+    progress("descargando")
     if args.candles:
         frame = pd.read_csv(args.candles)
         for column in ("timestamp", "close_time"):
@@ -99,40 +131,53 @@ def main() -> int:
                 f"Se rechaza sobrescribir artefactos 4h existentes: {protected[0]}"
             )
 
+    metrics_path = saved_dir / f"metrics_{base}_{args.interval}.json"
+    temporary_metrics_path = metrics_path.with_suffix(metrics_path.suffix + ".tmp")
+    existing_metrics = read_existing_metrics(metrics_path)
     metric_results: dict[str, dict[str, Any]] = {}
     metric_by_model: dict[str, dict[str, Any]] = {}
     temporary_artifacts: dict[str, Path] = {}
-    for key in args.models:
-        model_name = f"model_{key}"
-        artifact_path = artifact_paths[key]
-        module_name, class_name = MODEL_MODULES[key]
-        model_class = getattr(importlib.import_module(module_name), class_name)
-        model = model_class()
-        metrics = model.train(frame)
-        temporary_path = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
-        model.save(str(temporary_path))
-        temporary_artifacts[key] = temporary_path
-        metric_results[model_name] = dict(metrics)
-        metric_by_model[model_name] = dict(metrics)
+    first_candle = frame["timestamp"].iloc[0].isoformat() if "timestamp" in frame else None
+    last_candle = frame["timestamp"].iloc[-1].isoformat() if "timestamp" in frame else None
+    run_trained_at = datetime.now(timezone.utc).isoformat()
+    try:
+        for key in args.models:
+            model_name = f"model_{key}"
+            artifact_path = artifact_paths[key]
+            module_name, class_name = MODEL_MODULES[key]
+            model_class = getattr(importlib.import_module(module_name), class_name)
+            model = model_class()
+            progress(f"entrenando:{model_name}")
+            metrics = model.train(frame)
+            temporary_path = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
+            temporary_artifacts[key] = temporary_path
+            model.save(str(temporary_path))
+            entry = dict(metrics)
+            entry.update({
+                "trained_at": entry.get("trained_at") or run_trained_at,
+                "n_candles": len(frame), "first_candle": first_candle,
+                "last_candle": last_candle, "days": args.days,
+            })
+            metric_results[model_name] = entry
+            metric_by_model[model_name] = dict(metrics)
 
-    metrics_path = saved_dir / f"metrics_{base}_{args.interval}.json"
-    metadata = {
-        "symbol": args.symbol,
-        "interval": args.interval,
-        "days": args.days,
-        "first_candle": frame["timestamp"].iloc[0].isoformat() if "timestamp" in frame else None,
-        "last_candle": frame["timestamp"].iloc[-1].isoformat() if "timestamp" in frame else None,
-        "n_candles": len(frame),
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "models": metric_results,
-    }
-    temporary_metrics_path = metrics_path.with_suffix(metrics_path.suffix + ".tmp")
-    temporary_metrics_path.write_text(
-        json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8"
-    )
-    os.replace(temporary_metrics_path, metrics_path)
-    for key, temporary_path in temporary_artifacts.items():
-        os.replace(temporary_path, artifact_paths[key])
+        metadata = {
+            "symbol": args.symbol, "interval": args.interval, "days": args.days,
+            "first_candle": first_candle, "last_candle": last_candle,
+            "n_candles": len(frame), "trained_at": run_trained_at,
+        }
+        metadata = merge_training_metrics(existing_metrics, metadata, metric_results)
+        temporary_metrics_path.write_text(
+            json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8"
+        )
+        progress("guardando")
+        replace_training_outputs(temporary_artifacts, artifact_paths, temporary_metrics_path, metrics_path)
+    finally:
+        for temporary_path in [*temporary_artifacts.values(), temporary_metrics_path]:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     print("Modelo         accuracy  baseline  roc_auc  signal_coverage  signal_accuracy")
     for model_name, metrics in metric_by_model.items():

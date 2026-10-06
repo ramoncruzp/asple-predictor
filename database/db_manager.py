@@ -102,6 +102,24 @@ class DBManager:
             Column("added_at", DateTime(timezone=True), nullable=False),
             Column("notes", String, nullable=True),
         )
+        self.training_jobs = Table(
+            "training_jobs", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String, nullable=False),
+            Column("interval", String, nullable=False),
+            Column("models", Text, nullable=False),
+            Column("days", Integer, nullable=False),
+            Column("status", String, nullable=False),
+            Column("phase", String, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("started_at", DateTime(timezone=True)),
+            Column("finished_at", DateTime(timezone=True)),
+            Column("pid", Integer),
+            Column("exit_code", Integer),
+            Column("log_path", Text),
+            Column("error", Text),
+            Column("confirm_reset_evaluation", Integer, nullable=False, default=0, server_default="0"),
+        )
         self.grids = Table(
             "grids", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_MODEL_NAME
+from pathlib import Path
+from models.training_jobs import artifact_trained_at, predictions_before_training, read_metrics_manifest
 router = APIRouter()
 
 MODEL_DISPLAY_NAMES = {
@@ -15,6 +17,7 @@ def status(request: Request):
     db, items = request.app.state.db, []
     loaded_models = request.app.state.models
     load_report = getattr(request.app.state, "model_load_report", {})
+    manifest = read_metrics_manifest(Path(__file__).resolve().parents[2], ACTIVE_SYMBOL, ACTIVE_INTERVAL)
     for name, configuration in MODELS_CONFIG.items():
         if not configuration.get("enabled", False):
             continue
@@ -28,6 +31,9 @@ def status(request: Request):
                 "accuracy_30d": stats["accuracy"],
                 "verified_predictions": stats["verified_count"],
                 "last_trained": None, "available": False,
+                "artifact_trained_at": artifact_trained_at(
+                    manifest, name, symbol=ACTIVE_SYMBOL, interval=ACTIVE_INTERVAL,
+                ),
                 "unavailable_reason": report.get("reason", "Modelo no cargado"),
                 "validation_status": configuration.get("validation_status", "not_validated"),
                 "signal_threshold": configuration.get("signal_threshold"),
@@ -42,6 +48,9 @@ def status(request: Request):
             "accuracy_30d": stats["accuracy"],
             "verified_predictions": stats["verified_count"],
             "last_trained": info.get("ultima_actualizacion"),
+            "artifact_trained_at": artifact_trained_at(
+                manifest, name, symbol=ACTIVE_SYMBOL, interval=ACTIVE_INTERVAL,
+            ),
             "available": True,
             "validation_status": configuration.get("validation_status", "not_validated"),
             "signal_threshold": configuration.get("signal_threshold"),
@@ -76,6 +85,7 @@ def page_context(
         raise HTTPException(status_code=404, detail="La moneda no está activa en el registro")
     names = list(dict.fromkeys(("model_a", "model_b", "model_c", "model_d", "ensemble", *MODELS_CONFIG)))
     summaries = {}
+    manifest = read_metrics_manifest(Path(__file__).resolve().parents[2], symbol, interval)
     for name in names:
         aggregate = getattr(db, "get_prediction_signal_summary", None)
         if aggregate:
@@ -95,4 +105,8 @@ def page_context(
                 "neutral_count": sum(str(row.get("signal") or "").upper() == "NEUTRAL" for row in rows),
                 "base_rate": sum(direction == "UP" for direction in actual) / len(actual) if actual else None,
             }
+        trained_at = artifact_trained_at(manifest, name, symbol=symbol, interval=interval)
+        summaries[name]["predictions_before_last_training"] = predictions_before_training(
+            db, symbol, interval, name, trained_at,
+        )
     return {"symbol": symbol, "interval": interval, "coins": coins, "models": summaries}

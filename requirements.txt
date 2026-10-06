@@ -22,3 +22,4 @@ joblib==1.6.0
 requests==2.34.2
 cmdstanpy==1.3.0
 arch==8.0.0
+psutil>=5.9.3

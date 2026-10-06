@@ -1,11 +1,25 @@
 (() => {
-  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], sort: { key: 'r2_cal', direction: 'desc' } };
+  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], sort: { key: 'r2_cal', direction: 'desc' }, trainingJob: null, trainingPoll: null, trainingClock: null, trainingBusy: false, trainingModel: null };
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const n = (value, digits = 3) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : Number(value).toFixed(digits);
   const pct = value => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `${(Number(value) * 100).toFixed(1)}%`;
   const msg = (text, cls = '') => `<p class="models-status ${cls}">${esc(text)}</p>`;
   const title = name => ({ model_a: 'XGBoost', model_b: 'GRU (PyTorch)', model_c: 'Prophet+XGBoost', model_d: 'TFT', ensemble: 'Ensamble', HAR_range: 'HAR Range', HAR_asym: 'HAR Asim\u00E9trico' }[name] || name || 'No disponible');
+
+  const trainingElapsedSeconds = (value, now = Date.now()) => {
+    const started = Date.parse(value || '');
+    return Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : 0;
+  };
+  const formatTrainingDate = value => {
+    const parsed = new Date(value || '');
+    return Number.isNaN(parsed.getTime()) ? '\u2014'
+      : new Intl.DateTimeFormat('es-DO', { dateStyle: 'short', timeStyle: 'short' }).format(parsed);
+  };
+  const trainingTimesDiffer = (artifact, loaded) => {
+    const artifactMs = Date.parse(artifact || ''), loadedMs = Date.parse(loaded || '');
+    return !Number.isFinite(loadedMs) || (Number.isFinite(artifactMs) && artifactMs - loadedMs > 2000);
+  };
 
   const sortValue = (row, key) => key === 'model_name' ? String(row.model_name || '') : Number(row[key]);
   const liveRankMap = models => new Map(
@@ -168,7 +182,114 @@
       : winner === name ? 'L\u00EDder por precisi\u00F3n registrada' : 'Activo';
     const evaluated = Number(counts?.bullish_correct || 0) + Number(counts?.bullish_failed || 0);
     const accuracy = evaluated ? `${(Number(counts.bullish_correct || 0) * 100 / evaluated).toFixed(1)}%` : 'Sin evidencia';
-    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small>${esc(name === 'model_a' && shadow?.model_name === name ? 'XRPUSDT 1h' : `${scope.symbol || APP.currentSymbol || 'XRPUSDT'} ${scope.interval || APP.currentInterval || '1h'}`)}</small></td><td>${esc(status)}${model?.last_trained ? `<small>\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
+    const priorCount = Number(counts?.predictions_before_last_training || 0);
+    const priorNote = priorCount > 0 ? `<small>${priorCount} predicciones anteriores al \u00FAltimo entrenamiento (otra versi\u00F3n del modelo)</small>` : '';
+    const artifactTime = model?.artifact_trained_at;
+    const loadedTime = model?.last_trained;
+    const staleNote = artifactTime && (!model?.available || trainingTimesDiffer(artifactTime, loadedTime))
+      ? `<small>Entrenado en disco el ${esc(artifactTime)}. ${model?.available && loadedTime ? `El servidor sigue usando la versi\u00F3n del ${esc(loadedTime)}` : 'El servidor no tiene una versi\u00F3n cargada'}: rein\u00EDcialo para cargarlo.</small>` : '';
+    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small>${esc(name === 'model_a' && shadow?.model_name === name ? 'XRPUSDT 1h' : `${scope.symbol || APP.currentSymbol || 'XRPUSDT'} ${scope.interval || APP.currentInterval || '1h'}`)}</small>${priorNote}</td><td>${esc(status)}${model?.last_trained ? `<small>\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}${staleNote}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
+  }
+
+  const activeTraining = job => !!job && ['pendiente', 'descargando', 'entrenando', 'running'].includes(job.status);
+  function renderTrainingModels(status) {
+    const models = Object.fromEntries((status?.models || []).map(item => [item.model_name, item]));
+    return `<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${['model_b', 'model_c', 'model_a'].map(name => {
+      const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-alert">Reinicia su evaluaci\u00F3n en vivo.</small>' : '';
+      return `<tr><td>${esc(model.display_name || title(name))}${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${activeTraining(state.trainingJob) || state.trainingBusy ? 'disabled' : ''}>Entrenar</button></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+
+  function renderTrainingJobs(jobs) {
+    if (!Array.isArray(jobs) || !jobs.length) return '<p class="muted">Todav\u00EDa no hay trabajos de entrenamiento.</p>';
+    return `<div class="table-card"><table class="data-table"><thead><tr><th>Creado</th><th>Modelos</th><th>Estado</th><th>Fase</th><th>Error</th></tr></thead><tbody>${jobs.slice(0, 5).map(job => `<tr><td>${esc(formatTrainingDate(job.created_at))}</td><td>${esc((job.models || []).join(', '))}</td><td>${esc(job.status || '\u2014')}</td><td>${esc(job.phase || '\u2014')}</td><td class="models-job-error">${esc(job.error || '')}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function renderTrainingCurrent(job) {
+    if (!job) return '<p class="muted">No hay trabajos de entrenamiento.</p>';
+    if (!activeTraining(job)) return `<p class="models-status">\u00DAltimo trabajo: ${esc(job.status)}${job.error ? ` · ${esc(job.error)}` : ''}</p>`;
+    const seconds = trainingElapsedSeconds(job.started_at || job.created_at || '');
+    return `<div class="models-training-current"><p><strong>Estado:</strong> ${esc(job.status)}</p><p><strong>Fase:</strong> ${esc(job.phase || job.status)}</p><p>Tiempo: <span id="models-training-elapsed">${seconds} s</span></p><button type="button" class="button secondary" id="models-training-cancel" data-job-id="${Number(job.id)}">Cancelar</button></div>`;
+  }
+
+  function updateTrainingElapsed() {
+    const node = $('models-training-elapsed'), job = state.trainingJob;
+    if (!node || !job || !activeTraining(job)) return;
+    node.textContent = `${trainingElapsedSeconds(job.started_at || job.created_at || '')} s`;
+  }
+
+  function configureTrainingPolling(active) {
+    if (active) {
+      if (!state.trainingPoll) state.trainingPoll = setInterval(refreshTraining, 5000);
+      if (!state.trainingClock) state.trainingClock = setInterval(updateTrainingElapsed, 1000);
+    } else {
+      if (state.trainingPoll) clearInterval(state.trainingPoll);
+      if (state.trainingClock) clearInterval(state.trainingClock);
+      state.trainingPoll = null;
+      state.trainingClock = null;
+    }
+  }
+
+  async function refreshTraining() {
+    const [statusResult, jobsResult] = await Promise.allSettled([
+      api.get('/api/models/train/status'), api.get('/api/models/train/jobs', { limit: 5 }),
+    ]);
+    if (statusResult.status === 'fulfilled') state.trainingJob = statusResult.value?.job || null;
+    $('models-training-current').innerHTML = statusResult.status === 'fulfilled'
+      ? renderTrainingCurrent(state.trainingJob) : msg(`Estado de entrenamiento: ${statusResult.reason?.message || 'error de red'}`, 'error');
+    $('models-training-jobs').innerHTML = jobsResult.status === 'fulfilled'
+      ? renderTrainingJobs(jobsResult.value?.jobs) : msg(`Historial de trabajos: ${jobsResult.reason?.message || 'error de red'}`, 'error');
+    $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels || {});
+    configureTrainingPolling(statusResult.status === 'fulfilled' && activeTraining(state.trainingJob));
+  }
+
+  function openTrainingDialog(modelName) {
+    state.trainingModel = modelName;
+    $('models-train-target').textContent = `${title(`model_${modelName}`)} · XRPUSDT · 1h · ${$('models-train-days').value} días`;
+    $('models-train-reset').hidden = modelName !== 'a';
+    $('models-train-reset-check').checked = false;
+    $('models-train-reset-text').value = '';
+    $('models-train-confirm').disabled = modelName === 'a';
+    $('models-train-dialog').showModal();
+  }
+
+  function updateTrainingConfirmation() {
+    $('models-train-confirm').disabled = state.trainingModel === 'a'
+      && (!$('models-train-reset-check').checked || $('models-train-reset-text').value.trim() !== 'A');
+  }
+
+  async function submitTraining(event) {
+    event.preventDefault();
+    const modelName = state.trainingModel;
+    const days = Number($('models-train-days').value);
+    if (!modelName || !Number.isInteger(days) || days < 365 || days > 730) return;
+    if (modelName === 'a' && $('models-train-confirm').disabled) return;
+    state.trainingBusy = true;
+    $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels || {});
+    try {
+      await api.post('/api/models/train', {
+        symbol: 'XRPUSDT', interval: '1h', models: [modelName], days, confirm: true,
+        ...(modelName === 'a' ? { confirm_reset_evaluation: true } : {}),
+      });
+      $('models-train-dialog').close();
+      await refreshTraining();
+    } catch (error) {
+      $('models-training-current').innerHTML = msg(error?.message || 'No se pudo iniciar el entrenamiento.', 'error');
+    } finally {
+      state.trainingBusy = false;
+      $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels || {});
+    }
+  }
+
+  async function cancelTraining(jobId) {
+    const button = $('models-training-cancel');
+    if (button) button.disabled = true;
+    try {
+      await api.post(`/api/models/train/${Number(jobId)}/cancel`, {});
+      await refreshTraining();
+    } catch (error) {
+      $('models-training-current').innerHTML = msg(error?.message || 'No se pudo cancelar el trabajo.', 'error');
+    }
   }
 
   function renderDirection(status, context, shadow) {
@@ -290,7 +411,10 @@
     const request = Date.now(); state.context = context;
     const direction = Promise.allSettled([api.modelsStatus(), api.shadowStatus()]).then(([sr, sh]) => {
       const errors = [context.registryError ? 'Registro de monedas: error de red.' : '', sr.status === 'rejected' ? 'Estado de modelos: error de red.' : '', sh.status === 'rejected' ? 'Estado sombra: error de red.' : ''].filter(Boolean);
+      state.trainingModels = sr.status === 'fulfilled' ? sr.value : {};
+      $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels);
       $('models-direction-content').innerHTML = `${errors.map(text => msg(text, 'error')).join('')}${renderDirection(sr.status === 'fulfilled' ? sr.value : {}, context, sh.status === 'fulfilled' ? sh.value : {})}`;
+      refreshTraining();
     });
     await Promise.all([loadVolatility(), direction]);
   }
@@ -312,7 +436,22 @@
       state.sort = { key: button.dataset.sort, direction: state.sort.key === button.dataset.sort && state.sort.direction === 'desc' ? 'asc' : 'desc' };
       $('models-vol-table').innerHTML = renderVolBattleTable(state.battle, $('models-vol-mode').value);
     });
+    $('models-training-models')?.addEventListener('click', event => {
+      const button = event.target.closest('.models-train-button');
+      if (button && !button.disabled) openTrainingDialog(button.dataset.model);
+    });
+    $('models-training-current')?.addEventListener('click', event => {
+      const button = event.target.closest('#models-training-cancel');
+      if (button) cancelTraining(button.dataset.jobId);
+    });
+    $('models-train-form')?.addEventListener('submit', submitTraining);
+    $('models-train-reset-check')?.addEventListener('change', updateTrainingConfirmation);
+    $('models-train-reset-text')?.addEventListener('input', updateTrainingConfirmation);
+    $('models-train-days')?.addEventListener('input', () => {
+      if (state.trainingModel) $('models-train-target').textContent = `${title(`model_${state.trainingModel}`)} · XRPUSDT · 1h · ${$('models-train-days').value} días`;
+    });
+    $('models-train-close')?.addEventListener('click', () => $('models-train-dialog').close());
   });
   window.loadModelsPage = loadModelsPage;
-  window.ModelsPageTest = Object.freeze({ renderStats, renderWiden, renderDirectionRow, renderHistory, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow });
+  window.ModelsPageTest = Object.freeze({ renderStats, renderWiden, renderDirectionRow, renderHistory, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow, renderTrainingCurrent, renderTrainingJobs, activeTraining, configureTrainingPolling, trainingElapsedSeconds, formatTrainingDate, trainingTimesDiffer, isTrainingPolling: () => Boolean(state.trainingPoll) });
 })();
