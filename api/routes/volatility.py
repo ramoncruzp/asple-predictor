@@ -294,6 +294,8 @@ def model_stats(
         stats["n_min"] = N_MIN
         stats["widen_factor"] = _widen_horizon_payload(request, current_horizon)
         stats["adaptive"]["validation_status_live"] = stats["forward"]["validation_status_live"]
+        # snapshots are calculation state used by forward metrics, not API data.
+        stats["adaptive"].pop("snapshots", None)
         result.append(stats)
     return {"symbol": symbol, "horizons": result}
 

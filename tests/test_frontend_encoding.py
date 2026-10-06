@@ -11,7 +11,8 @@ WHITELIST = ("signal?escapeHtml", "edge_gross_pct==null?null",
              "lastPreview?lastPreview")
 
 def test_frontend_user_text_has_no_question_mark_mojibake():
-    for path in (ROOT / "frontend").rglob("*"):
+    paths = {ROOT / "frontend/index.html", *(ROOT / "frontend").rglob("*")}
+    for path in paths:
         if path.suffix not in {".html", ".js"}:
             continue
         source = path.read_text(encoding="utf-8")

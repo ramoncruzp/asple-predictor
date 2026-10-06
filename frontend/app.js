@@ -263,7 +263,7 @@ function renderGridV2a(data) {
   $('#copy-grid').onclick=()=>{const text=`Grid ${data.symbol}\nPiso ${data.recommended_floor} · Techo ${data.recommended_ceiling}\nNiveles ${data.suggested_grids} · Capital por celda ${money(data.capital_per_grid,2)}\nGenerado ${formatDateTime(new Date())}`;navigator.clipboard.writeText(text);};
   $('#grid-create-from-advisor').onclick=()=>{sessionStorage.setItem('asple-advisor-open',JSON.stringify({symbol:data.symbol,capital:$('#grid-capital').value,strategy:'smart',range_low:data.recommended_floor,range_high:data.recommended_ceiling,n_levels:data.suggested_grids,spacing_pct:data.spacing_pct,margin_target_pct:data.margin_target_pct}));location.hash='#scanner';};
 }
-function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
+function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'models', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'models') window.loadModelsPage?.(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
 document.addEventListener('DOMContentLoaded', () => { restoreCache(); document.addEventListener('submit', event => { if (event.target?.id === 'grid-form') loadGrid(event); }, true); $('#grid-symbol').addEventListener('change', event => { APP.gridSymbol = event.target.value; }); $('#dashboard-symbol').addEventListener('change', loadDashboard); $('#dashboard-interval').addEventListener('change', loadDashboard); $('#refresh-dashboard').addEventListener('click', refreshDashboard); window.addEventListener('hashchange', route); route(); checkApiStatus(); setInterval(checkApiStatus, 30000); setInterval(() => { if ((location.hash || '#dashboard') === '#dashboard') loadDashboard(); }, 60000); });
 
 // V2b volatility UI: fetched alongside the existing dashboard and battle views.
@@ -317,31 +317,7 @@ function renderWidenFactorLine(item, horizon, className='') {
 }
 async function loadVolDashboard() { const symbol=APP.currentSymbol||'XRPUSDT'; try { const data=symbol==='XRPUSDT'?await volGet('/api/volatility/forecast',{symbol}):await volGet('/api/grid/volatility',{symbol,days:90}); let stats=null; if(symbol==='XRPUSDT'){try{stats=await volGet('/api/volatility/model-stats',{symbol});}catch(_error){stats=null;}} APP.volForecast=symbol==='XRPUSDT'?data:null; if(symbol==='XRPUSDT')cache({volForecast:data}); renderVolDashboard(data); if(symbol==='XRPUSDT')renderVolModelStats(stats); $('#vol-overlay-horizon')?.addEventListener('change',()=>{applyVolatilityOverlay();renderVolModelStats(stats);}); $('#vol-overlay-enabled')?.addEventListener('change',applyVolatilityOverlay); applyVolatilityOverlay(); } catch(error) { if(symbol==='XRPUSDT')renderVolDashboard(APP.lastData.volForecast||null,error); else renderVolDashboard(null,error); } }
 async function loadDashboard() { await loadDashboardSymbols(); await loadDashboardV2bBase(); const shadow=$('#shadow-status'); shadow?.classList.toggle('muted-shadow',APP.currentSymbol!=='XRPUSDT'); await loadVolDashboard(); }
-function renderVolBattleTable(data) {
-  const rows = (data.models || []).map(model => { const champ = model.is_champion, liveR2 = model.r2_live == null ? (Number(model.n_verified || 0) < 30 ? '\u2014 (n<30)' : '\u2014') : volNumber(model.r2_live, 3); return `<tr class="${champ ? 'vol-champion-row' : ''}"><td>${escapeHtml(model.model_name || '\u2014')}${champ ? ' <span class="champion-star" title="Campe\u00f3n">&#9733;</span>' : ''}</td><td>${volNumber(model.r2_cal, 3)}</td><td>${volNumber(model.qlike_cal, 4)}</td><td>${volNumber(model.n_verified, 0)}</td><td>${liveR2}</td></tr>`; }).join('');
-  const champion = (data.models || []).find(model => model.is_champion);
-  const missing = Math.max(0, 30 - Number(champion?.n_verified || 0));
-  $('#vol-battle-table').innerHTML = `<thead><tr><th>Modelo</th><th>R\u00b2 hist\u00f3rico</th><th>QLIKE hist\u00f3rico</th><th>Verificadas en vivo</th><th>R\u00b2 en vivo</th></tr></thead><tbody>${rows || '<tr><td colspan="5">Sin modelos disponibles</td></tr>'}</tbody><tfoot><tr><td colspan="5">Faltan ${missing} verificadas para R\u00b2 en vivo (m\u00ednimo 30).</td></tr></tfoot>`;
-}
-function renderVolHistory(rows, horizon = 4) {
-  const container = $('#vol-history-chart'), empty = $('#vol-history-empty');
-  if (APP.volHistoryChart) { APP.volHistoryChart.remove(); APP.volHistoryChart = null; } container.innerHTML = '';
-  const items = Array.isArray(rows) ? rows : [];
-  if (!window.LightweightCharts || !items.length) { empty.textContent = items.length ? 'Gráfico no disponible' : 'Aún no hay resultados verificados'; empty.classList.remove('hidden'); return; }
-  APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#30363d' } });
-  const forecast = APP.volHistoryChart.addLineSeries({ color: '#2F81F7', lineWidth: 2, title: `Pron\u00f3stico ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } }), realized = APP.volHistoryChart.addLineSeries({ color: '#3FB950', lineWidth: 2, title: `Realizado ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } });
-  const points = key => items.filter(row => row.forecast_at && row[key] != null).map(row => ({ time: Math.floor(new Date(row.forecast_at).getTime() / 1000), value: Number(row[key]) })).filter(row => Number.isFinite(row.time) && Number.isFinite(row.value)).sort((a,b) => a.time-b.time);
-  forecast.setData(points('pred_vol_pct')); const actual = points('realized_vol_pct'); realized.setData(actual);
-  if (!actual.length) { empty.textContent = 'Aún no hay resultados verificados'; empty.classList.remove('hidden'); } else empty.classList.add('hidden');
-  APP.volHistoryChart.timeScale().fitContent();
-}
-function renderVolCoverage(data) { const host = $('#vol-coverage'); if (!host) return; const n = Number(data?.n || 0); if (n < 30) { host.textContent = `Muestra insuficiente para cobertura en vivo: ${n}/30 predicciones verificadas con rango guardado.`; return; } host.textContent = `Cobertura verificada 4h (n=${n}): 1\u03c3 ${percent(data.coverage_1sigma)} (esperado \u224868%) \u00b7 2\u03c3 ${percent(data.coverage_2sigma)} (esperado \u224895%).`; }
-async function loadVolBattle() {
-  const horizon = Number($('#vol-horizon-select').value);
-  try { const [data, coverage] = await Promise.all([volGet('/api/volatility/battle', { symbol: 'XRPUSDT', horizon }), volGet('/api/predictions/volatility-coverage', { symbol: 'XRPUSDT', interval: '1h' })]); renderVolCoverage(coverage); renderVolBattleTable(data); const champion = (data.models || []).find(model => model.is_champion)?.model_name; if (!champion) { renderVolHistory([]); return; } const history = await volGet('/api/volatility/history', { symbol: 'XRPUSDT', horizon, model: champion, limit: 200 }); renderVolHistory(history, horizon); }
-  catch (error) { $('#vol-battle-table').innerHTML = `<tbody><tr><td>${error.status === 503 ? 'Modelos de volatilidad no entrenados' : 'Battle de volatilidad no disponible'}</td></tr></tbody>`; renderVolHistory([]); }
-}
-async function loadBattle() { await loadBattleV2bBase(); await loadVolBattle(); }
+async function loadBattle() { await loadBattleV2bBase(); }
 function renderGrid(data, forecast = null) {
   renderGridV2bBase(data); const host = $('#grid-result');
   const centered=data.range_centered,structural=data.range_structural;
@@ -412,7 +388,6 @@ document.addEventListener('click',event=>{
   const button=event.target.closest('.apply-widen-suggestion');
   if(button)applySuggestedWidenFactor(button);
 });
-document.addEventListener('DOMContentLoaded', () => { $('#vol-horizon-select')?.addEventListener('change', loadVolBattle); });
 document.addEventListener('click', event => { const button = event.target.closest('#calculate-grid-volatility'); if (button) loadSelectedGridVolatility(button); });
 
 // Coin registry: add/remove tradable pairs shown across the app.

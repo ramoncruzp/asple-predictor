@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_MODEL_NAME
 router = APIRouter()
 
@@ -59,3 +59,40 @@ def accuracy_by_condition(request: Request, model: str = Query(...)):
 @router.get("/shadow-status")
 def shadow_status(request: Request):
     return request.app.state.db.get_shadow_stats(SHADOW_MODEL_NAME, ACTIVE_SYMBOL, ACTIVE_INTERVAL)
+
+
+@router.get("/page-context")
+def page_context(
+    request: Request,
+    symbol: str = Query(ACTIVE_SYMBOL),
+    interval: str = Query(ACTIVE_INTERVAL),
+):
+    """Read-only registry and signal summary for the Models page; no market-data calls."""
+    db = request.app.state.db
+    coins = [row["symbol"] for row in db.get_active_coins()]
+    symbol = symbol.strip().upper().replace("/", "")
+    interval = interval.strip().lower()
+    if symbol not in coins:
+        raise HTTPException(status_code=404, detail="La moneda no está activa en el registro")
+    names = list(dict.fromkeys(("model_a", "model_b", "model_c", "model_d", "ensemble", *MODELS_CONFIG)))
+    summaries = {}
+    for name in names:
+        aggregate = getattr(db, "get_prediction_signal_summary", None)
+        if aggregate:
+            summaries[name] = aggregate(symbol, interval, name)
+        else:
+            rows = db.get_predictions_with_outcomes(symbol=symbol, interval=interval, model_name=name, limit=100000)
+            verified = [row for row in rows if row.get("is_verified")]
+            bullish = [row for row in rows if str(row.get("signal") or "").upper() == "ALCISTA"]
+            evaluated = [row for row in bullish if row.get("was_correct") is not None]
+            actual = [str(row.get("actual_direction") or "").upper() for row in verified]
+            summaries[name] = {
+                "total_predictions": len(rows), "verified_count": len(verified),
+                "pending_count": len(rows) - len(verified), "bullish_count": len(bullish),
+                "bullish_correct": sum(row.get("was_correct") is True for row in evaluated),
+                "bullish_failed": sum(row.get("was_correct") is False for row in evaluated),
+                "bullish_pending": len(bullish) - len(evaluated),
+                "neutral_count": sum(str(row.get("signal") or "").upper() == "NEUTRAL" for row in rows),
+                "base_rate": sum(direction == "UP" for direction in actual) / len(actual) if actual else None,
+            }
+    return {"symbol": symbol, "interval": interval, "coins": coins, "models": summaries}

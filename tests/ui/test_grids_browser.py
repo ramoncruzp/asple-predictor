@@ -796,7 +796,7 @@ def test_dashboard_shows_b_and_c_as_comparison_only_not_validated_models(live_se
     assert_no_js_errors(ui_page)
 
 
-def test_battle_shows_validation_and_prediction_time_volatility_range(live_server, ui_page):
+def test_battle_shows_direction_validation_and_models_link_without_live_volatility(live_server, ui_page):
     statuses = [
         {"model_name": "model_a", "display_name": "XGBoost", "available": True,
          "validation_status": "shadow", "accuracy": None, "verified_count": 0},
@@ -814,14 +814,14 @@ def test_battle_shows_validation_and_prediction_time_volatility_range(live_serve
         "is_verified": True, "was_correct": False, "price_at_verification": 100,
         "market_condition": '{"volatility_4h":{"range_1sigma":[98,102],"range_2sigma":[96,104]}}',
     }]))
-    ui_page.route("**/api/volatility/battle**", lambda route: route.fulfill(json={"models": []}))
-    ui_page.route("**/api/predictions/volatility-coverage**", lambda route: route.fulfill(json={"n": 0}))
 
     ui_page.goto(f"{live_server.url}/#battle")
     expect(ui_page.locator("#battle-content")).to_contain_text("No validado")
     expect(ui_page.locator("#battle-content")).to_contain_text("No disponible")
     expect(ui_page.locator("#battle-content")).to_contain_text("Rango 4h 1σ: 98.00 – 102.00 · 2σ: 96.00 – 104.00 · ✓ dentro de 1σ")
-    expect(ui_page.locator("#vol-coverage")).to_contain_text("Muestra insuficiente")
+    expect(ui_page.locator("#vol-coverage")).to_have_count(0)
+    expect(ui_page.locator("#vol-battle-table")).to_have_count(0)
+    expect(ui_page.locator('#screen-battle a[href="#models"]')).to_have_count(1)
     assert_no_js_errors(ui_page)
 
 

@@ -230,17 +230,31 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
 
     def _migrate_widen_columns(self) -> None:
-        """Add the 19C-3b suggestion fields without changing existing records."""
-        additions = {"k_raw": "FLOAT", "bias_log": "FLOAT", "vol_scale_suggested": "FLOAT"}
+        """Add missing declared widen suggestion columns without changing rows."""
+        def sql_type(column):
+            if isinstance(column.type, Float):
+                return "FLOAT"
+            if isinstance(column.type, Integer):
+                return "INTEGER"
+            if isinstance(column.type, (String, Text)):
+                return "TEXT"
+            if isinstance(column.type, DateTime):
+                return "DATETIME"
+            return column.type.compile(dialect=self.engine.dialect)
+
         with self.engine.begin() as conn:
             if self.engine.dialect.name == "sqlite":
                 present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('vol_widen_suggestions')")}
-                for name, sql_type in additions.items():
-                    if name not in present:
-                        conn.exec_driver_sql(f"ALTER TABLE vol_widen_suggestions ADD COLUMN {name} {sql_type}")
+                for column in self.vol_widen_suggestions.columns:
+                    if column.name not in present:
+                        conn.exec_driver_sql(
+                            f"ALTER TABLE vol_widen_suggestions ADD COLUMN {column.name} {sql_type(column)}"
+                        )
             elif self.engine.dialect.name == "postgresql":
-                for name, sql_type in additions.items():
-                    conn.exec_driver_sql(f"ALTER TABLE vol_widen_suggestions ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+                for column in self.vol_widen_suggestions.columns:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE vol_widen_suggestions ADD COLUMN IF NOT EXISTS {column.name} {sql_type(column)}"
+                    )
 
     def _seed_widen_defaults(self) -> None:
         """Persist configured per-horizon defaults once, without altering other tables."""
@@ -460,6 +474,39 @@ class DBManager:
                 item["was_correct"] = item.get("was_correct") if item["is_verified"] else None
                 rows.append(item)
             return rows
+
+    def get_prediction_signal_summary(self, symbol: str, interval: str, model_name: str) -> dict:
+        p, o = self.predictions.c, self.outcomes.c
+        joined = self.predictions.outerjoin(
+            self.outcomes, p.prediction_id == o.prediction_id,
+        )
+        bullish = p.signal == "ALCISTA"
+        columns = [
+            func.count(func.distinct(p.id)).label("total_predictions"),
+            func.count(func.distinct(o.id)).label("verified_count"),
+            func.coalesce(func.sum(case((bullish, 1), else_=0)), 0).label("bullish_count"),
+            func.coalesce(func.sum(case((bullish & (o.was_correct == 1), 1), else_=0)), 0).label("bullish_correct"),
+            func.coalesce(func.sum(case((bullish & (o.was_correct == 0), 1), else_=0)), 0).label("bullish_failed"),
+            func.coalesce(func.sum(case((p.signal == "NEUTRAL", 1), else_=0)), 0).label("neutral_count"),
+            func.coalesce(func.sum(case((o.actual_direction == "UP", 1), else_=0)), 0).label("base_up"),
+        ]
+        statement = select(*columns).select_from(joined).where(
+            p.symbol == symbol, p.interval == interval, p.model_name == model_name,
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().one()
+        total = int(row["total_predictions"] or 0)
+        verified = int(row["verified_count"] or 0)
+        bullish_count = int(row["bullish_count"] or 0)
+        correct, failed = int(row["bullish_correct"] or 0), int(row["bullish_failed"] or 0)
+        return {
+            "total_predictions": total, "verified_count": verified,
+            "pending_count": total - verified, "bullish_count": bullish_count,
+            "bullish_correct": correct, "bullish_failed": failed,
+            "bullish_pending": bullish_count - correct - failed,
+            "neutral_count": int(row["neutral_count"] or 0),
+            "base_rate": int(row["base_up"] or 0) / verified if verified else None,
+        }
 
     def get_shadow_stats(self, model_name: str, symbol: str, interval: str) -> dict:
         stmt = select(

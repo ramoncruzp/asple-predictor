@@ -140,12 +140,16 @@ assert(detail.includes('Rango 4h 1'));
 assert(detail.includes(String.fromCodePoint(0x2713)));
 const missing=context.volatilityDetail({market_condition:'{}'});
 assert(missing.includes('guardado al momento'));
-context.renderVolBattleTable({models:[{model_name:'GBM',is_champion:true,n_verified:12}]});
-assert(elements['#vol-battle-table'].innerHTML.includes('Faltan 18 verificadas'));
+const modelElements={};const modelsDocument={addEventListener(){},getElementById(id){return modelElements[id]||(modelElements[id]={value:'historical'})}};
+const modelsContext={window,document:modelsDocument,APP:{},volNumber:(v,d)=>v==null?'—':Number(v).toFixed(d),api:{}};
+vm.runInNewContext(fs.readFileSync(process.env.MODELS_JS,'utf8'),modelsContext);
+const movedHistorical=modelsContext.window.ModelsPageTest.renderVolBattleTable({models:[{model_name:'GBM',is_champion:true,n_verified:12,r2_cal:.5,qlike_cal:.4}]},'historical');
+assert(movedHistorical.includes('R² histórico')&&movedHistorical.includes('GBM'));
+assert(!movedHistorical.includes('R² en vivo'));
 process.stdout.write('ok');'''
     result = subprocess.run(
         [node, "-e", harness], cwd=ROOT,
-        env=dict(os.environ, APP_JS=str(ROOT / "frontend" / "app.js")),
+        env=dict(os.environ, APP_JS=str(ROOT / "frontend" / "app.js"), MODELS_JS=str(ROOT / "frontend" / "models.js")),
         capture_output=True, text=True, encoding="utf-8", timeout=10,
     )
     assert result.returncode == 0, result.stderr

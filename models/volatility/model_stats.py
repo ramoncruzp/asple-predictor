@@ -186,7 +186,7 @@ def adaptive_weight_history(rows, models, val_weights, now):
                           "confidence": "alta" if source == "vivo" else "baja",
                           "source": source})
     if snapshots:
-        latest = snapshots[-1]
+        latest = dict(snapshots[-1])
     else:
         latest = {"forecast_at": None, "eligible": [], "mse": {}, "P": {}, "P2": {},
                   "confidence": "baja", "source": "val"}
