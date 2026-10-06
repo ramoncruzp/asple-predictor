@@ -1,8 +1,37 @@
+import json
 from fastapi import APIRouter, HTTPException, Query, Request
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_MODEL_NAME
 from pathlib import Path
 from models.training_jobs import artifact_trained_at, predictions_before_training, read_metrics_manifest
+from config.models_config import VOL_ARTIFACT_DIR, VOL_SYMBOL
 router = APIRouter()
+
+
+@router.get("/vol/artifacts")
+def volatility_artifacts(request: Request):
+    artifact_dir = Path(VOL_ARTIFACT_DIR)
+    try:
+        manifest = json.loads((artifact_dir / "manifest_xrp.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        manifest = {}
+    try:
+        consensus = json.loads((artifact_dir / "consensus_xrp.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        consensus = {}
+    predictor = getattr(request.app.state, "vol_predictor", None)
+    loaded_manifest = getattr(predictor, "manifest", None) if predictor is not None else None
+    digest = consensus.get("source_csv_sha256")
+    return {
+        "symbol": VOL_SYMBOL,
+        "artifact_trained_at": manifest.get("trained_at"),
+        "loaded_trained_at": loaded_manifest.get("trained_at") if isinstance(loaded_manifest, dict) else None,
+        "data_range": manifest.get("data_range"),
+        "consensus": {
+            "created_at": consensus.get("created_at"),
+            "source_csv": consensus.get("source_csv"),
+            "source_csv_sha256_short": str(digest)[:12] if digest else None,
+        },
+    }
 
 MODEL_DISPLAY_NAMES = {
     "model_a": "XGBoost",

@@ -24,6 +24,7 @@ from models.volatility import (
     NexoHARModel, PersistenceModel,
 )
 from scripts.vol_research import score_forecast
+from scripts.download_candles import download_closed_candles
 
 
 MODEL_TYPES = {
@@ -36,13 +37,41 @@ MODEL_TYPES = {
     "NexoHAR": NexoHARModel,
     "GARCH_t": GARCHModel,
 }
+VOL_TRAIN_DAYS = 730
+MIN_HOURLY_ROWS = int(730 * 24 * 0.95)
+MIN_5M_ROWS = int(730 * 288 * 0.95)
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candles", type=Path, default=Path("data/cache/xrp_1h.csv"))
     parser.add_argument("--candles-5m", type=Path, default=Path("data/cache/xrp_5m.csv"))
-    return parser.parse_args(argv)
+    parser.add_argument("--refresh-candles", action="store_true")
+    parser.add_argument("--candles-dir", type=Path, default=Path("data/cache/vol_train"))
+    parser.add_argument("--progress", action="store_true")
+    args = parser.parse_args(argv)
+    provided = list(sys.argv[1:] if argv is None else argv)
+    if args.refresh_candles and any(flag in provided for flag in ("--candles", "--candles-5m")):
+        parser.error("--refresh-candles no se puede combinar con --candles ni --candles-5m")
+    return args
+
+
+def validate_refresh_csv(path: Path, interval: str, min_rows: int, *, now=None) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    if len(frame) < min_rows:
+        raise ValueError(f"Datos insuficientes en {interval}: {len(frame)} filas; se requieren {min_rows}")
+    if "close_time" not in frame:
+        raise ValueError(f"Falta close_time en el CSV de {interval}")
+    latest = pd.to_datetime(frame["close_time"], utc=True, errors="coerce").max()
+    current = pd.Timestamp(now or datetime.now(timezone.utc))
+    if current.tzinfo is None:
+        current = current.tz_localize("UTC")
+    else:
+        current = current.tz_convert("UTC")
+    age = current - latest
+    if pd.isna(latest) or age < pd.Timedelta(0) or age > pd.Timedelta(hours=2):
+        raise ValueError(f"Datos de {interval} obsoletos: última close_time={latest}, antigüedad máxima 2 horas")
+    return frame
 
 
 def _load_data(candles_path: Path, candles_5m_path: Path | None):
@@ -75,7 +104,7 @@ def _new_model(name: str, horizon: int):
     return model_type(horizon)
 
 
-def train_volatility_models(
+def _train_volatility_models_impl(
     candles: pd.DataFrame,
     intraday: pd.DataFrame | None = None,
     *,
@@ -83,6 +112,7 @@ def train_volatility_models(
     horizons: list[int] | None = None,
     model_names: list[str] | None = None,
     symbol: str = VOL_SYMBOL,
+    progress=None,
 ) -> dict:
     horizons = list(VOL_HORIZONS if horizons is None else horizons)
     model_names = list(VOL_MODELS if model_names is None else model_names)
@@ -115,6 +145,8 @@ def train_volatility_models(
             )
         horizon_results = {}
         for name in model_names:
+            if progress:
+                progress(f"entrenando:H{horizon}:{name}")
             model = _new_model(name, horizon)
             # Keep calibration fully held out; HAR_range defaults to Parkinson without VAL.
             model.fit(train)
@@ -147,6 +179,8 @@ def train_volatility_models(
             pending_artifacts.append((temporary_path, artifact_path))
         manifest["horizons"][str(horizon)] = horizon_results
 
+    if progress:
+        progress("calibrando_regimen")
     if intraday is not None:
         frame_24 = build_volatility_frame(candles, 24, intraday=intraday)
         cutoff = hourly_times.max() - pd.Timedelta(days=365)
@@ -177,6 +211,8 @@ def train_volatility_models(
     }
     manifest_tmp = artifact_dir / "manifest_xrp.json.tmp"
     manifest_path = artifact_dir / "manifest_xrp.json"
+    if progress:
+        progress("guardando")
     manifest_tmp.write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
     for temporary_path, artifact_path in pending_artifacts:
         os.replace(temporary_path, artifact_path)
@@ -184,12 +220,50 @@ def train_volatility_models(
     return manifest
 
 
+def train_volatility_models(
+    candles: pd.DataFrame,
+    intraday: pd.DataFrame | None = None,
+    *,
+    artifact_dir: Path | str = VOL_ARTIFACT_DIR,
+    horizons: list[int] | None = None,
+    model_names: list[str] | None = None,
+    symbol: str = VOL_SYMBOL,
+    progress=None,
+) -> dict:
+    artifact_dir = Path(artifact_dir)
+    try:
+        return _train_volatility_models_impl(
+            candles, intraday, artifact_dir=artifact_dir, horizons=horizons,
+            model_names=model_names, symbol=symbol, progress=progress,
+        )
+    except Exception:
+        for temporary in artifact_dir.glob("*.tmp"):
+            temporary.unlink(missing_ok=True)
+        raise
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
-    candles_path = args.candles.resolve()
-    candles_5m_path = args.candles_5m.resolve() if args.candles_5m and args.candles_5m.is_file() else None
+    progress = (lambda phase: print(f"PROGRESS:{phase}", flush=True)) if args.progress else None
+    if args.refresh_candles:
+        directory = args.candles_dir
+        hourly_path, five_path = directory / "xrp_1h.csv", directory / "xrp_5m.csv"
+        if progress:
+            progress("descargando_1h")
+        download_closed_candles(VOL_SYMBOL, "1h", VOL_TRAIN_DAYS, hourly_path)
+        if progress:
+            progress("descargando_5m")
+        download_closed_candles(VOL_SYMBOL, "5m", VOL_TRAIN_DAYS, five_path)
+        if progress:
+            progress("validando_datos")
+        validate_refresh_csv(hourly_path, "1h", MIN_HOURLY_ROWS)
+        validate_refresh_csv(five_path, "5m", MIN_5M_ROWS)
+        candles_path, candles_5m_path = hourly_path.resolve(), five_path.resolve()
+    else:
+        candles_path = args.candles.resolve()
+        candles_5m_path = args.candles_5m.resolve() if args.candles_5m and args.candles_5m.is_file() else None
     candles, intraday = _load_data(candles_path, candles_5m_path)
-    manifest = train_volatility_models(candles, intraday)
+    manifest = train_volatility_models(candles, intraday, progress=progress)
     print(f"Modelos guardados en {VOL_ARTIFACT_DIR}; horizontes={','.join(manifest['horizons'])}")
     return 0
 

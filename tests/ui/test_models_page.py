@@ -1,3 +1,4 @@
+import re
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
@@ -57,6 +58,22 @@ def test_models_page_renders_no_signal_evidence_and_low_effective_sample(ui_page
     assert "El modelo sobreestima" not in rendered["factor"]
     assert "Sin evidencia" in rendered["zero"]
     assert "0 % de acierto" not in rendered["zero"]
+
+
+def test_few_data_interpretation_is_prominent_and_distinct_from_muted_text(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => {
+      const root=document.createElement('div');
+      document.body.appendChild(root);
+      root.innerHTML=window.ModelsPageTest.renderWiden({status:'acumulando',n_effective:1.25,n_effective_min:30},4);
+      const notice=root.querySelector('.models-few-data');
+      const result={tag:notice.tagName,size:parseFloat(getComputedStyle(notice).fontSize),
+        color:getComputedStyle(notice).color,muted:getComputedStyle(document.querySelector('.muted')).color};
+      root.remove(); return result;
+    }""")
+    assert result["tag"] == "STRONG"
+    assert result["size"] >= 13
+    assert result["color"] != result["muted"]
 
 
 def test_models_page_separates_historical_and_live_columns_and_shows_ranks(ui_page, live_server):
@@ -190,6 +207,108 @@ def test_models_page_coverage_horizon_qlike_and_csv_escape(ui_page, live_server)
     assert "distintos" in rendered["qlike"]
     assert '"hoy, ayer"' in rendered["csv"] and '"HAR ""A"""' in rendered["csv"]
     assert rendered["windows"] == [1, 2, 3]
+
+
+def test_volatility_presentation_separates_labels_values_and_notes(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    rendered = ui_page.evaluate("""() => {
+      const summary=document.querySelector('#models-vol-summary');
+      const factor=document.querySelector('#models-vol-factor');
+      const coverage=document.querySelector('#models-vol-coverage');
+      summary.innerHTML=window.ModelsPageTest.renderForecast(
+        {horizons:[{horizon_h:4,adaptive:{source:'vivo',confidence:'alta'},validation_status_live:'en_evaluacion'}]},
+        {symbol:'XRPUSDT',vol_source:'val',forecasts:[{horizon_h:4,champion:'GBM',move_1sigma_pct:.79,
+          consensus:{sigma_pct:.8,dispersion_iqr:.02,confidence:'alta',validation_status_live:'en_evaluacion'}}]},
+        {models:[{model_name:'GBM',is_champion:true}]},'XRPUSDT',4);
+      factor.innerHTML=window.ModelsPageTest.renderWiden({status:'acumulando',n:18,n_effective:.75,
+        k_active:1.25,k_stress_smoothed:1.3,k_raw:.8,ci_low:.7,ci_high:1.4,progress_pct:70,
+        days_estimated:4,bias_log:.02,vol_scale_suggested:.98},4);
+      coverage.innerHTML=window.ModelsPageTest.renderVolCoverage({n:40,coverage_1sigma:.68,coverage_2sigma:.95},4);
+      return {summary:summary.innerText,factor:factor.innerText,coverage:coverage.innerText,
+        summaryDisplay:getComputedStyle(summary.querySelector('.models-presentation')).display,
+        factorDisplay:getComputedStyle(factor.querySelector('.models-factor')).display};
+    }""")
+    assert "CampeónGBM" not in rendered["summary"]
+    assert re.search(r"Campeón\s+GBM\s+σ 0\.79%", rendered["summary"])
+    assert re.search(r"Fuente efectiva de pesos\s+vivo\s+Confianza de pesos: alta", rendered["summary"])
+    assert "Validación en vivo\nEn evaluación" in rendered["summary"]
+    assert "en_evaluacion" not in rendered["summary"]
+    assert re.search(r"Cobertura en vivo 4h\s+1σ", rendered["coverage"])
+    assert re.search(r"Factor de ampliación\s+activo", rendered["factor"])
+    assert rendered["summaryDisplay"] == "flex"
+    assert rendered["factorDisplay"] == "grid"
+
+
+def test_vol_training_has_own_card_and_volatility_specific_dialog(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    ui_page.wait_for_selector("#models-training-models button[data-model='vol']")
+    layout = ui_page.evaluate("""() => {
+      const training=document.querySelector('#models-training-title').closest('section.card');
+      const volatility=document.querySelector('#models-vol-summary').closest('section.card');
+      return {sameCard:training===volatility,trainingBeforeVolatility:
+        Boolean(training.compareDocumentPosition(volatility)&Node.DOCUMENT_POSITION_FOLLOWING)};
+    }""")
+    assert layout == {"sameCard":False,"trainingBeforeVolatility":True}
+
+    ui_page.locator("#models-training-models button[data-model='vol']").click()
+    expect(ui_page.locator("#models-train-dialog")).to_be_visible()
+    expect(ui_page.locator("#models-train-days-control")).to_be_hidden()
+    expect(ui_page.locator("#models-train-gru-duration")).to_be_hidden()
+    expect(ui_page.locator("#models-train-reset")).to_be_hidden()
+    expect(ui_page.locator("#models-train-vol-note")).to_be_visible()
+    expect(ui_page.locator("#models-train-vol-note")).to_contain_text("≈210 mil velas de 5m")
+    ui_page.locator("#models-train-close").click()
+
+    ui_page.locator("#models-training-models button[data-model='b']").click()
+    expect(ui_page.locator("#models-train-days-control")).to_be_visible()
+    expect(ui_page.locator("#models-train-gru-duration")).to_be_visible()
+    expect(ui_page.locator("#models-train-direction-note")).to_be_visible()
+    expect(ui_page.locator("#models-train-vol-note")).to_be_hidden()
+    ui_page.locator("#models-train-close").click()
+
+    assert ui_page.evaluate("""() => {
+      const root=document.createElement('div');
+      root.innerHTML=window.ModelsPageTest.renderTrainingJobs([
+        {id:9,models:['vol'],status:'error',phase:'error'}]);
+      const note=document.querySelector('#models-train-vol-note');
+      return {volLabel:root.innerText.includes('Volatilidad'),
+        noteDisplay:getComputedStyle(note).display};
+    }""") == {"volLabel":True,"noteDisplay":"none"}
+
+
+def test_vol_training_intro_covers_volatility_horizons_and_restart(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    note = ui_page.locator("#models-training-title").evaluate(
+      "node => node.parentElement.querySelector('.models-note').innerText")
+    assert "1/2/4/24" in note
+    assert "reiniciar" in note.lower()
+
+
+def test_cancel_guardando_409_shows_detail_and_reenables_button(ui_page, live_server):
+    error_detail = "Guardando artefactos; espera unos segundos"
+    job = {"id":47,"models":["vol"],"status":"entrenando","phase":"guardando",
+           "created_at":"2026-10-06T12:00:00Z","started_at":"2026-10-06T12:00:00Z"}
+
+    def api(route):
+        request = route.request
+        path = urlparse(request.url).path
+        if request.method == "POST" and path.endswith("/train/47/cancel"):
+            route.fulfill(status=409, json={"detail":error_detail})
+        elif path.endswith("/train/status"):
+            route.fulfill(json={"job":job})
+        elif path.endswith("/train/jobs"):
+            route.fulfill(json={"jobs":[job]})
+        else:
+            route.fulfill(json={})
+
+    ui_page.route("**/api/**", api)
+    ui_page.goto(f"{live_server.url}/#models")
+    ui_page.wait_for_function("window.ModelsPageTest !== undefined")
+    cancel = ui_page.locator("#models-training-cancel")
+    expect(cancel).to_be_visible()
+    cancel.click()
+    expect(ui_page.locator("#models-training-current")).to_contain_text(error_detail)
+    expect(ui_page.locator("#models-training-cancel")).to_be_enabled()
 
 
 def test_models_page_selector_horizon_and_apply_confirmation(live_server, ui_page):

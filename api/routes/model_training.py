@@ -4,8 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, model_validator
 
-from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL
-from models.training_jobs import ActiveTrainingJob, TRAINING_MAX_DAYS, TRAINING_MIN_DAYS
+from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_SYMBOL
+from models.training_jobs import ActiveTrainingJob, TrainingArtifactsSaving, TRAINING_MAX_DAYS, TRAINING_MIN_DAYS, VOL_TRAIN_DAYS
 
 router = APIRouter()
 
@@ -25,6 +25,14 @@ class TrainingRequest(BaseModel):
         self.interval = self.interval.strip().lower()
         if self.confirm is not True:
             raise ValueError("Se requiere confirm=true")
+        if "vol" in self.models:
+            if self.models != ["vol"]:
+                raise ValueError('models="vol" debe enviarse solo; no se puede mezclar con a, b o c')
+            if self.symbol != VOL_SYMBOL or self.interval != ACTIVE_INTERVAL:
+                raise ValueError("El entrenamiento de volatilidad solo admite XRPUSDT 1h")
+            if self.days != VOL_TRAIN_DAYS:
+                raise ValueError(f"El entrenamiento de volatilidad requiere days={VOL_TRAIN_DAYS}")
+            return self
         if self.symbol != ACTIVE_SYMBOL or self.interval != ACTIVE_INTERVAL:
             raise ValueError("Sin modelos de dirección habilitados para esa combinación; llegará con 20B-2")
         if not self.models or len(set(self.models)) != len(self.models) or any(name not in {"a", "b", "c"} for name in self.models):
@@ -60,7 +68,10 @@ def training_jobs(request: Request, limit: int = Query(10, ge=1, le=50)):
 
 @router.post("/train/{job_id}/cancel")
 def cancel_training(job_id: int, request: Request):
-    result = request.app.state.training_job_service.cancel(job_id)
+    try:
+        result = request.app.state.training_job_service.cancel(job_id)
+    except TrainingArtifactsSaving as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="Trabajo de entrenamiento no encontrado")
     if result is False:

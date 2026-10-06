@@ -1,11 +1,11 @@
 (() => {
-  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], sort: { key: 'r2_cal', direction: 'desc' }, trainingJob: null, trainingPoll: null, trainingClock: null, trainingBusy: false, trainingModel: null };
+  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], sort: { key: 'r2_cal', direction: 'desc' }, trainingJob: null, trainingPoll: null, trainingClock: null, trainingBusy: false, trainingModel: null, volArtifacts: null };
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const n = (value, digits = 3) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : Number(value).toFixed(digits);
   const pct = value => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `${(Number(value) * 100).toFixed(1)}%`;
   const msg = (text, cls = '') => `<p class="models-status ${cls}">${esc(text)}</p>`;
-  const title = name => ({ model_a: 'XGBoost', model_b: 'GRU (PyTorch)', model_c: 'Prophet+XGBoost', model_d: 'TFT', ensemble: 'Ensamble', HAR_range: 'HAR Range', HAR_asym: 'HAR Asim\u00E9trico' }[name] || name || 'No disponible');
+  const title = name => ({ model_a: 'XGBoost', model_b: 'GRU (PyTorch)', model_c: 'Prophet+XGBoost', model_d: 'TFT', ensemble: 'Ensamble', vol: 'Volatilidad', HAR_range: 'HAR Range', HAR_asym: 'HAR Asim\u00E9trico' }[name] || name || 'No disponible');
 
   const trainingElapsedSeconds = (value, now = Date.now()) => {
     const started = Date.parse(value || '');
@@ -64,9 +64,9 @@
     return table;
   }
   function renderVolCoverage(data, horizon) {
-    if (Number(horizon) !== 4) return 'Cobertura disponible solo a 4h.';
+    if (Number(horizon) !== 4) return '<div class="models-presentation models-coverage"><span class="models-presentation-label">Cobertura</span><strong>Cobertura disponible solo a 4h.</strong></div>';
     const n = Number(data?.n || 0);
-    return `Cobertura en vivo 4h (n=${n}): 1σ ${pct(data?.coverage_1sigma)} (esperado ≈68%) · 2σ ${pct(data?.coverage_2sigma)} (esperado ≈95%).`;
+    return `<div class="models-presentation models-coverage"><span class="models-presentation-label">Cobertura en vivo 4h</span><strong>1σ ${pct(data?.coverage_1sigma)} · 2σ ${pct(data?.coverage_2sigma)}</strong><small>n=${n} · esperado ≈68% para 1σ y ≈95% para 2σ</small></div>`;
   }
   function sampleNotice(data, horizon, coverage, mode = $('models-vol-mode')?.value || 'historical') {
     if (mode !== 'live') return '';
@@ -147,8 +147,9 @@
     const consensus = f.consensus || {};
     const item = (stats?.horizons || []).find(row => Number(row.horizon_h) === Number(horizon));
     const adaptive = item?.adaptive || {};
-    const validation = consensus.validation_status_live || item?.validation_status_live || 'en_evaluacion';
-    return `<div class="models-summary-grid"><article><span>Campe\u00F3n</span><strong>${esc(title(champ))}</strong><small>\u03C3 ${n(f.move_1sigma_pct, 2)}%</small></article><article><span>Consenso</span><strong>${consensus.sigma_pct == null ? 'No disponible' : `\u03C3 ${n(consensus.sigma_pct, 2)}%`}</strong><small>Dispersi\u00F3n ${n(consensus.dispersion_iqr, 4)} \u00B7 confianza ${esc(consensus.confidence || 'no disponible')}</small></article><article><span>Validaci\u00F3n en vivo</span><strong>${esc(validation)}</strong><small>VOL_SOURCE: ${esc(f.vol_source || forecast.vol_source || 'no expuesto por el endpoint')}</small></article><article><span>Fuente efectiva de pesos</span><strong>${esc(adaptive.source || 'no disponible')}</strong><small>Confianza de pesos: ${esc(adaptive.confidence || 'no disponible')}</small></article></div>`;
+    const rawValidation = consensus.validation_status_live || item?.validation_status_live || 'en_evaluacion';
+    const validation = rawValidation === 'en_evaluacion' ? 'En evaluaci\u00F3n' : rawValidation;
+    return `<div class="models-summary-grid"><article class="models-presentation"><span class="models-presentation-label">Campe\u00F3n</span><strong>${esc(title(champ))}</strong><small>\u03C3 ${n(f.move_1sigma_pct, 2)}%</small></article><article class="models-presentation"><span class="models-presentation-label">Consenso</span><strong>${consensus.sigma_pct == null ? 'No disponible' : `\u03C3 ${n(consensus.sigma_pct, 2)}%`}</strong><small>Dispersi\u00F3n ${n(consensus.dispersion_iqr, 4)} \u00B7 confianza ${esc(consensus.confidence || 'no disponible')}</small></article><article class="models-presentation"><span class="models-presentation-label">Validaci\u00F3n en vivo</span><strong>${esc(validation)}</strong><small>VOL_SOURCE: ${esc(f.vol_source || forecast.vol_source || 'no expuesto por el endpoint')}</small></article><article class="models-presentation"><span class="models-presentation-label">Fuente efectiva de pesos</span><strong>${esc(adaptive.source || 'no disponible')}</strong><small>Confianza de pesos: ${esc(adaptive.confidence || 'no disponible')}</small></article></div>`;
   }
 
   function renderWiden(factor, horizon) {
@@ -159,7 +160,7 @@
     const interpretation = few ? `Pocos datos (n efectiva ${n(effective, 2)}). No se concluye sobreestimaci\u00F3n ni que el factor no aplique.` : (factor.overestimate_message || '');
     const apply = factor.status === 'disponible' && !few && Number(factor.k_raw ?? 1) >= 1
       ? ` <button type="button" class="button secondary apply-widen-suggestion" data-horizon="${Number(horizon)}" data-k="${Number(factor.k_stress_smoothed)}">Aplicar sugerido</button>` : '';
-    return `<p class="models-factor">Factor de ampliaci\u00F3n: activo ${n(factor.k_active ?? 1.25, 2)} \u00B7 sugerido ${n(factor.k_stress_smoothed, 2)} \u00B7 k_raw ${n(factor.k_raw, 2)} \u00B7 IC ${n(factor.ci_low, 2)}\u2013${n(factor.ci_high, 2)} \u00B7 precisi\u00F3n ${n(factor.progress_pct, 0)}% \u00B7 ${factor.days_estimated == null ? 'd\u00EDas estimados no disponibles' : `${Math.ceil(Number(factor.days_estimated))} d\u00EDas estimados`} \u00B7 sesgo log ${n(factor.bias_log, 4)} \u00B7 vol_scale_suggested ${n(factor.vol_scale_suggested, 3)} \u00B7 n=${Number(factor.n || 0)}, n efectiva ${n(effective, 2)}${interpretation ? `<strong class="models-few-data">${esc(interpretation)}</strong>` : ''}${apply}</p>`;
+    return `<div class="models-factor"><div class="models-presentation"><span class="models-presentation-label">Factor de ampliaci\u00F3n</span><strong>activo ${n(factor.k_active ?? 1.25, 2)} \u00B7 sugerido ${n(factor.k_stress_smoothed, 2)}</strong><small>k_raw ${n(factor.k_raw, 2)} \u00B7 IC ${n(factor.ci_low, 2)}\u2013${n(factor.ci_high, 2)}</small></div><div class="models-presentation"><span class="models-presentation-label">Precisi\u00F3n y plazo</span><strong>${n(factor.progress_pct, 0)}%</strong><small>${factor.days_estimated == null ? 'd\u00EDas estimados no disponibles' : `${Math.ceil(Number(factor.days_estimated))} d\u00EDas estimados`}</small></div><div class="models-presentation"><span class="models-presentation-label">Sesgo y muestra</span><strong>sesgo log ${n(factor.bias_log, 4)} \u00B7 vol_scale_suggested ${n(factor.vol_scale_suggested, 3)}</strong><small>n=${Number(factor.n || 0)}, n efectiva ${n(effective, 2)}</small>${interpretation ? `<strong class="models-few-data">${esc(interpretation)}</strong>` : ''}</div>${apply}</div>`;
   }
 
   function renderHistory(rows, selectedModel) {
@@ -184,26 +185,33 @@
     const evaluated = Number(counts?.bullish_correct || 0) + Number(counts?.bullish_failed || 0);
     const accuracy = evaluated ? `${(Number(counts.bullish_correct || 0) * 100 / evaluated).toFixed(1)}%` : 'Sin evidencia';
     const priorCount = Number(counts?.predictions_before_last_training || 0);
-    const priorNote = priorCount > 0 ? `<small>${priorCount} predicciones anteriores al \u00FAltimo entrenamiento (otra versi\u00F3n del modelo)</small>` : '';
+    const priorNote = priorCount > 0 ? `<small class="models-status-subtext">${priorCount} predicciones anteriores al \u00FAltimo entrenamiento (otra versi\u00F3n del modelo)</small>` : '';
     const artifactTime = model?.artifact_trained_at;
     const loadedTime = model?.last_trained;
     const staleNote = artifactTime && (!model?.available || trainingTimesDiffer(artifactTime, loadedTime))
-      ? `<small>Entrenado en disco el ${esc(artifactTime)}. ${model?.available && loadedTime ? `El servidor sigue usando la versi\u00F3n del ${esc(loadedTime)}` : 'El servidor no tiene una versi\u00F3n cargada'}: rein\u00EDcialo para cargarlo.</small>` : '';
-    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small>${esc(name === 'model_a' && shadow?.model_name === name ? 'XRPUSDT 1h' : `${scope.symbol || APP.currentSymbol || 'XRPUSDT'} ${scope.interval || APP.currentInterval || '1h'}`)}</small>${priorNote}</td><td>${esc(status)}${model?.last_trained ? `<small>\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}${staleNote}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
+      ? `<small class="models-status-subtext">Entrenado en disco el ${esc(artifactTime)}. ${model?.available && loadedTime ? `El servidor sigue usando la versi\u00F3n del ${esc(loadedTime)}` : 'El servidor no tiene una versi\u00F3n cargada'}: rein\u00EDcialo para cargarlo.</small>` : '';
+    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small class="models-status-subtext">${esc(name === 'model_a' && shadow?.model_name === name ? 'XRPUSDT 1h' : `${scope.symbol || APP.currentSymbol || 'XRPUSDT'} ${scope.interval || APP.currentInterval || '1h'}`)}</small>${priorNote}</td><td>${esc(status)}${model?.last_trained ? `<small class="models-status-subtext">\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}${staleNote}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
   }
 
   const activeTraining = job => !!job && ['pendiente', 'descargando', 'entrenando', 'running'].includes(job.status);
   function renderTrainingModels(status) {
     const models = Object.fromEntries((status?.models || []).map(item => [item.model_name, item]));
-    return `<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${['model_b', 'model_c', 'model_a'].map(name => {
-      const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-alert">Reinicia su evaluaci\u00F3n en vivo.</small>' : '';
-      return `<tr><td>${esc(model.display_name || title(name))}${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${activeTraining(state.trainingJob) || state.trainingBusy ? 'disabled' : ''}>Entrenar</button></td></tr>`;
-    }).join('')}</tbody></table></div>`;
+    const disabled = activeTraining(state.trainingJob) || state.trainingBusy ? 'disabled' : '';
+    const directionRows = ['model_b', 'model_c', 'model_a'].map(name => {
+      const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-training-note">Reinicia su evaluaci\u00F3n en vivo.</small>' : '';
+      return `<tr><td><strong class="models-training-name">${esc(model.display_name || title(name))}</strong>${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${disabled}>Entrenar</button></td></tr>`;
+    }).join('');
+    const vol = state.volArtifacts || {}, disk = vol.artifact_trained_at, loaded = vol.loaded_trained_at;
+    const diskMs = Date.parse(disk || ''), loadedMs = Date.parse(loaded || '');
+    const stale = disk && (!Number.isFinite(loadedMs) || (Number.isFinite(diskMs) && Math.abs(diskMs - loadedMs) > 2000));
+    const restart = stale ? '<small class="models-training-note">El artefacto en disco difiere de la versi\u00F3n cargada; reinicia el servidor para cargarlo.</small>' : '';
+    const volRow = `<tr><td><strong class="models-training-name">Volatilidad \u00B7 8 modelos \u00D7 4 horizontes \u00B7 XRPUSDT</strong></td><td>${esc(disk || '\u2014')}</td><td>${esc(loaded || (disk ? 'No cargado' : '\u2014'))}${restart}</td><td><button type="button" class="button secondary models-train-button" data-model="vol" ${disabled}>Entrenar</button></td></tr>`;
+    return `<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${directionRows}${volRow}</tbody></table></div>`;
   }
 
   function renderTrainingJobs(jobs) {
     if (!Array.isArray(jobs) || !jobs.length) return '<p class="muted">Todav\u00EDa no hay trabajos de entrenamiento.</p>';
-    return `<div class="table-card"><table class="data-table"><thead><tr><th>Creado</th><th>Modelos</th><th>Estado</th><th>Fase</th><th>Error</th></tr></thead><tbody>${jobs.slice(0, 5).map(job => `<tr><td>${esc(formatTrainingDate(job.created_at))}</td><td>${esc((job.models || []).join(', '))}</td><td>${esc(job.status || '\u2014')}</td><td>${esc(job.phase || '\u2014')}</td><td class="models-job-error">${esc(job.error || '')}</td></tr>`).join('')}</tbody></table></div>`;
+    return `<div class="table-card"><table class="data-table"><thead><tr><th>Creado</th><th>Modelos</th><th>Estado</th><th>Fase</th><th>Error</th></tr></thead><tbody>${jobs.slice(0, 5).map(job => `<tr><td>${esc(formatTrainingDate(job.created_at))}</td><td>${esc((job.models || []).map(name => name === 'vol' ? 'Volatilidad' : name).join(', '))}</td><td>${esc(job.status || '\u2014')}</td><td>${esc(job.phase || '\u2014')}</td><td class="models-job-error">${esc(job.error || '')}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function renderTrainingCurrent(job) {
@@ -232,10 +240,11 @@
   }
 
   async function refreshTraining() {
-    const [statusResult, jobsResult] = await Promise.allSettled([
-      api.get('/api/models/train/status'), api.get('/api/models/train/jobs', { limit: 5 }),
+    const [statusResult, jobsResult, volResult] = await Promise.allSettled([
+      api.get('/api/models/train/status'), api.get('/api/models/train/jobs', { limit: 5 }), api.get('/api/models/vol/artifacts'),
     ]);
     if (statusResult.status === 'fulfilled') state.trainingJob = statusResult.value?.job || null;
+    if (volResult.status === 'fulfilled') state.volArtifacts = volResult.value || null;
     $('models-training-current').innerHTML = statusResult.status === 'fulfilled'
       ? renderTrainingCurrent(state.trainingJob) : msg(`Estado de entrenamiento: ${statusResult.reason?.message || 'error de red'}`, 'error');
     $('models-training-jobs').innerHTML = jobsResult.status === 'fulfilled'
@@ -246,7 +255,12 @@
 
   function openTrainingDialog(modelName) {
     state.trainingModel = modelName;
-    $('models-train-target').textContent = `${title(`model_${modelName}`)} · XRPUSDT · 1h · ${$('models-train-days').value} días`;
+    const isVol = modelName === 'vol';
+    $('models-train-target').textContent = isVol ? 'Volatilidad · XRPUSDT · 1h, 2h, 4h y 24h' : `${title(`model_${modelName}`)} · XRPUSDT · 1h · ${$('models-train-days').value} días`;
+    $('models-train-days-control').hidden = isVol;
+    $('models-train-gru-duration').hidden = isVol;
+    $('models-train-vol-note').hidden = !isVol;
+    $('models-train-direction-note').hidden = isVol;
     $('models-train-reset').hidden = modelName !== 'a';
     $('models-train-reset-check').checked = false;
     $('models-train-reset-text').value = '';
@@ -262,14 +276,15 @@
   async function submitTraining(event) {
     event.preventDefault();
     const modelName = state.trainingModel;
+    const isVol = modelName === 'vol';
     const days = Number($('models-train-days').value);
-    if (!modelName || !Number.isInteger(days) || days < 365 || days > 730) return;
+    if (!modelName || (!isVol && (!Number.isInteger(days) || days < 365 || days > 730))) return;
     if (modelName === 'a' && $('models-train-confirm').disabled) return;
     state.trainingBusy = true;
     $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels || {});
     try {
       await api.post('/api/models/train', {
-        symbol: 'XRPUSDT', interval: '1h', models: [modelName], days, confirm: true,
+        symbol: 'XRPUSDT', interval: '1h', models: [modelName], days: isVol ? 730 : days, confirm: true,
         ...(modelName === 'a' ? { confirm_reset_evaluation: true } : {}),
       });
       $('models-train-dialog').close();
@@ -289,7 +304,7 @@
       await api.post(`/api/models/train/${Number(jobId)}/cancel`, {});
       await refreshTraining();
     } catch (error) {
-      $('models-training-current').innerHTML = msg(error?.message || 'No se pudo cancelar el trabajo.', 'error');
+      $('models-training-current').innerHTML = `${renderTrainingCurrent(state.trainingJob)}${msg(error?.message || 'No se pudo cancelar el trabajo.', 'error')}`;
     }
   }
 
@@ -335,7 +350,7 @@
     $('models-vol-table').innerHTML = renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
     setVolMode($('models-vol-mode')?.value || 'historical');
     $('models-vol-sample-notice').textContent = sampleNotice(battlePayload, horizon, cr.status === 'fulfilled' ? cr.value : null);
-    $('models-vol-coverage').textContent = cr.status === 'fulfilled' && cr.value ? renderVolCoverage(cr.value, horizon) : renderVolCoverage(null, horizon);
+    $('models-vol-coverage').innerHTML = cr.status === 'fulfilled' && cr.value ? renderVolCoverage(cr.value, horizon) : renderVolCoverage(null, horizon);
     $('models-v4-qlike').textContent = horizon === 4 ? renderV4Qlike(battlePayload) : '';
     const modelSelect = $('models-vol-model');
     if (modelSelect && battlePayload?.models) {
@@ -454,5 +469,5 @@
     $('models-train-close')?.addEventListener('click', () => $('models-train-dialog').close());
   });
   window.loadModelsPage = loadModelsPage;
-  window.ModelsPageTest = Object.freeze({ renderStats, renderWiden, renderDirectionRow, renderHistory, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow, renderTrainingCurrent, renderTrainingJobs, activeTraining, configureTrainingPolling, trainingElapsedSeconds, formatTrainingDate, trainingTimesDiffer, isTrainingPolling: () => Boolean(state.trainingPoll) });
+  window.ModelsPageTest = Object.freeze({ renderStats, renderForecast, renderWiden, renderDirectionRow, renderHistory, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow, renderTrainingCurrent, renderTrainingJobs, activeTraining, configureTrainingPolling, trainingElapsedSeconds, formatTrainingDate, trainingTimesDiffer, isTrainingPolling: () => Boolean(state.trainingPoll) });
 })();

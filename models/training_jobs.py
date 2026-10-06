@@ -19,6 +19,7 @@ ACTIVE_STATUSES = ("pendiente", "descargando", "entrenando", "running")
 ALL_STATUSES = (*ACTIVE_STATUSES, "listo", "error", "cancelado", "interrumpido")
 TRAINING_MIN_DAYS = 365
 TRAINING_MAX_DAYS = 730
+VOL_TRAIN_DAYS = 730
 VOL_RETRAIN_SCHEDULE = None
 _LOG = logging.getLogger(__name__)
 IS_WINDOWS = os.name == "nt"
@@ -33,6 +34,10 @@ PID_CHECK_METHOD = ("psutil.pid_exists + create_time" if IS_WINDOWS and _psutil 
 
 
 class ActiveTrainingJob(Exception):
+    pass
+
+
+class TrainingArtifactsSaving(Exception):
     pass
 
 
@@ -147,6 +152,8 @@ class TrainingJobService:
 
     @staticmethod
     def _command(job):
+        if job.get("models") == ["vol"]:
+            return [sys.executable, "-u", "scripts/train_vol_models.py", "--refresh-candles", "--progress"]
         return [
             sys.executable, "-u", "scripts/train_models.py",
             "--symbol", job["symbol"], "--interval", job["interval"],
@@ -236,7 +243,7 @@ class TrainingJobService:
                     conn.rollback()
                     raise ActiveTrainingJob("Ya existe un trabajo de entrenamiento activo")
                 result = conn.execute(table.insert().values(
-                    symbol=symbol, interval=interval, models=",".join(models), days=days,
+                    symbol=symbol, interval=interval, models=",".join(models), days=VOL_TRAIN_DAYS if models == ["vol"] else days,
                     status="pendiente", phase="pendiente", created_at=created,
                     confirm_reset_evaluation=int(confirm_reset_evaluation),
                 ))
@@ -287,7 +294,7 @@ class TrainingJobService:
         if not line.startswith("PROGRESS:"):
             return
         phase = line.partition(":")[2].strip()[:120]
-        status = "descargando" if phase == "descargando" else "entrenando"
+        status = "descargando" if phase.startswith("descargando") else "entrenando"
         if phase == "guardando":
             status = "entrenando"
         self._update_active(job_id, status=status, phase=phase)
@@ -346,8 +353,18 @@ class TrainingJobService:
         job = self.get(job_id)
         if job is None:
             return None
+        if job.get("phase") == "guardando":
+            raise TrainingArtifactsSaving("Guardando artefactos; espera unos segundos")
         now = _now_for_db(self.db)
-        if not self._update_active(job_id, status="cancelado", phase="cancelado", finished_at=now, error=None):
+        table = self.db.training_jobs
+        with self.db.engine.begin() as conn:
+            result = conn.execute(update(table).where(
+                table.c.id == int(job_id), table.c.status.in_(ACTIVE_STATUSES), table.c.phase != "guardando",
+            ).values(status="cancelado", phase="cancelado", finished_at=now, error=None))
+        if result.rowcount != 1:
+            latest = self.get(job_id)
+            if latest and latest.get("phase") == "guardando":
+                raise TrainingArtifactsSaving("Guardando artefactos; espera unos segundos")
             return False
         with self._lock:
             process = self._processes.get(int(job_id))
@@ -380,6 +397,15 @@ class TrainingJobService:
         return self.get(job_id)
 
     def _cleanup_temps(self, job):
+        if job.get("models") == ["vol"]:
+            paths = list((self.saved_dir / "vol").glob("*.tmp"))
+            paths.extend((self.root / "data" / "cache" / "vol_train").glob("*.tmp"))
+            for path in paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    _LOG.warning("No se pudo retirar temporal de entrenamiento de volatilidad: %s", path)
+            return
         base = job["symbol"][:-4].lower() if job["symbol"].endswith("USDT") else job["symbol"].lower()
         paths = [self.saved_dir / f"metrics_{base}_{job['interval']}.json.tmp"]
         for name in job["models"]:
