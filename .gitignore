@@ -35,3 +35,8 @@ models/saved/*.pt
 models/saved/*.joblib
 models/saved/*.log
 models/saved/vol/*.joblib
+
+# Artefactos por moneda generados por Preparar y residuos de pruebas
+models/saved/vol/*/
+models/saved/*.bak
+.pytest_tmp/
