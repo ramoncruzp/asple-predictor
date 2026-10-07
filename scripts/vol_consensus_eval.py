@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config.models_config import VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL
+from config.models_config import VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL, vol_base, vol_consensus_path
 from data.splits import chronological_split
 from data.volatility import build_volatility_frame, feature_columns
 from models.volatility.consensus import (
@@ -133,12 +135,20 @@ def _confidence_distribution(predictions: dict[str, np.ndarray], eligible: list[
     return counts
 
 
-def evaluate_horizon(data: pd.DataFrame, horizon: int) -> dict:
+def validate_split_capacity(n_rows: int, horizon: int, symbol: str) -> None:
+    try:
+        chronological_split(n_rows, train=0.70, val=0.15, embargo=horizon)
+    except ValueError as exc:
+        raise ValueError(f"Datos insuficientes para {symbol} a {horizon}h: {exc}") from exc
+
+
+def evaluate_horizon(data: pd.DataFrame, horizon: int, symbol: str = VOL_SYMBOL) -> dict:
     frame = build_volatility_frame(data.attrs["candles"], horizon, intraday=data.attrs["intraday"])
     columns = feature_columns(horizon) + ["target_logvol"]
     valid = np.isfinite(frame[columns].to_numpy(dtype="float64")).all(axis=1)
     valid &= frame["complete_hour"].to_numpy(dtype=bool)
     rows = frame.loc[valid].reset_index(drop=True)
+    validate_split_capacity(len(rows), horizon, symbol)
     train_slice, val_slice, test_slice = chronological_split(len(rows), train=0.70, val=0.15, embargo=horizon)
     train, val, test = rows.iloc[train_slice], rows.iloc[val_slice], rows.iloc[test_slice]
     predictions_raw: dict[str, np.ndarray] = {}
@@ -201,7 +211,10 @@ def evaluate_horizon(data: pd.DataFrame, horizon: int) -> dict:
         variants_val[variant] = calibrated_val
         variants_test[variant] = calibrated_test
 
-    champion = VOL_CHAMPIONS[horizon]
+    if symbol == VOL_SYMBOL:
+        champion = VOL_CHAMPIONS[horizon]
+    else:
+        champion = min(eligible, key=lambda name: selection["validation_mse"].get(name, float("inf"))) if eligible else "Persistence"
     champion_test = test_predictions[champion]
     comparisons = {}
     model_table = {}
@@ -238,14 +251,14 @@ def evaluate_horizon(data: pd.DataFrame, horizon: int) -> dict:
     }
 
 
-def evaluate_dataset(candles: pd.DataFrame, intraday: pd.DataFrame) -> dict:
+def evaluate_dataset(candles: pd.DataFrame, intraday: pd.DataFrame, symbol: str = VOL_SYMBOL) -> dict:
     """Fit models in memory and evaluate; no artifact writes occur here."""
     results = {}
     for horizon in VOL_HORIZONS:
         prepared = pd.DataFrame()
         prepared.attrs["candles"] = candles
         prepared.attrs["intraday"] = intraday
-        results[str(horizon)] = evaluate_horizon(prepared, horizon)
+        results[str(horizon)] = evaluate_horizon(prepared, horizon, symbol)
     p_values = {}
     for key, result in results.items():
         for variant in ("P", "M"):
@@ -281,37 +294,63 @@ def _json_safe(value):
     return value
 
 
-def main() -> int:
-    output = Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json"
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--symbol", default=VOL_SYMBOL)
+    parser.add_argument("--candles", type=Path)
+    parser.add_argument("--candles-5m", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    base = vol_base(args.symbol)
+    hourly_path = args.candles or Path("data/cache") / f"{base}_1h.csv"
+    source = args.candles_5m or Path("data/cache") / f"{base}_5m.csv"
+    output = args.output or vol_consensus_path(args.symbol)
     if output.exists():
-        raise FileExistsError(f"No se sobrescribe el consenso existente: {output}")
-    source = Path("data/cache/xrp_5m.csv")
+        raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
     source_bytes = source.read_bytes()
-    hourly_path = Path("data/cache/xrp_1h.csv")
+    hourly_bytes = hourly_path.read_bytes()
     candles, intraday = _load_data(hourly_path, source)
-    report = evaluate_dataset(candles, intraday)
+    report = evaluate_dataset(candles, intraday, args.symbol)
     serialized = {
-        "symbol": VOL_SYMBOL,
+        "symbol": args.symbol,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_csv": str(source),
         "source_csv_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "hourly_csv": str(hourly_path),
+        "hourly_csv_sha256": hashlib.sha256(hourly_bytes).hexdigest(),
         "seed": SEED,
         "split": {"train": 0.70, "validation": 0.15, "test": 0.15, "embargo": "horizon rows"},
         "bootstrap": {"block_size_hours": BLOCK_HOURS, "replicates": BOOTSTRAP_REPLICATES, "seed": SEED},
         "confidence_thresholds": CONFIDENCE_THRESHOLDS,
-        "selection_basis": "only models fitted in memory on TRAIN 70%; eligibility and weights use VAL only",
-        "test_is_virgin": False,
+        "selection_basis": "candidate estimators fit on TRAIN; HAR_range selection, eligibility, and weights use VAL; TEST is scored only after selection",
+        "test_is_virgin": args.symbol != VOL_SYMBOL,
         "report": report,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8", newline="\n") as handle:
-        json.dump(_json_safe(serialized), handle, ensure_ascii=False, indent=2, allow_nan=False)
-        handle.write("\n")
+    lock = output.with_name(output.name + ".lock")
+    temporary = output.with_name(output.name + ".tmp")
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise FileExistsError(f"Ya hay una evaluaci\u00f3n en curso para {args.symbol}: {lock}") from exc
+    os.close(descriptor)
+    try:
+        if output.exists():
+            raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(_json_safe(serialized), handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+        if output.exists():
+            raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+        lock.unlink(missing_ok=True)
     print(f"JSON: {output}")
     print(f"CSV SHA256: {serialized['source_csv_sha256']}")
     for key, result in report["horizons"].items():
-        print(f"{key}h rows={result['rows']} eligible={result['eligible_models']} weights={result['weights']}")
-        print(f"  ensemble={result['ensemble_results_test']}")
+        print(f"{key}h rows={result.get('rows')} eligible={result.get('eligible_models')} weights={result.get('weights')}")
+        print(f"  ensemble={result.get('ensemble_results_test')}")
     return 0
 
 

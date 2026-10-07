@@ -14,7 +14,7 @@ import pandas as pd
 
 from config.models_config import (
     VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL,
-    vol_artifact_dir, vol_base, vol_manifest_path,
+    vol_artifact_dir, vol_base, vol_champions, vol_manifest_path,
 )
 from data.volatility import aggregate_intraday_to_hourly, build_volatility_frame
 
@@ -31,6 +31,7 @@ class VolPredictor:
         vol_base(symbol)
         self.artifact_dir = Path(artifact_dir if artifact_dir is not None else vol_artifact_dir(symbol))
         self.symbol = symbol
+        self.champions, self.selection_provisional = vol_champions(symbol)
         self.horizons = list(VOL_HORIZONS if horizons is None else horizons)
         self.model_names = list(VOL_MODELS if model_names is None else model_names)
         self.logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class VolPredictor:
                     self.logger.exception("No se pudo cargar artefacto de volatilidad %s", path)
         after = self.manifest_path.stat().st_mtime_ns
         if before != after:
-            raise RuntimeError("El manifest cambi? mientras se cargaban los artefactos")
+            raise RuntimeError("El manifest cambió mientras se cargaban los artefactos")
         return manifest, models, after
 
     def reload(self) -> bool:
@@ -80,8 +81,12 @@ class VolPredictor:
                 self.logger.exception("No se pudo recargar volatilidad para %s", self.symbol)
                 return False
             self.manifest, self.models, self.manifest_mtime = manifest, models, mtime
+            self.champions, self.selection_provisional = vol_champions(self.symbol)
             self.reload_error = None
             return True
+
+    def is_champion(self, horizon: int, model_name: str) -> bool:
+        return self.champions.get(horizon) == model_name
 
     @staticmethod
     def _utc(value) -> datetime:
@@ -145,7 +150,7 @@ class VolPredictor:
                     if not np.isfinite(raw_value):
                         raise ValueError("el pronóstico más reciente es NaN/inf")
                     var_factor = float(item["var_factor"])
-                    champion = VOL_CHAMPIONS.get(horizon) == model_name
+                    champion = self.is_champion(horizon, model_name)
                     rows.append({
                         "symbol": self.symbol,
                         "horizon_h": horizon,

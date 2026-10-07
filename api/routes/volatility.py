@@ -9,13 +9,13 @@ from pathlib import Path
 import threading
 import time
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from config.models_config import (
     VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_LIVE_MIN_VERIFIED, VOL_MODELS, VOL_SYMBOL,
     VOL_WIDEN_AUTO, VOL_WIDEN_DISAGREEMENT_PCT, VOL_WIDEN_K_ACTIVE,
-    vol_base, vol_consensus_path, vol_manifest_path,
+    load_vol_consensus, vol_base, vol_champions, vol_consensus_path, vol_manifest_path,
 )
 from models.volatility.consensus import dispersion_confidence, weighted_logvol
 from models.volatility.model_stats import (
@@ -91,6 +91,9 @@ def _ready_predictor(request: Request, symbol: str):
 def _selection_fields(symbol: str) -> dict:
     if symbol == VOL_SYMBOL:
         return {}
+    _champions, provisional = vol_champions(symbol)
+    if not provisional:
+        return {"selection": "consensus"}
     return {"selection": "provisional",
             "selection_note": "Campeones globales de XRP; sin estudio de consenso propio"}
 
@@ -114,7 +117,7 @@ def _utc(value) -> datetime:
 def _consensus_for_horizon(request: Request, symbol: str, horizon: int, rows: list[dict], price: float):
     path = (Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json" if symbol == VOL_SYMBOL
             else vol_consensus_path(symbol))
-    if symbol != VOL_SYMBOL:
+    if symbol != VOL_SYMBOL and load_vol_consensus(symbol) is None:
         return {"consensus": None, "reason": f"sin estudio de consenso para {symbol}"}
     if not path.is_file():
         return {"consensus": None, "reason": "consensus_xrp.json no disponible"}
@@ -142,13 +145,14 @@ def _consensus_for_horizon(request: Request, symbol: str, horizon: int, rows: li
         return {"consensus": None, "reason": "las predicciones de volatilidad están obsoletas"}
     factor_info = horizon_report.get("ensemble_calibration_val", {}).get("P", {})
     history_rows = _model_stats_rows(request, symbol, horizon)
+    champions, _provisional = vol_champions(symbol)
     adaptive = calculate_model_stats(
-        history_rows, VOL_MODELS, VOL_CHAMPIONS,
+        history_rows, VOL_MODELS, champions,
         _sigma_refs(horizon_report), weights, datetime.now(timezone.utc),
         horizon_report.get("eligible_models", VOL_MODELS),
     )
     forward = forward_consensus_metrics(
-        history_rows, VOL_MODELS, VOL_CHAMPIONS, weights, datetime.now(timezone.utc),
+        history_rows, VOL_MODELS, champions, weights, datetime.now(timezone.utc),
         _ensemble_sigma_ref(horizon_report),
     )
     adaptive = adaptive["adaptive"]
@@ -241,7 +245,7 @@ def forecast(request: Request, symbol: str = VOL_SYMBOL):
         sigma_h = sigma_per_hour * sqrt(horizon)
         item = {
             "horizon_h": horizon,
-            "champion": VOL_CHAMPIONS[horizon],
+            "champion": vol_champions(symbol)[0][horizon],
             "forecast_at": forecast_at,
             "made_at": made_at,
             "vol_per_hour": sigma_per_hour,
@@ -296,12 +300,13 @@ def model_stats(
         sigma_refs = _sigma_refs(report)
         aggregates = (aggregate_query(symbol, current_horizon, sigma_refs, now)
                       if aggregate_query else None)
+        champions, _provisional = vol_champions(symbol)
         stats = calculate_model_stats(
-            rows, VOL_MODELS, VOL_CHAMPIONS, sigma_refs, val_weights, now,
+            rows, VOL_MODELS, champions, sigma_refs, val_weights, now,
             report.get("eligible_models", VOL_MODELS), aggregates,
         )
         stats["forward"] = forward_consensus_metrics(
-            rows, VOL_MODELS, VOL_CHAMPIONS, val_weights, now, _ensemble_sigma_ref(report),
+            rows, VOL_MODELS, champions, val_weights, now, _ensemble_sigma_ref(report),
         )
         stats["n"] = stats["forward"].get("n", 0)
         stats["n_efectivas"] = stats["forward"].get("n_efectivas", 0)
@@ -459,7 +464,7 @@ def battle(
             "n_verified": n_verified,
             "r2_live": live.get("r2_live") if enough else None,
             "mse_live": live.get("mse_live") if enough else None,
-            "is_champion": bool(live.get("is_champion", VOL_CHAMPIONS.get(horizon) == model_name)),
+            "is_champion": bool(live.get("is_champion", vol_champions(symbol)[0].get(horizon) == model_name)),
         })
     return {"symbol": symbol, "horizon_h": horizon, "models": result, **_selection_fields(symbol)}
 
@@ -478,14 +483,16 @@ def volatility_symbols(request: Request):
         loaded = getattr(predictor, "manifest", {}) or {}
         symbols.append({"symbol": symbol, "artifact_trained_at": manifest.get("trained_at"),
                         "loaded_trained_at": loaded.get("trained_at"),
-                        "selection": "champions" if symbol == VOL_SYMBOL else "provisional",
-                        "has_consensus": vol_consensus_path(symbol).is_file()})
+                        "selection": "champions" if symbol == VOL_SYMBOL else _selection_fields(symbol)["selection"],
+                        "has_consensus": (vol_consensus_path(symbol).is_file() if symbol == VOL_SYMBOL
+                                          else load_vol_consensus(symbol) is not None)})
     return {"default": VOL_SYMBOL, "symbols": symbols}
 
 
 @router.get("/history")
 def history(
     request: Request,
+    response: Response,
     symbol: str = VOL_SYMBOL,
     horizon: int = Query(4, ge=1, le=24),
     model: str = Query("GBM"),
@@ -495,6 +502,6 @@ def history(
     if horizon not in VOL_HORIZONS or model not in VOL_MODELS:
         raise HTTPException(status_code=404, detail="Símbolo, horizonte o modelo de volatilidad no disponible")
     records = request.app.state.db.get_vol_history(symbol, horizon, model, limit)
-    if symbol == VOL_SYMBOL:
-        return records
-    return {"symbol": symbol, "history": records, **_selection_fields(symbol)}
+    _champions, provisional = vol_champions(symbol)
+    response.headers["X-Vol-Selection"] = "provisional" if provisional else "consensus"
+    return records

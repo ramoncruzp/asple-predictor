@@ -1,5 +1,6 @@
 """Configuration for the prediction models."""
 
+import json
 import re
 from pathlib import Path
 
@@ -20,9 +21,41 @@ VOL_HORIZONS = [1, 2, 4, 24]
 VOL_MODELS = [
     "Persistence", "EWMA", "HAR", "HAR_range", "HAR_asym", "GBM", "NexoHAR", "GARCH_t"
 ]
-# Champions remain global in this phase; per-symbol champions belong to 20B-2c.
 VOL_CHAMPIONS = {1: "GBM", 2: "GBM", 4: "GBM", 24: "NexoHAR"}
 VOL_ARTIFACT_DIR = "models/saved/vol"
+
+
+def load_vol_consensus(symbol: str) -> dict | None:
+    """Return a complete, symbol-matching consensus report, otherwise None."""
+    if symbol == VOL_SYMBOL:
+        return None
+    path = vol_consensus_path(symbol)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
+        return None
+    horizons = payload["report"].get("horizons", {})
+    if payload.get("symbol") != symbol or not isinstance(horizons, dict):
+        return None
+    if not all(str(h) in horizons for h in VOL_HORIZONS):
+        return None
+    if any(not isinstance(horizons[str(h)], dict) or horizons[str(h)].get("champion") not in VOL_MODELS
+           for h in VOL_HORIZONS):
+        return None
+    return payload
+
+
+def vol_champions(symbol: str) -> tuple[dict[int, str], bool]:
+    """Return per-symbol champions and whether global XRP defaults are provisional."""
+    if symbol == VOL_SYMBOL:
+        return VOL_CHAMPIONS, False
+    payload = load_vol_consensus(symbol)
+    if payload is None:
+        return VOL_CHAMPIONS, True
+    horizons = payload["report"]["horizons"]
+    return {h: horizons[str(h)]["champion"] for h in VOL_HORIZONS}, False
 
 
 def vol_base(symbol: str) -> str:

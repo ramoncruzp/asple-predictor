@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 import pytest
 import api.routes.models_status as models_status
 import api.routes.volatility as volatility
+import config.models_config as models_config
 from config.models_config import VOL_CHAMPIONS
 
 class FakeDB:
@@ -35,6 +36,7 @@ def api_client(tmp_path,monkeypatch):
     for module in (volatility,models_status):
         monkeypatch.setattr(module,"vol_manifest_path",lambda symbol:manifests[symbol])
         monkeypatch.setattr(module,"vol_consensus_path",lambda symbol:consensuses[symbol])
+    monkeypatch.setattr(models_config,"vol_consensus_path",lambda symbol:consensuses[symbol])
     monkeypatch.setattr(volatility,"_load_horizon_report",lambda horizon,symbol="XRPUSDT":{})
     app=FastAPI();app.include_router(volatility.router,prefix="/api/volatility");app.include_router(models_status.router,prefix="/api/models")
     app.state.vol_registry=FakeRegistry();app.state.vol_predictor=app.state.vol_registry.get("XRPUSDT")
@@ -46,13 +48,18 @@ def test_symbol_routes_selection_and_xrp_compatibility(api_client):
     for route in ("forecast","model-stats","battle","history"):
         ada=api_client.get(f"/api/volatility/{route}",params={"symbol":"ada/usdt","horizon":4,"model":"GBM"})
         assert ada.status_code==200,ada.text
-        assert ada.json()["selection"]=="provisional"
-        assert ada.json()["selection_note"]=="Campeones globales de XRP; sin estudio de consenso propio"
+        if route == "history":
+            assert isinstance(ada.json(), list)
+            assert ada.headers["x-vol-selection"] == "provisional"
+        else:
+            assert ada.json()["selection"]=="provisional"
+            assert ada.json()["selection_note"]=="Campeones globales de XRP; sin estudio de consenso propio"
     assert api_client.get("/api/volatility/forecast",params={"symbol":"ADAUSDT"}).json()["price"]==101.0
     xrp=api_client.get("/api/volatility/forecast",params={"symbol":"XRPUSDT"})
     assert xrp.status_code==200 and "selection" not in xrp.json()
     hist=api_client.get("/api/volatility/history",params={"symbol":"XRPUSDT"})
     assert hist.status_code==200 and isinstance(hist.json(),list)
+    assert hist.headers["x-vol-selection"]=="consensus"
 
 def test_invalid_and_unloaded_symbols_have_expected_status(api_client):
     assert api_client.get("/api/volatility/forecast",params={"symbol":"SOLUSDT"}).status_code==404
@@ -65,7 +72,7 @@ def test_symbols_endpoint_reports_registry_and_consensus_state(api_client):
     items={x["symbol"]:x for x in r.json()["symbols"]}
     assert r.json()["default"]=="XRPUSDT"
     assert items["XRPUSDT"]["selection"]=="champions" and items["ADAUSDT"]["selection"]=="provisional"
-    assert items["ADAUSDT"]["has_consensus"] is True
+    assert items["ADAUSDT"]["has_consensus"] is False
     assert items["ADAUSDT"]["artifact_trained_at"]=="artifact-ADAUSDT" and items["ADAUSDT"]["loaded_trained_at"]=="loaded-ADAUSDT"
 
 def test_artifacts_endpoint_uses_ada_manifest_and_registry_predictor(api_client):
@@ -75,3 +82,15 @@ def test_artifacts_endpoint_uses_ada_manifest_and_registry_predictor(api_client)
 
 def test_widen_factor_remains_xrp_only(api_client):
     assert api_client.get("/api/volatility/widen-factor",params={"symbol":"ADAUSDT"}).status_code==404
+
+
+def test_ada_valid_consensus_selection_and_history_header(api_client, tmp_path):
+    path=tmp_path/"ada"/"consensus_ada.json"
+    horizons={str(h):{"champion":"GBM"} for h in (1,2,4,24)}
+    path.write_text(json.dumps({"symbol":"ADAUSDT","report":{"horizons":horizons}}),encoding="utf-8")
+    symbols=api_client.get("/api/volatility/symbols").json()["symbols"]
+    ada=next(item for item in symbols if item["symbol"]=="ADAUSDT")
+    assert ada["selection"]=="consensus" and ada["has_consensus"] is True
+    history=api_client.get("/api/volatility/history",params={"symbol":"ADAUSDT"})
+    assert history.status_code==200 and isinstance(history.json(),list)
+    assert history.headers["x-vol-selection"]=="consensus"
