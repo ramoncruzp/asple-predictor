@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,29 +12,42 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from config.models_config import VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL
+from config.models_config import (
+    VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL,
+    vol_artifact_dir, vol_base, vol_manifest_path,
+)
 from data.volatility import aggregate_intraday_to_hourly, build_volatility_frame
 
 
 class VolPredictor:
     def __init__(
         self,
-        artifact_dir: str | Path = VOL_ARTIFACT_DIR,
+        artifact_dir: str | Path | None = None,
         *,
         symbol: str = VOL_SYMBOL,
         horizons: list[int] | None = None,
         model_names: list[str] | None = None,
     ):
-        self.artifact_dir = Path(artifact_dir)
+        vol_base(symbol)
+        self.artifact_dir = Path(artifact_dir if artifact_dir is not None else vol_artifact_dir(symbol))
         self.symbol = symbol
         self.horizons = list(VOL_HORIZONS if horizons is None else horizons)
         self.model_names = list(VOL_MODELS if model_names is None else model_names)
         self.logger = logging.getLogger(__name__)
-        manifest_path = self.artifact_dir / "manifest_xrp.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"No existe el manifest de volatilidad: {manifest_path}")
-        self.manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.manifest_path = self.artifact_dir / Path(vol_manifest_path(symbol)).name
+        self._lock = threading.RLock()
+        self.manifest: dict = {}
         self.models: dict[tuple[int, str], dict] = {}
+        self.manifest_mtime: int | None = None
+        self.reload_error: str | None = None
+        manifest, models, mtime = self._read_snapshot(strict_models=False)
+        with self._lock:
+            self.manifest, self.models, self.manifest_mtime = manifest, models, mtime
+
+    def _read_snapshot(self, *, strict_models: bool) -> tuple[dict, dict, int]:
+        before = self.manifest_path.stat().st_mtime_ns
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        models: dict[tuple[int, str], dict] = {}
         for horizon in self.horizons:
             for model_name in self.model_names:
                 path = self.artifact_dir / f"{model_name}_{horizon}h.joblib"
@@ -42,13 +56,32 @@ class VolPredictor:
                     model = payload.get("model", payload) if isinstance(payload, dict) else payload
                     var_factor = (
                         payload.get("var_factor") if isinstance(payload, dict)
-                        else self.manifest["horizons"][str(horizon)][model_name]["var_factor"]
+                        else manifest["horizons"][str(horizon)][model_name]["var_factor"]
                     )
                     if var_factor is None:
-                        var_factor = self.manifest["horizons"][str(horizon)][model_name]["var_factor"]
-                    self.models[(horizon, model_name)] = {"model": model, "var_factor": float(var_factor)}
+                        var_factor = manifest["horizons"][str(horizon)][model_name]["var_factor"]
+                    models[(horizon, model_name)] = {"model": model, "var_factor": float(var_factor)}
                 except Exception:
+                    if strict_models:
+                        raise
                     self.logger.exception("No se pudo cargar artefacto de volatilidad %s", path)
+        after = self.manifest_path.stat().st_mtime_ns
+        if before != after:
+            raise RuntimeError("El manifest cambi? mientras se cargaban los artefactos")
+        return manifest, models, after
+
+    def reload(self) -> bool:
+        """Atomically reload manifest and artifacts; retain the active snapshot on failure."""
+        with self._lock:
+            try:
+                manifest, models, mtime = self._read_snapshot(strict_models=True)
+            except Exception as exc:
+                self.reload_error = str(exc)
+                self.logger.exception("No se pudo recargar volatilidad para %s", self.symbol)
+                return False
+            self.manifest, self.models, self.manifest_mtime = manifest, models, mtime
+            self.reload_error = None
+            return True
 
     @staticmethod
     def _utc(value) -> datetime:
@@ -98,10 +131,12 @@ class VolPredictor:
         forecast_at = self._utc(close_times.iloc[latest_index])
         made_at = now_utc
         rows = []
+        with self._lock:
+            loaded_models = self.models
         for horizon in self.horizons:
             frame = prepared_by_horizon[horizon]
             for model_name in self.model_names:
-                item = self.models.get((horizon, model_name))
+                item = loaded_models.get((horizon, model_name))
                 if item is None:
                     continue
                 try:
@@ -126,3 +161,84 @@ class VolPredictor:
                 except Exception:
                     self.logger.exception("Predicción live falló para %s H=%dh", model_name, horizon)
         return rows
+
+
+class VolPredictorRegistry:
+    """Thread-safe registry for predictors whose artifacts are ready on disk."""
+
+    def __init__(
+        self, artifact_root: str | Path | None = None, *,
+        horizons: list[int] | None = None, model_names: list[str] | None = None,
+    ):
+        self.horizons = None if horizons is None else list(horizons)
+        self.model_names = None if model_names is None else list(model_names)
+        self._default_root = artifact_root is None
+        self._artifact_root = Path(VOL_ARTIFACT_DIR if artifact_root is None else artifact_root)
+        self._predictors: dict[str, VolPredictor] = {}
+        self._lock = threading.RLock()
+        self.logger = logging.getLogger(__name__)
+
+    def _directory(self, symbol: str) -> Path:
+        base = vol_base(symbol)
+        if self._default_root:
+            return Path(vol_artifact_dir(symbol))
+        return self._artifact_root if symbol == VOL_SYMBOL else self._artifact_root / base
+
+    def get(self, symbol: str) -> VolPredictor | None:
+        vol_base(symbol)
+        with self._lock:
+            return self._predictors.get(symbol)
+
+    def load(self, symbol: str) -> VolPredictor | None:
+        vol_base(symbol)
+        with self._lock:
+            existing = self._predictors.get(symbol)
+            if existing is not None:
+                return existing
+            directory = self._directory(symbol)
+            manifest = directory / Path(vol_manifest_path(symbol)).name
+            if not manifest.is_file():
+                return None
+            predictor = VolPredictor(directory, symbol=symbol, horizons=self.horizons, model_names=self.model_names)
+            self._predictors[symbol] = predictor
+            return predictor
+
+    def load_available(self) -> list[str]:
+        """Load XRP legacy artifacts and valid symbol subdirectories found on disk."""
+        symbols = [VOL_SYMBOL]
+        if self._artifact_root.is_dir():
+            for directory in self._artifact_root.iterdir():
+                if not directory.is_dir():
+                    continue
+                candidate = directory.name.upper() + "USDT"
+                try:
+                    vol_base(candidate)
+                except ValueError:
+                    continue
+                if (directory / Path(vol_manifest_path(candidate)).name).is_file():
+                    symbols.append(candidate)
+        loaded = []
+        for symbol in dict.fromkeys(symbols):
+            try:
+                if self.load(symbol) is not None:
+                    loaded.append(symbol)
+            except Exception:
+                self.logger.exception("No se pudo cargar volatilidad para %s", symbol)
+        return loaded
+
+    def reload_if_changed(self, symbol: str) -> bool:
+        predictor = self.get(symbol)
+        if predictor is None:
+            return False
+        try:
+            current_mtime = predictor.manifest_path.stat().st_mtime_ns
+        except OSError:
+            self.logger.exception("No se pudo consultar el manifest de %s", symbol)
+            return False
+        if current_mtime == predictor.manifest_mtime:
+            return False
+        return predictor.reload()
+
+    def ready_symbols(self) -> list[str]:
+        with self._lock:
+            return sorted(self._predictors)

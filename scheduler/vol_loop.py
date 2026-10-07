@@ -17,6 +17,7 @@ class VolLoop:
     def __init__(self, binance_client, predictor, db_manager, scheduler=None):
         self.binance_client = binance_client
         self.predictor = predictor
+        self.registry = predictor if all(hasattr(predictor, name) for name in ("ready_symbols", "get", "reload_if_changed")) else None
         self.db_manager = db_manager
         self.scheduler = scheduler or BackgroundScheduler()
         self.logger = logging.getLogger(__name__)
@@ -60,37 +61,53 @@ class VolLoop:
             return None
         return float(0.5 * np.log(realized_variance.mean() + 1e-12))
 
+    def _run_symbol(self, symbol: str, predictor, now: datetime):
+        hourly = self._closed(
+            self.binance_client.get_historical_klines(symbol, "1h", lookback_days=12), now
+        )
+        five_minute = self._closed(
+            self.binance_client.get_historical_klines(symbol, "5m", lookback_days=12), now
+        )
+        if hourly.empty or five_minute.empty:
+            self.logger.warning("VolLoop: velas cerradas insuficientes para %s", symbol)
+            return
+        predictions = predictor.predict_latest(hourly, five_minute, now=now)
+        inserted = self.db_manager.save_vol_forecasts(predictions)
+        if symbol == VOL_SYMBOL and predictions:
+            self.latest = {
+                "forecast_at": predictions[0]["forecast_at"],
+                "made_at": predictions[0]["made_at"],
+                "price": predictions[0]["price"],
+                "forecasts": predictions,
+            }
+        hourly_intraday = aggregate_intraday_to_hourly(five_minute)
+        if "close_time" in hourly and not hourly.empty:
+            latest_close = pd.to_datetime(hourly["close_time"], utc=True).max().to_pydatetime()
+            for pending in self.db_manager.get_pending_vol_verifications(now):
+                if pending.get("symbol", symbol) != symbol:
+                    continue
+                realized = self.realized_for_forecast(pending, hourly_intraday, latest_close)
+                if realized is not None:
+                    self.db_manager.save_vol_realized(pending["id"], realized)
+        self.logger.info("VolLoop: %s inserted %d forecasts; processed verification cycle", symbol, inserted)
+
     def run_cycle(self):
         now = datetime.now(timezone.utc)
-        try:
-            hourly = self._closed(
-                self.binance_client.get_historical_klines(VOL_SYMBOL, "1h", lookback_days=12), now
-            )
-            five_minute = self._closed(
-                self.binance_client.get_historical_klines(VOL_SYMBOL, "5m", lookback_days=12), now
-            )
-            if hourly.empty or five_minute.empty:
-                self.logger.warning("VolLoop: Binance devolvió velas cerradas insuficientes")
-                return
-            predictions = self.predictor.predict_latest(hourly, five_minute, now=now)
-            inserted = self.db_manager.save_vol_forecasts(predictions)
-            if predictions:
-                self.latest = {
-                    "forecast_at": predictions[0]["forecast_at"],
-                    "made_at": predictions[0]["made_at"],
-                    "price": predictions[0]["price"],
-                    "forecasts": predictions,
-                }
-            hourly_intraday = aggregate_intraday_to_hourly(five_minute)
-            if "close_time" in hourly and not hourly.empty:
-                latest_close = pd.to_datetime(hourly["close_time"], utc=True).max().to_pydatetime()
-                for pending in self.db_manager.get_pending_vol_verifications(now):
-                    realized = self.realized_for_forecast(pending, hourly_intraday, latest_close)
-                    if realized is not None:
-                        self.db_manager.save_vol_realized(pending["id"], realized)
-            self.logger.info("VolLoop: %d forecasts inserted; processed verification cycle", inserted)
-        except Exception:
-            self.logger.exception("Volatility prediction cycle failed")
+        if self.registry is None:
+            symbol = getattr(self.predictor, "symbol", VOL_SYMBOL)
+            try:
+                self._run_symbol(symbol, self.predictor, now)
+            except Exception:
+                self.logger.exception("Volatility prediction cycle failed for %s", symbol)
+            return
+        for symbol in self.registry.ready_symbols():
+            try:
+                self.registry.reload_if_changed(symbol)
+                predictor = self.registry.get(symbol)
+                if predictor is not None:
+                    self._run_symbol(symbol, predictor, now)
+            except Exception:
+                self.logger.exception("Volatility prediction cycle failed for %s", symbol)
 
     def start(self):
         self.run_cycle()

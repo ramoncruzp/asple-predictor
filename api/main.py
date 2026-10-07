@@ -24,11 +24,11 @@ from database.learning_engine import LearningEngine
 from models.model_a_xgboost import ModelA
 from models.shadow_predictor import ShadowPredictor
 from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
-                                  SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_WIDEN_COMPUTE_HOUR_UTC)
+                                  SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_SYMBOL, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
 from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility
-from models.volatility.live import VolPredictor
+from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
 from scheduler.vol_loop import VolLoop
@@ -73,22 +73,13 @@ async def lifespan(app: FastAPI):
     prediction_loop = PredictionLoop(client, ensemble, db_manager=db)
     verification_loop = VerificationLoop(LearningEngine(db, client), model_names=["model_a", *shadow_models])
     volatility_manifest = Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json"
-    vol_predictor = None
-    vol_loop = None
-    if volatility_manifest.is_file():
-        try:
-            vol_predictor = VolPredictor()
-            vol_loop = VolLoop(client, vol_predictor, db)
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "No se pudo inicializar volatilidad desde %s; la app seguirá sin ese módulo",
-                volatility_manifest,
-            )
-            vol_predictor = None
-            vol_loop = None
-    else:
+    vol_registry = VolPredictorRegistry()
+    vol_registry.load_available()
+    vol_predictor = vol_registry.get(VOL_SYMBOL)
+    vol_loop = VolLoop(client, vol_registry, db) if vol_registry.ready_symbols() else None
+    if vol_predictor is None:
         logging.getLogger(__name__).warning(
-            "Volatilidad deshabilitada: no existe el manifest %s", volatility_manifest
+            "Volatilidad XRP deshabilitada: no existe un predictor cargado desde %s", volatility_manifest
         )
     grid_monitor = None
     backup_loop = BackupLoop(db, settings)
@@ -144,6 +135,7 @@ async def lifespan(app: FastAPI):
     }
     app.state.prediction_loop, app.state.verification_loop = prediction_loop, verification_loop
     app.state.vol_predictor, app.state.vol_loop = vol_predictor, vol_loop
+    app.state.vol_registry = vol_registry
     app.state.grid_monitor = grid_monitor
     app.state.backup_loop = backup_loop
     app.state.widen_factor_loop = widen_factor_loop
@@ -152,6 +144,7 @@ async def lifespan(app: FastAPI):
     verification_loop.start()
     if vol_loop is not None:
         vol_loop.start()
+    if vol_predictor is not None:
         widen_factor_loop.start()
     backup_loop.start()
     if grid_monitor is not None:
@@ -165,6 +158,7 @@ async def lifespan(app: FastAPI):
         grid_auto_open.stop()
         if vol_loop is not None:
             vol_loop.stop()
+        if vol_predictor is not None:
             widen_factor_loop.stop()
         backup_loop.stop()
         prediction_loop.stop(); verification_loop.stop()

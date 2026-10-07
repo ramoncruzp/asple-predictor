@@ -1,5 +1,8 @@
 """Configuration for the prediction models."""
 
+import re
+from pathlib import Path
+
 TARGET_HORIZON_CANDLES = 4
 TARGET_UP_THRESHOLD = 0.005
 
@@ -17,8 +20,30 @@ VOL_HORIZONS = [1, 2, 4, 24]
 VOL_MODELS = [
     "Persistence", "EWMA", "HAR", "HAR_range", "HAR_asym", "GBM", "NexoHAR", "GARCH_t"
 ]
+# Champions remain global in this phase; per-symbol champions belong to 20B-2c.
 VOL_CHAMPIONS = {1: "GBM", 2: "GBM", 4: "GBM", 24: "NexoHAR"}
 VOL_ARTIFACT_DIR = "models/saved/vol"
+
+
+def vol_base(symbol: str) -> str:
+    """Validate a USDT pair and return its lowercase base asset."""
+    if not isinstance(symbol, str) or re.fullmatch(r"[A-Z0-9]{2,20}USDT", symbol) is None:
+        raise ValueError(f"S?mbolo de volatilidad no v?lido: {symbol!r}")
+    return symbol[:-4].lower()
+
+
+def vol_artifact_dir(symbol: str) -> str:
+    """Return the legacy XRP artifact directory or the isolated symbol directory."""
+    base = vol_base(symbol)
+    if symbol == VOL_SYMBOL:
+        return VOL_ARTIFACT_DIR
+    return str(Path(VOL_ARTIFACT_DIR) / base)
+
+
+def vol_manifest_path(symbol: str) -> Path:
+    """Return the manifest path for a validated USDT pair."""
+    base = vol_base(symbol)
+    return Path(vol_artifact_dir(symbol)) / f"manifest_{base}.json"
 VOL_LIVE_MIN_VERIFIED = 30
 VOL_SOURCE = "auto"
 VOL_WIDEN_AUTO = False

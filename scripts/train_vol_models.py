@@ -17,7 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config.models_config import VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL
+from config.models_config import (
+    VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_MODELS, VOL_SYMBOL,
+    vol_artifact_dir, vol_base, vol_manifest_path,
+)
 from data.volatility import aggregate_intraday_to_hourly, build_volatility_frame, feature_columns
 from models.volatility import (
     EWMAModel, GARCHModel, GBMModel, HARAsymModel, HARModel, HARRangeModel,
@@ -44,13 +47,25 @@ MIN_5M_ROWS = int(730 * 288 * 0.95)
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candles", type=Path, default=Path("data/cache/xrp_1h.csv"))
-    parser.add_argument("--candles-5m", type=Path, default=Path("data/cache/xrp_5m.csv"))
+    parser.add_argument("--symbol", default=VOL_SYMBOL)
+    parser.add_argument("--candles", type=Path, default=None)
+    parser.add_argument("--candles-5m", type=Path, default=None)
     parser.add_argument("--refresh-candles", action="store_true")
     parser.add_argument("--candles-dir", type=Path, default=Path("data/cache/vol_train"))
+    parser.add_argument("--min-days", type=int, default=VOL_TRAIN_DAYS)
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
     provided = list(sys.argv[1:] if argv is None else argv)
+    try:
+        base = vol_base(args.symbol)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.min_days <= 0:
+        parser.error("--min-days debe ser un entero positivo")
+    if args.candles is None:
+        args.candles = Path("data/cache") / f"{base}_1h.csv"
+    if args.candles_5m is None:
+        args.candles_5m = Path("data/cache") / f"{base}_5m.csv"
     if args.refresh_candles and any(flag in provided for flag in ("--candles", "--candles-5m")):
         parser.error("--refresh-candles no se puede combinar con --candles ni --candles-5m")
     return args
@@ -108,15 +123,16 @@ def _train_volatility_models_impl(
     candles: pd.DataFrame,
     intraday: pd.DataFrame | None = None,
     *,
-    artifact_dir: Path | str = VOL_ARTIFACT_DIR,
+    artifact_dir: Path | str | None = None,
     horizons: list[int] | None = None,
     model_names: list[str] | None = None,
     symbol: str = VOL_SYMBOL,
     progress=None,
 ) -> dict:
+    vol_base(symbol)
     horizons = list(VOL_HORIZONS if horizons is None else horizons)
     model_names = list(VOL_MODELS if model_names is None else model_names)
-    artifact_dir = Path(artifact_dir)
+    artifact_dir = Path(artifact_dir if artifact_dir is not None else vol_artifact_dir(symbol))
     artifact_dir.mkdir(parents=True, exist_ok=True)
     trained_at = datetime.now(timezone.utc)
     hourly_times = pd.to_datetime(candles["timestamp"], utc=True)
@@ -209,8 +225,8 @@ def _train_volatility_models_impl(
         "sample_rows": int(len(realized_24)),
         "lookback_days": 365,
     }
-    manifest_tmp = artifact_dir / "manifest_xrp.json.tmp"
-    manifest_path = artifact_dir / "manifest_xrp.json"
+    manifest_path = artifact_dir / Path(vol_manifest_path(symbol)).name
+    manifest_tmp = manifest_path.with_name(manifest_path.name + ".tmp")
     if progress:
         progress("guardando")
     manifest_tmp.write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
@@ -224,13 +240,14 @@ def train_volatility_models(
     candles: pd.DataFrame,
     intraday: pd.DataFrame | None = None,
     *,
-    artifact_dir: Path | str = VOL_ARTIFACT_DIR,
+    artifact_dir: Path | str | None = None,
     horizons: list[int] | None = None,
     model_names: list[str] | None = None,
     symbol: str = VOL_SYMBOL,
     progress=None,
 ) -> dict:
-    artifact_dir = Path(artifact_dir)
+    vol_base(symbol)
+    artifact_dir = Path(artifact_dir if artifact_dir is not None else vol_artifact_dir(symbol))
     try:
         return _train_volatility_models_impl(
             candles, intraday, artifact_dir=artifact_dir, horizons=horizons,
@@ -247,24 +264,33 @@ def main(argv=None) -> int:
     progress = (lambda phase: print(f"PROGRESS:{phase}", flush=True)) if args.progress else None
     if args.refresh_candles:
         directory = args.candles_dir
-        hourly_path, five_path = directory / "xrp_1h.csv", directory / "xrp_5m.csv"
+        base = vol_base(args.symbol)
+        hourly_path, five_path = directory / f"{base}_1h.csv", directory / f"{base}_5m.csv"
         if progress:
             progress("descargando_1h")
-        download_closed_candles(VOL_SYMBOL, "1h", VOL_TRAIN_DAYS, hourly_path)
+        download_closed_candles(args.symbol, "1h", args.min_days, hourly_path)
         if progress:
             progress("descargando_5m")
-        download_closed_candles(VOL_SYMBOL, "5m", VOL_TRAIN_DAYS, five_path)
+        download_closed_candles(args.symbol, "5m", args.min_days, five_path)
         if progress:
             progress("validando_datos")
-        validate_refresh_csv(hourly_path, "1h", MIN_HOURLY_ROWS)
-        validate_refresh_csv(five_path, "5m", MIN_5M_ROWS)
+        hourly_min = MIN_HOURLY_ROWS if args.min_days == VOL_TRAIN_DAYS else int(args.min_days * 24 * 0.95)
+        five_min = MIN_5M_ROWS if args.min_days == VOL_TRAIN_DAYS else int(args.min_days * 288 * 0.95)
+        validate_refresh_csv(hourly_path, "1h", hourly_min)
+        validate_refresh_csv(five_path, "5m", five_min)
         candles_path, candles_5m_path = hourly_path.resolve(), five_path.resolve()
     else:
         candles_path = args.candles.resolve()
         candles_5m_path = args.candles_5m.resolve() if args.candles_5m and args.candles_5m.is_file() else None
     candles, intraday = _load_data(candles_path, candles_5m_path)
-    manifest = train_volatility_models(candles, intraday, progress=progress)
-    print(f"Modelos guardados en {VOL_ARTIFACT_DIR}; horizontes={','.join(manifest['horizons'])}")
+    artifact_dir = vol_artifact_dir(args.symbol)
+    if args.symbol == VOL_SYMBOL:
+        manifest = train_volatility_models(candles, intraday, progress=progress)
+    else:
+        manifest = train_volatility_models(
+            candles, intraday, artifact_dir=artifact_dir, symbol=args.symbol, progress=progress
+        )
+    print(f"Modelos guardados en {artifact_dir}; horizontes={','.join(manifest['horizons'])}")
     return 0
 
 
