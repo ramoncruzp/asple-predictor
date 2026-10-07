@@ -1,5 +1,5 @@
 (() => {
-  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], sort: { key: 'r2_cal', direction: 'desc' }, trainingJob: null, trainingPoll: null, trainingClock: null, trainingBusy: false, trainingModel: null, volArtifacts: null };
+  const state = { volRequest: 0, context: null, battle: null, coverage: null, history: [], volSymbols: [], coinReadiness: {}, activeSymbol: 'XRPUSDT', selection: null, sort: { key: 'r2_cal', direction: 'desc' }, trainingJob: null, trainingPoll: null, trainingClock: null, trainingBusy: false, trainingModel: null, volArtifacts: null };
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const n = (value, digits = 3) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : Number(value).toFixed(digits);
@@ -105,7 +105,7 @@
     const items = filterHistoryWindow(rows);
     if (!window.LightweightCharts || !items.length) { empty.textContent = items.length ? 'Gráfico no disponible' : 'Aún no hay resultados verificados en esta ventana.'; empty.classList.remove('hidden'); return; }
     // Reuses the Battle de Volatilidad chart implementation, now rendered in Modelos.
-    APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 8, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#30363d' } });
+    APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 8, fixLeftEdge: true, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#303d43' } });
     const forecast = APP.volHistoryChart.addLineSeries({ color: '#2F81F7', lineWidth: 2, title: `Pronóstico ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } }), realized = APP.volHistoryChart.addLineSeries({ color: '#3FB950', lineWidth: 2, title: `Realizado ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } });
     const points = key => items.filter(row => row.forecast_at && row[key] != null).map(row => ({ time: Math.floor(new Date(row.forecast_at).getTime() / 1000), value: Number(row[key]) })).filter(row => Number.isFinite(row.time) && Number.isFinite(row.value)).sort((a,b) => a.time-b.time);
     forecast.setData(points('pred_vol_pct')); const actual = points('realized_vol_pct'); realized.setData(actual);
@@ -134,7 +134,7 @@
         : weightSource === 'vivo' ? model.peso_actual : null;
       const weightText = weightValue == null || !Number.isFinite(Number(weightValue)) ? '\u2014'
         : `${(Number(weightValue) * 100).toFixed(1)}%${weightSource === 'val' ? ' (val)' : ''}`;
-      return `<tr class="${championRow ? 'models-champion' : ''} ${consensus ? 'models-consensus' : ''}"><td>${rank == null ? '\u2014' : rank}${verified < min ? '<small class="models-few-data">Pocos datos</small>' : ''}</td><td><strong>${esc(title(model.model_name))}</strong>${championRow ? '<span class="models-tag">Campe\u00F3n</span>' : ''}${consensus ? '<span class="models-tag consensus">Consenso</span>' : ''}<small>Volatilidad \u00B7 ${esc(symbol)} \u00B7 ${Number(horizon)} h</small></td><td>${Number(model.n_predicciones || 0)} / ${verified} / ${Math.max(0, Number(model.n_predicciones || 0) - verified)}</td><td>${n(m.mse, 6)}</td><td>${pct(m.coverage_1sigma)}</td><td>${pct(m.coverage_2sigma)}</td><td>${n(m.over_pct, 1)}% / ${n(m.under_pct, 1)}%</td><td>bias_log ${m.bias_mean==null?'\u2014':n(m.bias_mean, 5)} ? var_ratio ${m.var_ratio==null?'\u2014':n(m.var_ratio, 3)}${model.bias_alert ? '<small class="models-alert">Sesgo sostenido</small>' : ''}</td><td>${weightText}</td><td>${active ? 'Activo' : `Acumulando datos (${verified}/${min})`}</td><td>${model.bias_alert ? 'Alerta' : 'Sin alerta'}</td></tr>`;
+      return `<tr class="${championRow ? 'models-champion' : ''} ${consensus ? 'models-consensus' : ''}"><td>${rank == null ? '\u2014' : rank}${verified < min ? '<small class="models-few-data">Pocos datos</small>' : ''}</td><td><strong>${esc(title(model.model_name))}</strong>${championRow ? '<span class="models-tag">Campe\u00F3n</span>' : ''}${consensus ? '<span class="models-tag consensus">Consenso</span>' : ''}<small>Volatilidad \u00B7 ${esc(symbol)} \u00B7 ${Number(horizon)} h</small></td><td>${Number(model.n_predicciones || 0)} / ${verified} / ${Math.max(0, Number(model.n_predicciones || 0) - verified)}</td><td>${n(m.mse, 6)}</td><td>${pct(m.coverage_1sigma)}</td><td>${pct(m.coverage_2sigma)}</td><td>${n(m.over_pct, 1)}% / ${n(m.under_pct, 1)}%</td><td>bias_log ${m.bias_mean==null?'\u2014':n(m.bias_mean, 5)} \u00B7 var_ratio ${m.var_ratio==null?'\u2014':n(m.var_ratio, 3)}${model.bias_alert ? '<small class="models-alert">Sesgo sostenido</small>' : ''}</td><td>${weightText}</td><td>${active ? 'Activo' : `Acumulando datos (${verified}/${min})`}</td><td>${model.bias_alert ? 'Alerta' : 'Sin alerta'}</td></tr>`;
     }).join('');
     return `<div class="table-card models-table-wrap"><table class="data-table models-table"><thead><tr><th>Puesto</th><th>Modelo e identidad</th><th>Pred. / verificadas / pendientes</th><th>MSE vivo</th><th>Dentro de \u00B1\u03C3_ref (error log)</th><th>Dentro de \u00B12\u03C3_ref (error log)</th><th>Sobre/sub %</th><th>Sesgo</th><th>Peso</th><th>Estado</th><th>bias_alert</th></tr></thead><tbody>${rows}</tbody></table></div><p class="muted models-note">Dentro de \u00B1\u03C3_ref y \u00B12\u03C3_ref mide error en log, no cobertura del precio. El sesgo en log tiene un componente estructural por calibrar en varianza. TEST visto durante la selecci\u00F3n. Las fechas y tramos se muestran si el endpoint los entrega.</p>`;
   }
@@ -186,17 +186,21 @@
     const accuracy = evaluated ? `${(Number(counts.bullish_correct || 0) * 100 / evaluated).toFixed(1)}%` : 'Sin evidencia';
     const priorCount = Number(counts?.predictions_before_last_training || 0);
     const priorNote = priorCount > 0 ? `<small class="models-status-subtext">${priorCount} predicciones anteriores al \u00FAltimo entrenamiento (otra versi\u00F3n del modelo)</small>` : '';
+    const artifactSymbol = model?.symbol || model?.artifact_symbol || model?.trained_symbol || model?.config?.symbol || 'XRPUSDT';
+    const artifactInterval = model?.interval || model?.artifact_interval || model?.trained_interval || model?.config?.interval || '1h';
+    const directionIdentity = shadow?.model_name === name ? `${shadow.symbol || artifactSymbol} ${shadow.interval || artifactInterval}` : `${artifactSymbol} ${artifactInterval}`;
     const artifactTime = model?.artifact_trained_at;
     const loadedTime = model?.last_trained;
     const staleNote = artifactTime && (!model?.available || trainingTimesDiffer(artifactTime, loadedTime))
       ? `<small class="models-status-subtext">Entrenado en disco el ${esc(artifactTime)}. ${model?.available && loadedTime ? `El servidor sigue usando la versi\u00F3n del ${esc(loadedTime)}` : 'El servidor no tiene una versi\u00F3n cargada'}: rein\u00EDcialo para cargarlo.</small>` : '';
-    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small class="models-status-subtext">${esc(name === 'model_a' && shadow?.model_name === name ? 'XRPUSDT 1h' : `${scope.symbol || APP.currentSymbol || 'XRPUSDT'} ${scope.interval || APP.currentInterval || '1h'}`)}</small>${priorNote}</td><td>${esc(status)}${model?.last_trained ? `<small class="models-status-subtext">\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}${staleNote}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
+    return `<tr><td><strong>${esc(model?.display_name || model?.nombre || title(name))}</strong><small class="models-status-subtext">${esc(directionIdentity)}</small>${priorNote}</td><td>${esc(status)}${model?.last_trained ? `<small class="models-status-subtext">\u00DAltimo entrenamiento: ${esc(model.last_trained)}</small>` : ''}${staleNote}</td><td>${Number(counts?.total_predictions || 0)} / ${Number(counts?.verified_count || 0)} / ${Number(counts?.pending_count || 0)}</td><td>${Number(counts?.bullish_correct || 0)} / ${Number(counts?.bullish_failed || 0)} / ${Number(counts?.bullish_pending || 0)}</td><td>${Number(counts?.neutral_count || 0)} sin se\u00F1al</td><td>${evaluated ? accuracy : 'Sin evidencia'}</td><td>${pct(counts?.base_rate)}</td></tr>`;
   }
 
   const activeTraining = job => !!job && ['pendiente', 'descargando', 'entrenando', 'running'].includes(job.status);
   function renderTrainingModels(status) {
     const models = Object.fromEntries((status?.models || []).map(item => [item.model_name, item]));
-    const disabled = activeTraining(state.trainingJob) || state.trainingBusy ? 'disabled' : '';
+    const otherSymbol = state.activeSymbol !== 'XRPUSDT';
+    const disabled = activeTraining(state.trainingJob) || state.trainingBusy || otherSymbol ? 'disabled' : '';
     const directionRows = ['model_b', 'model_c', 'model_a'].map(name => {
       const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-training-note">Reinicia su evaluaci\u00F3n en vivo.</small>' : '';
       return `<tr><td><strong class="models-training-name">${esc(model.display_name || title(name))}</strong>${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${disabled}>Entrenar</button></td></tr>`;
@@ -205,8 +209,10 @@
     const diskMs = Date.parse(disk || ''), loadedMs = Date.parse(loaded || '');
     const stale = disk && (!Number.isFinite(loadedMs) || (Number.isFinite(diskMs) && Math.abs(diskMs - loadedMs) > 2000));
     const restart = stale ? '<small class="models-training-note">El artefacto en disco difiere de la versi\u00F3n cargada; reinicia el servidor para cargarlo.</small>' : '';
-    const volRow = `<tr><td><strong class="models-training-name">Volatilidad \u00B7 8 modelos \u00D7 4 horizontes \u00B7 XRPUSDT</strong></td><td>${esc(disk || '\u2014')}</td><td>${esc(loaded || (disk ? 'No cargado' : '\u2014'))}${restart}</td><td><button type="button" class="button secondary models-train-button" data-model="vol" ${disabled}>Entrenar</button></td></tr>`;
-    return `<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${directionRows}${volRow}</tbody></table></div>`;
+    const volDisabled = otherSymbol ? 'disabled title="El entrenamiento de esta moneda se gestiona desde Monedas."' : disabled;
+    const volRow = `<tr><td><strong class="models-training-name">Volatilidad \u00B7 8 modelos \u00D7 4 horizontes \u00B7 XRPUSDT</strong></td><td>${esc(disk || '\u2014')}</td><td>${esc(loaded || (disk ? 'No cargado' : '\u2014'))}${restart}</td><td><button type="button" class="button secondary models-train-button" data-model="vol" ${volDisabled}>Entrenar</button></td></tr>`;
+    const otherSymbolNote = otherSymbol ? '<p class="models-training-note">El entrenamiento de esta moneda se gestiona desde Monedas.</p>' : '';
+    return `${otherSymbolNote}<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${directionRows}${volRow}</tbody></table></div>`;
   }
 
   function renderTrainingJobs(jobs) {
@@ -309,6 +315,7 @@
   }
 
   function renderDirection(status, context, shadow) {
+    if ((context?.symbol || 'XRPUSDT') !== 'XRPUSDT') return '<p class="models-direction-only-xrp">Los modelos de direcci\u00F3n solo existen para XRPUSDT.</p>';
     const names = ['model_a', 'model_b', 'model_c', 'model_d', 'ensemble'];
     const models = Object.fromEntries((status?.models || []).map(model => [model.model_name, model]));
     const rows = names.map(name => renderDirectionRow(name, models[name], context?.models?.[name], shadow, status?.winner_by_accuracy, context)).join('');
@@ -318,21 +325,53 @@
   async function loadContext(requestedSymbol) {
     const requested = requestedSymbol || APP.currentSymbol || 'XRPUSDT';
     const context = await api.get('/api/models/page-context', { symbol: requested, interval: APP.currentInterval || '1h' });
+    let coinRows = [];
+    try { coinRows = await api.get('/api/coins'); } catch (_) {}
+    state.coinReadiness = Object.fromEntries((Array.isArray(coinRows) ? coinRows : []).map(row => [row.symbol, row]));
     const select = $('models-symbol'), old = requestedSymbol || select.value || APP.currentSymbol || context.symbol;
-    select.innerHTML = (context.coins || []).map(symbol => `<option value="${esc(symbol)}">${esc(symbol)}</option>`).join('');
+    select.innerHTML = (context.coins || []).map(symbol => {
+      const row = state.coinReadiness[symbol], ready = symbol === 'XRPUSDT' || row?.ready === true || row?.readiness?.state === 'lista';
+      const status = row?.readiness?.state || (ready ? 'lista' : 'pendiente');
+      const suffix = ready ? '' : (['descargando','entrenando','consensuando'].includes(status) ? ' (preparando)' : ' (no lista)');
+      return `<option value="${esc(symbol)}">${esc(symbol)}${suffix}</option>`;
+    }).join('');
     select.value = context.coins?.includes(old) ? old : (context.coins?.includes(context.symbol) ? context.symbol : context.coins?.[0] || 'XRPUSDT');
     return context;
   }
 
+  function clearVolatilityPanels() {
+    for (const id of ['models-vol-live-table','models-vol-factor','models-vol-table','models-vol-history','models-vol-short-history']) $(id).innerHTML = '';
+    $('models-vol-coverage').textContent = '';
+    $('models-vol-sample-notice').textContent = '';
+    $('models-v4-qlike').textContent = '';
+    $('models-vol-history-empty').textContent = '';
+    $('models-vol-history-empty').classList.add('hidden');
+    state.battle = null; state.coverage = null; state.history = [];
+  }
+  function unavailableVolatilityMessage(symbol) {
+    const readiness = state.coinReadiness[symbol]?.readiness || {};
+    const status = readiness.state || 'pendiente';
+    return `<p>${esc(symbol)} a\u00FAn no tiene modelos de volatilidad: estado ${esc(status)}. Se prepara desde la pantalla <a href="#coins">Monedas</a>.</p>`;
+  }
+  function selectionNotice(selection, battle) {
+    let note = selection === 'provisional'
+      ? 'Selecci\u00F3n provisional: el consenso estad\u00EDstico de esta moneda a\u00FAn no se ha calculado. Los campeones se eligen por menor error en validaci\u00F3n.'
+      : selection === 'consensus'
+        ? 'Selecci\u00F3n por consenso estad\u00EDstico (estudio hist\u00F3rico). La validaci\u00F3n en vivo se acumula con el tiempo.' : '';
+    const champion = (battle?.models || []).find(row => row.is_champion)?.model_name;
+    if (selection === 'consensus' && champion === 'Persistence') note += `${note ? ' ' : ''}Ning\u00FAn modelo super\u00F3 a Persistence en este horizonte; se usa el modelo trivial.`;
+    return note ? `<p class="models-selection-note">${esc(note)}</p>` : '';
+  }
   async function loadVolatility() {
     const request = ++state.volRequest, symbol = $('models-symbol').value || 'XRPUSDT', horizon = Number($('models-horizon').value || 4);
-    if (symbol !== 'XRPUSDT') {
-      for (const id of ['models-vol-live-table', 'models-vol-summary', 'models-vol-factor', 'models-vol-history', 'models-vol-short-history']) $(id).innerHTML = msg('Volatilidad solo disponible para XRPUSDT');
-      $('models-vol-table').innerHTML = msg('Volatilidad solo disponible para XRPUSDT');
-      $('models-vol-coverage').textContent = 'Volatilidad solo disponible para XRPUSDT';
-      $('models-vol-sample-notice').textContent = '';
-      $('models-v4-qlike').textContent = '';
-      state.battle = null; state.coverage = null; state.history = [];
+    let symbolPayload = null;
+    try { symbolPayload = await api.get('/api/volatility/symbols'); } catch (_) {}
+    if (request !== state.volRequest || symbol !== $('models-symbol').value) return;
+    state.volSymbols = symbolPayload?.symbols || [];
+    const symbolInfo = state.volSymbols.find(row => String(row.symbol).toUpperCase() === symbol);
+    if (symbol !== 'XRPUSDT' && !symbolInfo) {
+      clearVolatilityPanels();
+      $('models-vol-summary').innerHTML = unavailableVolatilityMessage(symbol);
       return;
     }
     for (const id of ['models-vol-live-table', 'models-vol-summary', 'models-vol-factor', 'models-vol-history', 'models-vol-short-history']) $(id).innerHTML = msg('Cargando datos\u2026');
@@ -358,49 +397,40 @@
       modelSelect.innerHTML = battlePayload.models.map(row => `<option value="${esc(row.model_name)}">${esc(row.model_name)}</option>`).join('');
       modelSelect.value = battlePayload.models.some(row => row.model_name === selected) ? selected : (battlePayload.models.find(row => row.is_champion)?.model_name || battlePayload.models[0]?.model_name || '');
     }
-    $('models-vol-table').innerHTML = renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
+    $('models-vol-table').innerHTML = selectionNotice(symbolInfo?.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
+    const payload = sr.status === 'fulfilled' ? sr.value : null;
+    const item = (payload?.horizons || []).find(row => Number(row.horizon_h) === horizon);
     if (sr.status !== 'fulfilled') {
       const isNoModel = Number(sr.reason?.status || String(sr.reason || '').match(/HTTP (\d+)/)?.[1] || 0) === 404;
       $('models-vol-live-table').innerHTML = isNoModel ? renderStats({ symbol, horizons: [{ horizon_h: horizon, models: [] }] }, symbol, horizon) : msg('Estad\u00EDsticas de volatilidad: error de red.', 'error');
     } else {
-      const payload = sr.value, item = (payload.horizons || []).find(row => Number(row.horizon_h) === horizon);
-      const battleCandidate = br.status === 'fulfilled' ? br.value : null;
-      const battle = battleCandidate && String(battleCandidate.symbol || '').toUpperCase() === symbol
-        && Number(battleCandidate.horizon_h) === horizon ? battleCandidate : null;
-      $('models-vol-live-table').innerHTML = renderStats(payload, symbol, horizon, battle);
-      if (String(payload.symbol || '').toUpperCase() !== symbol || !item || Number(item.horizon_h) !== horizon) {
-        $('models-vol-summary').innerHTML = msg('Respuesta descartada: moneda u horizonte no coinciden.', 'error');
-        $('models-vol-factor').innerHTML = msg('Factor descartado: moneda u horizonte no coinciden.', 'error');
-      } else {
-        $('models-vol-summary').innerHTML = fr.status === 'fulfilled' ? renderForecast(payload, fr.value, battle, symbol, horizon) : msg('Pron\u00F3stico: error de red.', 'error');
-        const widenPayload = wr.status === 'fulfilled' ? wr.value : null;
-        const factor = widenPayload && String(widenPayload.symbol || '').toUpperCase() === symbol
-          ? (widenPayload.horizons || []).find(row => Number(row.horizon_h) === horizon) : null;
-        $('models-vol-factor').innerHTML = wr.status === 'fulfilled' ? (factor ? renderWiden(factor, horizon) : msg('Factor descartado: moneda u horizonte no coinciden.', 'error')) : msg('Factor de ampliaci\u00F3n: error de red.', 'error');
-      }
+      $('models-vol-live-table').innerHTML = renderStats(payload, symbol, horizon, battlePayload);
     }
-    if (sr.status !== 'fulfilled') {
-      $('models-vol-summary').innerHTML = fr.status === 'fulfilled'
-        ? renderForecast(null, fr.value, battlePayload, symbol, horizon)
-        : msg('Pron\u00F3stico: error de red.', 'error');
-      const widenPayload = wr.status === 'fulfilled' ? wr.value : null;
-      const factor = widenPayload && String(widenPayload.symbol || '').toUpperCase() === symbol
+    const statsMatches = payload && String(payload.symbol || '').toUpperCase() === symbol && item && Number(item.horizon_h) === horizon;
+    $('models-vol-summary').innerHTML = selectionNotice(symbolInfo?.selection, battlePayload) + (statsMatches && fr.status === 'fulfilled'
+      ? renderForecast(payload, fr.value, battlePayload, symbol, horizon)
+      : fr.status === 'fulfilled' ? renderForecast(null, fr.value, battlePayload, symbol, horizon)
+      : msg('Pron\u00F3stico: error de red.', 'error'));
+    if (wr.status === 'fulfilled') {
+      const widenPayload = wr.value, factor = String(widenPayload?.symbol || '').toUpperCase() === symbol
         ? (widenPayload.horizons || []).find(row => Number(row.horizon_h) === horizon) : null;
-      $('models-vol-factor').innerHTML = wr.status === 'fulfilled'
-        ? (factor ? renderWiden(factor, horizon) : msg('Factor descartado: moneda u horizonte no coinciden.', 'error'))
-        : msg('Factor de ampliaci\u00F3n: error de red.', 'error');
-    }
+      $('models-vol-factor').innerHTML = factor ? renderWiden(factor, horizon) : msg('Factor descartado: moneda u horizonte no coinciden.', 'error');
+    } else $('models-vol-factor').innerHTML = msg('Factor de ampliaci\u00F3n: error de red.', 'error');
     if (battlePayload) {
       const series = $('models-vol-series')?.value || 'champion';
       const champion = battlePayload.models?.find(row => row.is_champion)?.model_name || ({ 1: 'GBM', 2: 'GBM', 4: 'GBM', 24: 'NexoHAR' })[horizon];
       const chartModel = series === 'model' ? $('models-vol-model')?.value : champion;
       if (series === 'consensus') { state.history = []; renderVolHistory([], horizon, 'consensus'); return; }
       try {
-        const history = await api.get('/api/volatility/history', { symbol, horizon, model: chartModel || champion, limit: $('models-vol-window')?.value === 'all' ? 1000 : 200 });
-        const scopedHistory = (history || []).filter(row => (!row.symbol || String(row.symbol).toUpperCase() === symbol) && (row.horizon_h == null || Number(row.horizon_h) === horizon));
+        const response = await api.getWithHeaders('/api/volatility/history', { symbol, horizon, model: chartModel || champion, limit: $('models-vol-window')?.value === 'all' ? 1000 : 200 });
+        const history = response.data || [];
+        const scopedHistory = history.filter(row => (!row.symbol || String(row.symbol).toUpperCase() === symbol) && (row.horizon_h == null || Number(row.horizon_h) === horizon));
         if (request === state.volRequest && symbol === $('models-symbol').value && horizon === Number($('models-horizon').value)) {
+          state.selection = response.headers?.get('X-Vol-Selection') || symbolInfo?.selection || null;
           state.history = scopedHistory;
           $('models-vol-short-history').innerHTML = renderHistory(scopedHistory, chartModel || champion);
+          $('models-vol-table').innerHTML = selectionNotice(state.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
+          $('models-vol-summary').innerHTML = selectionNotice(state.selection, battlePayload) + (sr.status === 'fulfilled' && fr.status === 'fulfilled' ? renderForecast(sr.value, fr.value, battlePayload, symbol, horizon) : $('models-vol-summary').innerHTML);
           renderVolHistory(scopedHistory, horizon);
         }
       } catch (_) { if (request === state.volRequest) {
@@ -418,10 +448,10 @@
     let context;
     try {
       context = await loadContext($('models-symbol').value || undefined);
-      $('models-active-context').textContent = `${context.symbol} ${context.interval}`;
+      $('models-active-context').textContent = `${context.symbol} ${context.interval}`; state.activeSymbol = context.symbol || 'XRPUSDT';
     } catch (_) {
       $('models-symbol').innerHTML = '<option value="XRPUSDT">XRPUSDT</option>';
-      context = { symbol: APP.currentSymbol || 'XRPUSDT', interval: APP.currentInterval || '1h', coins: [], registryError: true };
+      context = { symbol: APP.currentSymbol || 'XRPUSDT', interval: APP.currentInterval || '1h', coins: [], registryError: true }; state.activeSymbol = context.symbol;
       $('models-direction-content').innerHTML = msg('Registro de monedas: error de red. Los otros bloques siguen disponibles.', 'error');
     }
     const request = Date.now(); state.context = context;
@@ -438,7 +468,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     $('models-symbol')?.addEventListener('change', loadModelsPage);
     $('models-horizon')?.addEventListener('change', loadVolatility);
-    $('models-vol-mode')?.addEventListener('change', () => { const mode = $('models-vol-mode').value; state.sort = { key: mode === 'live' ? 'live_rank' : 'historical_rank', direction: 'asc' }; setVolMode(mode); $('models-vol-table').innerHTML = renderVolBattleTable(state.battle, mode); $('models-vol-sample-notice').textContent = sampleNotice(state.battle, Number($('models-horizon').value), state.coverage, mode); });
+    $('models-vol-mode')?.addEventListener('change', () => { const mode = $('models-vol-mode').value; state.sort = { key: mode === 'live' ? 'live_rank' : 'historical_rank', direction: 'asc' }; setVolMode(mode); $('models-vol-table').innerHTML = selectionNotice(state.selection, state.battle) + renderVolBattleTable(state.battle, mode); $('models-vol-sample-notice').textContent = sampleNotice(state.battle, Number($('models-horizon').value), state.coverage, mode); });
     $('models-vol-series')?.addEventListener('change', () => { if ($('models-vol-series').value === 'consensus') { renderVolHistory(state.history, Number($('models-horizon').value), 'consensus'); return; } loadVolatility(); });
     $('models-vol-model')?.addEventListener('change', () => loadVolatility());
     $('models-vol-window')?.addEventListener('change', () => $('models-vol-window').value === 'all' ? loadVolatility() : renderVolHistory(state.history, Number($('models-horizon').value)));

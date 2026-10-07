@@ -22,7 +22,8 @@ class ApiClient {
     }
     return response;
   }
-  async get(path, params = {}, timeoutMs = 10000) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { const response = await this._fetch(url, { signal: controller.signal }); if (!response.ok) throw new Error(`HTTP ${response.status}`); return await response.json(); } finally { clearTimeout(timer); } }
+  async get(path, params = {}, timeoutMs = 10000) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { const response = await this._fetch(url, { signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
+  async getWithHeaders(path, params = {}, timeoutMs = 10000) { const url = new URL(this.baseUrl + path); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value); }); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { const response = await this._fetch(url, { signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return { data, headers: response.headers }; } finally { clearTimeout(timer); } }
   async post(path, body) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await this._fetch(this.baseUrl + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
   async delete(path) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await this._fetch(this.baseUrl + path, { method: 'DELETE', signal: controller.signal }); const data = await response.json().catch(() => null); if (!response.ok) { const error = new Error((data && data.detail) || `HTTP ${response.status}`); error.status = response.status; throw error; } return data; } finally { clearTimeout(timer); } }
   status() { return this.get('/api/health', {}, 8000); }
@@ -38,6 +39,8 @@ class ApiClient {
   coinsList(includeInactive = false) { return this.get(`/api/coins${includeInactive ? '?include_inactive=true' : ''}`); }
   addCoin(symbol, notes) { return this.post('/api/coins', { symbol, notes: notes || null }); }
   removeCoin(symbol) { return this.delete(`/api/coins/${symbol}`); }
+  prepareCoin(symbol) { return this.post(`/api/coins/${symbol}/prepare`, {}); }
+  cancelCoinPreparation(symbol) { return this.post(`/api/coins/${symbol}/prepare/cancel`, {}); }
 }
 const api = new ApiClient();
 const $ = (selector) => document.querySelector(selector);
@@ -85,9 +88,19 @@ function formatPrice(value) {
 }
 const GRID_SYMBOL_FALLBACK = ['XRPUSDT', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
 function buildGridSymbolOptions(coins, selectedSymbol) {
-  const symbols = [...new Set((Array.isArray(coins) ? coins : []).map(item => String(typeof item === 'string' ? item : item?.symbol || '').trim().toUpperCase()).filter(Boolean))];
-  const selected = symbols.includes(selectedSymbol) ? selectedSymbol : (symbols.includes('XRPUSDT') ? 'XRPUSDT' : symbols[0] || '');
-  const options = symbols.map(symbol => `<option value="${escapeHtml(symbol)}"${symbol === selected ? ' selected' : ''}>${escapeHtml(symbol.replace(/USDT$/, '/USDT'))}</option>`).join('');
+  const entries = (Array.isArray(coins) ? coins : []).map(item => {
+    const symbol = String(typeof item === 'string' ? item : item?.symbol || '').trim().toUpperCase();
+    const readiness = typeof item === 'string' ? null : item?.readiness;
+    const ready = symbol === 'XRPUSDT' || (typeof item === 'string') || item?.ready === true || readiness?.state === 'lista';
+    const label = symbol ? escapeHtml(symbol.replace(/USDT$/, '/USDT')) + (ready ? '' : (['descargando','entrenando','consensuando'].includes(readiness?.state) ? ' (preparando)' : ' (no lista)')) : '';
+    return { symbol, ready, label };
+  }).filter(item => item.symbol);
+  const unique = [...new Map(entries.map(item => [item.symbol, item])).values()];
+  const symbols = unique.map(item => item.symbol);
+  const selected = unique.find(item => item.symbol === selectedSymbol && item.ready)?.symbol
+    || unique.find(item => item.symbol === 'XRPUSDT' && item.ready)?.symbol
+    || unique.find(item => item.ready)?.symbol || unique[0]?.symbol || '';
+  const options = unique.map(item => `<option value="${escapeHtml(item.symbol)}"${item.symbol === selected ? ' selected' : ''}${item.ready ? '' : ' disabled'}>${item.label}</option>`).join('');
   return { symbols, selected, options };
 }
 function advanceApiHealth(state, succeeded, now = Date.now()) {
@@ -268,7 +281,7 @@ function renderGridV2a(data) {
   $('#copy-grid').onclick=()=>{const text=`Grid ${data.symbol}\nPiso ${data.recommended_floor} · Techo ${data.recommended_ceiling}\nNiveles ${data.suggested_grids} · Capital por celda ${money(data.capital_per_grid,2)}\nGenerado ${formatDateTime(new Date())}`;navigator.clipboard.writeText(text);};
   $('#grid-create-from-advisor').onclick=()=>{sessionStorage.setItem('asple-advisor-open',JSON.stringify({symbol:data.symbol,capital:$('#grid-capital').value,strategy:'smart',range_low:data.recommended_floor,range_high:data.recommended_ceiling,n_levels:data.suggested_grids,spacing_pct:data.spacing_pct,margin_target_pct:data.margin_target_pct}));location.hash='#scanner';};
 }
-function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'models', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'models') window.loadModelsPage?.(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
+function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; if (base !== 'coins') stopCoinsPolling(); $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'models', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'models') window.loadModelsPage?.(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
 document.addEventListener('DOMContentLoaded', () => { restoreCache(); document.addEventListener('submit', event => { if (event.target?.id === 'grid-form') loadGrid(event); }, true); $('#grid-symbol').addEventListener('change', event => { APP.gridSymbol = event.target.value; }); $('#dashboard-symbol').addEventListener('change', loadDashboard); $('#dashboard-interval').addEventListener('change', loadDashboard); $('#refresh-dashboard').addEventListener('click', refreshDashboard); window.addEventListener('hashchange', route); route(); checkApiStatus(); setInterval(checkApiStatus, 30000); setInterval(() => { if ((location.hash || '#dashboard') === '#dashboard') loadDashboard(); }, 60000); });
 
 // V2b volatility UI: fetched alongside the existing dashboard and battle views.
@@ -368,7 +381,7 @@ async function loadSelectedGridVolatility(button) {
 async function loadGrid(event) {
   event.preventDefault(); const params = { symbol: $('#grid-symbol').value, capital: $('#grid-capital').value, risk: $('#grid-risk').value, days: $('#grid-days').value, margin_target_pct: $('#grid-margin-target').value || .7, range_mode: $('#grid-range-mode')?.value || 'centrado' }, button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'ANALIZANDO...';
   try { const data = await api.grid(params); let forecast = null; try { forecast = data.symbol === 'XRPUSDT' ? await volGet('/api/volatility/forecast', { symbol: 'XRPUSDT' }) : await volGet('/api/grid/volatility', { symbol: data.symbol, days: params.days }); } catch (_) {} cache({ grid: data, ...(forecast ? { volForecast: forecast } : {}) }); renderGrid(data, forecast); }
-  catch (error) { $('#grid-result').innerHTML = `<div class=\"empty-state\"><p class=\"muted\">${escapeHtml(panelLoadError('Grid Advisor', error))}</p></div>`; }
+  catch (error) { const message = error.status === 409 && /a[u\u00FA]n no est[a\u00E1] lista/i.test(error.message) ? error.message : panelLoadError('Grid Advisor', error); $('#grid-result').innerHTML = `<div class=\"empty-state\"><p class=\"muted\">${escapeHtml(message)}</p></div>`; }
   finally { button.disabled = false; button.innerHTML = 'ANALIZAR <span>-&gt;</span>'; }
 }
 document.addEventListener('DOMContentLoaded',()=>{
@@ -398,6 +411,23 @@ document.addEventListener('click', event => { const button = event.target.closes
 // Coin registry: add/remove tradable pairs shown across the app.
 APP.coinsAvailableLoaded = false;
 APP.coinsPendingDelete = null;
+APP.coinsRows = [];
+APP.coinsPoll = null;
+APP.coinsLoading = false;
+const COIN_ACTIVE_STATES = new Set(['descargando', 'entrenando', 'consensuando']);
+const COIN_STATE_LABELS = { pendiente: 'Pendiente', descargando: 'Descargando historial', entrenando: 'Entrenando modelos', consensuando: 'Calculando consenso', lista: 'Lista', datos_insuficientes: 'Datos insuficientes', error: 'Error' };
+function coinReadiness(row) {
+  if (row.symbol === 'XRPUSDT' || row.is_predictor_symbol) return { state: 'lista', progress_pct: 100 };
+  return row.readiness || { state: row.ready ? 'lista' : 'pendiente' };
+}
+function coinState(row) { return coinReadiness(row).state || 'pendiente'; }
+function hasCoinPreparation(rows = APP.coinsRows) { return (rows || []).some(row => COIN_ACTIVE_STATES.has(coinState(row))); }
+function stopCoinsPolling() { if (APP.coinsPoll) clearInterval(APP.coinsPoll); APP.coinsPoll = null; }
+function syncCoinsPolling() {
+  if (location.hash === '#coins' && hasCoinPreparation()) {
+    if (!APP.coinsPoll) APP.coinsPoll = setInterval(() => { if (!APP.coinsLoading) loadCoins(); }, 5000);
+  } else stopCoinsPolling();
+}
 async function loadCoinsAvailableOnce() {
   if (APP.coinsAvailableLoaded) return;
   try {
@@ -407,38 +437,59 @@ async function loadCoinsAvailableOnce() {
   } catch (_) {}
 }
 function showCoinsError(message) { const el = $('#coins-error'); if (!message) { el.classList.add('hidden'); el.textContent = ''; return; } el.textContent = message; el.classList.remove('hidden'); }
+function showCoinsNotice(message) { const el = $('#coins-notice'); if (!el) return; el.textContent = message || ''; el.classList.toggle('hidden', !message); }
 function renderCoinsTable(rows) {
+  const inProgress = hasCoinPreparation(rows);
   const body = (rows || []).map(row => {
     const changeClass = row.change_pct_24h == null ? '' : Number(row.change_pct_24h) >= 0 ? 'change-positive' : 'change-negative';
-    const changeText = row.change_pct_24h == null ? '—' : `${Number(row.change_pct_24h).toFixed(2)}%`;
-    const priceText = row.price == null ? '—' : formatPrice(row.price);
-    const volumeText = row.volume_24h_quote == null ? '—' : formatNumber(row.volume_24h_quote, 0);
-    const addedText = row.added_at ? escapeHtml(formatDate(row.added_at)) : '—';
-    const notesText = row.notes ? escapeHtml(row.notes) : '—';
+    const changeText = row.change_pct_24h == null ? '\u2014' : `${Number(row.change_pct_24h).toFixed(2)}%`;
+    const priceText = row.price == null ? '\u2014' : formatPrice(row.price);
+    const volumeText = row.volume_24h_quote == null ? '\u2014' : formatNumber(row.volume_24h_quote, 0);
+    const addedText = row.added_at ? escapeHtml(formatDate(row.added_at)) : '\u2014';
+    const notesText = row.notes ? escapeHtml(row.notes) : '\u2014';
     const pending = APP.coinsPendingDelete === row.symbol;
     const inactive = row.active === false || row.active === 0;
-    const buttonAttrs = row.is_predictor_symbol ? 'disabled title="XRPUSDT es el símbolo activo del predictor" aria-label="XRPUSDT es el símbolo activo del predictor"' : '';
-    const action = inactive
-      ? `<button type="button" class="button secondary coin-reactivate-btn" data-symbol="${escapeHtml(row.symbol)}">Reactivar</button>`
-      : `<button type="button" class="button secondary coin-remove-btn" data-symbol="${escapeHtml(row.symbol)}" ${buttonAttrs}>${!row.is_predictor_symbol && pending ? '¿Sacar?' : '×'}</button>`;
-    const grid = row.open_grid_id ? `<a href="#grids/${encodeURIComponent(row.open_grid_id)}">Sí (#${escapeHtml(row.open_grid_id)})</a>` : 'No';
-    return `<tr class="${inactive ? 'coin-inactive' : ''}"><td>${escapeHtml(row.symbol)}</td><td>${priceText}</td><td>${volumeText}</td><td class="${changeClass}">${changeText}</td><td>${addedText}</td><td>${notesText}</td><td>${grid}</td><td>${escapeHtml(row.volatility_model || '—')}</td><td>${action}</td></tr>`;
+    const readiness = coinReadiness(row), status = readiness.state || 'pendiente', active = COIN_ACTIVE_STATES.has(status);
+    const statusLabel = COIN_STATE_LABELS[status] || 'Pendiente';
+    const badge = `<span class="coin-readiness coin-readiness-${escapeHtml(status)}">${statusLabel}</span>`;
+    const progress = active ? `<div class="coin-progress"><progress max="100" value="${Math.max(0, Math.min(100, Number(readiness.progress_pct || 0)))}"></progress><small>${escapeHtml(readiness.stage_detail || statusLabel)} \u00B7 ${Math.round(Number(readiness.progress_pct || 0))}%</small></div>` : '';
+    const history = status === 'datos_insuficientes' ? `<small>Historial: ${readiness.history_days == null ? '\u2014' : Number(readiness.history_days)} d\u00EDas; se necesitan al menos 540</small>` : '';
+    const errorText = status === 'error' ? String(readiness.error || 'No se pudo preparar la moneda.') : '';
+    const errorNote = errorText ? `<small class="coin-readiness-error" title="${escapeHtml(errorText)}">${escapeHtml(errorText.length > 120 ? `${errorText.slice(0,117)}...` : errorText)}</small>` : '';
+    const buttonAttrs = row.is_predictor_symbol ? 'disabled title="XRPUSDT es el s\u00EDmbolo activo del predictor" aria-label="XRPUSDT es el s\u00EDmbolo activo del predictor"' : '';
+    const action = inactive ? `<button type="button" class="button secondary coin-reactivate-btn" data-symbol="${escapeHtml(row.symbol)}">Reactivar</button>`
+      : row.is_predictor_symbol || status === 'lista' ? ''
+      : active ? `<button type="button" class="button secondary coin-prepare-cancel" data-symbol="${escapeHtml(row.symbol)}">Cancelar</button>`
+      : `<button type="button" class="button secondary coin-prepare-btn" data-symbol="${escapeHtml(row.symbol)}" ${inProgress ? 'disabled title="Espera a que termine la otra preparaci\u00F3n"' : ''}>Preparar</button>`;
+    const removeAction = `<button type="button" class="button secondary coin-remove-btn" data-symbol="${escapeHtml(row.symbol)}" ${buttonAttrs}>${!row.is_predictor_symbol && pending ? '\u00BFSacar\u003F' : '\u00D7'}</button>`;
+    const grid = row.open_grid_id ? `<a href="#grids/${encodeURIComponent(row.open_grid_id)}">S\u00ED (#${escapeHtml(row.open_grid_id)})</a>` : 'No';
+    return `<tr class="${inactive ? 'coin-inactive' : ''}"><td>${escapeHtml(row.symbol)}</td><td>${priceText}</td><td>${volumeText}</td><td class="${changeClass}">${changeText}</td><td>${addedText}</td><td>${notesText}</td><td>${grid}</td><td>${escapeHtml(row.volatility_model || '\u2014')}</td><td>${badge}${progress}${history}${errorNote}</td><td>${action} ${removeAction}</td></tr>`;
   }).join('');
-  $('#coins-table').innerHTML = `<thead><tr><th>Símbolo</th><th>Precio</th><th>Volumen 24h (USDT)</th><th>Cambio 24h</th><th>Alta</th><th>Notas</th><th>Grid abierto</th><th>Modelo de volatilidad</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="9">Sin monedas activas.</td></tr>'}</tbody>`;
+  $('#coins-table').innerHTML = `<thead><tr><th>S\u00EDmbolo</th><th>Precio</th><th>Volumen 24h (USDT)</th><th>Cambio 24h</th><th>Alta</th><th>Notas</th><th>Grid abierto</th><th>Modelo de volatilidad</th><th>Preparaci\u00F3n</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="10">Sin monedas activas.</td></tr>'}</tbody>`;
+  syncCoinsPolling();
 }
 async function loadCoins() {
   loadCoinsAvailableOnce();
-  try { const rows = await api.coinsList($('#coins-show-inactive')?.checked); showCoinsError(null); renderCoinsTable(rows); }
-  catch (error) { showCoinsError(panelLoadError('Monedas', error)); $('#coins-table').innerHTML = '<tbody><tr><td>No se pudo cargar la lista; puedes reintentar.</td></tr></tbody>'; }
+  if (APP.coinsLoading) return;
+  APP.coinsLoading = true;
+  try { const rows = await api.coinsList($('#coins-show-inactive')?.checked); APP.coinsRows = rows || []; showCoinsError(null); renderCoinsTable(APP.coinsRows); }
+  catch (error) { APP.coinsRows = []; stopCoinsPolling(); showCoinsError(panelLoadError('Monedas', error)); $('#coins-table').innerHTML = '<tbody><tr><td colspan="10">No se pudo cargar la lista; puedes reintentar.</td></tr></tbody>'; }
+  finally { APP.coinsLoading = false; }
 }
 async function handleCoinFormSubmit(event) {
   event.preventDefault();
   const symbolInput = $('#coin-symbol-input'), notesInput = $('#coin-notes-input');
   const symbol = symbolInput.value.trim().toUpperCase();
   if (!symbol) return;
-  showCoinsError(null);
-  try { await api.addCoin(symbol, notesInput.value.trim()); symbolInput.value = ''; notesInput.value = ''; await loadCoins(); }
-  catch (error) { showCoinsError(error.message || 'No se pudo agregar la moneda.'); }
+  showCoinsError(null); showCoinsNotice(null);
+  try {
+    await api.addCoin(symbol, notesInput.value.trim());
+    symbolInput.value = ''; notesInput.value = '';
+    APP.coinsRows = [...APP.coinsRows.filter(row => row.symbol !== symbol), { symbol, active: true, readiness: { state: 'pendiente', stage_detail: 'pendiente', progress_pct: 0 } }];
+    renderCoinsTable(APP.coinsRows);
+    showCoinsNotice(`${symbol} agregada. Se est\u00E1 preparando en segundo plano; no podr\u00E1s abrir grids hasta que est\u00E9 lista.`);
+    await loadCoins();
+  } catch (error) { showCoinsError(error.message || 'No se pudo agregar la moneda.'); }
 }
 async function handleCoinsTableClick(event) {
   const reactivate = event.target.closest('.coin-reactivate-btn');
@@ -447,13 +498,27 @@ async function handleCoinsTableClick(event) {
     catch (error) { showCoinsError(error.message || 'No se pudo reactivar la moneda.'); }
     return;
   }
+  const prepare = event.target.closest('.coin-prepare-btn');
+  if (prepare && !prepare.disabled) {
+    showCoinsError(null);
+    try { await api.prepareCoin(prepare.dataset.symbol); await loadCoins(); }
+    catch (error) { showCoinsError(error.message || 'No se pudo iniciar la preparaci\u00F3n.'); }
+    return;
+  }
+  const cancel = event.target.closest('.coin-prepare-cancel');
+  if (cancel) {
+    showCoinsError(null);
+    try { await api.cancelCoinPreparation(cancel.dataset.symbol); await loadCoins(); }
+    catch (error) { showCoinsError(error.message || 'No se pudo cancelar la preparaci\u00F3n.'); }
+    return;
+  }
   const button = event.target.closest('.coin-remove-btn');
   if (!button || button.disabled) return;
   const symbol = button.dataset.symbol;
   if (APP.coinsPendingDelete !== symbol) { APP.coinsPendingDelete = symbol; await loadCoins(); return; }
   APP.coinsPendingDelete = null;
   showCoinsError(null);
-  try { await api.removeCoin(symbol); await loadCoins(); }
-  catch (error) { showCoinsError(error.message || 'No se pudo sacar la moneda.'); await loadCoins(); }
+  try { await api.removeCoin(symbol); showCoinsNotice(null); await loadCoins(); }
+  catch (error) { await loadCoins(); showCoinsError(error.message || 'No se pudo sacar la moneda.'); }
 }
 document.addEventListener('DOMContentLoaded', () => { $('#coins-form')?.addEventListener('submit', handleCoinFormSubmit); $('#coins-table')?.addEventListener('click', handleCoinsTableClick); $('#coins-show-inactive')?.addEventListener('change', loadCoins); });

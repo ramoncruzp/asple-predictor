@@ -5,3 +5,5 @@
 .models-training-name{display:block}.models-training-note,.models-status-subtext{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.4}
 .models-train-dialog [hidden]{display:none!important}
 .models-few-data{color:var(--warning, #d29922);font-size:13px;font-weight:600;display:block;margin-top:4px}
+
+.models-vol-history-chart{padding-left:12px;box-sizing:border-box}.models-direction-only-xrp,.models-selection-note{display:block;margin:8px 0;color:var(--muted)}.models-training-note{display:block;color:var(--muted);margin-top:4px}.models-selection-note{padding:8px 10px;border-left:3px solid var(--blue);background:var(--surface2)}

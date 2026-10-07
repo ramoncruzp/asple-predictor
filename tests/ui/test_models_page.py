@@ -1,5 +1,6 @@
 import re
 from urllib.parse import parse_qs, urlparse
+import time
 
 from playwright.sync_api import expect
 
@@ -442,8 +443,172 @@ def test_models_page_selector_horizon_and_apply_confirmation(live_server, ui_pag
     expect(ui_page.locator("#models-vol-factor")).to_contain_text("Pocos datos (n efectiva 0.75)")
     expect(ui_page.locator("#models-vol-factor")).not_to_contain_text("El modelo sobreestima")
     ui_page.locator("#models-symbol").select_option("BTCUSDT")
-    expect(ui_page.locator("#models-vol-live-table")).to_contain_text("Volatilidad solo disponible para XRPUSDT")
+    expect(ui_page.locator("#models-vol-summary")).to_contain_text("BTCUSDT aún no tiene modelos de volatilidad")
+    expect(ui_page.locator("#models-vol-summary").get_by_role("link", name="Monedas")).to_have_attribute("href", "#coins")
+    expect(ui_page.locator("#models-vol-live-table")).not_to_contain_text("BTCUSDT aún no tiene modelos de volatilidad")
     expect(ui_page.locator("#models-vol-live-table")).not_to_contain_text("error")
     expect(ui_page.locator("#models-vol-summary")).not_to_contain_text("σ 3.2%")
     assert ("XRPUSDT", 1) in calls["stats"] and ("BTCUSDT", 1) not in calls["stats"]
 
+
+
+
+def _models_symbol_page(ui_page, live_server, readiness_state='lista', symbols=None, delay_xrp_stats=False):
+    calls = {'stats': [], 'forecast': [], 'widen': [], 'history': []}
+    available = symbols or [{'symbol':'XRPUSDT','selection':'consensus','has_consensus':True},
+                            {'symbol':'ADAUSDT','selection':'provisional','has_consensus':False}]
+    def handler(route):
+        request=route.request
+        path=request.url.split(live_server.url,1)[-1].split('?',1)[0]
+        query=parse_qs(urlparse(request.url).query)
+        symbol=query.get('symbol',['XRPUSDT'])[0]
+        if path=='/api/models/page-context':
+            route.fulfill(json={'symbol':symbol,'interval':'1h','coins':['XRPUSDT','ADAUSDT']})
+        elif path=='/api/coins':
+            route.fulfill(json=[{'symbol':'XRPUSDT','ready':True,'readiness':{'state':'lista'}},
+                                {'symbol':'ADAUSDT','ready':readiness_state=='lista','readiness':{'state':readiness_state}}])
+        elif path=='/api/volatility/symbols': route.fulfill(json={'default':'XRPUSDT','symbols':available})
+        elif path=='/api/volatility/model-stats':
+            calls['stats'].append(symbol)
+            route.fulfill(json={'symbol':symbol,'horizons':[{'horizon_h':4,'n_min':30,'models':[{'model_name':'GBM','n_predicciones':40,'n_verificadas':35,'estado':'activo','all':{'mse':.01}}]}]})
+        elif path=='/api/volatility/forecast':
+            calls['forecast'].append(symbol)
+            route.fulfill(json={'symbol':symbol,'forecasts':[{'horizon_h':4,'champion':'GBM','move_1sigma_pct':3.2,'consensus':{'sigma_pct':3.1,'validation_status_live':'en_evaluacion'}}]})
+        elif path=='/api/volatility/widen-factor':
+            calls['widen'].append(symbol)
+            route.fulfill(json={'symbol':symbol,'horizons':[{'horizon_h':4,'status':'acumulando','n_effective':1}]})
+        elif path=='/api/volatility/battle':
+            champion='Persistence' if symbol=='ADAUSDT' and next((row.get('selection') for row in available if row.get('symbol')=='ADAUSDT'),None)=='consensus' else 'GBM'
+            route.fulfill(json={'symbol':symbol,'horizon_h':4,'models':[{'model_name':champion,'is_champion':True,'r2_cal':.2,'qlike_cal':.3}]})
+        elif path=='/api/volatility/history':
+            calls['history'].append(symbol)
+            route.fulfill(json=[{'forecast_at':'2026-10-07T10:00:00Z','pred_vol_pct':3.1,'realized_vol_pct':3.0}],headers={'X-Vol-Selection':available[1].get('selection','provisional') if symbol=='ADAUSDT' else available[0].get('selection','consensus')})
+        elif path=='/api/predictions/volatility-coverage': route.fulfill(json={'n':40,'coverage_1sigma':.68,'coverage_2sigma':.95})
+        elif path=='/api/models/status': route.fulfill(json={'models':[{'model_name':'model_a','available':True,'validation_status':'champion','display_name':'XGBoost','symbol':'XRPUSDT','interval':'1h'}]})
+        elif path=='/api/models/shadow-status': route.fulfill(json={})
+        elif path.endswith('/train/status'): route.fulfill(json={'job':None})
+        elif path.endswith('/train/jobs'): route.fulfill(json={'jobs':[]})
+        elif path.endswith('/vol/artifacts'): route.fulfill(json={})
+        else: route.fulfill(json={})
+    ui_page.route('**/api/**',handler)
+    ui_page.goto(f'{live_server.url}/#models')
+    ui_page.wait_for_function("document.querySelector('#models-symbol')?.options.length >= 2")
+    return calls
+
+
+def test_ready_ada_uses_its_own_volatility_endpoints_and_selection_notice(ui_page, live_server):
+    calls=_models_symbol_page(ui_page,live_server)
+    ui_page.locator('#models-symbol').select_option('ADAUSDT')
+    expect(ui_page.locator('#models-vol-summary')).to_contain_text('Selección provisional: el consenso estadístico de esta moneda aún no se ha calculado')
+    expect(ui_page.locator('#models-active-context')).to_contain_text('ADAUSDT')
+    assert calls['stats'].count('ADAUSDT') >= 1
+    assert calls['forecast'].count('ADAUSDT') >= 1
+    assert calls['widen'].count('ADAUSDT') >= 1
+    assert 'Volatilidad solo disponible para XRPUSDT' not in ui_page.locator('body').inner_text()
+
+
+def test_unready_ada_gets_one_notice_and_no_volatility_requests(ui_page, live_server):
+    calls=_models_symbol_page(ui_page,live_server,readiness_state='entrenando',symbols=[{'symbol':'XRPUSDT','selection':'consensus'}])
+    ui_page.locator('#models-symbol').select_option('ADAUSDT')
+    expect(ui_page.locator('#models-vol-summary')).to_contain_text('ADAUSDT aún no tiene modelos de volatilidad: estado entrenando')
+    expect(ui_page.locator('#models-vol-summary a')).to_have_attribute('href','#coins')
+    text=ui_page.locator('#screen-models').inner_text()
+    assert text.count('ADAUSDT aún no tiene modelos de volatilidad')==1
+    assert calls['stats'].count('ADAUSDT')==0
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('Los modelos de dirección solo existen para XRPUSDT.')
+    expect(ui_page.locator('#models-direction-content')).not_to_contain_text('ADAUSDT 1h')
+    vol_train=ui_page.locator('#models-training-models button[data-model="vol"]')
+    expect(vol_train).to_be_disabled()
+    expect(ui_page.locator('#models-training-models')).to_contain_text('El entrenamiento de esta moneda se gestiona desde Monedas.')
+
+
+def test_consensus_persistence_note_and_xrp_history_selection_header(ui_page, live_server):
+    symbols=[{'symbol':'XRPUSDT','selection':'champions'}, {'symbol':'ADAUSDT','selection':'consensus'}]
+    _models_symbol_page(ui_page,live_server,readiness_state='lista',symbols=symbols)
+    ui_page.locator('#models-symbol').select_option('ADAUSDT')
+    # The history response carries the authoritative selection header.
+    expect(ui_page.locator('#models-vol-table')).to_contain_text('Selección por consenso estadístico')
+    expect(ui_page.locator('#models-vol-table')).to_contain_text('Ningún modelo superó a Persistence en este horizonte')
+    ui_page.locator('#models-symbol').select_option('XRPUSDT')
+    expect(ui_page.locator('#models-vol-summary')).to_contain_text('En evaluación')
+
+
+def test_direction_uses_artifact_identity_and_hides_non_xrp_content(ui_page, live_server):
+    _models_symbol_page(ui_page,live_server,readiness_state='lista')
+    rendered=ui_page.evaluate("""() => ({
+      row:window.ModelsPageTest.renderDirectionRow('model_a',{display_name:'XGBoost',available:true,symbol:'XRPUSDT',interval:'1h'}, {}, {}, null, {symbol:'ADAUSDT',interval:'1h'}),
+      ada:window.ModelsPageTest.renderDirection({models:[{model_name:'model_a',display_name:'XGBoost'}]},{symbol:'ADAUSDT',interval:'1h'},{}),
+      xrp:window.ModelsPageTest.renderDirection({models:[{model_name:'model_a',display_name:'XGBoost'}]},{symbol:'XRPUSDT',interval:'1h'}, {})
+    })""")
+    assert 'XRPUSDT 1h' in rendered['row']
+    assert 'ADAUSDT 1h' not in rendered['row']
+    assert 'Los modelos de dirección solo existen para XRPUSDT.' in rendered['ada']
+    assert 'XGBoost' not in rendered['ada']
+    assert 'XGBoost' in rendered['xrp']
+
+
+def test_chart_left_edge_has_room_at_narrow_viewport(ui_page, live_server):
+    ui_page.add_init_script("""window.LightweightCharts={createChart:(container,options)=>{window.__volChartOptions=options;return {addLineSeries:()=>({setData:()=>{}}),timeScale:()=>({fitContent:()=>{}}),remove:()=>{}}}}""")
+    _page_with_empty_api(ui_page,live_server)
+    ui_page.set_viewport_size({'width':360,'height':900})
+    result=ui_page.evaluate("""() => {
+      window.ModelsPageTest.renderVolHistory([{forecast_at:new Date().toISOString(),pred_vol_pct:1,realized_vol_pct:1}],4,'champion');
+      const el=document.querySelector('#models-vol-history');
+      return {fixLeft:window.__volChartOptions.timeScale.fixLeftEdge,padding:getComputedStyle(el).paddingLeft,viewport:innerWidth};
+    }""")
+    assert result['fixLeft'] is True
+    assert float(result['padding'].replace('px','')) >= 12
+    assert result['viewport'] == 360
+
+
+def test_training_note_covers_volatility_and_direction_and_restart(ui_page, live_server):
+    _page_with_empty_api(ui_page,live_server)
+    note=ui_page.locator('#models-training-title').locator('xpath=following-sibling::p')
+    expect(note).to_contain_text('1/2/4/24')
+    expect(note).to_contain_text('reiniciar')
+    expect(note).to_contain_text('Dirección: XRPUSDT · 1h')
+    expect(note).to_contain_text('solo a modelos de dirección')
+
+
+
+def test_late_xrp_response_is_ignored_after_switching_to_ada(ui_page, live_server):
+    calls={'xrp_started':False,'xrp_finished':False}
+    def api(route):
+        request=route.request
+        path=request.url.split(live_server.url,1)[-1].split('?',1)[0]
+        query=parse_qs(urlparse(request.url).query)
+        symbol=query.get('symbol',['XRPUSDT'])[0]
+        if path=='/api/models/page-context':
+            route.fulfill(json={'symbol':symbol,'interval':'1h','coins':['XRPUSDT','ADAUSDT']})
+        elif path=='/api/coins':
+            route.fulfill(json=[{'symbol':'XRPUSDT','ready':True,'readiness':{'state':'lista'}}, {'symbol':'ADAUSDT','ready':True,'readiness':{'state':'lista'}}])
+        elif path=='/api/volatility/symbols':
+            route.fulfill(json={'symbols':[{'symbol':'XRPUSDT','selection':'consensus'},{'symbol':'ADAUSDT','selection':'provisional'}]})
+        elif path=='/api/volatility/model-stats':
+            if symbol=='XRPUSDT' and not calls['xrp_started']:
+                calls['xrp_started']=True
+                time.sleep(1.0)
+                calls['xrp_finished']=True
+            route.fulfill(json={'symbol':symbol,'horizons':[{'horizon_h':4,'models':[]}]})
+        elif path=='/api/volatility/forecast':
+            pct=9.9 if symbol=='XRPUSDT' else 1.1
+            route.fulfill(json={'symbol':symbol,'forecasts':[{'horizon_h':4,'champion':'GBM','move_1sigma_pct':pct,'consensus':{'validation_status_live':'en_evaluacion'}}]})
+        elif path=='/api/volatility/widen-factor': route.fulfill(json={'symbol':symbol,'horizons':[]})
+        elif path=='/api/volatility/battle': route.fulfill(json={'symbol':symbol,'horizon_h':4,'models':[{'model_name':'GBM','is_champion':True}]})
+        elif path=='/api/volatility/history': route.fulfill(json=[],headers={'X-Vol-Selection':'consensus'})
+        elif path.endswith('/train/status'): route.fulfill(json={'job':None})
+        elif path.endswith('/train/jobs'): route.fulfill(json={'jobs':[]})
+        elif path.endswith('/vol/artifacts'): route.fulfill(json={})
+        else: route.fulfill(json={})
+    ui_page.route('**/api/**',api)
+    ui_page.goto(f'{live_server.url}/#models')
+    ui_page.wait_for_function("window.ModelsPageTest !== undefined")
+    ui_page.wait_for_timeout(120)
+    ui_page.locator('#models-symbol').select_option('ADAUSDT')
+    expect(ui_page.locator('#models-active-context')).to_contain_text('ADAUSDT')
+    expect(ui_page.locator('#models-vol-summary')).to_contain_text('1.10%')
+    ui_page.wait_for_timeout(1200)
+    assert calls['xrp_finished'] is True
+    expect(ui_page.locator('#models-active-context')).to_contain_text('ADAUSDT')
+    expect(ui_page.locator('#models-vol-summary')).to_contain_text('1.10%')
+    expect(ui_page.locator('#models-vol-summary')).not_to_contain_text('9.90%')
