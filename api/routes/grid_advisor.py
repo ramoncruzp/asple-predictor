@@ -5,11 +5,13 @@ from statistics import NormalDist
 from fastapi import APIRouter, HTTPException, Query, Request
 from models.coin_onboarding import coin_is_ready
 import numpy as np
+import pandas as pd
 from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
                                   VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
 from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_threshold, minimum_cell_warning)
+from grid.sim.data import CandleData
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
 from grid.range_risk import estimate_range_risk
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
@@ -194,19 +196,21 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     sigma_realized_24h = float(np.std(np.diff(np.log(np.asarray(close, dtype=float))), ddof=1) * np.sqrt(24))
     sigma_24h = volatility["sigma_24h"] or sigma_realized_24h
     vol_source_effective = volatility["effective"]
-    sigma_source = (f"pronostico {vol_source_effective} {symbol} 24 h"
-                    if vol_source_effective in {"campeon", "consenso"}
-                    else "volatilidad realizada de velas 1h (log-retornos)")
+    source_label = {"campeon": "campeón", "consenso": "consenso"}.get(vol_source_effective)
+    sigma_source = (f"pronóstico {source_label} {symbol} 24 h"
+                    if source_label else "volatilidad realizada de velas 1h (log-retornos)")
     if vol_source_effective == "realizada" and volatility.get("reason"):
         sigma_source += f" (respaldo; {volatility['reason']})"
     accumulating_models, bias_alerts = _model_volatility_advisories(request, volatility, forecast24, symbol)
     if symbol == VOL_SYMBOL:
         widen_active, widen_latest = _widen_runtime_settings(request)
     else:
-        widen_active = {"k_active": 1.0, "disagreement_pct_active": VOL_WIDEN_DISAGREEMENT_PCT}
+        widen_active = {"k_active": 1.0, "disagreement_pct_active": None}
         widen_latest = None
+    widen_not_calculated = symbol != VOL_SYMBOL
     k_active = float(widen_active["k_active"])
-    disagreement_active = float(widen_active["disagreement_pct_active"])
+    disagreement_active = (float(widen_active["disagreement_pct_active"])
+                           if widen_active["disagreement_pct_active"] is not None else None)
     current_iqr = ((forecast24.get("consensus") or {}).get("dispersion_iqr")
                    if forecast24 else None)
     adaptive_ready = bool(widen_latest and int(widen_latest.get("dispersion_n") or 0) >= WIDEN_DISAGREEMENT_MIN
@@ -264,13 +268,31 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     target_cycles = ceil(capital * margin_target_pct / 100 / net_per_cycle_usdt) if net_per_cycle_usdt > 0 else None
     prediction = request.app.state.prediction_loop.latest.get((symbol, ACTIVE_INTERVAL))
     simulation_window, simulation_meta = _simulation_window(df, floor, ceiling, days)
+    simulation_candles = None
+    if simulation_window is not None:
+        timestamps = (pd.to_datetime(simulation_window["timestamp"], utc=True)
+                      .astype("int64").to_numpy() // 1_000_000_000)
+        simulation_candles = CandleData(
+            timestamp=timestamps.astype(np.int64),
+            open=np.asarray(simulation_window["open"], dtype=float),
+            high=np.asarray(simulation_window["high"], dtype=float),
+            low=np.asarray(simulation_window["low"], dtype=float),
+            close=np.asarray(simulation_window["close"], dtype=float),
+            gaps=0)
+    if simulation_window is not None and simulation_meta["sim_days"] + 0.5 < days:
+        available = f"{simulation_meta['sim_days']:.1f}".replace(".", ",")
+        start_date = str(simulation_meta["sim_start"])[:10]
+        simulation_meta["window_warning"] = (
+            f"Historia disponible para simular {available} días de {days} pedidos; "
+            f"el precio entr\u00f3 al rango el {start_date}."
+        )
     simulations = {}
     for strategy in ("simple", "smart"):
         if simulation_window is None:
             simulations[strategy] = {**simulation_meta}
             continue
         try:
-            result = run_simulation(simulation_window, strategy=strategy, n=grids, capital=capital,
+            result = run_simulation(simulation_candles, strategy=strategy, n=grids, capital=capital,
                 low=floor, high=ceiling, fee_pct=fee_pct, filters=filters)
             simulations[strategy] = {**simulation_meta, **result["metrics"]}
         except Exception as exc:
@@ -296,23 +318,24 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         "champion_sigma_24h": volatility.get("champion_sigma_24h"),
         "consensus_sigma_24h": volatility.get("consensus_sigma_24h"),
         "disagreement_pct": disagreement_pct,
-        "show_comparison": disagreement_pct is not None and disagreement_pct > disagreement_active,
+        "show_comparison": disagreement_pct is not None and disagreement_active is not None and disagreement_pct > disagreement_active,
         "k_active": k_active,
         "k_suggested": (widen_latest or {}).get("k_stress_smoothed"),
-        "widen_status": (widen_latest or {}).get("status", "acumulando"),
-        "widen_progress_pct": (widen_latest or {}).get("progress_pct", 0.0),
-        "widen_ci_low": (widen_latest or {}).get("ci_low"),
-        "widen_ci_high": (widen_latest or {}).get("ci_high"),
-        "widen_ci_width": (widen_latest or {}).get("ci_width"),
-        "widen_n": (widen_latest or {}).get("n", 0),
-        "widen_n_effective": (widen_latest or {}).get("n_effective", 0.0),
-        "widen_days_estimated": (widen_latest or {}).get("days_estimated"),
+        "widen_not_calculated": widen_not_calculated,
+        "widen_status": "no_calculado" if widen_not_calculated else (widen_latest or {}).get("status", "acumulando"),
+        "widen_progress_pct": None if widen_not_calculated else (widen_latest or {}).get("progress_pct", 0.0),
+        "widen_ci_low": None if widen_not_calculated else (widen_latest or {}).get("ci_low"),
+        "widen_ci_high": None if widen_not_calculated else (widen_latest or {}).get("ci_high"),
+        "widen_ci_width": None if widen_not_calculated else (widen_latest or {}).get("ci_width"),
+        "widen_n": None if widen_not_calculated else (widen_latest or {}).get("n", 0),
+        "widen_n_effective": None if widen_not_calculated else (widen_latest or {}).get("n_effective", 0.0),
+        "widen_days_estimated": None if widen_not_calculated else (widen_latest or {}).get("days_estimated"),
         "widen_adaptive_trigger": adaptive_ready,
-        "widen_stress_threshold": (widen_latest or {}).get("stress_threshold"),
+        "widen_stress_threshold": None if widen_not_calculated else (widen_latest or {}).get("stress_threshold"),
         "disagreement_pct_active": disagreement_active,
-        "disagreement_threshold_suggested": (widen_latest or {}).get("disagreement_threshold_suggested"),
-        "disagreement_status": (widen_latest or {}).get("disagreement_status", "acumulando"),
-        "disagreement_progress": (widen_latest or {}).get("disagreement_progress", 0.0),
+        "disagreement_threshold_suggested": None if widen_not_calculated else (widen_latest or {}).get("disagreement_threshold_suggested"),
+        "disagreement_status": None if widen_not_calculated else (widen_latest or {}).get("disagreement_status", "acumulando"),
+        "disagreement_progress": None if widen_not_calculated else (widen_latest or {}).get("disagreement_progress", 0.0),
         "reason": volatility.get("reason"),
         "accumulating_models": accumulating_models,
         "bias_alerts": bias_alerts,
@@ -330,7 +353,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         range_preference_note = "El precio está a menos de 1 ATR de un borde estructural; se prefiere el rango centrado."
     if actual_range_mode == "centrado" and centered["limited_by_profile"]:
         range_mode_reason = "Rango centrado limitado por el perfil."
-    return {"symbol": symbol, "current_price": current, "recommended_floor": floor,
+    return {"symbol": symbol, "capital": capital, "current_price": current, "recommended_floor": floor,
         "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids,
         "capital_per_grid": capital / grids, "spacing_pct": evaluation["spacing_pct"],
         "margin_target_pct": margin_target_pct, "fee_pct": fee_pct,

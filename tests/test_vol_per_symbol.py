@@ -274,3 +274,37 @@ def test_vol_loop_continues_other_symbol_after_one_symbol_fails():
     assert reloaded == ["ADAUSDT", "XRPUSDT"]
     assert calls[0][0] == "ADAUSDT" and any(symbol == "XRPUSDT" for symbol, _, _ in calls)
     assert [row["symbol"] for row in saved] == ["XRPUSDT"]
+
+
+def test_vol_loop_forecasts_after_ada_becomes_ready_without_network(tmp_path):
+    from unittest.mock import create_autospec
+    from data.binance_client import BinanceClient
+    from database.db_manager import DBManager
+
+    db = DBManager(f"sqlite:///{tmp_path / 'onboarding.db'}")
+    db.add_or_reactivate_coin("ADAUSDT")
+    db.set_readiness("ADAUSDT", "lista", stage_detail="lista", progress_pct=100.0)
+    assert db.get_readiness("ADAUSDT")["state"] == "lista"
+
+    artifact_root = tmp_path / "vol_artifacts"
+    _write_symbol_artifacts(artifact_root / "ada", "ADAUSDT", "onboarded-ada")
+    registry = VolPredictorRegistry(artifact_root, horizons=[1], model_names=["Persistence"])
+    assert registry.load_available() == ["ADAUSDT"]
+    assert registry.ready_symbols() == ["ADAUSDT"]
+    predictor = registry.get("ADAUSDT")
+    now = datetime.now(timezone.utc)
+    predictor.predict_latest = create_autospec(predictor.predict_latest, return_value=[{
+        "symbol":"ADAUSDT", "horizon_h":1, "model_name":"Persistence",
+        "forecast_at":now-timedelta(hours=2), "made_at":now,
+        "pred_logvol_raw":-5.0, "pred_logvol_cal":-5.0,
+        "var_factor":1.0, "is_champion":True, "price":100.0,
+    }])
+    client = create_autospec(BinanceClient, instance=True)
+    hourly, five = _cycle_frames()
+    client.get_historical_klines.side_effect = lambda symbol, interval, lookback_days: hourly if interval == "1h" else five
+
+    VolLoop(client, registry, db).run_cycle()
+
+    predictor.predict_latest.assert_called_once()
+    forecasts = db.get_latest_vol_forecasts("ADAUSDT")
+    assert forecasts and forecasts[0]["symbol"] == "ADAUSDT"

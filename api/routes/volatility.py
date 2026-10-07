@@ -338,8 +338,14 @@ def model_stats(
         # snapshots are calculation state used by forward metrics, not API data.
         stats["adaptive"].pop("snapshots", None)
         result.append(stats)
+    consensus_path = (Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json" if symbol == VOL_SYMBOL
+                      else vol_consensus_path(symbol))
+    try:
+        consensus_payload = json.loads(consensus_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        consensus_payload = {}
     return {"symbol": symbol, "horizons": result,
-            "consensus_selection_note": "TEST visto durante la selecci\u00F3n",
+            "test_is_virgin": consensus_payload.get("test_is_virgin") if isinstance(consensus_payload, dict) else None,
             **_selection_fields(symbol)}
 
 

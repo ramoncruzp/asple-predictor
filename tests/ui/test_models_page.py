@@ -23,7 +23,7 @@ def test_model_stats_explains_var_ratio_log_error_and_direction_metric_visibly(u
     }""")
     assert "var_ratio 1.250" in result["text"]
     assert "sesgo en log tiene un componente estructural por calibrar en varianza" in result["text"]
-    assert "TEST visto durante la selecci\u00F3n" in result["text"]
+    assert "TEST visto durante la selecci\u00F3n" not in result["text"]
     assert "Dentro de \u00B1\u03C3_ref" in result["text"] and "no cobertura del precio" in result["text"]
     assert result["coverageDisplay"] != "none" and result["coverageVisibility"] == "visible"
     assert "BAJISTA acierta si el precio no sube m\u00E1s de 0,5 %" in result["text"]
@@ -251,7 +251,7 @@ def test_volatility_presentation_separates_labels_values_and_notes(ui_page, live
     assert "CampeónGBM" not in rendered["summary"]
     assert re.search(r"Campeón\s+GBM\s+σ 0\.79%", rendered["summary"])
     assert re.search(r"Fuente efectiva de pesos\s+vivo\s+Confianza de pesos: alta", rendered["summary"])
-    assert "Validación en vivo\nEn evaluación" in rendered["summary"]
+    assert "Validaci\u00f3n en vivo" in rendered["summary"] and "En evaluaci\u00f3n" in rendered["summary"]
     assert "en_evaluacion" not in rendered["summary"]
     assert re.search(r"Cobertura en vivo 4h\s+1σ", rendered["coverage"])
     assert re.search(r"Factor de ampliación\s+activo", rendered["factor"])
@@ -499,7 +499,8 @@ def _models_symbol_page(ui_page, live_server, readiness_state='lista', symbols=N
 def test_ready_ada_uses_its_own_volatility_endpoints_and_selection_notice(ui_page, live_server):
     calls=_models_symbol_page(ui_page,live_server)
     ui_page.locator('#models-symbol').select_option('ADAUSDT')
-    expect(ui_page.locator('#models-vol-summary')).to_contain_text('Selección provisional: el consenso estadístico de esta moneda aún no se ha calculado')
+    expect(ui_page.locator('#models-vol-table')).to_contain_text('Selección provisional: el consenso estadístico de esta moneda aún no se ha calculado')
+    assert ui_page.locator('.models-selection-note').count() == 1
     expect(ui_page.locator('#models-active-context')).to_contain_text('ADAUSDT')
     assert calls['stats'].count('ADAUSDT') >= 1
     assert calls['forecast'].count('ADAUSDT') >= 1
@@ -612,3 +613,89 @@ def test_late_xrp_response_is_ignored_after_switching_to_ada(ui_page, live_serve
     expect(ui_page.locator('#models-active-context')).to_contain_text('ADAUSDT')
     expect(ui_page.locator('#models-vol-summary')).to_contain_text('1.10%')
     expect(ui_page.locator('#models-vol-summary')).not_to_contain_text('9.90%')
+
+
+def test_non_xrp_volatility_errors_and_selection_notice_are_symbol_aware(ui_page, live_server):
+    responses = {"ADAUSDT": {"stats":200,"forecast":503,"factor":404}, "XRPUSDT": {"stats":200,"forecast":500,"factor":500}}
+    def respond(route):
+        url=route.request.url; symbol=parse_qs(urlparse(url).query).get("symbol",["XRPUSDT"])[0]
+        if "/api/models/page-context" in url:
+            route.fulfill(json={"symbol":"XRPUSDT","interval":"1h","coins":["XRPUSDT","ADAUSDT"],"models":{}})
+        elif "/api/coins" in url:
+            route.fulfill(json=[{"symbol":"ADAUSDT","ready":True,"readiness":{"state":"lista"}}])
+        elif "/symbols" in url:
+            route.fulfill(json={"symbols":[{"symbol":"ADAUSDT","selection":"consensus"},{"symbol":"XRPUSDT","selection":"consensus"}]})
+        elif "/model-stats" in url:
+            route.fulfill(status=responses[symbol]["stats"],json={"detail":"stats unavailable"} if responses[symbol]["stats"]!=200 else {"symbol":symbol,"test_is_virgin":symbol=="ADAUSDT","horizons":[{"horizon_h":4,"models":[]}]})
+        elif "/forecast" in url:
+            route.fulfill(status=responses[symbol]["forecast"],json={"detail":"forecast unavailable"})
+        elif "/widen-factor" in url:
+            route.fulfill(status=responses[symbol]["factor"],json={"detail":"factor unavailable"})
+        elif "/battle" in url:
+            route.fulfill(json={"symbol":symbol,"horizon_h":4,"models":[{"model_name":"GBM","is_champion":True}]},headers={"X-Vol-Selection":"consensus"})
+        elif "/history" in url:
+            route.fulfill(json=[])
+        else:
+            route.fulfill(json={})
+    ui_page.route("**/api/**",respond)
+    ui_page.goto(f"{live_server.url}/#models")
+    ui_page.wait_for_function("window.ModelsPageTest !== undefined")
+    ui_page.evaluate("async () => { await window.ModelsPageTest.loadContext('ADAUSDT'); document.querySelector('#models-horizon').value='4'; await window.ModelsPageTest.loadVolatility(); }")
+    expect(ui_page.locator("#models-vol-summary")).to_contain_text("sin pron\u00f3stico para esta moneda")
+    expect(ui_page.locator("#models-vol-factor")).to_contain_text("no disponible para esta moneda")
+    expect(ui_page.locator("#models-test-selection-note")).to_contain_text("TEST virgen")
+    assert ui_page.locator("#models-vol-table .models-selection-note").count()==1
+    ui_page.evaluate("async () => { const select=document.querySelector('#models-symbol'); select.value='XRPUSDT'; await window.ModelsPageTest.loadVolatility(); }")
+    expect(ui_page.locator("#models-vol-summary")).to_contain_text("error de red")
+    expect(ui_page.locator("#models-vol-factor")).to_contain_text("error de red")
+    expect(ui_page.locator("#models-test-selection-note")).to_contain_text("TEST de XRPUSDT no es virgen")
+
+
+def test_training_summary_uses_selected_symbol_and_selected_horizon(ui_page, live_server):
+    ui_page.route("**/api/**", lambda route: route.fulfill(json={}))
+    ui_page.route("**/api/models/page-context**", lambda route: route.fulfill(json={"symbol":"ADAUSDT","interval":"1h","coins":["XRPUSDT","ADAUSDT"],"models":{}}))
+    ui_page.route("**/api/coins**", lambda route: route.fulfill(json=[]))
+    ui_page.goto(f"{live_server.url}/#models")
+    ui_page.wait_for_function("window.ModelsPageTest !== undefined")
+    result=ui_page.evaluate("""async () => {
+      const context=await window.ModelsPageTest.loadContext('ADAUSDT');
+      return {label:window.ModelsPageTest.activeContextLabel('ADAUSDT',4,context),context};
+    }""")
+    assert result["context"]["symbol"] == "ADAUSDT"
+    assert "Volatilidad: ADAUSDT 4 h" in result["label"]
+    assert "Direcci\u00f3n: XRPUSDT 1h" in result["label"]
+
+
+def test_volatility_artifact_fetch_failure_is_not_reported_as_no_models(ui_page, live_server):
+    def respond(route):
+        path = urlparse(route.request.url).path
+        if path.endswith('/api/models/page-context'):
+            route.fulfill(json={"symbol":"XRPUSDT","interval":"1h","coins":["XRPUSDT","ADAUSDT"],"models":{}})
+        elif path.endswith('/api/coins'):
+            route.fulfill(json=[{"symbol":"ADAUSDT","ready":False,"readiness":{"state":"pendiente"}}])
+        elif path.endswith('/api/models/vol/artifacts'):
+            route.fulfill(status=503, json={"detail":"unavailable"})
+        elif path.endswith('/api/models/train/status'):
+            route.fulfill(json={"job":None})
+        elif path.endswith('/api/models/train/jobs'):
+            route.fulfill(json={"jobs":[]})
+        else:
+            route.fulfill(json={"models":[]})
+    ui_page.route("**/api/**", respond)
+    ui_page.goto(f"{live_server.url}/#models")
+    ui_page.wait_for_function("window.ModelsPageTest !== undefined")
+    ui_page.evaluate("""async () => {
+      const select=document.querySelector('#models-symbol'); select.value='XRPUSDT';
+      await window.loadModelsPage();
+    }""")
+    ui_page.wait_for_function("document.querySelector('#models-training-models').innerText.includes('no disponible')")
+    text = ui_page.locator("#models-training-models").inner_text()
+    assert "no disponible" in text and "sin modelos" not in text
+
+    ui_page.evaluate("""async () => {
+      const select=document.querySelector('#models-symbol'); select.value='ADAUSDT';
+      await window.loadModelsPage();
+    }""")
+    ui_page.wait_for_function("document.querySelector('#models-training-models').innerText.includes('sin modelos')")
+    text = ui_page.locator("#models-training-models").inner_text()
+    assert "sin modelos" in text

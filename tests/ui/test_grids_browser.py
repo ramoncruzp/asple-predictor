@@ -77,8 +77,8 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
         "net_per_cycle_usdt":.8,"target_met":True,"estimated_cycles_to_target":9,"min_cell_usdt":"5",
         "min_cell_warning":None,"range_warning":False,"risk":{"label":"Moderado","max_range_pct":45,
             "meaning":"Equilibrio","capital_below_price_pct":50,"unrealized_loss_at_floor_usdt":120},
-        "simulations":{"label":"histórico, no promesa de resultado","sim_start":"2026-10-01T00:00:00+00:00","sim_days":12,"window_warning":"Ventana corta (menos de 30 días): poca evidencia.","strategies":{"simple":{"pnl_total_net_usdt":10,"cycles_completed":4},
-            "smart":{"pnl_total_net_usdt":12,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
+        "simulations":{"label":"histórico, no promesa de resultado","sim_start":"2026-10-01T00:00:00+00:00","sim_days":12,"window_warning":"Ventana corta (menos de 30 días): poca evidencia.","strategies":{"simple":{"pnl_total_net_usdt":10,"max_drawdown_pct":1.25,"fees_usdt":2.5,"buy_hold_pnl_usdt":3.75,"cycles_completed":4},
+            "smart":{"pnl_total_net_usdt":12,"max_drawdown_pct":2.5,"fees_usdt":3.5,"buy_hold_pnl_usdt":4.75,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
             "atr":2,"support_touches":3,"resistance_touches":4},"prediction_signal":None,
         "range_risk":{"sigma_24h":.02,"source":"campeón","horizons":{"24":{"touch_floor":.2,"touch_ceiling":.25,"exit_upper_bound":.4},"72":{"touch_floor":.4,"touch_ceiling":.45,"exit_upper_bound":.7}},"disclaimer":"Estimaci\u00F3n te\u00F3rica."},
         "pause_risk":{"horizon_h":24,"break_prob":.15,"pause_enter_prob":.10,"would_be_pausable":True},
@@ -99,9 +99,18 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
         ui_page.evaluate("loadGrid({preventDefault(){},target:document.querySelector('#grid-form')})")
     expect(ui_page.locator(".advisor-cascade")).to_contain_text("comisiones")
     expect(ui_page.locator(".advisor-risk")).to_contain_text("Pérdida no realizada estimada al piso")
+    assert ui_page.locator("#grid-result .advisor-risk > p.scanner-warning:empty").count() == 0
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("histórico, no promesa de resultado")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Inicio histórico: 2026-10-01T00:00:00+00:00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Ventana corta")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Equity final estimada: $1,010.00")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("P&L neto (USDT): $10.00")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Drawdown m\u00e1ximo (%): 1.25%")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Comisiones (USDT): $2.50")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Comprar y mantener (USDT): $3.75")
+    simulation_text=ui_page.locator(".advisor-simulation").inner_text()
+    assert "NaN" not in simulation_text
+    assert "Equity final estimada: \u2014" not in simulation_text
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("probabilidad de salir por cada lado en 72 h")
     expect(ui_page.locator("#grid-result")).to_contain_text("Probabilidad de salir del rango (cota superior)")
     expect(ui_page.locator("#grid-result")).to_contain_text("Toque por lado")

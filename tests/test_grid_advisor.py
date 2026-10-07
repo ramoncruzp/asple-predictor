@@ -53,6 +53,7 @@ def test_recommendation_uses_editable_margin_and_named_risk_limits():
     high = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "capital": 1000,
         "risk": "high", "days": 90, "margin_target_pct": .5, "range_mode": "estructural"}).body
     assert high["recommended_floor"] < low["recommended_floor"]
+    assert low["capital"] == 1000 and high["capital"] == 1000
     assert low["risk"]["max_range_pct"] == 25
     assert high["risk"]["max_range_pct"] == 70
     assert low["margin_target_pct"] == .7
@@ -234,7 +235,8 @@ def test_advisor_defaults_centered_and_keeps_structural_range_available():
     assert result["range_risk"]["horizons"]["72"]["touch_ceiling"] == pytest.approx(.30, abs=.02)
     assert result["simulations"]["sim_start"] is not None
     assert result["simulations"]["sim_days"] < 30
-    assert "Ventana corta" in result["simulations"]["window_warning"]
+    assert "Historia disponible para simular" in result["simulations"]["window_warning"]
+    assert "90 pedidos" in result["simulations"]["window_warning"]
     structural = make_client().get("/api/grid/recommend", query={
         "symbol": "ADAUSDT", "range_mode": "estructural"}).body
     assert structural["range_mode"] == "estructural"
@@ -303,7 +305,88 @@ def test_ready_ada_advisor_uses_its_model_without_xrp_widening(monkeypatch):
     monkeypatch.setattr(grid_advisor, "_widen_runtime_settings", lambda *args: (_ for _ in ()).throw(AssertionError("XRP widening queried for ADA")))
     result = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT", "range_mode": "estructural"}).body
     assert result["vol_source_effective"] == "campeon"
+    assert result["range_risk"]["source"].startswith("pron\u00f3stico campe\u00f3n ADAUSDT 24 h")
     assert result["vol_selection"] == "provisional"
     assert result["volatility_advisory"]["k_active"] == 1.0
     assert result["volatility_advisory"]["range_widened"] is False
     assert advisory_symbols == ["ADAUSDT"]
+
+
+def test_ada_advisor_uses_neutral_factor_without_xrp_widen_data():
+    result = make_client().get("/api/grid/recommend", query={"symbol":"ADAUSDT","capital":1000,"risk":"low","days":90}).body
+    advisory = result["volatility_advisory"]
+    assert advisory["widen_not_calculated"] is True and advisory["k_active"] == 1.0
+    assert advisory["widen_n"] is None and advisory["widen_n_effective"] is None
+    assert advisory["disagreement_pct_active"] is None and advisory["disagreement_threshold_suggested"] is None
+    assert advisory["k_suggested"] is None
+
+
+def test_advisor_simulation_resets_nonzero_index_and_reports_short_history(monkeypatch):
+    frame = candles().iloc[1:]
+    monkeypatch.setattr(grid_advisor, "_simulation_window", lambda *_: (frame, {"sim_start":"2026-08-22T00:00:00+00:00", "sim_days":46.8, "window_warning":None}))
+    result = make_client().get("/api/grid/recommend", query={"symbol":"ADAUSDT","capital":1000,"risk":"low","days":90}).body
+    for strategy in ("simple", "smart"):
+        row=result["simulations"]["strategies"][strategy]
+        assert "KeyError: 0" not in row.get("unavailable", "")
+        assert "Historia disponible para simular 46,8 d\u00edas de 90 pedidos" in row["window_warning"]
+        assert "el precio entr\u00f3 al rango" in row["window_warning"]
+
+
+def test_advisor_simulation_passes_candle_data_for_ada_and_xrp(monkeypatch):
+    import sys
+    import threading
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from data.binance_client import BinanceClient
+    from grid.sim.data import CandleData
+    from grid.sim.runner import run_simulation as actual_run_simulation
+
+    rows = []
+    for index in range(420):
+        close = 70.0 if index < 30 else 100 + 4 * np.sin((index - 30) / 8) + .02 * (index - 30)
+        stamp_ms = int(pd.Timestamp("2026-09-01T00:00:00Z").timestamp() * 1000) + index * 3_600_000
+        rows.append([stamp_ms, str(close - .1), str(close + .8), str(close - .8),
+                     str(close), "1000", stamp_ms + 3_599_999, "100000", 10, "500", "50000"])
+    frame = BinanceClient._klines_to_dataframe(rows)
+    assert str(frame.timestamp.dtype) == "datetime64[ns, UTC]"
+    assert isinstance(frame.index, pd.RangeIndex)
+    received = []
+
+    def spy(frame, event, arg):
+        if event == "call" and frame.f_code is actual_run_simulation.__code__:
+            received.append(frame.f_locals["candles"])
+
+    monkeypatch.setattr(volatility_route, "forecast", lambda *_args, **_kwargs: {"forecasts": []})
+    app = FastAPI()
+    app.include_router(grid_advisor.router, prefix="/api/grid")
+    app.state.client = type("HistoricalClient", (), {"get_historical_klines": lambda self, *_a, **_kw: frame})()
+    app.state.settings = SimpleNamespace(scanner_fee_pct=.1, scanner_timeout_seconds=10)
+    app.state.grid_scan_service = None
+    app.state.prediction_loop = SimpleNamespace(latest={})
+    observed = {}
+    previous_sys_profile, previous_thread_profile = sys.getprofile(), threading.getprofile()
+    sys.setprofile(spy)
+    threading.setprofile(spy)
+    try:
+        with TestClient(app) as client:
+            for symbol in ("ADAUSDT", "XRPUSDT"):
+                response = client.get("/api/grid/recommend", params={"symbol": symbol, "days": 10, "risk": "low"})
+                assert response.status_code == 200, response.text
+                observed[symbol] = response.json()["simulations"]["strategies"]
+    finally:
+        sys.setprofile(previous_sys_profile)
+        threading.setprofile(previous_thread_profile)
+
+    assert len(received) == 4
+    assert all(isinstance(candles, CandleData) for candles in received), [type(item).__name__ for item in received]
+    assert all(candles.timestamp.dtype == np.int64 for candles in received)
+    assert all(candles.open.dtype == np.float64 and candles.high.dtype == np.float64
+               and candles.low.dtype == np.float64 and candles.close.dtype == np.float64 for candles in received)
+    assert all(int(candles.timestamp[0]) > int(frame.timestamp.iloc[0].timestamp()) for candles in received)
+    for symbol in ("ADAUSDT", "XRPUSDT"):
+        for strategy in ("simple", "smart"):
+            row = observed[symbol][strategy]
+            assert "unavailable" not in row, f"{symbol} {strategy}: {row}"
+            assert isinstance(row.get("pnl_total_net_usdt"), (int, float))
+            assert isinstance(row.get("max_drawdown_pct"), (int, float))
+            assert isinstance(row.get("cycles_completed"), int)

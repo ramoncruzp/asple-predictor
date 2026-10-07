@@ -5,6 +5,7 @@
   const n = (value, digits = 3) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : Number(value).toFixed(digits);
   const pct = value => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `${(Number(value) * 100).toFixed(1)}%`;
   const msg = (text, cls = '') => `<p class="models-status ${cls}">${esc(text)}</p>`;
+  const httpStatus = error => Number(error?.status || /HTTP (\d+)/.exec(error?.message || '')?.[1] || 0);
   const title = name => ({ model_a: 'XGBoost', model_b: 'GRU (PyTorch)', model_c: 'Prophet+XGBoost', model_d: 'TFT', ensemble: 'Ensamble', vol: 'Volatilidad', HAR_range: 'HAR Range', HAR_asym: 'HAR Asim\u00E9trico' }[name] || name || 'No disponible');
 
   const trainingElapsedSeconds = (value, now = Date.now()) => {
@@ -136,7 +137,7 @@
         : `${(Number(weightValue) * 100).toFixed(1)}%${weightSource === 'val' ? ' (val)' : ''}`;
       return `<tr class="${championRow ? 'models-champion' : ''} ${consensus ? 'models-consensus' : ''}"><td>${rank == null ? '\u2014' : rank}${verified < min ? '<small class="models-few-data">Pocos datos</small>' : ''}</td><td><strong>${esc(title(model.model_name))}</strong>${championRow ? '<span class="models-tag">Campe\u00F3n</span>' : ''}${consensus ? '<span class="models-tag consensus">Consenso</span>' : ''}<small>Volatilidad \u00B7 ${esc(symbol)} \u00B7 ${Number(horizon)} h</small></td><td>${Number(model.n_predicciones || 0)} / ${verified} / ${Math.max(0, Number(model.n_predicciones || 0) - verified)}</td><td>${n(m.mse, 6)}</td><td>${pct(m.coverage_1sigma)}</td><td>${pct(m.coverage_2sigma)}</td><td>${n(m.over_pct, 1)}% / ${n(m.under_pct, 1)}%</td><td>bias_log ${m.bias_mean==null?'\u2014':n(m.bias_mean, 5)} \u00B7 var_ratio ${m.var_ratio==null?'\u2014':n(m.var_ratio, 3)}${model.bias_alert ? '<small class="models-alert">Sesgo sostenido</small>' : ''}</td><td>${weightText}</td><td>${active ? 'Activo' : `Acumulando datos (${verified}/${min})`}</td><td>${model.bias_alert ? 'Alerta' : 'Sin alerta'}</td></tr>`;
     }).join('');
-    return `<div class="table-card models-table-wrap"><table class="data-table models-table"><thead><tr><th>Puesto</th><th>Modelo e identidad</th><th>Pred. / verificadas / pendientes</th><th>MSE vivo</th><th>Dentro de \u00B1\u03C3_ref (error log)</th><th>Dentro de \u00B12\u03C3_ref (error log)</th><th>Sobre/sub %</th><th>Sesgo</th><th>Peso</th><th>Estado</th><th>bias_alert</th></tr></thead><tbody>${rows}</tbody></table></div><p class="muted models-note">Dentro de \u00B1\u03C3_ref y \u00B12\u03C3_ref mide error en log, no cobertura del precio. El sesgo en log tiene un componente estructural por calibrar en varianza. TEST visto durante la selecci\u00F3n. Las fechas y tramos se muestran si el endpoint los entrega.</p>`;
+    return `<div class="table-card models-table-wrap"><table class="data-table models-table"><thead><tr><th>Puesto</th><th>Modelo e identidad</th><th>Pred. / verificadas / pendientes</th><th>MSE vivo</th><th>Dentro de \u00B1\u03C3_ref (error log)</th><th>Dentro de \u00B12\u03C3_ref (error log)</th><th>Sobre/sub %</th><th>Sesgo</th><th>Peso</th><th>Estado</th><th>bias_alert</th></tr></thead><tbody>${rows}</tbody></table></div><p class="muted models-note">Dentro de \u00B1\u03C3_ref y \u00B12\u03C3_ref mide error en log, no cobertura del precio. El sesgo en log tiene un componente estructural por calibrar en varianza. Las fechas y tramos se muestran si el endpoint los entrega.</p>`;
   }
 
   function renderForecast(stats, forecast, battle, symbol, horizon) {
@@ -197,24 +198,28 @@
   }
 
   const activeTraining = job => !!job && ['pendiente', 'descargando', 'entrenando', 'running'].includes(job.status);
-  function renderTrainingModels(status) {
+  function renderTrainingModels(status, symbol = state.activeSymbol, artifacts = state.volArtifacts) {
+    const activeSymbol = symbol || 'XRPUSDT', otherSymbol = activeSymbol !== 'XRPUSDT';
     const models = Object.fromEntries((status?.models || []).map(item => [item.model_name, item]));
-    const otherSymbol = state.activeSymbol !== 'XRPUSDT';
     const disabled = activeTraining(state.trainingJob) || state.trainingBusy || otherSymbol ? 'disabled' : '';
-    const directionRows = ['model_b', 'model_c', 'model_a'].map(name => {
-      const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-training-note">Reinicia su evaluaci\u00F3n en vivo.</small>' : '';
-      return `<tr><td><strong class="models-training-name">${esc(model.display_name || title(name))}</strong>${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${disabled}>Entrenar</button></td></tr>`;
-    }).join('');
-    const vol = state.volArtifacts || {}, disk = vol.artifact_trained_at, loaded = vol.loaded_trained_at;
+    const directionRows = otherSymbol ? '<tr><td colspan="4">Modelos de dirección: solo XRPUSDT</td></tr>'
+      : ['model_b', 'model_c', 'model_a'].map(name => {
+        const model = models[name] || {}, key = name.slice(-1), warn = key === 'a' ? '<small class="models-training-note">Reinicia su evaluación en vivo.</small>' : '';
+        return `<tr><td><strong class="models-training-name">${esc(model.display_name || title(name))}</strong>${warn}</td><td>${esc(model.artifact_trained_at || '\u2014')}</td><td>${esc(model.last_trained || (model.available === false ? 'No cargado' : '\u2014'))}</td><td><button type="button" class="button secondary models-train-button" data-model="${esc(key)}" ${disabled}>Entrenar</button></td></tr>`;
+      }).join('');
+    const vol = artifacts?.symbol === activeSymbol ? artifacts : {}, disk = vol.artifact_trained_at, loaded = vol.loaded_trained_at;
+    const notReady = otherSymbol && state.coinReadiness[activeSymbol]?.ready !== true;
+    const unavailable = !notReady && (vol.unavailable || vol.no_models);
+    const diskText = notReady ? 'sin modelos' : unavailable ? 'no disponible' : (disk || '\u2014');
+    const loadedText = notReady ? 'sin modelos' : unavailable ? 'no disponible' : (loaded || (disk ? 'No cargado' : '\u2014'));
     const diskMs = Date.parse(disk || ''), loadedMs = Date.parse(loaded || '');
-    const stale = disk && (!Number.isFinite(loadedMs) || (Number.isFinite(diskMs) && Math.abs(diskMs - loadedMs) > 2000));
-    const restart = stale ? '<small class="models-training-note">El artefacto en disco difiere de la versi\u00F3n cargada; reinicia el servidor para cargarlo.</small>' : '';
+    const stale = !notReady && disk && (!Number.isFinite(loadedMs) || (Number.isFinite(diskMs) && Math.abs(diskMs - loadedMs) > 2000));
+    const restart = stale ? '<small class="models-training-note">El artefacto en disco difiere de la versión cargada; reinicia el servidor para cargarlo.</small>' : '';
     const volDisabled = otherSymbol ? 'disabled title="El entrenamiento de esta moneda se gestiona desde Monedas."' : disabled;
-    const volRow = `<tr><td><strong class="models-training-name">Volatilidad \u00B7 8 modelos \u00D7 4 horizontes \u00B7 XRPUSDT</strong></td><td>${esc(disk || '\u2014')}</td><td>${esc(loaded || (disk ? 'No cargado' : '\u2014'))}${restart}</td><td><button type="button" class="button secondary models-train-button" data-model="vol" ${volDisabled}>Entrenar</button></td></tr>`;
+    const volRow = `<tr><td><strong class="models-training-name">Volatilidad · 8 modelos × 4 horizontes · ${esc(activeSymbol)}</strong></td><td>${esc(diskText)}</td><td>${esc(loadedText)}${restart}</td><td><button type="button" class="button secondary models-train-button" data-model="vol" ${volDisabled}>Entrenar</button></td></tr>`;
     const otherSymbolNote = otherSymbol ? '<p class="models-training-note">El entrenamiento de esta moneda se gestiona desde Monedas.</p>' : '';
-    return `${otherSymbolNote}<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versi\u00F3n cargada</th><th></th></tr></thead><tbody>${directionRows}${volRow}</tbody></table></div>`;
+    return `${otherSymbolNote}<div class="table-card"><table class="data-table models-training-table"><thead><tr><th>Modelo</th><th>Artefacto en disco</th><th>Versión cargada</th><th></th></tr></thead><tbody>${directionRows}${volRow}</tbody></table></div>`;
   }
-
   function renderTrainingJobs(jobs) {
     if (!Array.isArray(jobs) || !jobs.length) return '<p class="muted">Todav\u00EDa no hay trabajos de entrenamiento.</p>';
     return `<div class="table-card"><table class="data-table"><thead><tr><th>Creado</th><th>Modelos</th><th>Estado</th><th>Fase</th><th>Error</th></tr></thead><tbody>${jobs.slice(0, 5).map(job => `<tr><td>${esc(formatTrainingDate(job.created_at))}</td><td>${esc((job.models || []).map(name => name === 'vol' ? 'Volatilidad' : name).join(', '))}</td><td>${esc(job.status || '\u2014')}</td><td>${esc(job.phase || '\u2014')}</td><td class="models-job-error">${esc(job.error || '')}</td></tr>`).join('')}</tbody></table></div>`;
@@ -222,11 +227,10 @@
 
   function renderTrainingCurrent(job) {
     if (!job) return '<p class="muted">No hay trabajos de entrenamiento.</p>';
-    if (!activeTraining(job)) return `<p class="models-status">\u00DAltimo trabajo: ${esc(job.status)}${job.error ? ` · ${esc(job.error)}` : ''}</p>`;
+    if (!activeTraining(job)) return `<p class="models-status">Último trabajo (todas las monedas): ${esc(job.status)}${job.error ? ` · ${esc(job.error)}` : ''}</p>`;
     const seconds = trainingElapsedSeconds(job.started_at || job.created_at || '');
-    return `<div class="models-training-current"><p><strong>Estado:</strong> ${esc(job.status)}</p><p><strong>Fase:</strong> ${esc(job.phase || job.status)}</p><p>Tiempo: <span id="models-training-elapsed">${seconds} s</span></p><button type="button" class="button secondary" id="models-training-cancel" data-job-id="${Number(job.id)}">Cancelar</button></div>`;
+    return `<div class="models-training-current"><p><strong>Estado (todas las monedas):</strong> ${esc(job.status)}</p><p><strong>Fase:</strong> ${esc(job.phase || job.status)}</p><p>Tiempo: <span id="models-training-elapsed">${seconds} s</span></p><button type="button" class="button secondary" id="models-training-cancel" data-job-id="${Number(job.id)}">Cancelar</button></div>`;
   }
-
   function updateTrainingElapsed() {
     const node = $('models-training-elapsed'), job = state.trainingJob;
     if (!node || !job || !activeTraining(job)) return;
@@ -247,10 +251,10 @@
 
   async function refreshTraining() {
     const [statusResult, jobsResult, volResult] = await Promise.allSettled([
-      api.get('/api/models/train/status'), api.get('/api/models/train/jobs', { limit: 5 }), api.get('/api/models/vol/artifacts'),
+      api.get('/api/models/train/status'), api.get('/api/models/train/jobs', { limit: 5 }), api.get('/api/models/vol/artifacts', { symbol: state.activeSymbol }),
     ]);
     if (statusResult.status === 'fulfilled') state.trainingJob = statusResult.value?.job || null;
-    if (volResult.status === 'fulfilled') state.volArtifacts = volResult.value || null;
+    state.volArtifacts = volResult.status === 'fulfilled' ? (volResult.value || null) : { symbol: state.activeSymbol, unavailable: true };
     $('models-training-current').innerHTML = statusResult.status === 'fulfilled'
       ? renderTrainingCurrent(state.trainingJob) : msg(`Estado de entrenamiento: ${statusResult.reason?.message || 'error de red'}`, 'error');
     $('models-training-jobs').innerHTML = jobsResult.status === 'fulfilled'
@@ -369,6 +373,7 @@
     if (request !== state.volRequest || symbol !== $('models-symbol').value) return;
     state.volSymbols = symbolPayload?.symbols || [];
     const symbolInfo = state.volSymbols.find(row => String(row.symbol).toUpperCase() === symbol);
+    state.selection = symbolInfo?.selection || null;
     if (symbol !== 'XRPUSDT' && !symbolInfo) {
       clearVolatilityPanels();
       $('models-vol-summary').innerHTML = unavailableVolatilityMessage(symbol);
@@ -386,7 +391,7 @@
     const battlePayload = battleCandidate && String(battleCandidate.symbol || '').toUpperCase() === symbol
       && Number(battleCandidate.horizon_h) === horizon ? battleCandidate : null;
     state.battle = battlePayload; state.coverage = cr.status === 'fulfilled' ? cr.value : null;
-    $('models-vol-table').innerHTML = renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
+    $('models-vol-table').innerHTML = selectionNotice(state.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
     setVolMode($('models-vol-mode')?.value || 'historical');
     $('models-vol-sample-notice').textContent = sampleNotice(battlePayload, horizon, cr.status === 'fulfilled' ? cr.value : null);
     $('models-vol-coverage').innerHTML = cr.status === 'fulfilled' && cr.value ? renderVolCoverage(cr.value, horizon) : renderVolCoverage(null, horizon);
@@ -397,7 +402,7 @@
       modelSelect.innerHTML = battlePayload.models.map(row => `<option value="${esc(row.model_name)}">${esc(row.model_name)}</option>`).join('');
       modelSelect.value = battlePayload.models.some(row => row.model_name === selected) ? selected : (battlePayload.models.find(row => row.is_champion)?.model_name || battlePayload.models[0]?.model_name || '');
     }
-    $('models-vol-table').innerHTML = selectionNotice(symbolInfo?.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
+    $('models-vol-table').innerHTML = selectionNotice(state.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
     const payload = sr.status === 'fulfilled' ? sr.value : null;
     const item = (payload?.horizons || []).find(row => Number(row.horizon_h) === horizon);
     if (sr.status !== 'fulfilled') {
@@ -407,15 +412,22 @@
       $('models-vol-live-table').innerHTML = renderStats(payload, symbol, horizon, battlePayload);
     }
     const statsMatches = payload && String(payload.symbol || '').toUpperCase() === symbol && item && Number(item.horizon_h) === horizon;
-    $('models-vol-summary').innerHTML = selectionNotice(symbolInfo?.selection, battlePayload) + (statsMatches && fr.status === 'fulfilled'
+    $('models-vol-summary').innerHTML = (statsMatches && fr.status === 'fulfilled'
       ? renderForecast(payload, fr.value, battlePayload, symbol, horizon)
       : fr.status === 'fulfilled' ? renderForecast(null, fr.value, battlePayload, symbol, horizon)
-      : msg('Pron\u00F3stico: error de red.', 'error'));
+      : httpStatus(fr.reason) === 503 ? msg('Aún sin pronóstico para esta moneda; el primero llega en el próximo ciclo (cada hora, minuto :01).')
+      : msg('Pronóstico: error de red.', 'error'));
+    const virgin = sr.status === 'fulfilled' ? sr.value?.test_is_virgin : (symbol === 'XRPUSDT' ? false : null);
+    const virginNote = $('models-test-selection-note');
+    virginNote.textContent = virgin === true ? 'TEST virgen.' : virgin === false ? `TEST de ${symbol} no es virgen.` : '';
+    virginNote.classList.toggle('hidden', virgin == null);
     if (wr.status === 'fulfilled') {
       const widenPayload = wr.value, factor = String(widenPayload?.symbol || '').toUpperCase() === symbol
         ? (widenPayload.horizons || []).find(row => Number(row.horizon_h) === horizon) : null;
       $('models-vol-factor').innerHTML = factor ? renderWiden(factor, horizon) : msg('Factor descartado: moneda u horizonte no coinciden.', 'error');
-    } else $('models-vol-factor').innerHTML = msg('Factor de ampliaci\u00F3n: error de red.', 'error');
+    } else $('models-vol-factor').innerHTML = httpStatus(wr.reason) === 404
+      ? msg('Factor de ampliación: aún no disponible para esta moneda.')
+      : msg('Factor de ampliación: error de red.', 'error');
     if (battlePayload) {
       const series = $('models-vol-series')?.value || 'champion';
       const champion = battlePayload.models?.find(row => row.is_champion)?.model_name || ({ 1: 'GBM', 2: 'GBM', 4: 'GBM', 24: 'NexoHAR' })[horizon];
@@ -430,7 +442,7 @@
           state.history = scopedHistory;
           $('models-vol-short-history').innerHTML = renderHistory(scopedHistory, chartModel || champion);
           $('models-vol-table').innerHTML = selectionNotice(state.selection, battlePayload) + renderVolBattleTable(battlePayload, $('models-vol-mode')?.value || 'historical');
-          $('models-vol-summary').innerHTML = selectionNotice(state.selection, battlePayload) + (sr.status === 'fulfilled' && fr.status === 'fulfilled' ? renderForecast(sr.value, fr.value, battlePayload, symbol, horizon) : $('models-vol-summary').innerHTML);
+          $('models-vol-summary').innerHTML = (sr.status === 'fulfilled' && fr.status === 'fulfilled' ? renderForecast(sr.value, fr.value, battlePayload, symbol, horizon) : $('models-vol-summary').innerHTML);
           renderVolHistory(scopedHistory, horizon);
         }
       } catch (_) { if (request === state.volRequest) {
@@ -443,12 +455,17 @@
     } else { $('models-vol-history-empty').textContent = 'Historial: no disponible.'; $('models-vol-history-empty').classList.remove('hidden'); }
   }
 
+  const activeContextLabel = (volSymbol, horizon) => `Volatilidad: ${volSymbol} ${Number(horizon)} h \u00b7 Direcci\u00f3n: XRPUSDT 1h`;
+  function setTrainingTestState(symbol, readiness, artifacts) {
+    state.activeSymbol = symbol; state.coinReadiness = { [symbol]: readiness }; state.volArtifacts = artifacts;
+  }
   async function loadModelsPage() {
     $('models-direction-content').innerHTML = msg('Cargando modelos de direcci\u00F3n\u2026');
     let context;
     try {
       context = await loadContext($('models-symbol').value || undefined);
-      $('models-active-context').textContent = `${context.symbol} ${context.interval}`; state.activeSymbol = context.symbol || 'XRPUSDT';
+      state.activeSymbol = $('models-symbol').value || context.symbol || 'XRPUSDT';
+      $('models-active-context').textContent = activeContextLabel(state.activeSymbol, $('models-horizon').value || 4, context);
     } catch (_) {
       $('models-symbol').innerHTML = '<option value="XRPUSDT">XRPUSDT</option>';
       context = { symbol: APP.currentSymbol || 'XRPUSDT', interval: APP.currentInterval || '1h', coins: [], registryError: true }; state.activeSymbol = context.symbol;
@@ -467,7 +484,7 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     $('models-symbol')?.addEventListener('change', loadModelsPage);
-    $('models-horizon')?.addEventListener('change', loadVolatility);
+    $('models-horizon')?.addEventListener('change', () => { $('models-active-context').textContent = activeContextLabel($('models-symbol').value, $('models-horizon').value, state.context); loadVolatility(); });
     $('models-vol-mode')?.addEventListener('change', () => { const mode = $('models-vol-mode').value; state.sort = { key: mode === 'live' ? 'live_rank' : 'historical_rank', direction: 'asc' }; setVolMode(mode); $('models-vol-table').innerHTML = selectionNotice(state.selection, state.battle) + renderVolBattleTable(state.battle, mode); $('models-vol-sample-notice').textContent = sampleNotice(state.battle, Number($('models-horizon').value), state.coverage, mode); });
     $('models-vol-series')?.addEventListener('change', () => { if ($('models-vol-series').value === 'consensus') { renderVolHistory(state.history, Number($('models-horizon').value), 'consensus'); return; } loadVolatility(); });
     $('models-vol-model')?.addEventListener('change', () => loadVolatility());
@@ -499,5 +516,5 @@
     $('models-train-close')?.addEventListener('click', () => $('models-train-dialog').close());
   });
   window.loadModelsPage = loadModelsPage;
-  window.ModelsPageTest = Object.freeze({ renderStats, renderForecast, renderWiden, renderDirection, renderDirectionRow, renderHistory, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow, renderTrainingCurrent, renderTrainingJobs, activeTraining, configureTrainingPolling, trainingElapsedSeconds, formatTrainingDate, trainingTimesDiffer, isTrainingPolling: () => Boolean(state.trainingPoll) });
+  window.ModelsPageTest = Object.freeze({ renderStats, renderForecast, renderWiden, renderDirection, renderDirectionRow, renderHistory, renderTrainingModels, setTrainingTestState, activeContextLabel, loadContext, loadVolatility, renderVolBattleTable, renderVolCoverage, sampleNotice, formatVolCsv, renderV4Qlike, renderVolHistory, filterHistoryWindow, renderTrainingCurrent, renderTrainingJobs, activeTraining, configureTrainingPolling, trainingElapsedSeconds, formatTrainingDate, trainingTimesDiffer, isTrainingPolling: () => Boolean(state.trainingPoll) });
 })();

@@ -70,7 +70,7 @@ def test_model_stats_testclient_serializes_many_verified_rows_without_cycles(tmp
             params={"symbol": VOL_SYMBOL, "horizon": 4},
         )
     assert response.status_code == 200, response.text[:400]
-    assert response.json()["consensus_selection_note"] == "TEST visto durante la selecci\u00F3n"
+    assert "test_is_virgin" in response.json() and response.json()["test_is_virgin"] is None
     model = response.json()["horizons"][0]["models"][0]
     assert model["var_ratio"] is not None and model["bias_log"] is not None
     payload = response.json()

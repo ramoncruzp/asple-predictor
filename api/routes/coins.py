@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from config.models_config import ACTIVE_SYMBOL, VOL_SYMBOL
+from config.models_config import ACTIVE_SYMBOL, VOL_SYMBOL, vol_champions
 from models.coin_onboarding import OnboardingArtifactsSaving, coin_is_ready, readiness_public
 from data.binance_client import BinanceClient
 
@@ -182,6 +182,7 @@ def list_coins(request: Request):
             change = stats["change_pct_24h"]
         except Exception:
             pass
+        ready = coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol)
         result.append({
             "symbol": symbol,
             "added_at": coin["added_at"],
@@ -193,16 +194,20 @@ def list_coins(request: Request):
             "active": bool(coin["active"]),
             "open_grid_id": open_grids.get(symbol, {}).get("id"),
             "readiness": readiness_public(db.get_readiness(symbol)),
-            "ready": coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol),
-            "volatility_model": _champion_name(db, symbol),
+            "ready": ready,
+            "volatility_model": _champion_name(db, symbol, ready=ready),
         })
     return result
 
 
-def _champion_name(db: Any, symbol: str) -> str | None:
+def _champion_name(db: Any, symbol: str, *, ready: bool = True) -> str | None:
+    if not ready:
+        return None
     try:
-        rows = db.get_vol_battle(symbol, 4)
-        champions = [row for row in rows if row.get("is_champion")]
-        return champions[0].get("model_name") if champions else "realizada" if rows else None
+        champions, provisional = vol_champions(symbol)
+        name = champions.get(4)
+        if not name:
+            return None
+        return f"{name} (provisional)" if provisional else name
     except Exception:
         return None

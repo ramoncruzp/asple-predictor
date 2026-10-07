@@ -332,3 +332,12 @@ def test_prediction_loop_only_monitors_xrp_after_registering_new_coin(tmp_path):
     post(app, "/api/coins", {"symbol": "ETHUSDT"})
 
     assert PredictionLoop.SYMBOLS_TO_MONITOR == ["XRPUSDT"]
+
+
+def test_ada_champion_uses_consensus_without_battle_rows():
+    db = DBManager("sqlite://")
+    assert db.get_vol_battle("ADAUSDT", 4) == []
+    champions, provisional = coins_module.vol_champions("ADAUSDT")
+    assert champions.get(4) == "GBM"
+    assert coins_module._champion_name(db, "ADAUSDT", ready=True) == ("GBM (provisional)" if provisional else "GBM")
+    assert coins_module._champion_name(db, "ADAUSDT", ready=False) is None
