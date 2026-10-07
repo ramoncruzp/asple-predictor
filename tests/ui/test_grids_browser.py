@@ -731,6 +731,26 @@ def test_scanner_disables_unready_coin_only_in_create_selector(live_server, ui_p
     expect(ui_page.locator("#sc-symbol option[value='XRPUSDT']")).to_be_enabled()
 
 
+def test_scanner_coin_selector_fails_open_without_readiness_information(live_server, ui_page):
+    ui_page.route("**/api/coins", lambda route: route.fulfill(json=[
+        {"symbol": "XRPUSDT"},
+        {"symbol": "UNKNOWNUSDT"},
+        {"symbol": "BLOCKEDUSDT", "ready": False},
+        {"symbol": "TRAININGUSDT", "readiness": {"state": "entrenando"}},
+        {"symbol": "READYUSDT", "readiness": {"state": "lista"}},
+    ]))
+    ui_page.goto(f"{live_server.url}/#scanner")
+    selector = ui_page.locator("#sc-symbol")
+    for symbol in ("XRPUSDT", "UNKNOWNUSDT", "READYUSDT"):
+        assert selector.locator(f"option[value='{symbol}']").is_enabled()
+    blocked = selector.locator("option[value='BLOCKEDUSDT']")
+    assert blocked.evaluate("option => option.disabled") is True
+    expect(blocked).to_have_text("BLOCKEDUSDT (no lista)")
+    training = selector.locator("option[value='TRAININGUSDT']")
+    assert training.evaluate("option => option.disabled") is True
+    expect(training).to_have_text("TRAININGUSDT (preparando)")
+
+
 def test_scanner_surfaces_server_409_detail_verbatim(live_server, ui_page):
     _mock_scanner_coin_readiness(ui_page)
     ui_page.route("**/api/grids/structure-preview", lambda route: route.fulfill(json={

@@ -91,7 +91,7 @@ function buildGridSymbolOptions(coins, selectedSymbol) {
   const entries = (Array.isArray(coins) ? coins : []).map(item => {
     const symbol = String(typeof item === 'string' ? item : item?.symbol || '').trim().toUpperCase();
     const readiness = typeof item === 'string' ? null : item?.readiness;
-    const ready = symbol === 'XRPUSDT' || (typeof item === 'string') || item?.ready === true || readiness?.state === 'lista';
+    const ready = symbol === 'XRPUSDT' || (typeof item === 'string') || !(item?.ready === false || (readiness?.state && readiness.state !== 'lista'));
     const label = symbol ? escapeHtml(symbol.replace(/USDT$/, '/USDT')) + (ready ? '' : (['descargando','entrenando','consensuando'].includes(readiness?.state) ? ' (preparando)' : ' (no lista)')) : '';
     return { symbol, ready, label };
   }).filter(item => item.symbol);

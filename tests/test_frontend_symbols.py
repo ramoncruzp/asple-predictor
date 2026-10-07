@@ -43,6 +43,22 @@ assert(escaped.options.includes('&lt;IMG&gt;USDT'));
 """)
 
 
+def test_grid_symbol_readiness_fails_open_without_explicit_unready_state():
+    _run_node(r"""
+const { buildGridSymbolOptions } = sandbox.__test;
+const result = buildGridSymbolOptions([
+  {symbol:'UNKNOWNUSDT'},
+  {symbol:'BLOCKEDUSDT', ready:false},
+  {symbol:'TRAININGUSDT', readiness:{state:'entrenando'}},
+  {symbol:'READYUSDT', readiness:{state:'lista'}},
+], 'UNKNOWNUSDT');
+assert(result.options.includes('value="UNKNOWNUSDT" selected>UNKNOWN/USDT</option>'));
+assert(result.options.includes('value="BLOCKEDUSDT" disabled>BLOCKED/USDT (no lista)</option>'));
+assert(result.options.includes('value="TRAININGUSDT" disabled>TRAINING/USDT (preparando)</option>'));
+assert(result.options.includes('value="READYUSDT">READY/USDT</option>'));
+""")
+
+
 def test_api_health_chip_hysteresis_and_success_recovery():
     _run_node(r"""
 const { advanceApiHealth, apiHealthLabel, timeSinceSuccess } = sandbox.__test;

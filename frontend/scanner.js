@@ -59,7 +59,7 @@
   function errorText(error) { return `${error.status && error.status !== 409 ? `${error.status}: ` : ''}${error.message || 'Error de conexi\u00f3n'}`; }
   function coinOption(coin) {
     const readiness = coin?.readiness || {};
-    const ready = coin?.symbol === 'XRPUSDT' || coin?.ready === true || readiness.state === 'lista';
+    const ready = coin?.symbol === 'XRPUSDT' || !(coin?.ready === false || (readiness.state && readiness.state !== 'lista'));
     const label = ready ? '' : (['descargando','entrenando','consensuando'].includes(readiness.state) ? ' (preparando)' : ' (no lista)');
     return `<option value="${esc(coin.symbol)}" ${ready ? '' : 'disabled'}>${esc(coin.symbol)}${label}</option>`;
   }

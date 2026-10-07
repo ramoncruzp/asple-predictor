@@ -9,7 +9,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from api.routes.volatility import forecast as api_forecast
 from api.routes.volatility import history as api_history
@@ -319,7 +319,9 @@ def test_api_battle_hides_live_metrics_until_minimum_and_history_delegates():
 
     assert gbm["r2_cal"] == 0.6 and gbm["qlike_cal"] == 0.2
     assert gbm["n_verified"] == 2 and gbm["r2_live"] is None and gbm["mse_live"] is None
-    assert api_history(request, horizon=4, model="GBM", limit=17) == [{"model": "GBM", "limit": 17}]
+    history_response = Response()
+    assert api_history(request, history_response, horizon=4, model="GBM", limit=17) == [{"model": "GBM", "limit": 17}]
+    assert history_response.headers["X-Vol-Selection"] in {"provisional", "consensus"}
 
 
 def test_api_returns_503_when_volatility_manifest_is_unavailable():
@@ -369,5 +371,7 @@ def test_frontend_volatility_contract_fields():
     battle_fields = {"model_name", "r2_cal", "qlike_cal", "n_verified", "r2_live", "is_champion"}
     assert battle_fields <= battle_result["models"][0].keys()
 
-    history_result = api_history(request, horizon=4, model="GBM", limit=200)
+    history_response = Response()
+    history_result = api_history(request, history_response, horizon=4, model="GBM", limit=200)
     assert {"forecast_at", "pred_vol_pct", "realized_vol_pct"} <= history_result[0].keys()
+    assert history_response.headers["X-Vol-Selection"] in {"provisional", "consensus"}

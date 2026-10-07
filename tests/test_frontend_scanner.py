@@ -201,7 +201,8 @@ def test_node_partial_or_error_never_reports_open_and_cancel_resets_state(tmp_pa
     if scenario == "partial":
         assert "parcial" in result["alertText"]
     else:
-        assert "409" in result["alertText"]
+        assert "conflict" in result["alertText"]
+        assert "409" not in result["alertText"]
 
 
 @pytest.mark.parametrize("scenario,expected", [("scan_fee", "0,500 %"), ("scan_no_fee", "no disponible")])
