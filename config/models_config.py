@@ -28,7 +28,7 @@ VOL_ARTIFACT_DIR = "models/saved/vol"
 def vol_base(symbol: str) -> str:
     """Validate a USDT pair and return its lowercase base asset."""
     if not isinstance(symbol, str) or re.fullmatch(r"[A-Z0-9]{2,20}USDT", symbol) is None:
-        raise ValueError(f"S?mbolo de volatilidad no v?lido: {symbol!r}")
+        raise ValueError(f"Símbolo de volatilidad no válido: {symbol!r}")
     return symbol[:-4].lower()
 
 
@@ -44,6 +44,12 @@ def vol_manifest_path(symbol: str) -> Path:
     """Return the manifest path for a validated USDT pair."""
     base = vol_base(symbol)
     return Path(vol_artifact_dir(symbol)) / f"manifest_{base}.json"
+
+
+def vol_consensus_path(symbol: str) -> Path:
+    """Return the legacy XRP consensus path or a symbol-scoped path."""
+    base = vol_base(symbol)
+    return Path(vol_artifact_dir(symbol)) / f"consensus_{base}.json"
 VOL_LIVE_MIN_VERIFIED = 30
 VOL_SOURCE = "auto"
 VOL_WIDEN_AUTO = False

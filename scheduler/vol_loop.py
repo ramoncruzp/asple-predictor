@@ -22,6 +22,7 @@ class VolLoop:
         self.scheduler = scheduler or BackgroundScheduler()
         self.logger = logging.getLogger(__name__)
         self.latest: dict = {}
+        self.latest_by_symbol: dict[str, dict] = {}
 
     @staticmethod
     def _closed(frame: pd.DataFrame, now: datetime) -> pd.DataFrame:
@@ -73,13 +74,16 @@ class VolLoop:
             return
         predictions = predictor.predict_latest(hourly, five_minute, now=now)
         inserted = self.db_manager.save_vol_forecasts(predictions)
-        if symbol == VOL_SYMBOL and predictions:
-            self.latest = {
+        if predictions:
+            latest = {
                 "forecast_at": predictions[0]["forecast_at"],
                 "made_at": predictions[0]["made_at"],
                 "price": predictions[0]["price"],
                 "forecasts": predictions,
             }
+            self.latest_by_symbol[symbol] = latest
+            if symbol == VOL_SYMBOL:
+                self.latest = latest
         hourly_intraday = aggregate_intraday_to_hourly(five_minute)
         if "close_time" in hourly and not hourly.empty:
             latest_close = pd.to_datetime(hourly["close_time"], utc=True).max().to_pydatetime()

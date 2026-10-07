@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from config.models_config import (
     VOL_ARTIFACT_DIR, VOL_CHAMPIONS, VOL_HORIZONS, VOL_LIVE_MIN_VERIFIED, VOL_MODELS, VOL_SYMBOL,
     VOL_WIDEN_AUTO, VOL_WIDEN_DISAGREEMENT_PCT, VOL_WIDEN_K_ACTIVE,
+    vol_base, vol_consensus_path, vol_manifest_path,
 )
 from models.volatility.consensus import dispersion_confidence, weighted_logvol
 from models.volatility.model_stats import (
@@ -66,6 +67,42 @@ def _vol_state(request: Request):
     return predictor, loop
 
 
+def _normalize_symbol(symbol: str) -> str:
+    normalized = (symbol or "").strip().upper().replace("/", "")
+    try:
+        vol_base(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return normalized
+
+
+def _ready_predictor(request: Request, symbol: str):
+    symbol = _normalize_symbol(symbol)
+    registry = getattr(request.app.state, "vol_registry", None)
+    predictor = registry.get(symbol) if registry is not None else None
+    loop = getattr(request.app.state, "vol_loop", None)
+    if predictor is None and registry is None and symbol == VOL_SYMBOL:
+        predictor, loop = _vol_state(request)
+    if predictor is None:
+        raise HTTPException(status_code=404, detail=f"No hay artefactos de volatilidad para {symbol}")
+    return predictor, loop, symbol
+
+
+def _selection_fields(symbol: str) -> dict:
+    if symbol == VOL_SYMBOL:
+        return {}
+    return {"selection": "provisional",
+            "selection_note": "Campeones globales de XRP; sin estudio de consenso propio"}
+
+
+def _latest_price(loop, symbol: str):
+    by_symbol = getattr(loop, "latest_by_symbol", {}) if loop is not None else {}
+    latest = by_symbol.get(symbol) if isinstance(by_symbol, dict) else None
+    if latest is None and symbol == VOL_SYMBOL:
+        latest = getattr(loop, "latest", None) if loop is not None else None
+    return latest.get("price") if isinstance(latest, dict) else None
+
+
 def _utc(value) -> datetime:
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -75,9 +112,10 @@ def _utc(value) -> datetime:
 
 
 def _consensus_for_horizon(request: Request, symbol: str, horizon: int, rows: list[dict], price: float):
+    path = (Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json" if symbol == VOL_SYMBOL
+            else vol_consensus_path(symbol))
     if symbol != VOL_SYMBOL:
-        return None
-    path = Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json"
+        return {"consensus": None, "reason": f"sin estudio de consenso para {symbol}"}
     if not path.is_file():
         return {"consensus": None, "reason": "consensus_xrp.json no disponible"}
     try:
@@ -154,8 +192,9 @@ def _consensus_for_horizon(request: Request, symbol: str, horizon: int, rows: li
     }}
 
 
-def _load_horizon_report(horizon: int):
-    path = Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json"
+def _load_horizon_report(horizon: int, symbol: str = VOL_SYMBOL):
+    path = (Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json" if symbol == VOL_SYMBOL
+            else vol_consensus_path(symbol))
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -181,15 +220,12 @@ def _ensemble_sigma_ref(horizon_report: dict) -> float | None:
 
 @router.get("/forecast")
 def forecast(request: Request, symbol: str = VOL_SYMBOL):
-    predictor, loop = _vol_state(request)
-    symbol = symbol.strip().upper().replace("/", "")
-    if symbol != predictor.symbol:
-        raise HTTPException(status_code=404, detail=f"No hay artefactos de volatilidad para {symbol}")
+    predictor, loop, symbol = _ready_predictor(request, symbol)
     rows = request.app.state.db.get_latest_vol_forecasts(symbol)
     champion_rows = {
         int(row["horizon_h"]): row for row in rows if bool(row["is_champion"])
     }
-    price = loop.latest.get("price")
+    price = _latest_price(loop, symbol)
     if price is None or not champion_rows:
         raise HTTPException(status_code=503, detail="Aún no hay pronósticos de volatilidad disponibles.")
     price = float(price)
@@ -215,7 +251,7 @@ def forecast(request: Request, symbol: str = VOL_SYMBOL):
             "stale": now - forecast_at > timedelta(hours=2),
         }
         consensus = _consensus_for_horizon(request, symbol, horizon, rows, price)
-        if consensus:
+        if consensus is not None:
             item.update(consensus)
         outputs.append(item)
     if not outputs:
@@ -236,6 +272,7 @@ def forecast(request: Request, symbol: str = VOL_SYMBOL):
         "regime": regime,
         "regime_percentiles_24h": pcts,
         "forecasts": outputs,
+        **_selection_fields(symbol),
     }
 
 
@@ -245,17 +282,14 @@ def model_stats(
     symbol: str = VOL_SYMBOL,
     horizon: int | None = Query(None, ge=1, le=24),
 ):
-    predictor, _loop = _vol_state(request)
-    symbol = symbol.strip().upper().replace("/", "")
-    if symbol != predictor.symbol:
-        raise HTTPException(status_code=404, detail=f"No hay estadísticas de volatilidad para {symbol}")
+    predictor, _loop, symbol = _ready_predictor(request, symbol)
     horizons = [horizon] if horizon is not None else VOL_HORIZONS
     if any(value not in VOL_HORIZONS for value in horizons):
         raise HTTPException(status_code=404, detail="Horizonte de volatilidad no disponible")
     result = []
     now = datetime.now(timezone.utc)
     for current_horizon in horizons:
-        report = _load_horizon_report(current_horizon) or {}
+        report = _load_horizon_report(current_horizon, symbol) or {}
         val_weights = report.get("weights", {})
         rows = _model_stats_rows(request, symbol, current_horizon)
         aggregate_query = getattr(request.app.state.db, "get_vol_model_stats_aggregates", None)
@@ -300,7 +334,8 @@ def model_stats(
         stats["adaptive"].pop("snapshots", None)
         result.append(stats)
     return {"symbol": symbol, "horizons": result,
-            "consensus_selection_note": "TEST visto durante la selecci\u00F3n"}
+            "consensus_selection_note": "TEST visto durante la selecci\u00F3n",
+            **_selection_fields(symbol)}
 
 
 def _widen_horizon_payload(request, horizon):
@@ -403,9 +438,8 @@ def battle(
     symbol: str = VOL_SYMBOL,
     horizon: int = Query(4, ge=1, le=24),
 ):
-    predictor, _loop = _vol_state(request)
-    symbol = symbol.strip().upper().replace("/", "")
-    if symbol != predictor.symbol or horizon not in VOL_HORIZONS:
+    predictor, _loop, symbol = _ready_predictor(request, symbol)
+    if horizon not in VOL_HORIZONS:
         raise HTTPException(status_code=404, detail="Símbolo u horizonte de volatilidad no disponible")
     manifest_models = predictor.manifest.get("horizons", {}).get(str(horizon), {})
     live_models = {
@@ -427,7 +461,26 @@ def battle(
             "mse_live": live.get("mse_live") if enough else None,
             "is_champion": bool(live.get("is_champion", VOL_CHAMPIONS.get(horizon) == model_name)),
         })
-    return {"symbol": symbol, "horizon_h": horizon, "models": result}
+    return {"symbol": symbol, "horizon_h": horizon, "models": result, **_selection_fields(symbol)}
+
+
+@router.get("/symbols")
+def volatility_symbols(request: Request):
+    registry = getattr(request.app.state, "vol_registry", None)
+    ready = registry.ready_symbols() if registry is not None else ([VOL_SYMBOL] if getattr(request.app.state, "vol_predictor", None) else [])
+    symbols = []
+    for symbol in ready:
+        predictor = registry.get(symbol) if registry is not None else request.app.state.vol_predictor
+        try:
+            manifest = json.loads(vol_manifest_path(symbol).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            manifest = getattr(predictor, "manifest", {}) or {}
+        loaded = getattr(predictor, "manifest", {}) or {}
+        symbols.append({"symbol": symbol, "artifact_trained_at": manifest.get("trained_at"),
+                        "loaded_trained_at": loaded.get("trained_at"),
+                        "selection": "champions" if symbol == VOL_SYMBOL else "provisional",
+                        "has_consensus": vol_consensus_path(symbol).is_file()})
+    return {"default": VOL_SYMBOL, "symbols": symbols}
 
 
 @router.get("/history")
@@ -438,8 +491,10 @@ def history(
     model: str = Query("GBM"),
     limit: int = Query(200, ge=1, le=1000),
 ):
-    predictor, _loop = _vol_state(request)
-    symbol = symbol.strip().upper().replace("/", "")
-    if symbol != predictor.symbol or horizon not in VOL_HORIZONS or model not in VOL_MODELS:
+    _predictor, _loop, symbol = _ready_predictor(request, symbol)
+    if horizon not in VOL_HORIZONS or model not in VOL_MODELS:
         raise HTTPException(status_code=404, detail="Símbolo, horizonte o modelo de volatilidad no disponible")
-    return request.app.state.db.get_vol_history(symbol, horizon, model, limit)
+    records = request.app.state.db.get_vol_history(symbol, horizon, model, limit)
+    if symbol == VOL_SYMBOL:
+        return records
+    return {"symbol": symbol, "history": records, **_selection_fields(symbol)}

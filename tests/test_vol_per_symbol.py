@@ -15,7 +15,7 @@ import pytest
 
 import models.volatility.live as live_module
 import scripts.train_vol_models as trainer
-from config.models_config import VOL_ARTIFACT_DIR, vol_artifact_dir, vol_base, vol_manifest_path
+from config.models_config import VOL_ARTIFACT_DIR, vol_artifact_dir, vol_base, vol_consensus_path, vol_manifest_path
 from models.volatility.live import VolPredictor, VolPredictorRegistry
 from scheduler.vol_loop import VolLoop
 
@@ -76,6 +76,11 @@ def test_symbol_paths_validation_and_xrp_cli_defaults():
     assert Path(vol_manifest_path("XRPUSDT")) == Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json"
     assert Path(vol_artifact_dir("ADAUSDT")) == Path(VOL_ARTIFACT_DIR) / "ada"
     assert Path(vol_manifest_path("ADAUSDT")) == Path(VOL_ARTIFACT_DIR) / "ada" / "manifest_ada.json"
+    assert Path(vol_consensus_path("XRPUSDT")) == Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json"
+    assert Path(vol_consensus_path("ADAUSDT")) == Path(VOL_ARTIFACT_DIR) / "ada" / "consensus_ada.json"
+    with pytest.raises(ValueError) as invalid:
+        vol_base("../x")
+    assert "Símbolo" in str(invalid.value) and "válido" in str(invalid.value)
     defaults = trainer.parse_args([])
     assert defaults.candles == Path("data/cache/xrp_1h.csv")
     assert defaults.candles_5m == Path("data/cache/xrp_5m.csv")
@@ -106,9 +111,9 @@ def test_refresh_paths_and_min_days_are_symbol_scoped_and_offline(tmp_path, monk
         return {"horizons": {"1": {}}}
 
     monkeypatch.setattr(trainer, "train_volatility_models", fake_train)
-    assert trainer.main(["--symbol", "ADAUSDT", "--refresh-candles", "--min-days", "540", "--candles-dir", str(cache)]) == 0
+    assert trainer.main(["--symbol", "ADAUSDT", "--refresh-candles", "--days", "730", "--min-days", "540", "--candles-dir", str(cache)]) == 0
     assert [(symbol, interval, days) for symbol, interval, days, _ in calls] == [
-        ("ADAUSDT", "1h", 540), ("ADAUSDT", "5m", 540),
+        ("ADAUSDT", "1h", 730), ("ADAUSDT", "5m", 730),
     ]
     assert [path.name for _, _, _, path in calls] == ["ada_1h.csv", "ada_5m.csv"]
     assert all(path.parent == cache for _, _, _, path in calls)
@@ -116,6 +121,11 @@ def test_refresh_paths_and_min_days_are_symbol_scoped_and_offline(tmp_path, monk
     assert trained[0]["symbol"] == "ADAUSDT"
     assert Path(trained[0]["artifact_dir"]) == tmp_path / "artifacts" / "ada"
     assert trainer.parse_args(["--min-days", "540"]).min_days == 540
+    defaults = trainer.parse_args([])
+    assert defaults.days == defaults.min_days == 730
+    assert trainer.parse_args(["--days", "730", "--min-days", "540"]).days == 730
+    with pytest.raises(SystemExit):
+        trainer.parse_args(["--days", "730", "--min-days", "800"])
 
 
 def test_ada_cli_training_writes_only_ada_artifacts_and_preserves_xrp(tmp_path, monkeypatch):
@@ -250,7 +260,7 @@ def test_vol_loop_continues_other_symbol_after_one_symbol_fails():
     class Client:
         def get_historical_klines(self, symbol, interval, lookback_days):
             calls.append((symbol, interval, lookback_days))
-            if symbol == "ADAUSDT": raise RuntimeError("fallo sint?tico ADA")
+            if symbol == "ADAUSDT": raise RuntimeError("fallo sintético ADA")
             return hourly if interval == "1h" else five
 
     class Database:

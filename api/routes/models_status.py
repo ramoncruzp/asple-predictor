@@ -3,35 +3,41 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from config.models_config import ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG, SHADOW_MODEL_NAME
 from pathlib import Path
 from models.training_jobs import artifact_trained_at, predictions_before_training, read_metrics_manifest
-from config.models_config import VOL_ARTIFACT_DIR, VOL_SYMBOL
+from config.models_config import VOL_ARTIFACT_DIR, VOL_SYMBOL, vol_base, vol_consensus_path, vol_manifest_path
 router = APIRouter()
 
 
 @router.get("/vol/artifacts")
-def volatility_artifacts(request: Request):
-    artifact_dir = Path(VOL_ARTIFACT_DIR)
+def volatility_artifacts(request: Request, symbol: str = Query(VOL_SYMBOL)):
+    symbol = (symbol or "").strip().upper().replace("/", "")
     try:
-        manifest = json.loads((artifact_dir / "manifest_xrp.json").read_text(encoding="utf-8"))
+        vol_base(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        manifest_path = (Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json" if symbol == VOL_SYMBOL
+                         else vol_manifest_path(symbol))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         manifest = {}
     try:
-        consensus = json.loads((artifact_dir / "consensus_xrp.json").read_text(encoding="utf-8"))
+        consensus_path = (Path(VOL_ARTIFACT_DIR) / "consensus_xrp.json" if symbol == VOL_SYMBOL
+                          else vol_consensus_path(symbol))
+        consensus = json.loads(consensus_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         consensus = {}
-    predictor = getattr(request.app.state, "vol_predictor", None)
+    registry = getattr(request.app.state, "vol_registry", None)
+    predictor = registry.get(symbol) if registry is not None else None
+    if predictor is None and symbol == VOL_SYMBOL:
+        predictor = getattr(request.app.state, "vol_predictor", None)
     loaded_manifest = getattr(predictor, "manifest", None) if predictor is not None else None
     digest = consensus.get("source_csv_sha256")
-    return {
-        "symbol": VOL_SYMBOL,
-        "artifact_trained_at": manifest.get("trained_at"),
-        "loaded_trained_at": loaded_manifest.get("trained_at") if isinstance(loaded_manifest, dict) else None,
-        "data_range": manifest.get("data_range"),
-        "consensus": {
-            "created_at": consensus.get("created_at"),
-            "source_csv": consensus.get("source_csv"),
-            "source_csv_sha256_short": str(digest)[:12] if digest else None,
-        },
-    }
+    return {"symbol": symbol, "artifact_trained_at": manifest.get("trained_at"),
+            "loaded_trained_at": loaded_manifest.get("trained_at") if isinstance(loaded_manifest, dict) else None,
+            "data_range": manifest.get("data_range"),
+            "consensus": {"created_at": consensus.get("created_at"),
+                          "source_csv": consensus.get("source_csv"),
+                          "source_csv_sha256_short": str(digest)[:12] if digest else None}}
 
 MODEL_DISPLAY_NAMES = {
     "model_a": "XGBoost",

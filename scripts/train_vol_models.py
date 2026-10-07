@@ -52,7 +52,8 @@ def parse_args(argv=None):
     parser.add_argument("--candles-5m", type=Path, default=None)
     parser.add_argument("--refresh-candles", action="store_true")
     parser.add_argument("--candles-dir", type=Path, default=Path("data/cache/vol_train"))
-    parser.add_argument("--min-days", type=int, default=VOL_TRAIN_DAYS)
+    parser.add_argument("--days", type=int, default=VOL_TRAIN_DAYS, help="ventana de descarga en días")
+    parser.add_argument("--min-days", type=int, default=VOL_TRAIN_DAYS, help="mínimo de días de datos aceptado")
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
     provided = list(sys.argv[1:] if argv is None else argv)
@@ -60,8 +61,12 @@ def parse_args(argv=None):
         base = vol_base(args.symbol)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.days <= 0:
+        parser.error("--days debe ser un entero positivo")
     if args.min_days <= 0:
         parser.error("--min-days debe ser un entero positivo")
+    if args.min_days > args.days:
+        parser.error("--min-days no puede ser mayor que --days")
     if args.candles is None:
         args.candles = Path("data/cache") / f"{base}_1h.csv"
     if args.candles_5m is None:
@@ -268,10 +273,10 @@ def main(argv=None) -> int:
         hourly_path, five_path = directory / f"{base}_1h.csv", directory / f"{base}_5m.csv"
         if progress:
             progress("descargando_1h")
-        download_closed_candles(args.symbol, "1h", args.min_days, hourly_path)
+        download_closed_candles(args.symbol, "1h", args.days, hourly_path)
         if progress:
             progress("descargando_5m")
-        download_closed_candles(args.symbol, "5m", args.min_days, five_path)
+        download_closed_candles(args.symbol, "5m", args.days, five_path)
         if progress:
             progress("validando_datos")
         hourly_min = MIN_HOURLY_ROWS if args.min_days == VOL_TRAIN_DAYS else int(args.min_days * 24 * 0.95)
