@@ -715,6 +715,71 @@ def test_grids_scanner_account_navigation_has_no_js_errors_and_preserves_health_
     assert_no_js_errors(ui_page)
 
 
+def _mock_scanner_coin_readiness(ui_page):
+    ui_page.route("**/api/coins", lambda route: route.fulfill(json=[
+        {"symbol": "XRPUSDT", "ready": True, "readiness": {"state": "lista"}},
+        {"symbol": "ADAUSDT", "ready": False, "readiness": {"state": "entrenando"}},
+    ]))
+
+
+def test_scanner_disables_unready_coin_only_in_create_selector(live_server, ui_page):
+    _mock_scanner_coin_readiness(ui_page)
+    ui_page.goto(f"{live_server.url}/#scanner")
+    ada = ui_page.locator("#sc-symbol option[value='ADAUSDT']")
+    assert ada.evaluate("option => option.disabled") is True
+    expect(ada).to_have_text("ADAUSDT (preparando)")
+    expect(ui_page.locator("#sc-symbol option[value='XRPUSDT']")).to_be_enabled()
+
+
+def test_scanner_surfaces_server_409_detail_verbatim(live_server, ui_page):
+    _mock_scanner_coin_readiness(ui_page)
+    ui_page.route("**/api/grids/structure-preview", lambda route: route.fulfill(json={
+        "fee_pct": .1, "variants": {},
+        "edited": {"feasible": True, "range_low": "90", "range_high": "110",
+            "n_levels": 4, "spacing_pct": 5, "edge_gross_pct": 4.8,
+            "dust_estimate_pct": .1, "edge_after_dust_pct": 4.7},
+    }))
+    detail = "La moneda ADAUSDT aún no está lista: entrenando. Espera a que termine la preparación."
+    def open_route(route):
+        body = route.request.post_data_json
+        if body.get("dry_run"):
+            route.fulfill(json={"dry_run": True, "symbol": "XRPUSDT", "strategy": "simple",
+                "capital": "100", "range_low": "90", "range_high": "110", "n_levels": 4,
+                "levels": [], "current_price": "100", "testnet_price": "100",
+                "price_in_range": True, "testnet_in_range": True,
+                "testnet_price_guard": {"allowed": True, "reason": None}, "cells": [],
+                "margin_guard": {"allowed": True, "actual_pct": 4.7, "minimum_pct": .7}})
+        else:
+            route.fulfill(status=409, json={"detail": detail})
+    ui_page.route("**/api/grids/open", open_route)
+    ui_page.goto(f"{live_server.url}/#scanner")
+    ui_page.locator("#sc-low").fill("90")
+    ui_page.locator("#sc-high").fill("110")
+    ui_page.locator("#sc-levels").fill("4")
+    ui_page.locator("#sc-preview-open").click()
+    confirm = ui_page.locator("#sc-dialog [data-confirm]")
+    expect(confirm).to_be_enabled()
+    confirm.click()
+    alert = ui_page.locator("#sc-dialog [role=alert]")
+    expect(alert).to_have_text(detail)
+    expect(confirm).to_be_enabled()
+
+
+def test_scanner_ranking_keeps_unready_coins_visible(live_server, ui_page):
+    _mock_scanner_coin_readiness(ui_page)
+    ui_page.route("**/api/grids/scan", lambda route: route.fulfill(json={"results": [{
+        "symbol": "ADAUSDT", "eligible": False, "score": .42, "fee_pct": .1,
+        "hard_filters": [{"passed": False, "reason": "Moneda en preparación"}],
+        "components": [], "warnings": [],
+        "suggested_structure": {"range_low": "90", "range_high": "110", "n_levels": 4,
+            "spacing_pct": 5, "net_edge_pct_per_cycle": .6},
+    }]}))
+    ui_page.goto(f"{live_server.url}/#scanner")
+    ui_page.locator("#sc-run").click()
+    expect(ui_page.locator(".scanner-table tbody")).to_contain_text("ADAUSDT")
+    expect(ui_page.locator(".scanner-table tbody")).to_contain_text("Moneda en preparación")
+
+
 def test_shared_testnet_notice_is_visible_only_on_relevant_screens(live_server, ui_page):
     ui_page.goto(f"{live_server.url}/#dashboard")
     notice = ui_page.locator("#testnet-notice")
