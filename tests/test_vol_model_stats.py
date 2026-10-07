@@ -50,6 +50,20 @@ def test_stats_fixed_metrics_and_active_threshold_29_30():
     assert gbm["all"]["bias_mean"] == pytest.approx(0)
 
 
+def test_live_gate_uses_effective_observations_n_over_h():
+    now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    models = ["Persistence", "GBM", "HAR", "NexoHAR"]
+    val = {"GBM": .4, "HAR": .4, "NexoHAR": .2, "Persistence": 0.0}
+    rows_below = _rows(59, now)
+    rows_above = _rows(62, now)
+    for row in rows_below + rows_above:
+        row["horizon_h"] = 2
+        row["verified_at"] = row["forecast_at"] + timedelta(hours=2)
+    assert sum(row["model_name"] == "GBM" and row["verified_at"] <= now for row in rows_below) == 59
+    assert adaptive_weight_history(rows_below, models, val, now)["source"] == "val"
+    assert adaptive_weight_history(rows_above, models, val, now)["source"] == "vivo"
+
+
 def test_maturity_excludes_future_and_unverified_results():
     now = datetime(2026, 1, 10, tzinfo=timezone.utc)
     row = _rows(1, now)[0]

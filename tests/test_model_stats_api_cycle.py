@@ -26,7 +26,8 @@ def _assert_acyclic_finite(value, ancestors=(), path="$", seen_paths=None):
         assert math.isfinite(value), f"non-finite float at {path}: {value}"
 
 
-def test_model_stats_testclient_serializes_many_verified_rows_without_cycles(tmp_path):
+def test_model_stats_testclient_serializes_many_verified_rows_without_cycles(tmp_path, monkeypatch):
+    monkeypatch.setattr(volatility, "VOL_ARTIFACT_DIR", tmp_path)
     db = DBManager(f"sqlite:///{tmp_path / 'model-stats-cycle.sqlite'}")
     now = datetime.now(timezone.utc)
     forecasts = []
@@ -69,6 +70,9 @@ def test_model_stats_testclient_serializes_many_verified_rows_without_cycles(tmp
             params={"symbol": VOL_SYMBOL, "horizon": 4},
         )
     assert response.status_code == 200, response.text[:400]
+    assert response.json()["consensus_selection_note"] == "TEST visto durante la selecci\u00F3n"
+    model = response.json()["horizons"][0]["models"][0]
+    assert model["var_ratio"] is not None and model["bias_log"] is not None
     payload = response.json()
     json.dumps(payload, allow_nan=False)
     _assert_acyclic_finite(payload)

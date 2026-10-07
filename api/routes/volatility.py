@@ -275,6 +275,8 @@ def model_stats(
         adaptive = stats["adaptive"]
         for model in stats["models"]:
             name = model["model_name"]
+            model["bias_log"] = (model.get("all") or {}).get("bias_mean")
+            model["var_ratio"] = (model.get("all") or {}).get("var_ratio")
             model["peso_actual"] = (
                 adaptive.get("P", {}).get(name, 0.0)
                 if model["estado"] == "activo" and name in adaptive.get("eligible", [])
@@ -297,7 +299,8 @@ def model_stats(
         # snapshots are calculation state used by forward metrics, not API data.
         stats["adaptive"].pop("snapshots", None)
         result.append(stats)
-    return {"symbol": symbol, "horizons": result}
+    return {"symbol": symbol, "horizons": result,
+            "consensus_selection_note": "TEST visto durante la selecci\u00F3n"}
 
 
 def _widen_horizon_payload(request, horizon):

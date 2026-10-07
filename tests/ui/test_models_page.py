@@ -10,6 +10,25 @@ def _page_with_empty_api(ui_page, live_server):
     ui_page.wait_for_function("window.ModelsPageTest !== undefined")
 
 
+def test_model_stats_explains_var_ratio_log_error_and_direction_metric_visibly(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    result = ui_page.evaluate("""() => {
+      const model={model_name:"GBM",n_predicciones:40,n_verificadas:35,estado:"activo",all:{mse:.02,coverage_1sigma:.7,coverage_2sigma:.9,bias_mean:.012,var_ratio:1.25},bias_log:.012,var_ratio:1.25};
+      const root=document.createElement("div"); document.body.append(root);
+      root.innerHTML=window.ModelsPageTest.renderStats({symbol:"XRPUSDT",consensus_selection_note:"TEST visto durante la selecci\u00F3n",horizons:[{horizon_h:4,n_min:30,models:[model]}]},"XRPUSDT",4)+window.ModelsPageTest.renderDirection({models:[]},{symbol:"XRPUSDT",interval:"1h"},{});
+      const note=root.querySelector(".models-direction-metric-note");
+      const coverageNote=root.querySelector(".models-note"), coverageStyle=getComputedStyle(coverageNote);
+      return {text:root.textContent,display:getComputedStyle(note).display,color:getComputedStyle(note).color,coverageDisplay:coverageStyle.display,coverageVisibility:coverageStyle.visibility};
+    }""")
+    assert "var_ratio 1.250" in result["text"]
+    assert "sesgo en log tiene un componente estructural por calibrar en varianza" in result["text"]
+    assert "TEST visto durante la selecci\u00F3n" in result["text"]
+    assert "Dentro de \u00B1\u03C3_ref" in result["text"] and "no cobertura del precio" in result["text"]
+    assert result["coverageDisplay"] != "none" and result["coverageVisibility"] == "visible"
+    assert "BAJISTA acierta si el precio no sube m\u00E1s de 0,5 %" in result["text"]
+    assert result["display"] == "block" and result["color"] != "rgba(0, 0, 0, 0)"
+
+
 def test_models_page_renders_accumulating_below_minimum(ui_page, live_server):
     _page_with_empty_api(ui_page, live_server)
     rendered = ui_page.evaluate("""() => {

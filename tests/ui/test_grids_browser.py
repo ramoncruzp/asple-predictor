@@ -80,6 +80,8 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
         "simulations":{"label":"histórico, no promesa de resultado","sim_start":"2026-10-01T00:00:00+00:00","sim_days":12,"window_warning":"Ventana corta (menos de 30 días): poca evidencia.","strategies":{"simple":{"pnl_total_net_usdt":10,"cycles_completed":4},
             "smart":{"pnl_total_net_usdt":12,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
             "atr":2,"support_touches":3,"resistance_touches":4},"prediction_signal":None,
+        "range_risk":{"sigma_24h":.02,"source":"campeón","horizons":{"24":{"touch_floor":.2,"touch_ceiling":.25,"exit_upper_bound":.4},"72":{"touch_floor":.4,"touch_ceiling":.45,"exit_upper_bound":.7}},"disclaimer":"Estimaci\u00F3n te\u00F3rica."},
+        "pause_risk":{"horizon_h":24,"break_prob":.15,"pause_enter_prob":.10,"would_be_pausable":True},
         "disclaimer":"Estimación teórica."}
     def fulfill_advisor(route):
         payload = dict(advisor)
@@ -101,6 +103,11 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Inicio histórico: 2026-10-01T00:00:00+00:00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Ventana corta")
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("probabilidad de salir por cada lado en 72 h")
+    expect(ui_page.locator("#grid-result")).to_contain_text("Probabilidad de salir del rango (cota superior)")
+    expect(ui_page.locator("#grid-result")).to_contain_text("Toque por lado")
+    pause_notice=ui_page.locator("#grid-result .advisor-pause-risk")
+    assert pause_notice.is_visible() and "nacer\u00EDa pausable" in pause_notice.inner_text()
+    assert ui_page.locator("#grid-result .advisor-profile-risk").evaluate("el => getComputedStyle(el).display") != "none"
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("La volatilidad está ensanchada ×1.25: la probabilidad real de salir por cada lado es menor que la indicada.")
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("se prefiere el rango centrado")
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("Este grid compra solo cuando el precio baja")
@@ -814,6 +821,7 @@ def test_battle_shows_direction_validation_and_models_link_without_live_volatili
         "is_verified": True, "was_correct": False, "price_at_verification": 100,
         "market_condition": '{"volatility_4h":{"range_1sigma":[98,102],"range_2sigma":[96,104]}}',
     }]))
+    ui_page.route("**/api/models/page-context**", lambda route: route.fulfill(json={"symbol": "XRPUSDT", "interval": "1h", "models": {}}))
 
     ui_page.goto(f"{live_server.url}/#battle")
     expect(ui_page.locator("#battle-content")).to_contain_text("No validado")
@@ -821,7 +829,12 @@ def test_battle_shows_direction_validation_and_models_link_without_live_volatili
     expect(ui_page.locator("#battle-content")).to_contain_text("Rango 4h 1σ: 98.00 – 102.00 · 2σ: 96.00 – 104.00 · ✓ dentro de 1σ")
     expect(ui_page.locator("#vol-coverage")).to_have_count(0)
     expect(ui_page.locator("#vol-battle-table")).to_have_count(0)
-    expect(ui_page.locator('#screen-battle a[href="#models"]')).to_have_count(1)
+    card_links = ui_page.locator('#battle-content a[href="#models"]')
+    expect(card_links).to_have_count(len(statuses))
+    for link in card_links.all():
+        expect(link).to_contain_text("Ver estado y detalle en Modelos")
+    header_link = ui_page.locator('#screen-battle > p.card.muted a[href="#models"]')
+    expect(header_link).to_have_count(1)
     assert_no_js_errors(ui_page)
 
 

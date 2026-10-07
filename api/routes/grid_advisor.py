@@ -11,6 +11,7 @@ from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_threshold, minimum_cell_warning)
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
 from grid.range_risk import estimate_range_risk
+from grid.policy import DEFAULT_SMART_PARAMS, break_prob
 from datetime import datetime, timezone
 
 RISK_LEVELS = {
@@ -273,6 +274,8 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     range_risk = estimate_range_risk(current, floor, ceiling, sigma_24h,
         vol_source_effective=vol_source_effective,
         vol_source_requested=volatility["requested"])
+    pause_break_prob, _, _, _ = break_prob(current, floor, ceiling, sigma_24h, DEFAULT_SMART_PARAMS)
+    pause_enter_prob = float(DEFAULT_SMART_PARAMS["pause_enter_prob"])
     disagreement_pct = None
     if volatility.get("champion_sigma_24h") and volatility.get("consensus_sigma_24h"):
         disagreement_pct = abs(volatility["consensus_sigma_24h"] - volatility["champion_sigma_24h"])
@@ -349,6 +352,9 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         "range_risk": {"sigma_24h": sigma_24h, "source": sigma_source,
             "horizons": range_risk,
             "disclaimer": "Estimación; las colas gruesas hacen que la probabilidad real pueda ser mayor; no validado más allá de 24 h; no es predicción de dirección."},
+        "pause_risk": {"horizon_h": 24, "break_prob": pause_break_prob,
+                       "pause_enter_prob": pause_enter_prob,
+                       "would_be_pausable": pause_break_prob > pause_enter_prob},
         "range_position_warning": range_position_warning,
         "range_preference_note": range_preference_note,
         "confidence": prediction.get("consensus_confidence") if prediction else None,

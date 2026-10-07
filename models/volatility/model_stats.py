@@ -134,8 +134,9 @@ def _weights_from_mse(mse, eligible, power=1):
     return capped_normalize(raw) if raw else {}
 
 
-def adaptive_weight_history(rows, models, val_weights, now):
+def adaptive_weight_history(rows, models, val_weights, now, horizon_h=None):
     """Build causal P/P2 weights at each forecast timestamp, then return latest."""
+    horizon_h = max(1, int(horizon_h or (rows[0].get("horizon_h", 1) if rows else 1)))
     mature = verified_rows(rows, now)
     mature_by_model = defaultdict(list)
     for row in mature:
@@ -162,7 +163,7 @@ def adaptive_weight_history(rows, models, val_weights, now):
                 positions[model] += 1
                 if len(window) > ROLLING_VERIFICATIONS:
                     squared_errors[model] -= window.popleft() ** 2
-            if len(window) >= N_MIN:
+            if len(window) / horizon_h >= N_MIN:
                 mse[model] = squared_errors[model] / len(window)
             else:
                 mse[model] = None
@@ -250,7 +251,8 @@ def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
         iqr, _bucket = dispersion_bucket(by_timestamp.get((as_utc(row["forecast_at"]), int(row["horizon_h"])), {}), dispersion_models)
         if iqr is not None:
             champ_pairs.append((iqr, abs(float(row["pred_logvol_cal"]) - float(row["realized_logvol"]))))
-    weights = adaptive_weight_history(rows, models, val_weights, now)
+    weights = adaptive_weight_history(rows, models, val_weights, now,
+                                      horizon_h=int(rows[0]["horizon_h"]) if rows else 1)
     return {"models": model_results, "dispersion": dispersion_rows,
             "dispersion_iqr_error_spearman": _spearman([p[0] for p in champ_pairs], [p[1] for p in champ_pairs]),
             "adaptive": weights, "n_verified": sum(
@@ -271,7 +273,8 @@ def _bias_alert(metrics, sigma_ref):
 
 def forward_consensus_metrics(rows, models, champions, val_weights, now, sigma_ref=None):
     """Evaluate P/P2/M only on outcomes occurring after each causal weight snapshot."""
-    states = adaptive_weight_history(rows, models, val_weights, now)
+    states = adaptive_weight_history(rows, models, val_weights, now,
+                                     horizon_h=int(rows[0]["horizon_h"]) if rows else 1)
     mature = verified_rows(rows, now)
     by_time = defaultdict(dict)
     for row in rows:

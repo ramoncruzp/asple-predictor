@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from api.routes import grid_advisor, volatility as volatility_route
 from config.models_config import VOL_CHAMPIONS
 from grid.sim.runner import FILTERS
+from grid.policy import DEFAULT_SMART_PARAMS, break_prob
 from tests.test_grid_status_api import LocalClient
 
 
@@ -58,6 +59,11 @@ def test_recommendation_uses_editable_margin_and_named_risk_limits():
     assert "dust_estimate_pct" in low and "net_margin_pct" in low
     assert low["prediction_signal"] is None
     assert low["range_preference_note"] is None
+    expected_break, _, _, _ = break_prob(low["current_price"], low["recommended_floor"],
+        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], DEFAULT_SMART_PARAMS)
+    assert low["pause_risk"]["break_prob"] == pytest.approx(expected_break)
+    assert low["pause_risk"]["pause_enter_prob"] == .10
+    assert low["pause_risk"]["would_be_pausable"] == (expected_break > .10)
     assert low["range_position_warning"] == "El precio está cerca del techo: casi todo el capital quedaría en compras"
     assert low["simulations"]["label"] == "histórico, no promesa de resultado"
     assert set(low["simulations"]["strategies"]) == {"simple", "smart"}
