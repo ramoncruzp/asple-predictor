@@ -13,7 +13,7 @@ from tests.test_grid_monitor import monitor_settings
 class QuietVolatility:
     last_reason = None
 
-    def get(self, symbol):
+    def get(self, symbol, horizon_h=24):
         return SimpleNamespace(sigma_24h=0.05)
 
 

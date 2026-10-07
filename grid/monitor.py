@@ -51,6 +51,7 @@ class GridMonitor:
         self.testnet_reset_since: datetime | None = None
         self._testnet_reset_grid_ids: set[int] = set()
         self._last_dust_reconciliation_at: datetime | None = None
+        self._vol_fallback_notified: dict[int, str] = {}
         self.ops_lock = threading.RLock()
 
     def _emit(self, event: dict) -> None:
@@ -250,6 +251,9 @@ class GridMonitor:
                 "in_repository": int(repository), "origin_grid_id": origin.get("origin_grid_id"),
                 "origin_level_idx": origin.get("origin_level_idx"),
                 "age_hours": None if moved_at is None else max(0.0, (_utc(ts) - moved_at).total_seconds() / 3600),
+                "sigma_monitor_h": (policy_metrics or {}).get("sigma_monitor_h"),
+                "monitor_horizon_h": (policy_metrics or {}).get("monitor_horizon_h"),
+                "source": (policy_metrics or {}).get("source"),
             })
         rows.append({
             "run_id": run_id, "ts": ts, "grid_id": grid_id, "level_idx": None,
@@ -266,6 +270,9 @@ class GridMonitor:
             "sigma_24h": (policy_metrics or {}).get("sigma_24h"),
             "trapped_capital_pct": (policy_metrics or {}).get("trapped_capital_pct"),
             "free_cells": (policy_metrics or {}).get("free_cells"),
+            "sigma_monitor_h": (policy_metrics or {}).get("sigma_monitor_h"),
+            "monitor_horizon_h": (policy_metrics or {}).get("monitor_horizon_h"),
+            "source": (policy_metrics or {}).get("source"),
         })
         return self.db.add_snapshots(rows)
 
@@ -340,7 +347,7 @@ class GridMonitor:
             reset_blocked_grids = self._check_testnet_reset(all_grids)
             mids = self._market_mids(all_grids)
             policy_enabled = bool(getattr(self.settings, "grid_policy_enabled", True))
-            vol_cache: dict[str, Any] = {}
+            vol_cache: dict[tuple[str, int], Any] = {}
 
             def unavailable_event(grid: dict, reason: str) -> None:
                 previous_event = self.db.get_last_event(int(grid["id"]), "VOL_UNAVAILABLE")
@@ -388,12 +395,33 @@ class GridMonitor:
                 metrics: dict[str, Any] = {}
                 adjusted_this_pass = False
                 try:
-                    current = self.db.get_grid(grid_id) or grid
+                    current = dict(self.db.get_grid(grid_id) or grid)
+                    stored_params = dict(current.get("params") or {})
+                    monitor_h = stored_params.get("horizon_h", 24)
+                    try:
+                        monitor_h = float(monitor_h)
+                    except (TypeError, ValueError, OverflowError):
+                        monitor_h = 24
+                    policy_params = dict(stored_params)
+                    policy_params.setdefault("horizon_h", 24)
+                    current["params"] = policy_params
+                    provider_h = int(monitor_h) if monitor_h in {1, 2, 4, 24} else 24
                     view = None
                     if policy_enabled:
-                        if grid["symbol"] not in vol_cache:
-                            vol_cache[grid["symbol"]] = self.vol_provider.get(grid["symbol"])
-                        view = vol_cache[grid["symbol"]]
+                        cache_key = (grid["symbol"], provider_h)
+                        if cache_key not in vol_cache:
+                            vol_cache[cache_key] = self.vol_provider.get(grid["symbol"], provider_h)
+                        view = vol_cache[cache_key]
+                        if view is not None and getattr(view, "fallback", False):
+                            reason = getattr(view, "fallback_reason", None) or "forecast_unavailable"
+                            if self._vol_fallback_notified.get(grid_id) != reason:
+                                self._emit({"event_type": "vol_fallback_24h", "grid_id": grid_id,
+                                    "reason": reason, "price": mid,
+                                    "details": {"symbol": grid["symbol"], "horizon_h": monitor_h,
+                                                "fallback_horizon_h": 24, "reason": reason}})
+                                self._vol_fallback_notified[grid_id] = reason
+                        elif view is not None and getattr(view, "source", None) == "model":
+                            self._vol_fallback_notified.pop(grid_id, None)
                     if policy_enabled and mid is not None:
                         levels = self.db.get_grid_levels(grid_id)
                         if current["status"] in {"ACTIVE", "PAUSED", "HOLDING"}:
@@ -453,7 +481,7 @@ class GridMonitor:
                             values = pause_details.get("reasons")
                             pause_reasons = tuple(values) if values is not None else None
                         decision = evaluate_grid(
-                            current["status"], current.get("params") or {}, levels, mid,
+                            current["status"], policy_params, levels, mid,
                             float(current["range_low"]), float(current["range_high"]),
                             float(current["capital_total"]), sigma, paused_since, now,
                             pause_reasons=pause_reasons,
@@ -574,8 +602,10 @@ class GridMonitor:
                                 self._emit({"event_type": "ADJUST_BLOCKED", "grid_id": grid_id,
                                     "reason": blocked_reason, "price": mid,
                                     "details": {**adjust.metrics, "blocked_reason": blocked_reason}})
-                        metrics = decision.metrics
                         vol_source = None if view is None else getattr(view, "source", "model")
+                        sigma_monitor_h = (None if sigma is None else sigma * math.sqrt(monitor_h / 24.0))
+                        metrics = {**decision.metrics, "sigma_monitor_h": sigma_monitor_h,
+                                   "monitor_horizon_h": monitor_h, "source": vol_source}
                         details = {**decision.metrics, "reasons": list(decision.reasons),
                                    "vol_source": vol_source}
                         metrics = {**metrics, "vol_source": vol_source}

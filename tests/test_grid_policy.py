@@ -33,7 +33,7 @@ def cell(state="IDLE", **kwargs):
 
 def test_defaults_and_parameter_validation_rules():
     assert DEFAULT_SMART_PARAMS == {
-        "horizon_h": 24, "sigma_scale": 1.15,
+        "horizon_h": 4, "sigma_scale": 1.15,
         "pause_enter_prob": 0.10, "pause_exit_prob": 0.05,
         "trapped_age_h": 24, "trapped_cap_pct": 50.0,
         "trapped_exit_factor": 0.8, "min_free_cells": 2,
@@ -179,7 +179,8 @@ def test_evaluate_grid_closes_for_each_trigger(trigger, status, mid, paused_sinc
 
 
 def test_close_precedes_pause_and_resume_uses_hysteresis():
-    params = {**DEFAULT_SMART_PARAMS, "min_free_cells": 2, "pause_enter_prob": 0.1, "pause_exit_prob": 0.05}
+    params = {**DEFAULT_SMART_PARAMS, "horizon_h": 24, "min_free_cells": 2,
+              "pause_enter_prob": 0.1, "pause_exit_prob": 0.05}
     close_decision = evaluate_grid("ACTIVE", params, [cell("SELL_OPEN")], 85, 90, 110, 100, 0.2, None, NOW)
     assert close_decision.action == "CLOSE_REPOSITORY"
     between = break_prob(100, 90, 110, 0.065, params)[0]

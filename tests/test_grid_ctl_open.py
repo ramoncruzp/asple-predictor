@@ -29,7 +29,7 @@ def test_open_dry_run_reports_levels_params_and_calibrated_false(monkeypatch, ca
     assert result["dry_run"] and result["calibrated"] is False
     assert len(result["levels"]) == 6
     assert result["range"] == {"low": "90", "high": "110"}
-    assert result["params"]["horizon_h"] == 24
+    assert result["params"]["horizon_h"] == 4
 
 
 def test_open_shift_half_step_uses_exact_decimal_range(monkeypatch, capsys):

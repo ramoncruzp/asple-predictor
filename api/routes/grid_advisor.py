@@ -7,7 +7,7 @@ from models.coin_onboarding import coin_is_ready
 import numpy as np
 from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
-                                  VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN)
+                                  VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
 from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_threshold, minimum_cell_warning)
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
@@ -69,14 +69,10 @@ def _simulation_window(frame, floor, ceiling, days):
 
 def _resolve_volatility_source(symbol, forecast24, requested_source):
     """Select the Advisor's 24h sigma without changing forecast or grid formulas."""
-    if symbol != VOL_SYMBOL:
-        return {"sigma_24h": None, "effective": "realizada", "requested": requested_source,
-                "confidence": None, "consensus": None, "champion_sigma_24h": None,
-                "reason": "moneda sin modelos de consenso"}
     if not forecast24:
         return {"sigma_24h": None, "effective": "realizada", "requested": requested_source,
                 "confidence": None, "consensus": None, "champion_sigma_24h": None,
-                "reason": "pronóstico XRP no disponible"}
+                "reason": f"pronóstico {symbol} no disponible"}
     if forecast24.get("stale"):
         return {"sigma_24h": None, "effective": "realizada", "requested": requested_source,
                 "confidence": None, "consensus": None, "champion_sigma_24h": None,
@@ -105,15 +101,16 @@ def _resolve_volatility_source(symbol, forecast24, requested_source):
             "reason": None if sigma is not None else "pronóstico ausente o sigma inválida"}
 
 
-def _model_volatility_advisories(request, selection, forecast24):
+def _model_volatility_advisories(request, selection, forecast24, symbol=VOL_SYMBOL):
     if selection["effective"] == "realizada":
         return [], []
-    model_names = ([forecast24.get("champion") or VOL_CHAMPIONS[24]]
+    champions, _provisional = vol_champions(symbol)
+    model_names = ([forecast24.get("champion") or champions[24]]
                    if selection["effective"] == "campeon"
                    else (selection.get("consensus") or {}).get("eligible_models", []))
     try:
         from api.routes.volatility import model_stats
-        horizon_stats = model_stats(request, symbol=VOL_SYMBOL, horizon=24)["horizons"][0]
+        horizon_stats = model_stats(request, symbol=symbol, horizon=24)["horizons"][0]
         by_name = {item["model_name"]: item for item in horizon_stats.get("models", [])}
     except Exception:
         return [], []
@@ -186,25 +183,28 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     ceiling = resistance + profile["ceiling_atr"] * atr
     requested_vol_source = VOL_SOURCE
     forecast24 = None
-    if symbol == VOL_SYMBOL:
-        try:
-            from api.routes.volatility import forecast as volatility_forecast
-            model_forecast = volatility_forecast(request, symbol)
-            forecast24 = next(row for row in model_forecast["forecasts"]
-                              if int(row["horizon_h"]) == 24)
-        except Exception:
-            forecast24 = None
+    try:
+        from api.routes.volatility import forecast as volatility_forecast
+        model_forecast = volatility_forecast(request, symbol)
+        forecast24 = next(row for row in model_forecast["forecasts"]
+                          if int(row["horizon_h"]) == 24)
+    except Exception:
+        forecast24 = None
     volatility = _resolve_volatility_source(symbol, forecast24, requested_vol_source)
     sigma_realized_24h = float(np.std(np.diff(np.log(np.asarray(close, dtype=float))), ddof=1) * np.sqrt(24))
     sigma_24h = volatility["sigma_24h"] or sigma_realized_24h
     vol_source_effective = volatility["effective"]
-    sigma_source = (f"pronostico {vol_source_effective} XRP 24 h"
+    sigma_source = (f"pronostico {vol_source_effective} {symbol} 24 h"
                     if vol_source_effective in {"campeon", "consenso"}
                     else "volatilidad realizada de velas 1h (log-retornos)")
     if vol_source_effective == "realizada" and volatility.get("reason"):
         sigma_source += f" (respaldo; {volatility['reason']})"
-    accumulating_models, bias_alerts = _model_volatility_advisories(request, volatility, forecast24)
-    widen_active, widen_latest = _widen_runtime_settings(request)
+    accumulating_models, bias_alerts = _model_volatility_advisories(request, volatility, forecast24, symbol)
+    if symbol == VOL_SYMBOL:
+        widen_active, widen_latest = _widen_runtime_settings(request)
+    else:
+        widen_active = {"k_active": 1.0, "disagreement_pct_active": VOL_WIDEN_DISAGREEMENT_PCT}
+        widen_latest = None
     k_active = float(widen_active["k_active"])
     disagreement_active = float(widen_active["disagreement_pct_active"])
     current_iqr = ((forecast24.get("consensus") or {}).get("dispersion_iqr")
@@ -213,7 +213,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
                           and widen_latest.get("stress_threshold") is not None)
     is_stress = (current_iqr is not None and current_iqr >= float(widen_latest["stress_threshold"])
                  if adaptive_ready else volatility["confidence"] == "baja")
-    range_widened = vol_source_effective in {"campeon", "consenso"} and is_stress
+    range_widened = symbol == VOL_SYMBOL and vol_source_effective in {"campeon", "consenso"} and is_stress
     if range_widened:
         floor = max(float(np.finfo(float).tiny), current - (current - floor) * k_active)
         ceiling = current + (ceiling - current) * k_active
@@ -279,8 +279,9 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     range_risk = estimate_range_risk(current, floor, ceiling, sigma_24h,
         vol_source_effective=vol_source_effective,
         vol_source_requested=volatility["requested"])
-    pause_break_prob, _, _, _ = break_prob(current, floor, ceiling, sigma_24h, DEFAULT_SMART_PARAMS)
-    pause_enter_prob = float(DEFAULT_SMART_PARAMS["pause_enter_prob"])
+    pause_params = {**DEFAULT_SMART_PARAMS, "horizon_h": 24}
+    pause_break_prob, _, _, _ = break_prob(current, floor, ceiling, sigma_24h, pause_params)
+    pause_enter_prob = float(pause_params["pause_enter_prob"])
     disagreement_pct = None
     if volatility.get("champion_sigma_24h") and volatility.get("consensus_sigma_24h"):
         disagreement_pct = abs(volatility["consensus_sigma_24h"] - volatility["champion_sigma_24h"])
@@ -288,6 +289,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     volatility_advisory = {
         "vol_source_effective": vol_source_effective,
         "vol_source_requested": volatility["requested"],
+        "vol_selection": ("provisional" if symbol != VOL_SYMBOL and vol_champions(symbol)[1] else "consensus") if symbol != VOL_SYMBOL else None,
         "sigma_24h": sigma_24h,
         "confidence": volatility.get("confidence"),
         "range_widened": range_widened,
@@ -348,6 +350,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         "range_limit_warning": bool(actual_range_mode == "centrado" and centered["limited_by_profile"]),
         "vol_source_effective": vol_source_effective,
         "vol_source_requested": volatility["requested"],
+        "vol_selection": ("provisional" if symbol != VOL_SYMBOL and vol_champions(symbol)[1] else "consensus") if symbol != VOL_SYMBOL else None,
         "volatility_advisory": volatility_advisory,
         "risk": {**profile, "capital_below_price_pct": capital_below / capital * 100,
                  "unrealized_loss_at_floor_usdt": loss_at_floor},

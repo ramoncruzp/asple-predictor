@@ -31,7 +31,7 @@ def test_engine_allows_same_coin_sell_distinct_but_rejects_holding_overlap():
 
 def test_injected_engine_provider_blocks_smart_without_sigma():
     engine, _db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
-    engine.vol_provider = type("NoSigma", (), {"get": lambda self, symbol: None})()
+    engine.vol_provider = type("NoSigma", (), {"get": lambda self, symbol, horizon_h=24: None})()
     try:
         engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000, strategy="smart",
                            params={"adjust_enabled": False})

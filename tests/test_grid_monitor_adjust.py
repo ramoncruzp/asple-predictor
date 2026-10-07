@@ -10,14 +10,14 @@ class Vol:
     sigma_24h = 0.01
     last_reason = None
 
-    def get(self, _symbol):
+    def get(self, _symbol, horizon_h=24):
         return SimpleNamespace(sigma_24h=self.sigma_24h, stale=False)
 
 
 def test_monitor_adjusts_smart_grid_and_leaves_simple_grid_unchanged():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     smart = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000,
-                               strategy="smart", params={"pause_enter_prob": 0.99})
+                               strategy="smart", params={"horizon_h": 24, "pause_enter_prob": 0.99})
     simple = engine.create_grid("XRPUSDT", 95, 105, 4, capital=1000)
     exchange.move_price(109.49, 109.5, 109.495)
     run = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol()).run_once()
@@ -30,7 +30,7 @@ def test_monitor_adjusts_smart_grid_and_leaves_simple_grid_unchanged():
 def test_monitor_adjust_failure_is_partial_and_records_failure():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     smart = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000,
-                               strategy="smart", params={"pause_enter_prob": 0.99})
+                               strategy="smart", params={"horizon_h": 24, "pause_enter_prob": 0.99})
     exchange.move_price(90.5, 90.51, 90.505)
     engine.adjust_grid = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected"))
     run = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol()).run_once()
@@ -42,7 +42,7 @@ def test_monitor_adjust_failure_is_partial_and_records_failure():
 def test_monitor_adjust_cooldown_and_block_event_rate_limit():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     smart = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000,
-                               strategy="smart", params={"pause_enter_prob": 0.99})
+                               strategy="smart", params={"horizon_h": 24, "pause_enter_prob": 0.99})
     exchange.move_price(90.5, 90.51, 90.505)
     now = [datetime.now(timezone.utc)]
     monitor = GridMonitor(db, exchange, engine, monitor_settings(), clock=lambda: now[0], vol_provider=Vol())

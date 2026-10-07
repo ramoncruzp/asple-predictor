@@ -78,7 +78,10 @@ async def lifespan(app: FastAPI):
     vol_registry.load_available()
     coin_onboarding_service = CoinOnboardingService(db, vol_registry, training_job_service,
         root=Path(__file__).resolve().parents[1])
-    coin_onboarding_service.start()
+    try:
+        coin_onboarding_service.start()
+    except Exception:
+        logging.getLogger(__name__).exception("No se pudo iniciar el servicio de preparación de monedas")
     vol_predictor = vol_registry.get(VOL_SYMBOL)
     vol_loop = VolLoop(client, vol_registry, db) if vol_registry.ready_symbols() else None
     if vol_predictor is None:
@@ -90,7 +93,7 @@ async def lifespan(app: FastAPI):
     widen_factor_loop = WidenFactorLoop(db, hour_utc=VOL_WIDEN_COMPUTE_HOUR_UTC)
     testnet_client = None
     grid_engine = None
-    grid_vol_provider = VolatilityProvider(db, data_client=client)
+    grid_vol_provider = VolatilityProvider(db, data_client=client, registry=vol_registry)
     testnet_key = (settings.testnet_api_key or "").strip()
     testnet_secret = (settings.testnet_api_secret or "").strip()
     valid_testnet_credentials = (
@@ -158,7 +161,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        coin_onboarding_service.stop()
+        try:
+            coin_onboarding_service.stop()
+        except Exception:
+            logging.getLogger(__name__).exception("No se pudo detener el servicio de preparación de monedas")
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_auto_open.stop()

@@ -370,7 +370,7 @@ def test_adjust_rejections_match_engine_and_simulator(reason, params, capital, w
     sigma[3:] = .2
     effective = {"pause_enter_prob": None, "pause_exit_prob": None,
                  "adjust_trigger_z": .75, "adjust_cooldown_h": 0,
-                 "stop_loss_pct": 50, **params}
+                 "stop_loss_pct": 50, "horizon_h": 24, **params}
     real, sim, _trace = smart_pair(candles, params=effective, sigma_values=sigma,
                                    capital=capital, low=low, high=high)
     engine_reasons = [str(event.get("reason")) for event in real["events"]

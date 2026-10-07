@@ -1,17 +1,20 @@
-"""Read-only adapter for the latest persisted 24-hour volatility forecast."""
+"""Read-only adapter for per-symbol, per-horizon volatility forecasts."""
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from math import exp, isfinite, sqrt, log
 from typing import Any, Callable
 
-from config.models_config import VOL_CHAMPIONS, VOL_SYMBOL
+from config.models_config import VOL_CHAMPIONS, VOL_SYMBOL, vol_champions, vol_manifest_path
+from models.coin_onboarding import coin_is_ready
 
 logger = logging.getLogger(__name__)
+SUPPORTED_HORIZONS = frozenset({1, 2, 4, 24})
 
 
 @dataclass(frozen=True)
@@ -21,23 +24,23 @@ class VolView:
     regime: str | None
     as_of: datetime
     source: str = "model"
+    horizon_h: int = 24
+    sigma_h: float | None = None
+    fallback: bool = False
+    fallback_reason: str | None = None
 
 
 class VolatilityProvider:
-    """Expose the same calibrated 24h sigma used by the forecast API, without HTTP."""
+    """Expose calibrated hourly volatility as compatible 24h and requested-horizon sigma."""
 
-    def __init__(
-        self,
-        db_manager: Any,
-        *,
-        manifest: dict | None = None,
-        clock: Callable[[], datetime] | None = None,
-        data_client: Any = None,
-    ):
+    def __init__(self, db_manager: Any, *, manifest: dict | None = None,
+                 clock: Callable[[], datetime] | None = None, data_client: Any = None,
+                 registry: Any = None):
         self.db = db_manager
         self.manifest = manifest or {}
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.data_client = data_client
+        self.registry = registry
         self._realized_cache: dict[str, tuple[datetime, VolView | None]] = {}
         self._realized_lock = threading.Lock()
         self.last_reason: str | None = None
@@ -50,47 +53,89 @@ class VolatilityProvider:
             raise ValueError("forecast_at must be a datetime or ISO string")
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
-    def get(self, symbol: str) -> VolView | None:
+    def _manifest_for(self, symbol: str) -> dict:
+        if symbol == VOL_SYMBOL:
+            return self.manifest
+        try:
+            return json.loads(vol_manifest_path(symbol).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _champion_row(self, rows: list[dict], symbol: str, horizon_h: int) -> dict | None:
+        champions = VOL_CHAMPIONS if symbol == VOL_SYMBOL else vol_champions(symbol)[0]
+        champion_name = champions.get(horizon_h)
+        return next((row for row in rows if (
+            int(row.get("horizon_h", 0)) == horizon_h
+            and str(row.get("symbol", symbol)).strip().upper().replace("/", "") == symbol
+            and row.get("model_name") == champion_name
+            and bool(row.get("is_champion"))
+        )), None)
+
+    def _model_view(self, row: dict, symbol: str, requested_h: int, *,
+                    fallback: bool = False, fallback_reason: str | None = None) -> VolView | None:
+        as_of = self._utc(row["forecast_at"])
+        if self._utc(self.clock()) - as_of > timedelta(hours=2):
+            return None
+        hourly_sigma = exp(float(row["pred_logvol_cal"]))
+        if not isfinite(hourly_sigma) or hourly_sigma <= 0:
+            return None
+        manifest = self._manifest_for(symbol)
+        percentiles = manifest.get("regime_percentiles_24h", {})
+        p33, p66 = percentiles.get("p33"), percentiles.get("p66")
+        regime = None
+        if p33 is not None and p66 is not None:
+            regime = "CALMA" if hourly_sigma < float(p33) else "NORMAL" if hourly_sigma < float(p66) else "AGITADO"
+        return VolView(sigma_24h=hourly_sigma * sqrt(24.0), stale=False, regime=regime,
+                       as_of=as_of, source="model", horizon_h=requested_h,
+                       sigma_h=hourly_sigma * sqrt(requested_h), fallback=fallback,
+                       fallback_reason=fallback_reason)
+
+    def get(self, symbol: str, horizon_h: int = 24) -> VolView | None:
         self.last_reason = None
         normalized = str(symbol).strip().upper().replace("/", "")
-        if normalized != VOL_SYMBOL:
-            return self._realized(normalized)
+        requested_h = int(horizon_h)
+        if requested_h not in SUPPORTED_HORIZONS:
+            requested_h = 24
+        if normalized != VOL_SYMBOL and not coin_is_ready(self.db, self.registry, normalized):
+            return self._realized_for_horizon(normalized, requested_h)
         try:
             rows = self.db.get_latest_vol_forecasts(normalized)
-            champion_name = VOL_CHAMPIONS[24]
-            row = next((item for item in rows if (
-                int(item.get("horizon_h", 0)) == 24
-                and item.get("model_name") == champion_name
-                and bool(item.get("is_champion"))
-            )), None)
-            if row is None:
-                self.last_reason = "forecast_unavailable"
-                return None
-            as_of = self._utc(row["forecast_at"])
-            now = self._utc(self.clock())
-            if now - as_of > timedelta(hours=2):
-                self.last_reason = "stale"
-                return None
-            hourly_sigma = exp(float(row["pred_logvol_cal"]))
-            if not isfinite(hourly_sigma) or hourly_sigma <= 0:
-                self.last_reason = "invalid_sigma"
-                return None
-            sigma_24h = hourly_sigma * sqrt(24.0)
-            percentiles = self.manifest.get("regime_percentiles_24h", {})
-            p33, p66 = percentiles.get("p33"), percentiles.get("p66")
-            regime = None
-            if p33 is not None and p66 is not None:
-                regime = (
-                    "CALMA" if hourly_sigma < float(p33)
-                    else "NORMAL" if hourly_sigma < float(p66)
-                    else "AGITADO"
-                )
-            return VolView(sigma_24h=sigma_24h, stale=False, regime=regime, as_of=as_of,
-                           source="model")
+            row = self._champion_row(rows, normalized, requested_h)
+            if row is not None:
+                view = self._model_view(row, normalized, requested_h)
+                if view is not None:
+                    return view
+                target_reason = "stale" if self._utc(self.clock()) - self._utc(row["forecast_at"]) > timedelta(hours=2) else "invalid_sigma"
+            else:
+                target_reason = "forecast_unavailable"
+            if requested_h < 24:
+                fallback_row = self._champion_row(rows, normalized, 24)
+                if fallback_row is not None:
+                    fallback_view = self._model_view(fallback_row, normalized, requested_h,
+                                                     fallback=True, fallback_reason=target_reason)
+                    if fallback_view is not None:
+                        return fallback_view
+                    target_reason = "stale" if self._utc(self.clock()) - self._utc(fallback_row["forecast_at"]) > timedelta(hours=2) else "invalid_sigma"
+            if normalized != VOL_SYMBOL:
+                realized = self._realized_for_horizon(normalized, requested_h)
+                if realized is not None:
+                    return realized
+                target_reason = self.last_reason or target_reason
+            self.last_reason = target_reason
+            return None
         except Exception:
             self.last_reason = "exception"
             logger.exception("volatility lookup failed for %s", normalized)
+            if normalized != VOL_SYMBOL:
+                return self._realized_for_horizon(normalized, requested_h)
             return None
+
+    def _realized_for_horizon(self, symbol: str, horizon_h: int) -> VolView | None:
+        view = self._realized(symbol)
+        if view is None or horizon_h == 24:
+            return view
+        return replace(view, horizon_h=horizon_h,
+                       sigma_h=view.sigma_24h * sqrt(horizon_h / 24.0))
 
     def _realized(self, symbol: str) -> VolView | None:
         with self._realized_lock:
@@ -120,7 +165,7 @@ class VolatilityProvider:
                 if not isfinite(sigma_h) or sigma_h <= 0:
                     raise ValueError("invalid_realized_sigma")
                 view = VolView(sigma_24h=sigma_h * sqrt(24), stale=False, regime=None,
-                               as_of=now, source="realized")
+                               as_of=now, source="realized", horizon_h=24, sigma_h=sigma_h * sqrt(24))
                 self._realized_cache[symbol] = (now, view)
                 self.last_reason = None
                 return view

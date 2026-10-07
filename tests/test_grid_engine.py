@@ -38,6 +38,19 @@ def test_create_grid_places_only_buys_below_exchange_bid():
     assert all(order["side"] == "BUY" for order in exchange.get_open_orders("XRPUSDT"))
 
 
+def test_smart_grid_requests_volatility_at_its_selected_horizon():
+    engine, _db, _exchange = make_engine()
+    class Provider:
+        def __init__(self): self.calls = []
+        def get(self, symbol, horizon_h=24):
+            self.calls.append((symbol, horizon_h))
+            return SimpleNamespace(sigma_24h=.02)
+    provider = Provider()
+    engine.vol_provider = provider
+    engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 4})
+    assert provider.calls == [("XRPUSDT", 4)]
+
+
 def test_grid_capital_default_is_copied_and_simultaneous_limit_is_enforced():
     engine, db, exchange = make_engine()
     engine.settings.max_grids_simultaneos = 1
@@ -842,3 +855,12 @@ def test_engine_treats_absent_exchange_order_limit_as_unlimited():
     result = engine.sync_grid(grid["id"])
     assert result["errors"] == 0
     assert db.get_grid(grid["id"])["status"] == "ACTIVE"
+
+
+def test_smart_grid_rejects_horizons_outside_supported_set():
+    from grid.levels import GridConfigError
+    engine, _db, exchange = make_engine()
+    before = list(exchange.create_calls)
+    with pytest.raises(GridConfigError, match="horizon_h debe ser 1, 2, 4 o 24"):
+        create(engine, strategy="smart", params={"horizon_h": 12})
+    assert exchange.create_calls == before

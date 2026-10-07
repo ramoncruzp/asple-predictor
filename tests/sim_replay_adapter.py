@@ -119,7 +119,7 @@ class CandleVolatilityProvider:
     def advance(self, index):
         self.index = int(index)
 
-    def get(self, _symbol):
+    def get(self, _symbol, horizon_h=24):
         value = self.values[self.index]
         if value is None:
             self.last_reason = "unavailable"

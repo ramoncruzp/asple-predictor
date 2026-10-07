@@ -60,7 +60,7 @@ def test_recommendation_uses_editable_margin_and_named_risk_limits():
     assert low["prediction_signal"] is None
     assert low["range_preference_note"] is None
     expected_break, _, _, _ = break_prob(low["current_price"], low["recommended_floor"],
-        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], DEFAULT_SMART_PARAMS)
+        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], {**DEFAULT_SMART_PARAMS, "horizon_h": 24})
     assert low["pause_risk"]["break_prob"] == pytest.approx(expected_break)
     assert low["pause_risk"]["pause_enter_prob"] == .10
     assert low["pause_risk"]["would_be_pausable"] == (expected_break > .10)
@@ -125,7 +125,11 @@ def _stats_response(bias=False, bias_mean=.2, n=10):
 
 def test_advisor_widens_only_low_dispersion_and_bias_is_informational(monkeypatch):
     monkeypatch.setattr(grid_advisor, "VOL_SOURCE", "consensus")
-    monkeypatch.setattr(volatility_route, "forecast", lambda request, symbol: _forecast24("baja"))
+    def forecast_for_xrp(request, symbol):
+        if symbol != "XRPUSDT":
+            raise RuntimeError("no forecast")
+        return _forecast24("baja")
+    monkeypatch.setattr(volatility_route, "forecast", forecast_for_xrp)
     monkeypatch.setattr(volatility_route, "model_stats", lambda *a, **k: _stats_response(True))
     low = make_client().get("/api/grid/recommend", query={"symbol": "XRPUSDT", "range_mode": "estructural"}).body
     assert low["vol_source_effective"] == "consenso"
@@ -159,7 +163,7 @@ def test_advisor_widens_only_low_dispersion_and_bias_is_informational(monkeypatc
 
 def test_non_xrp_and_stale_forecasts_keep_realized_volatility(monkeypatch):
     payload = _forecast24("baja")["forecasts"][0]
-    assert grid_advisor._resolve_volatility_source("ADAUSDT", payload, "consensus")["effective"] == "realizada"
+    assert grid_advisor._resolve_volatility_source("ADAUSDT", payload, "consensus")["effective"] == "consenso"
     assert grid_advisor._resolve_volatility_source("XRPUSDT", {**payload, "stale": True}, "consensus")["effective"] == "realizada"
     monkeypatch.setattr(grid_advisor, "VOL_SOURCE", "consensus")
     monkeypatch.setattr(volatility_route, "forecast", lambda request, symbol: _forecast24("alta", stale=True))
@@ -288,3 +292,18 @@ def test_advisor_recommendation_rejects_coin_not_ready(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         grid_advisor.recommend(request,symbol="ADAUSDT")
     assert exc.value.status_code==409 and "ADAUSDT" in exc.value.detail and "entrenando" in exc.value.detail
+
+
+def test_ready_ada_advisor_uses_its_model_without_xrp_widening(monkeypatch):
+    monkeypatch.setattr(volatility_route, "forecast", lambda request, symbol: _forecast24("baja"))
+    monkeypatch.setattr(grid_advisor, "vol_champions", lambda _symbol: (VOL_CHAMPIONS, True))
+    advisory_symbols = []
+    monkeypatch.setattr(grid_advisor, "_model_volatility_advisories",
+        lambda *args: (advisory_symbols.append(args[-1]) or ([], [])))
+    monkeypatch.setattr(grid_advisor, "_widen_runtime_settings", lambda *args: (_ for _ in ()).throw(AssertionError("XRP widening queried for ADA")))
+    result = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT", "range_mode": "estructural"}).body
+    assert result["vol_source_effective"] == "campeon"
+    assert result["vol_selection"] == "provisional"
+    assert result["volatility_advisory"]["k_active"] == 1.0
+    assert result["volatility_advisory"]["range_widened"] is False
+    assert advisory_symbols == ["ADAUSDT"]

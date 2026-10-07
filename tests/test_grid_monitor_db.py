@@ -32,6 +32,7 @@ def test_monitor_tables_have_exact_audit_columns(db):
         "market_mid", "unrealized_pnl", "open_orders_db", "inventory_value_usdt", "in_repository",
         "origin_grid_id", "origin_level_idx", "age_hours",
         "break_prob", "sigma_24h", "trapped_capital_pct", "free_cells",
+        "sigma_monitor_h", "monitor_horizon_h", "source",
     }
 
 

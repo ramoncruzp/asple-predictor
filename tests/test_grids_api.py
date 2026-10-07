@@ -72,7 +72,7 @@ def app(tmp_path, *, token="", maximum=5, balance="100000"):
     api.include_router(router, prefix="/api/grids")
     api.state.db, api.state.settings = db, settings
     api.state.grid_engine, api.state.testnet_client = engine, exchange
-    api.state.vol_provider = SimpleNamespace(get=lambda symbol: SimpleNamespace(sigma_24h=.01))
+    api.state.vol_provider = SimpleNamespace(get=lambda symbol, horizon_h=24: SimpleNamespace(sigma_24h=.01))
     api.state.grid_scan_service = service
     return LocalClient(api), db, exchange
 
@@ -138,6 +138,9 @@ def test_dry_run_builds_plan_without_exchange_orders_and_confirm_is_required(tmp
     assert response.status_code == 200, response.text
     assert response.json()["dry_run"] is True
     assert response.json()["guards"]["exchange_will_be_called"] is False
+    assert response.json()["sigma_open"]["source"] == "realized"
+    assert response.json()["sigma_open"]["window"] == "30d"
+    assert response.json()["sigma_open"]["value"] > 0
     assert response.json()["testnet_in_range"] is True
     assert response.json()["testnet_price_guard"]["allowed"] is True
     assert exchange.create_calls == []
@@ -396,6 +399,10 @@ def test_smart_target_params_are_validated_and_passed_to_existing_engine(tmp_pat
     assert response.status_code == 200, response.text
     event = db.list_grid_events(grid_id=response.json()["grid_id"], event_type="GRID_OPEN_API")[0]
     assert event["details"]["params"]["target_pct"] == 5
+    assert event["details"]["params"]["horizon_h"] == 4
+    assert event["details"]["sigma_open"]["source"] == "realized"
+    assert event["details"]["sigma_open"]["window"] == "30d"
+    assert event["details"]["sigma_open"]["value"] > 0
 
 
 def test_simple_open_accepts_compound_params_and_persists_them(tmp_path):
@@ -574,3 +581,23 @@ def test_open_rejects_nonready_coin_and_records_same_rejection(monkeypatch,tmp_p
     assert "La moneda ADAUSDT aún no está lista: pendiente" in response.json()["detail"]
     events=db.list_grid_events(event_type="GRID_OPEN_REJECTED")
     assert events and "ADAUSDT" in events[-1]["reason"]
+
+
+def test_smart_open_rejects_unsupported_horizon_before_provider_or_market(tmp_path):
+    client, _db, exchange = app(tmp_path)
+    provider_calls = []
+    client.app.state.vol_provider = SimpleNamespace(
+        get=lambda symbol, horizon_h=24: provider_calls.append((symbol, horizon_h)))
+    response = client.post("/api/grids/open", json=payload(strategy="smart", params={"horizon_h": 12}))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "horizon_h debe ser 1, 2, 4 o 24"
+    assert provider_calls == [] and exchange.create_calls == []
+
+
+@pytest.mark.parametrize("horizon", [1, 2, 4, 24])
+def test_smart_open_accepts_supported_horizons(tmp_path, horizon):
+    client, _db, _exchange = app(tmp_path)
+    response = client.post("/api/grids/open", json=payload(
+        strategy="smart", params={"horizon_h": horizon}))
+    assert response.status_code == 200, response.text
+    assert response.json()["params"]["horizon_h"] == horizon

@@ -13,7 +13,7 @@ class Vol:
         self.sigma = sigma
         self.last_reason = "stale" if sigma is None else None
 
-    def get(self, symbol):
+    def get(self, symbol, horizon_h=24):
         return None if self.sigma is None else SimpleNamespace(sigma_24h=self.sigma, stale=False)
 
 

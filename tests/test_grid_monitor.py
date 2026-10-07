@@ -291,6 +291,75 @@ def monitor_settings():
     )
 
 
+def _freeze_monitor_policy(monkeypatch):
+    import grid.monitor as monitor_module
+    from grid.policy import PolicyDecision
+    monkeypatch.setattr(monitor_module, "evaluate_grid",
+        lambda *args, **kwargs: PolicyDecision("NONE", (), {"break_prob": .01, "sigma_24h": .02}))
+    monkeypatch.setattr(monitor_module, "adjust_decision",
+        lambda *args, **kwargs: PolicyDecision("NONE", (), {}))
+
+
+def test_monitor_uses_per_symbol_horizon_cache_and_records_snapshot_contract(monkeypatch):
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    class Provider:
+        def __init__(self): self.calls = []
+        def get(self, symbol, horizon_h=24):
+            self.calls.append((symbol, horizon_h))
+            return SimpleNamespace(sigma_24h=.02, source="model", fallback=False)
+    provider = Provider()
+    engine.vol_provider = provider
+    first = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 1})
+    first_params = dict(db.get_grid(first["id"])["params"])
+    first_params["horizon_h"] = 6  # legacy stored value remains valid for the policy, provider uses 24 h
+    db.update_grid(first["id"], params=db._json(first_params))
+    second = engine.create_grid("XRPUSDT", 89, 111, 5, strategy="smart", params={"horizon_h": 4})
+    third = engine.create_grid("XRPUSDT", 88, 112, 5, strategy="smart", params={"horizon_h": 2})
+    params = dict(db.get_grid(third["id"])["params"])
+    params.pop("horizon_h")
+    db.update_grid(third["id"], params=db._json(params))
+    provider.calls.clear()
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=provider)
+    result = monitor.run_once()
+    assert result["status"] == "OK"
+    assert sorted(provider.calls) == [("XRPUSDT", 4), ("XRPUSDT", 24)]
+    snapshots = [row for grid in (first, second, third)
+                 for row in db.list_grid_snapshots(grid_id=grid["id"], run_id=result["run_id"])
+                 if row["level_idx"] is None]
+    by_grid = {row["grid_id"]: row for row in snapshots}
+    assert by_grid[first["id"]]["monitor_horizon_h"] == 6
+    assert by_grid[second["id"]]["monitor_horizon_h"] == 4
+    assert by_grid[third["id"]]["monitor_horizon_h"] == 24
+    assert all(row["source"] == "model" and row["sigma_monitor_h"] is not None
+               and row["market_mid"] is not None for row in snapshots)
+    assert by_grid[first["id"]]["sigma_monitor_h"] == pytest.approx(.02 * (6 / 24) ** .5)
+    assert by_grid[second["id"]]["sigma_monitor_h"] == pytest.approx(.02 * (4 / 24) ** .5)
+    assert by_grid[third["id"]]["sigma_monitor_h"] == pytest.approx(.02)
+
+
+def test_monitor_deduplicates_fallback_event_and_rearms_after_fresh_forecast(monkeypatch):
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    class Provider:
+        def __init__(self): self.index = 0
+        def get(self, symbol, horizon_h=24):
+            self.index += 1
+            fallback = self.index in {1, 2, 4}
+            return SimpleNamespace(sigma_24h=.02, source="model", fallback=fallback,
+                fallback_reason="forecast_unavailable" if fallback else None)
+    provider = Provider()
+    engine.vol_provider = provider
+    grid = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 4})
+    provider.index = 0
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=provider)
+    for _ in range(4):
+        assert monitor.run_once()["status"] == "OK"
+    events = db.list_grid_events(grid_id=grid["id"], event_type="vol_fallback_24h")
+    assert len(events) == 2
+    assert all(event["details"]["fallback_horizon_h"] == 24 for event in events)
+
+
 def test_monitor_run_records_heartbeat_snapshots_and_dust_baseline():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     copied = create(engine)
@@ -525,6 +594,16 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
     class DummyDB:
         def seed_coin_if_missing(self, *args):
             pass
+        def get_active_coins(self):
+            return []
+        def list_readiness(self):
+            return []
+        def get_readiness(self, *args):
+            return None
+        def set_readiness(self, *args):
+            return {}
+        def has_active_training_job(self, *args):
+            return False
     class DummyModel:
         def load(self, *args):
             pass
@@ -565,3 +644,86 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
     assert lifespan_entered["value"] is True
     assert "Grid monitor disabled: faltan credenciales" in caplog.text
     assert "No se pudieron recuperar los trabajos de entrenamiento interrumpidos" in caplog.text
+
+
+def test_coin_onboarding_start_failure_does_not_prevent_lifespan_start(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+    import asyncio
+    from api import main as main_module
+
+    settings = SimpleNamespace(
+        binance_api_key="tu_api_key_aqui", binance_api_secret="tu_api_secret_aqui",
+        testnet_api_key="tu_testnet_api_key_aqui", testnet_api_secret="tu_testnet_secret_aqui",
+        database_url="sqlite:///:memory:", log_level="ERROR", grid_monitor_enabled=False,
+        grid_monitor_interval=900, grid_monitor_gap_minutes=20,
+        usdt_por_grid=100, max_grids_simultaneos=5, capital_max_por_nivel_pct=0.30,
+        grid_min_step_pct=0.003,
+    )
+
+    class DummyDB:
+        def seed_coin_if_missing(self, *args):
+            pass
+
+    class DummyModel:
+        def load(self, *args):
+            pass
+
+    class DummyLoop:
+        def __init__(self, *args, **kwargs):
+            self.models = {}
+        def start(self):
+            pass
+        def stop(self):
+            pass
+
+    class DummyTrainingJobs:
+        def __init__(self, *args, **kwargs):
+            pass
+        def recover_interrupted(self):
+            pass
+
+    class FailingOnboarding:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            raise RuntimeError("onboarding boom")
+        def stop(self):
+            raise RuntimeError("stop boom")
+
+    class DummyRegistry:
+        def load_available(self):
+            pass
+        def ready_symbols(self):
+            return []
+        def get(self, symbol):
+            return None
+
+    artifact = tmp_path / "model-a.bin"
+    artifact.write_bytes(b"test")
+    monkeypatch.setattr(main_module, "Settings", lambda: settings)
+    monkeypatch.setattr(main_module, "BinanceClient", lambda *args: object())
+    monkeypatch.setattr(main_module, "DBManager", lambda *args: DummyDB())
+    monkeypatch.setattr(main_module, "ModelA", DummyModel)
+    monkeypatch.setattr(main_module, "SHADOW_ARTIFACT", artifact)
+    monkeypatch.setattr(main_module, "load_optional_shadow_models", lambda: ({}, {}))
+    monkeypatch.setattr(main_module, "ShadowPredictor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(main_module, "PredictionLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "VerificationLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "VolLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "VolPredictorRegistry", DummyRegistry)
+    monkeypatch.setattr(main_module, "CoinOnboardingService", FailingOnboarding)
+    monkeypatch.setattr(main_module, "TrainingJobService", DummyTrainingJobs)
+    monkeypatch.setattr(main_module, "BackupLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "WidenFactorLoop", DummyLoop)
+    monkeypatch.setattr(main_module, "GridScanService", DummyLoop)
+    monkeypatch.setattr(main_module, "GridAutoOpen", DummyLoop)
+    monkeypatch.setattr(main_module, "VOL_ARTIFACT_DIR", tmp_path / "missing-vol")
+
+    async def run_lifespan():
+        app = SimpleNamespace(state=SimpleNamespace())
+        async with main_module.lifespan(app):
+            assert app.state.coin_onboarding_service is not None
+
+    asyncio.run(run_lifespan())
+    assert "No se pudo iniciar el servicio de preparación de monedas" in caplog.text
+    assert "No se pudo detener el servicio de preparación de monedas" in caplog.text

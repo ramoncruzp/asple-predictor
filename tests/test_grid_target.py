@@ -437,7 +437,7 @@ def _monitor_settings():
 
 def _monitor_target(engine, db, exchange):
     class Vol:
-        def get(self, symbol):
+        def get(self, symbol, horizon_h=24):
             return SimpleNamespace(sigma_24h=None)
     return GridMonitor(db, exchange, engine, _monitor_settings(), vol_provider=Vol())
 

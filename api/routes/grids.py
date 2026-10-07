@@ -25,6 +25,13 @@ def _mid(market: dict) -> Decimal:
     return (Decimal(str(market["bid"])) + Decimal(str(market["ask"]))) / Decimal(2)
 
 
+def _sigma_open(request, market: dict) -> dict:
+    closes = market["klines_1h"]["close"].astype(float).to_numpy()
+    sigma = float(np.std(np.diff(np.log(closes)), ddof=1) * np.sqrt(24)) if len(closes) > 2 else 0.0
+    days = int(getattr(request.app.state.settings, "scanner_history_days", 30))
+    return {"value": sigma, "source": "realized", "window": f"{days}d"}
+
+
 def _margin_guard(request, low, high, n, capital, mid, filters):
     settings = request.app.state.settings
     fee = float(getattr(settings, "scanner_fee_pct", .1))
@@ -175,6 +182,11 @@ def open_grid(request: Request, body: OpenRequest):
     if body.from_scan and scan_row is None:
         _reject(db, 422, "No hay resultado elegible reciente del scan para este símbolo.", symbol, body)
     params = dict(body.params or {})
+    if body.strategy == "smart":
+        horizon = params.get("horizon_h", 4)
+        if isinstance(horizon, bool) or not isinstance(horizon, (int, float)) or horizon not in {1, 2, 4, 24}:
+            _reject(db, 422, "horizon_h debe ser 1, 2, 4 o 24", symbol, body)
+        params["horizon_h"] = int(horizon)
     if body.target_pct is not None:
         params["target_pct"] = float(body.target_pct)
     if body.target_usdt is not None:
@@ -209,8 +221,8 @@ def open_grid(request: Request, body: OpenRequest):
             market, filters = request.app.state.grid_scan_service._market(
                 symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
                 float(request.app.state.settings.scanner_timeout_seconds))
-            closes = market["klines_1h"]["close"].astype(float).tolist()
-            sigma = float(np.std(np.diff(np.log(closes)), ddof=1) * np.sqrt(24)) if len(closes) > 2 else 0
+            sigma_open = _sigma_open(request, market)
+            sigma = sigma_open["value"]
             mid = _mid(market)
             structure = suggest_structure(sigma, body.capital, mid,
                 filters, float(request.app.state.settings.scanner_fee_pct),
@@ -256,7 +268,7 @@ def open_grid(request: Request, body: OpenRequest):
                 "testnet_price": str(testnet_price) if testnet_price is not None else None,
                 "testnet_in_range": testnet_in_range, "testnet_price_guard": testnet_price_guard,
                 "initial_order_count": active_orders, **position,
-                "suggested_structure": structure,
+                "suggested_structure": structure, "sigma_open": sigma_open,
                 "min_cell_warning": minimum_cell_warning(body.capital, n, minimum_cell),
                 "dust_target_pct": "0.1", "dust_min_cell_usdt": str(dust_min_cell),
                 "margin_guard": margin_guard,
@@ -281,6 +293,7 @@ def open_grid(request: Request, body: OpenRequest):
         market, filters = request.app.state.grid_scan_service._market(
             symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
             float(request.app.state.settings.scanner_timeout_seconds))
+        sigma_open = _sigma_open(request, market)
         margin_guard = _margin_guard(request, body.range_low, body.range_high, body.n_levels,
                                      body.capital, _mid(market), filters)
     except Exception as exc:
@@ -320,7 +333,7 @@ def open_grid(request: Request, body: OpenRequest):
             capital=body.capital, strategy=body.strategy, params=effective or None)
         db.add_grid_event(run_id=None, source="CLI", event_type="GRID_OPEN_API", grid_id=int(result["id"]),
             details={"who": "api", "strategy": body.strategy, "capital": str(body.capital),
-                     "params": effective, "scan_snapshot": scan_row})
+                     "params": effective, "scan_snapshot": scan_row, "sigma_open": sigma_open})
         return {"status": result.get("status"), "grid_id": result.get("id"), "symbol": symbol,
                 "warning": EXECUTION_WARNING}
     except GridConfigError as exc:

@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 
 DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
-    "horizon_h": 24,
+    "horizon_h": 4,
     "sigma_scale": 1.15,
     "pause_enter_prob": 0.10,
     "pause_exit_prob": 0.05,

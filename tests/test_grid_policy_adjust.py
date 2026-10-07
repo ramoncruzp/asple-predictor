@@ -6,7 +6,7 @@ from grid.policy import DEFAULT_SMART_PARAMS, adjust_decision, validate_params
 def _grid(params=None):
     return {"id": 7, "strategy": "smart", "status": "ACTIVE", "range_low": 90,
             "range_high": 110, "n_levels": 5, "capital_total": 1000,
-            "params": {**DEFAULT_SMART_PARAMS, **(params or {})}}
+            "params": {**DEFAULT_SMART_PARAMS, "horizon_h": 24, **(params or {})}}
 
 
 def test_adjust_decision_triggers_near_edge_and_keeps_log_width_centered():

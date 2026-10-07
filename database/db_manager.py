@@ -243,6 +243,8 @@ class DBManager:
             Column("origin_grid_id", Integer), Column("origin_level_idx", Integer), Column("age_hours", Float),
             Column("break_prob", Float), Column("sigma_24h", Float),
             Column("trapped_capital_pct", Float), Column("free_cells", Integer),
+            Column("sigma_monitor_h", Float), Column("monitor_horizon_h", Float),
+            Column("source", String),
         )
         self.metadata.create_all(self.engine)
         self._migrate_widen_columns()
@@ -325,6 +327,7 @@ class DBManager:
             "grid_snapshots": {
                 "break_prob": "FLOAT", "sigma_24h": "FLOAT",
                 "trapped_capital_pct": "FLOAT", "free_cells": "INTEGER",
+                "sigma_monitor_h": "FLOAT", "monitor_horizon_h": "FLOAT", "source": "TEXT",
             },
         }
         with self.engine.begin() as conn:

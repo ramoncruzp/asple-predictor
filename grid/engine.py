@@ -280,11 +280,14 @@ class GridEngine:
                 effective_params = validate_params(params, n_levels)
             except ValueError as exc:
                 raise GridConfigError(str(exc)) from exc
+            if effective_params["horizon_h"] not in {1, 2, 4, 24}:
+                raise GridConfigError("horizon_h debe ser 1, 2, 4 o 24")
             effective_stop = stop_loss_pct if stop_loss_pct is not None else effective_params["stop_loss_pct"]
             if float(effective_stop) <= 0:
                 raise GridConfigError("stop_loss_pct must be greater than zero")
             effective_params["stop_loss_pct"] = float(effective_stop)
-            if self.vol_provider is not None and self.vol_provider.get(symbol) is None:
+            if self.vol_provider is not None and self.vol_provider.get(
+                    symbol, effective_params["horizon_h"]) is None:
                 raise GridConfigError(f"smart requiere sigma disponible para {symbol}")
         else:
             if params is not None:
