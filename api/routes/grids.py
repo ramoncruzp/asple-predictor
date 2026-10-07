@@ -113,6 +113,7 @@ class OpenRequest(BaseModel):
 
 
 from api.auth import authorize as _authorize
+from models.coin_onboarding import coin_is_ready
 
 def _scan_snapshot(request: Request, symbol: str) -> dict | None:
     last = getattr(request.app.state.grid_scan_service, "last_scan", None)
@@ -164,6 +165,9 @@ def open_grid(request: Request, body: OpenRequest):
     coin = db.get_coin(symbol)
     if not coin or int(coin.get("active", 0)) != 1:
         _reject(db, 422, "El símbolo debe estar activo en Coin Registry.", symbol, body)
+    if not coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol):
+        state=(db.get_readiness(symbol) or {}).get("state") or "pendiente"
+        _reject(db,409,f"La moneda {symbol} aún no está lista: {state}. Espera a que termine la preparación.",symbol,body)
     maximum = int(request.app.state.settings.max_grids_simultaneos)
     if db.count_open_grids() >= maximum:
         _reject(db, 409, f"Se alcanzó max_grids_simultaneos ({maximum}).", symbol, body)

@@ -7,7 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from config.models_config import ACTIVE_SYMBOL
+from config.models_config import ACTIVE_SYMBOL, VOL_SYMBOL
+from models.coin_onboarding import OnboardingArtifactsSaving, coin_is_ready, readiness_public
 from data.binance_client import BinanceClient
 
 router = APIRouter()
@@ -77,8 +78,65 @@ def create_coin(request: Request, body: CoinCreate):
     existing = db.get_coin(symbol)
     if existing is not None and existing["active"] == 1:
         raise HTTPException(status_code=409, detail=f"{symbol} ya está activo.")
-    return db.add_or_reactivate_coin(symbol, body.notes)
+    coin=db.add_or_reactivate_coin(symbol,body.notes)
+    if symbol!=VOL_SYMBOL and not coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol):
+        if db.get_readiness(symbol) is None:db.set_readiness(symbol,"pendiente",stage_detail="pendiente",progress_pct=0.0)
+        service=getattr(request.app.state,"coin_onboarding_service",None)
+        if service is not None:service.enqueue(symbol)
+    return {**coin,"readiness":readiness_public(db.get_readiness(symbol))}
 
+
+@router.post("/{symbol}/prepare", status_code=202)
+def prepare_coin(request: Request, symbol: str):
+    db = request.app.state.db
+    symbol = _normalize(symbol)
+    coin = db.get_coin(symbol)
+    if coin is None or int(coin.get("active", 0)) != 1:
+        raise HTTPException(404, detail=f"{symbol} no está activo en Coin Registry.")
+    if symbol == VOL_SYMBOL:
+        raise HTTPException(409, detail="XRPUSDT usa la preparación heredada.")
+    service = getattr(request.app.state, "coin_onboarding_service", None)
+    if service is None:
+        raise HTTPException(503, detail="Servicio de preparación no disponible.")
+    if service.is_training_active():
+        raise HTTPException(409, detail="Hay un entrenamiento en curso; la preparación queda pendiente.")
+    row = db.get_readiness(symbol)
+    active = row and row.get("state") in {"descargando", "entrenando", "consensuando"}
+    if active or service.in_progress(symbol) or coin_is_ready(db, None, symbol):
+        raise HTTPException(409, detail="La moneda ya está en preparación o lista.")
+    if row and row.get("state") not in {"pendiente", "error", "datos_insuficientes"}:
+        raise HTTPException(409, detail="El estado actual no permite reintentar.")
+    service.prepare(symbol)
+    return {"symbol": symbol, "readiness": readiness_public(db.get_readiness(symbol))}
+
+
+@router.get("/{symbol}/readiness")
+def get_coin_readiness(request: Request, symbol: str):
+    db = request.app.state.db
+    symbol = _normalize(symbol)
+    if db.get_coin(symbol) is None:
+        raise HTTPException(404, detail=f"{symbol} no está registrado.")
+    return {
+        "symbol": symbol,
+        "readiness": readiness_public(db.get_readiness(symbol)),
+        "ready": coin_is_ready(db, getattr(request.app.state, "vol_registry", None), symbol),
+    }
+
+
+@router.post("/{symbol}/prepare/cancel")
+def cancel_coin_preparation(request: Request, symbol: str):
+    symbol = _normalize(symbol)
+    service = getattr(request.app.state, "coin_onboarding_service", None)
+    if service is None:
+        raise HTTPException(503, detail="Servicio de preparación no disponible.")
+    try:
+        cancelled = service.cancel(symbol)
+    except OnboardingArtifactsSaving as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    if not cancelled:
+        raise HTTPException(409, detail="No hay una preparación activa para cancelar.")
+    db = request.app.state.db
+    return {"symbol": symbol, "readiness": readiness_public(db.get_readiness(symbol))}
 
 @router.delete("/{symbol}")
 def remove_coin(request: Request, symbol: str):
@@ -89,7 +147,10 @@ def remove_coin(request: Request, symbol: str):
             status_code=409,
             detail="XRPUSDT es el símbolo activo del predictor; cambiarlo es una decisión aparte.",
         )
-    existing = db.get_coin(symbol)
+    existing=db.get_coin(symbol)
+    service=getattr(request.app.state,"coin_onboarding_service",None)
+    if service is not None and service.in_progress(symbol):
+        raise HTTPException(status_code=409,detail=f"No se puede desactivar {symbol} mientras se prepara la volatilidad.")
     if existing is None or existing["active"] == 0:
         raise HTTPException(status_code=404, detail=f"{symbol} no existe o ya está inactivo.")
     _assert_no_open_grid(db, symbol)
@@ -131,6 +192,8 @@ def list_coins(request: Request):
             "change_pct_24h": change,
             "active": bool(coin["active"]),
             "open_grid_id": open_grids.get(symbol, {}).get("id"),
+            "readiness": readiness_public(db.get_readiness(symbol)),
+            "ready": coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol),
             "volatility_model": _champion_name(db, symbol),
         })
     return result

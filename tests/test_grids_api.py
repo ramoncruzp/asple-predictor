@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 from api.routes.grids import router
+import api.routes.grids as grids_api
 from database.db_manager import DBManager
 from grid.engine import GridEngine
 from grid.levels import GridConfigError
@@ -562,3 +563,14 @@ def test_open_dry_run_and_fake_execution_allow_negative_dust_net_when_gross_pass
         dry_run=False, confirm=True))
     assert opened.status_code == 200, opened.text
     assert exchange.create_calls
+
+
+def test_open_rejects_nonready_coin_and_records_same_rejection(monkeypatch,tmp_path):
+    client,db,_=app(tmp_path)
+    db.add_or_reactivate_coin("ADAUSDT")
+    monkeypatch.setattr(grids_api,"coin_is_ready",lambda *_:False)
+    response=client.post("/api/grids/open",json=payload(symbol="ADAUSDT"))
+    assert response.status_code==409
+    assert "La moneda ADAUSDT aún no está lista: pendiente" in response.json()["detail"]
+    events=db.list_grid_events(event_type="GRID_OPEN_REJECTED")
+    assert events and "ADAUSDT" in events[-1]["reason"]

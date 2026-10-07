@@ -31,6 +31,7 @@ from api.routes import coins, grid_advisor, grid_status, grids, grid_control, gr
 from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
+from models.coin_onboarding import CoinOnboardingService
 from scheduler.vol_loop import VolLoop
 from scheduler.backup_loop import BackupLoop
 from scheduler.widen_factor_loop import WidenFactorLoop
@@ -75,6 +76,9 @@ async def lifespan(app: FastAPI):
     volatility_manifest = Path(VOL_ARTIFACT_DIR) / "manifest_xrp.json"
     vol_registry = VolPredictorRegistry()
     vol_registry.load_available()
+    coin_onboarding_service = CoinOnboardingService(db, vol_registry, training_job_service,
+        root=Path(__file__).resolve().parents[1])
+    coin_onboarding_service.start()
     vol_predictor = vol_registry.get(VOL_SYMBOL)
     vol_loop = VolLoop(client, vol_registry, db) if vol_registry.ready_symbols() else None
     if vol_predictor is None:
@@ -118,6 +122,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("Grid monitor disabled by GRID_MONITOR_ENABLED")
     app.state.settings, app.state.db, app.state.client = settings, db, client
     app.state.training_job_service = training_job_service
+    app.state.coin_onboarding_service = coin_onboarding_service
     public_market_client = BinanceClient("", "")
     grid_scan_service = GridScanService(db, public_market_client, settings)
     grid_auto_open = GridAutoOpen(grid_scan_service, db, grid_engine, testnet_client, settings)
@@ -153,6 +158,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        coin_onboarding_service.stop()
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_auto_open.stop()

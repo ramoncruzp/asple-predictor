@@ -7,6 +7,7 @@ from decimal import Decimal
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config.settings import Settings
+from models.coin_onboarding import coin_is_ready
 
 
 class GridAutoOpen:
@@ -14,6 +15,7 @@ class GridAutoOpen:
         self.scan_service, self.db, self.engine = scan_service, db, engine
         self.testnet_client, self.settings, self.settings_factory = testnet_client, settings, settings_factory
         self.scheduler = BackgroundScheduler(timezone="UTC")
+        self._coin_not_ready_notified: dict[str, str] = {}
         hours = max(1, int(getattr(settings, "scanner_auto_open_interval_hours", 6)))
         self.scheduler.add_job(self.run_once, "interval", hours=hours, id="grid_auto_open",
                                max_instances=1, coalesce=True, replace_existing=True)
@@ -63,6 +65,27 @@ class GridAutoOpen:
             symbol = row["symbol"]
             if self.db.has_open_grid(symbol):
                 continue
+            if not coin_is_ready(self.db, None, symbol):
+                readiness_getter = getattr(self.db, "get_readiness", lambda _symbol: None)
+                readiness = readiness_getter(symbol) or {}
+                readiness_state = readiness.get("state", "pendiente")
+                if self._coin_not_ready_notified.get(symbol) != readiness_state:
+                    self.db.add_grid_event(
+                        run_id=None,
+                        source="CLI",
+                        event_type="AUTO_OPEN",
+                        details={
+                            "slot": slot,
+                            "phase": "FAILED",
+                            "who": "auto",
+                            "symbol": symbol,
+                            "reason": f"coin_not_ready:{readiness_state}",
+                            "scan": row,
+                        },
+                    )
+                    self._coin_not_ready_notified[symbol] = readiness_state
+                continue
+            self._coin_not_ready_notified.pop(symbol, None)
             strategy = str(cfg.scanner_auto_open_strategy).lower()
             params = {}
             if cfg.scanner_auto_open_target_pct is not None:

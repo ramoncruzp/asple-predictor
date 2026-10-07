@@ -102,6 +102,19 @@ class DBManager:
             Column("added_at", DateTime(timezone=True), nullable=False),
             Column("notes", String, nullable=True),
         )
+        self.coin_readiness = Table(
+            "coin_readiness", self.metadata,
+            Column("symbol", String, primary_key=True),
+            Column("state", String, nullable=False),
+            Column("stage_detail", String),
+            Column("progress_pct", Float),
+            Column("history_days", Integer),
+            Column("error", Text),
+            Column("started_at", DateTime(timezone=True)),
+            Column("updated_at", DateTime(timezone=True), nullable=False),
+            Column("ready_at", DateTime(timezone=True)),
+            Column("pid", Integer),
+        )
         self.training_jobs = Table(
             "training_jobs", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
@@ -988,6 +1001,102 @@ class DBManager:
         with self.engine.begin() as conn:
             result = conn.execute(self.vol_widen_suggestions.insert().values(**record))
             return int(result.inserted_primary_key[0])
+
+    def _heavy_work_lock(self, conn) -> None:
+        if self.engine.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_xact_lock(2026100701)"))
+
+    def has_active_training_job(self) -> bool:
+        query = select(self.training_jobs.c.id).where(
+            self.training_jobs.c.status.in_(("pendiente", "descargando", "entrenando", "running"))
+        ).limit(1)
+        with self.engine.connect() as conn:
+            return conn.execute(query).first() is not None
+
+    def try_claim_coin_onboarding(self, symbol: str) -> bool:
+        now = datetime.now(timezone.utc)
+        if self.engine.dialect.name == "sqlite":
+            now = now.replace(tzinfo=None)
+        with self.engine.connect() as conn:
+            if self.engine.dialect.name == "sqlite":
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                self._heavy_work_lock(conn)
+            active = conn.execute(select(self.training_jobs.c.id).where(
+                self.training_jobs.c.status.in_(("pendiente", "descargando", "entrenando", "running"))
+            ).limit(1)).first()
+            other_onboarding = conn.execute(select(self.coin_readiness.c.symbol).where(
+                self.coin_readiness.c.symbol != symbol,
+                self.coin_readiness.c.state.in_(("descargando", "entrenando", "consensuando")),
+            ).limit(1)).first()
+            if active or other_onboarding:
+                conn.rollback()
+                return False
+            existing = conn.execute(select(self.coin_readiness.c.symbol).where(
+                self.coin_readiness.c.symbol == symbol
+            )).first()
+            values = {"state": "descargando", "stage_detail": "descargando",
+                      "progress_pct": 1.0, "error": None, "started_at": now,
+                      "updated_at": now, "ready_at": None, "pid": None}
+            if existing:
+                conn.execute(self.coin_readiness.update().where(
+                    self.coin_readiness.c.symbol == symbol).values(**values))
+            else:
+                conn.execute(self.coin_readiness.insert().values(symbol=symbol, **values))
+            conn.commit()
+            return True
+
+    def get_readiness(self, symbol: str) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.coin_readiness).where(
+                self.coin_readiness.c.symbol == symbol)).mappings().first()
+        if row is None:
+            return None
+        result = dict(row)
+        for key in ("started_at", "updated_at", "ready_at"):
+            if result.get(key) is not None:
+                value = result[key]
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+                result[key] = value.isoformat()
+        return result
+
+    def set_readiness(self, symbol: str, state: str, **fields) -> dict:
+        allowed = {"stage_detail", "progress_pct", "history_days", "error",
+                   "started_at", "ready_at", "pid"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Campos de readiness no permitidos: {sorted(unknown)}")
+        now = datetime.now(timezone.utc)
+        values = {"state": state, "updated_at": now, **fields}
+        if self.engine.dialect.name == "sqlite":
+            values = {key: value.replace(tzinfo=None) if isinstance(value, datetime) else value
+                      for key, value in values.items()}
+        with self.engine.begin() as conn:
+            existing = conn.execute(select(self.coin_readiness.c.symbol).where(
+                self.coin_readiness.c.symbol == symbol)).first()
+            if existing:
+                conn.execute(self.coin_readiness.update().where(
+                    self.coin_readiness.c.symbol == symbol).values(**values))
+            else:
+                conn.execute(self.coin_readiness.insert().values(symbol=symbol, **values))
+        return self.get_readiness(symbol)
+
+    def list_readiness(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(self.coin_readiness).order_by(
+                self.coin_readiness.c.symbol)).mappings().all()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key in ("started_at", "updated_at", "ready_at"):
+                if item.get(key) is not None:
+                    value = item[key]
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    item[key] = value.isoformat()
+            result.append(item)
+        return result
 
     def get_coin(self, symbol: str) -> dict | None:
         statement = select(self.coins_registry).where(self.coins_registry.c.symbol == symbol)

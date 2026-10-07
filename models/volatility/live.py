@@ -231,6 +231,14 @@ class VolPredictorRegistry:
                 self.logger.exception("No se pudo cargar volatilidad para %s", symbol)
         return loaded
 
+    def reload(self, symbol: str):
+        """Force reload after a per-symbol consensus has been written."""
+        vol_base(symbol)
+        predictor = self.get(symbol)
+        if predictor is None:
+            return self.load(symbol)
+        return predictor if predictor.reload() else None
+
     def reload_if_changed(self, symbol: str) -> bool:
         predictor = self.get(symbol)
         if predictor is None:

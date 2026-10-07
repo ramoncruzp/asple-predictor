@@ -2,7 +2,8 @@ from __future__ import annotations
 from decimal import Decimal
 from math import asinh, ceil, isfinite, sqrt
 from statistics import NormalDist
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from models.coin_onboarding import coin_is_ready
 import numpy as np
 from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
@@ -171,6 +172,10 @@ def _level(values, current):
 @router.get("/recommend")
 def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Query(1000, gt=0), risk: str = Query("medium", pattern="^(low|medium|high)$"), days: int = Query(90, ge=1, le=365), margin_target_pct: float = Query(.7, gt=0, le=10), range_mode: str = Query("centrado", pattern="^(centrado|estructural)$")):
     symbol = symbol.strip().upper().replace("/", "")
+    db=getattr(request.app.state,"db",None)
+    if not coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol):
+        state=(db.get_readiness(symbol) or {}).get("state") or "pendiente"
+        raise HTTPException(409,detail=f"La moneda {symbol} aún no está lista: {state}. Espera a que termine la preparación.")
     df = request.app.state.client.get_historical_klines(symbol, ACTIVE_INTERVAL, lookback_days=days)
     close, high, low = df["close"], df["high"], df["low"]
     current = float(close.iloc[-1])

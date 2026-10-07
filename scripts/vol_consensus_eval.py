@@ -300,6 +300,7 @@ def main(argv=None) -> int:
     parser.add_argument("--candles", type=Path)
     parser.add_argument("--candles-5m", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
     base = vol_base(args.symbol)
     hourly_path = args.candles or Path("data/cache") / f"{base}_1h.csv"
@@ -309,6 +310,8 @@ def main(argv=None) -> int:
         raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
     source_bytes = source.read_bytes()
     hourly_bytes = hourly_path.read_bytes()
+    if args.progress:
+        print("PROGRESS:consensuando", flush=True)
     candles, intraday = _load_data(hourly_path, source)
     report = evaluate_dataset(candles, intraday, args.symbol)
     serialized = {
@@ -333,16 +336,21 @@ def main(argv=None) -> int:
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
         raise FileExistsError(f"Ya hay una evaluaci\u00f3n en curso para {args.symbol}: {lock}") from exc
+    os.write(descriptor, str(os.getpid()).encode("ascii"))
     os.close(descriptor)
     try:
         if output.exists():
             raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
+        if args.progress:
+            print("PROGRESS:guardando", flush=True)
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(_json_safe(serialized), handle, ensure_ascii=False, indent=2, allow_nan=False)
             handle.write("\n")
         if output.exists():
             raise FileExistsError(f"No se sobrescribe el consenso existente para {args.symbol}: {output}")
         os.replace(temporary, output)
+        if args.progress:
+            print("PROGRESS:consenso_guardado", flush=True)
     finally:
         temporary.unlink(missing_ok=True)
         lock.unlink(missing_ok=True)

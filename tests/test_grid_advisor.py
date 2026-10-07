@@ -273,3 +273,18 @@ def test_historical_simulation_starts_at_first_strictly_in_range_candle():
     assert unavailable is None
     assert "últimos 90 días nunca estuvo dentro" in meta["unavailable"]
     assert meta["sim_start"] is None and meta["sim_days"] == 0
+
+
+def test_advisor_recommendation_rejects_coin_not_ready(monkeypatch):
+    from fastapi import FastAPI, HTTPException
+    from starlette.requests import Request
+    class DB:
+        def get_coin(self,symbol):return {"symbol":symbol,"active":1}
+        def get_readiness(self,symbol):return {"state":"entrenando"}
+    app=FastAPI();app.state.db=DB()
+    request=Request({"type":"http","method":"GET","path":"/api/grid/recommend",
+        "headers":[],"query_string":b"","server":("test",80),"client":("127.0.0.1",1),"scheme":"http","app":app})
+    monkeypatch.setattr(grid_advisor,"coin_is_ready",lambda *_:False)
+    with pytest.raises(HTTPException) as exc:
+        grid_advisor.recommend(request,symbol="ADAUSDT")
+    assert exc.value.status_code==409 and "ADAUSDT" in exc.value.detail and "entrenando" in exc.value.detail

@@ -236,6 +236,14 @@ class TrainingJobService:
             try:
                 if self.db.engine.dialect.name == "sqlite":
                     conn.exec_driver_sql("BEGIN IMMEDIATE")
+                else:
+                    self.db._heavy_work_lock(conn)
+                onboarding = conn.execute(select(self.db.coin_readiness.c.symbol).where(
+                    self.db.coin_readiness.c.state.in_(("descargando", "entrenando", "consensuando"))
+                ).limit(1)).first()
+                if onboarding:
+                    conn.rollback()
+                    raise ActiveTrainingJob("Hay una preparación de volatilidad en curso")
                 active = conn.execute(
                     select(table.c.id).where(table.c.status.in_(ACTIVE_STATUSES)).limit(1)
                 ).first()

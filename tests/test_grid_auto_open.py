@@ -5,6 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from grid.auto_open import GridAutoOpen
+import grid.auto_open as auto_open_module
 
 
 def row(symbol):
@@ -20,6 +21,7 @@ class DB:
     def list_grid_events(self, **kwargs): return list(self.events)
     def count_open_grids(self): return len(self.opened)
     def has_open_grid(self, symbol): return symbol in self.opened
+    def get_readiness(self, symbol): return getattr(self, "readiness", {}).get(symbol)
     def add_grid_event(self, **event):
         result = {**event, "ts": datetime.now(timezone.utc)}
         self.events.append(result)
@@ -131,4 +133,48 @@ def test_auto_open_allows_nonpositive_estimated_net_and_records_dust_warning():
     assert completed["details"]["dust_estimate_pct"] is not None
     assert completed["details"]["dust_warning"] is True
     assert "aún no medido" in completed["details"]["dust_warning_message"]
+    service.stop()
+
+
+def test_auto_open_skips_a_coin_without_completed_onboarding(monkeypatch):
+    cfg=settings(scanner_auto_open_max_per_run=2)
+    service,scanner,engine,db=setup(cfg)
+    scanner.scan=lambda **kwargs:{"results":[row("ADAUSDT")]}
+    monkeypatch.setattr(auto_open_module,"coin_is_ready",lambda _db,_registry,symbol:False)
+    result=service.run_once()
+    assert result["opened"]==[] and engine.calls==[]
+    failures=[event for event in db.events if event["event_type"]=="AUTO_OPEN"]
+    assert failures[-1]["details"]["reason"]=="coin_not_ready:pendiente"
+    service.stop()
+
+
+def test_unready_coin_event_is_once_per_state_and_repeats_after_state_change(monkeypatch):
+    from datetime import timedelta
+
+    cfg = settings(scanner_auto_open_max_per_run=2)
+    service, scanner, engine, db = setup(cfg)
+    scanner.scan = lambda **kwargs: {"results": [row("ADAUSDT")]}
+    db.readiness = {"ADAUSDT": {"state": "pendiente"}}
+    monkeypatch.setattr(auto_open_module, "coin_is_ready", lambda _db, _registry, _symbol: False)
+    start = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    instants = iter([start, start + timedelta(hours=6), start + timedelta(hours=12)])
+
+    class Clock:
+        @staticmethod
+        def now(tz=None):
+            return next(instants)
+
+    monkeypatch.setattr(auto_open_module, "datetime", Clock)
+    service.run_once()
+    service.run_once()
+    failures = [event for event in db.events if event["event_type"] == "AUTO_OPEN"]
+    assert len(failures) == 1
+    db.readiness["ADAUSDT"] = {"state": "error"}
+    service.run_once()
+    failures = [event for event in db.events if event["event_type"] == "AUTO_OPEN"]
+    assert len(failures) == 2
+    assert [event["details"]["reason"] for event in failures] == [
+        "coin_not_ready:pendiente",
+        "coin_not_ready:error",
+    ]
     service.stop()
