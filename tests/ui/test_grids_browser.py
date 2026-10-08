@@ -133,6 +133,37 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
     assert_no_js_errors(ui_page)
 
 
+def test_loan_pairs_panel_renders_conclusive_and_nonconclusive_without_verdict_colors(live_server, ui_page):
+    summary = {"n_pairs": 20, "mean_d": 0.25, "sd_d": 0.1, "t_paired": 11.18,
+        "ci_low": 0.12, "ci_high": 0.38, "wins": 15, "treated_pairs": 12,
+        "mean_d_treated": 0.3, "n_treated": 12, "duration_ratio_flagged": 1,
+        "detectable_effect_80pct": 0.063, "orphan_pairs": 1, "conclusive": True,
+        "reason": [], "note": "Observacional dentro del par; P&L realizado." ,
+        "pairs": [{"pair_id": "12345678-abcd", "symbol": "ADAUSDT",
+            "pair_loans_status": "CLOSED", "pair_control_status": "CLOSED",
+            "d_i": 0.25, "excluded_reason": None}]}
+    ui_page.route("**/api/grids/loans/pairs/summary",
+                  lambda route: route.fulfill(json=summary))
+    ui_page.goto(f"{live_server.url}/#grids")
+    panel = ui_page.locator(".loan-pairs-panel")
+    expect(panel).to_contain_text("Préstamos — pares")
+    expect(panel).to_contain_text("ADAUSDT")
+    expect(panel).to_contain_text("12345678")
+    expect(panel).to_contain_text("CLOSED")
+    expect(panel).to_contain_text("0.250%/día")
+    expect(panel).to_contain_text("concluyente")
+
+    summary.update({"n_pairs": 4, "conclusive": False,
+                    "reason": ["muestra insuficiente (n<15)"], "orphan_pairs": 2})
+    ui_page.reload()
+    expect(panel).to_contain_text("no concluyente (muestra insuficiente (n<15))")
+    expect(panel).to_contain_text("pares huérfanos: 2")
+    assert panel.locator(".pnl-positive, .pnl-negative").count() == 0
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text(
+        "Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.")
+    assert_no_js_errors(ui_page)
+
+
 def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_page):
     advisor = {"symbol":"XRPUSDT","current_price":100,"recommended_floor":80.123456,"recommended_ceiling":120.987654,
         "range_pct":40,"range_mode":"centrado","recommended_range":"centrado",

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import math
 import random
+import secrets
+import statistics
+import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Literal
@@ -15,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.policy import validate_params
 from grid.loan_cohorts import assign_loan_creation_defaults as _assign_loan_creation_defaults
-from grid.loan_cohorts import create_grid_with_loan_cohort
+from grid.loan_cohorts import create_grid_with_loan_cohort, create_loan_pair
 from grid.scan_service import EXECUTION_WARNING
 from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
                             minimum_cell_threshold, minimum_cell_warning,
@@ -220,6 +224,32 @@ class OpenRequest(BaseModel):
         return self
 
 
+class PairOpenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str = Field(min_length=5, max_length=20)
+    capital: Decimal = Field(gt=0)
+    range_low: Decimal = Field(gt=0)
+    range_high: Decimal = Field(gt=0)
+    n_levels: int = Field(ge=4, le=60)
+    params: dict | None = None
+    target_pct: Decimal | None = Field(default=None, gt=0, le=100)
+    target_usdt: Decimal | None = Field(default=None, gt=0)
+    target_basis: Literal["cash", "equity"] = "cash"
+    max_days: Decimal | None = Field(default=None, gt=0)
+    dry_run: StrictBool = True
+    confirm: StrictBool = False
+    pair_seed: int | None = None
+    pair_id: str | None = None
+
+    @model_validator(mode="after")
+    def valid_pair_range(self):
+        if self.range_low >= self.range_high:
+            raise ValueError("range_low debe ser menor que range_high")
+        if self.target_pct is not None and self.target_usdt is not None:
+            raise ValueError("elige target_pct o target_usdt, no ambos")
+        return self
+
+
 from api.auth import authorize as _authorize
 from models.coin_onboarding import coin_is_ready
 
@@ -264,6 +294,18 @@ def scan(request: Request, body: ScanRequest):
 
 @router.post("/open")
 def open_grid(request: Request, body: OpenRequest):
+    return _open_grid(request, body)
+
+
+def _persist_pair_metadata(db, result: dict, pair_metadata: dict):
+    grid_id = int(result["id"])
+    db.merge_grid_params(grid_id, pair_metadata, allowed=frozenset(pair_metadata))
+    effective = dict((db.get_grid(grid_id) or {}).get("params") or {})
+    return effective, db.get_grid(grid_id) or result
+
+
+def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | None = None,
+               pair_created_callback=None):
     _authorize(request)
     symbol = body.symbol.strip().upper().replace("/", "")
     if not symbol.endswith("USDT") or len(symbol) <= 4:
@@ -436,19 +478,27 @@ def open_grid(request: Request, body: OpenRequest):
             f"rango {body.range_low} a {body.range_high}).",
             symbol, body, testnet_snapshot)
     try:
-        effective, result = create_grid_with_loan_cohort(
-            db, body.strategy, params, control_every_n,
-            lambda assigned: engine.create_grid(
+        if pair_metadata is None:
+            effective, result = create_grid_with_loan_cohort(
+                db, body.strategy, params, control_every_n,
+                lambda assigned: engine.create_grid(
+                    symbol, body.range_low, body.range_high, body.n_levels,
+                    capital=body.capital, strategy=body.strategy, params=assigned or None),
+                explicit_params=raw_params,
+            )
+        else:
+            result = engine.create_grid(
                 symbol, body.range_low, body.range_high, body.n_levels,
-                capital=body.capital, strategy=body.strategy, params=assigned or None),
-            explicit_params=raw_params,
-        )
+                capital=body.capital, strategy="smart", params=params or None)
+            if pair_created_callback is not None:
+                pair_created_callback(int(result["id"]))
+            effective, result = _persist_pair_metadata(db, result, pair_metadata)
         db.add_grid_event(run_id=None, source="CLI", event_type="GRID_OPEN_API", grid_id=int(result["id"]),
             details={"who": "api", "strategy": body.strategy, "capital": str(body.capital),
                      "params": effective, "scan_snapshot": scan_row, "sigma_open": sigma_open,
-                     **_loan_fields(effective)})
+                     **_loan_fields(effective), **(pair_metadata or {})})
         return {"status": result.get("status"), "grid_id": result.get("id"), "symbol": symbol,
-                **_loan_fields(effective), "warning": EXECUTION_WARNING}
+                **_loan_fields(effective), **(pair_metadata or {}), "warning": EXECUTION_WARNING}
     except GridConfigError as exc:
         message = str(exc).casefold()
         status = 409 if ("maximum simultaneous" in message or "already exists" in message
@@ -456,6 +506,166 @@ def open_grid(request: Request, body: OpenRequest):
         _reject(db, status, str(exc), symbol, body, testnet_snapshot)
     except Exception as exc:
         _reject(db, 422, f"No se pudo abrir el grid: {exc}", symbol, body, testnet_snapshot)
+
+
+_PAIR_OFFSETS_PCT = (0.10, 0.15, 0.20, 0.30)
+
+
+def _pair_arm_body(body: PairOpenRequest, arm: str, low: Decimal, high: Decimal,
+                   *, dry_run: bool, confirm: bool) -> OpenRequest:
+    params = dict(body.params or {})
+    params.pop("loans_group", None)
+    params["loans_enabled"] = arm == "pair_loans"
+    if arm == "pair_loans":
+        params.update({"loan_topup_pct": 70.0, "loan_lender_max_pct": 70.0})
+    return OpenRequest(
+        symbol=body.symbol, strategy="smart", capital=body.capital,
+        range_low=low, range_high=high, n_levels=body.n_levels,
+        params=params, target_pct=body.target_pct, target_usdt=body.target_usdt,
+        target_basis=body.target_basis, max_days=body.max_days,
+        dry_run=dry_run, confirm=confirm,
+    )
+
+
+def _build_pair_plans(request: Request, body: PairOpenRequest, first_arm: str):
+    first = _open_grid(request, _pair_arm_body(
+        body, first_arm, body.range_low, body.range_high, dry_run=True, confirm=False))
+    second_arm = "pair_control" if first_arm == "pair_loans" else "pair_loans"
+    conflicts = []
+    chosen = None
+    second_plan = None
+    for offset_pct in _PAIR_OFFSETS_PCT:
+        offset = Decimal(str(offset_pct)) / Decimal(100)
+        low, high = body.range_low * (1 + offset), body.range_high * (1 + offset)
+        try:
+            candidate = _open_grid(request, _pair_arm_body(
+                body, second_arm, low, high, dry_run=True, confirm=False))
+        except HTTPException as exc:
+            if exc.status_code == 409 and "sell level conflict" in str(exc.detail).casefold():
+                continue
+            raise
+        tick = first["filters"]["tick_size"]
+        tolerance = getattr(request.app.state.settings, "same_coin_sell_tolerance_pct", 0.05)
+        conflicts = sell_level_conflicts(
+            [cell["sell_price"] for cell in candidate.get("cells", [])],
+            [{"sell_price": cell["sell_price"], "state": "SELL_OPEN"}
+             for cell in first.get("cells", [])], tick, tolerance)
+        if not conflicts:
+            chosen, second_plan = offset_pct, candidate
+            break
+    if chosen is None:
+        raise HTTPException(422, "Ningún desplazamiento de 0,10 % a 0,30 % evita el conflicto de ventas.")
+    return first_arm, second_arm, first, second_plan, chosen
+
+
+def _mark_pair_orphan(db, grid_id: int, pair_id: str, reason: str):
+    db.merge_grid_params(int(grid_id), {"pair_id": pair_id, "pair_status": "orphan"},
+                         allowed=frozenset({"pair_id", "pair_status"}))
+    db.add_grid_event(run_id=None, source="CLI", event_type="PAIR_ORPHAN", grid_id=int(grid_id),
+                      reason=reason, details={"pair_id": pair_id, "grid_id": int(grid_id)})
+
+
+@router.post("/pair")
+def open_loan_pair(request: Request, body: PairOpenRequest):
+    _authorize(request)
+    if body.dry_run and body.confirm:
+        raise HTTPException(422, "confirm solo se acepta junto con dry_run=false.")
+    if not body.dry_run and not body.confirm:
+        raise HTTPException(422, "confirm=true es obligatorio para ejecutar una apertura de par.")
+    db = request.app.state.db
+    maximum = int(request.app.state.settings.max_grids_simultaneos)
+    if maximum - int(db.count_open_grids()) < 2:
+        raise HTTPException(409, "El par necesita al menos dos cupos libres de max_grids_simultaneos.")
+    symbol = body.symbol.strip().upper().replace("/", "")
+    if not symbol.endswith("USDT") or len(symbol) <= 4:
+        raise HTTPException(422, "symbol debe ser un par USDT válido.")
+    if not db.get_coin(symbol) or int(db.get_coin(symbol).get("active", 0)) != 1:
+        raise HTTPException(422, "El símbolo debe estar activo en Coin Registry.")
+    if not coin_is_ready(db, getattr(request.app.state, "vol_registry", None), symbol):
+        state = (db.get_readiness(symbol) or {}).get("state") or "pendiente"
+        raise HTTPException(409, f"La moneda {symbol} aún no está lista: {state}.")
+    try:
+        _, filters = request.app.state.grid_scan_service._market(
+            symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
+            float(request.app.state.settings.scanner_timeout_seconds))
+    except Exception as exc:
+        raise HTTPException(503, f"No se pudieron comprobar los filtros del símbolo: {exc}") from exc
+    floor = functional_cell_threshold(filters, "smart")
+    if body.capital / Decimal(body.n_levels) < floor:
+        raise HTTPException(422, f"Capital por celda inferior al piso funcional Smart ({floor} USDT).")
+
+    pair_seed = body.pair_seed if body.pair_seed is not None else secrets.randbits(64)
+    first_arm = random.Random(pair_seed).choice(("pair_loans", "pair_control"))
+    first_arm, second_arm, first_plan, second_plan, selected_offset = _build_pair_plans(
+        request, body, first_arm)
+    pair_id = body.pair_id or str(uuid.uuid4())
+    if body.dry_run:
+        return {"dry_run": True, "pair_id": pair_id, "pair_seed": pair_seed,
+                "pair_first_arm": first_arm, "pair_offset_pct": selected_offset,
+                "arms": [{"arm": first_arm, "plan": first_plan},
+                         {"arm": second_arm, "plan": second_plan}],
+                "warning": EXECUTION_WARNING}
+    created = []
+
+    def create_pair():
+        if maximum - int(db.count_open_grids()) < 2:
+            raise HTTPException(409, "El par necesita al menos dos cupos libres.")
+        first_metadata = {"pair_id": pair_id, "pair_seed": pair_seed,
+                          "pair_arm": first_arm, "pair_first_arm": first_arm,
+                          "pair_offset_pct": 0.0, "loans_group": first_arm}
+        first_body = _pair_arm_body(body, first_arm, body.range_low, body.range_high,
+                                    dry_run=False, confirm=True)
+        first_result = _open_grid(request, first_body, pair_metadata=first_metadata,
+                                  pair_created_callback=created.append)
+        offset_list = [value for value in _PAIR_OFFSETS_PCT if value >= selected_offset]
+        last_error = None
+        for offset_pct in offset_list:
+            offset = Decimal(str(offset_pct)) / Decimal(100)
+            second_body = _pair_arm_body(
+                body, second_arm, body.range_low * (1 + offset), body.range_high * (1 + offset),
+                dry_run=False, confirm=True)
+            second_metadata = {"pair_id": pair_id, "pair_seed": pair_seed,
+                               "pair_arm": second_arm, "pair_first_arm": first_arm,
+                               "pair_offset_pct": offset_pct, "loans_group": second_arm}
+            try:
+                second_result = _open_grid(request, second_body, pair_metadata=second_metadata,
+                                           pair_created_callback=created.append)
+                return {"dry_run": False, "pair_id": pair_id, "pair_seed": pair_seed,
+                        "pair_first_arm": first_arm, "pair_offset_pct": offset_pct,
+                        "grids": [first_result, second_result], "warning": EXECUTION_WARNING}
+            except HTTPException as exc:
+                if exc.status_code == 409 and "sell level conflict" in str(exc.detail).casefold():
+                    last_error = exc
+                    continue
+                raise
+        raise HTTPException(422, f"Ningún desplazamiento disponible evita el conflicto: {last_error.detail if last_error else 'sin detalle'}")
+
+    try:
+        return create_loan_pair(db, create_pair)
+    except HTTPException as exc:
+        if created:
+            orphan_errors = []
+            for grid_id in created:
+                try:
+                    _mark_pair_orphan(db, grid_id, pair_id, str(exc.detail))
+                except Exception as mark_error:
+                    orphan_errors.append(f"grid_id={grid_id}: {mark_error}")
+            ids = ",".join(str(grid_id) for grid_id in created)
+            audit_note = f"; errores al registrar huérfano: {'; '.join(orphan_errors)}" if orphan_errors else ""
+            raise HTTPException(409, f"PAIR_ORPHAN pair_id={pair_id}; grid_id(s)={ids}; segundo brazo falló: {exc.detail}{audit_note}") from exc
+        raise
+    except Exception as exc:
+        if created:
+            orphan_errors = []
+            for grid_id in created:
+                try:
+                    _mark_pair_orphan(db, grid_id, pair_id, str(exc))
+                except Exception as mark_error:
+                    orphan_errors.append(f"grid_id={grid_id}: {mark_error}")
+            ids = ",".join(str(grid_id) for grid_id in created)
+            audit_note = f"; errores al registrar huérfano: {'; '.join(orphan_errors)}" if orphan_errors else ""
+            raise HTTPException(409, f"PAIR_ORPHAN pair_id={pair_id}; grid_id(s)={ids}; segundo brazo falló: {exc}{audit_note}") from exc
+        raise HTTPException(503, f"No se pudo adquirir el candado para abrir el par: {exc}") from exc
 
 
 @router.get("/loans/summary")
@@ -559,6 +769,120 @@ def loans_summary(request: Request):
     return {"groups": list(groups.values()), "grids": grid_rows,
             "cohort_comparisons": comparisons, "comparison_note": comparison_note,
             "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión."}
+
+
+def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
+    now = now or datetime.now(timezone.utc)
+    pairs = {}
+    for grid in _all_grids(db):
+        params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
+        pair_id = params.get("pair_id")
+        if pair_id:
+            pairs.setdefault(str(pair_id), []).append(grid)
+
+    rows, excluded, observations = [], [], []
+    duration_ratio_flagged = 0
+    treated_values = []
+    terminal = {"CLOSED", "CANCELLED", "FAILED", "ERROR"}
+    for pair_id, grids in sorted(pairs.items()):
+        arms = {str((grid.get("params") or {}).get("pair_arm")): grid for grid in grids}
+        reason = None
+        if any((grid.get("params") or {}).get("pair_status") == "orphan" for grid in grids):
+            reason = "par huérfano"
+        elif len(grids) != 2 or set(arms) != {"pair_loans", "pair_control"}:
+            reason = "brazos incompletos o duplicados"
+        elif any(str(grid.get("status", "")).upper() not in terminal for grid in grids):
+            reason = "brazos no cerrados"
+
+        metrics = {}
+        durations = {}
+        loans_created = 0
+        if reason is None:
+            for arm_name, grid in arms.items():
+                levels = db.get_grid_levels(int(grid["id"]))
+                pnl_values = [row.get("pnl") for row in levels]
+                capital = float(grid.get("capital_total") or 0)
+                created, ended = _dt_utc(grid.get("created_at")), _dt_utc(grid.get("closed_at"))
+                if any(value is None for value in pnl_values):
+                    reason = "P&L desconocido"
+                    break
+                if capital <= 0:
+                    reason = "capital no válido"
+                    break
+                if created is None or ended is None:
+                    reason = "fechas ausentes"
+                    break
+                duration_days = (ended - created).total_seconds() / 86400
+                if duration_days <= 0:
+                    reason = "duración no positiva"
+                    break
+                durations[arm_name] = duration_days
+                metrics[arm_name] = sum(float(value) for value in pnl_values) / capital / max(1.0, duration_days) * 100
+                if arm_name == "pair_loans":
+                    loans_created = len(db.list_grid_loans(int(grid["id"])))
+
+        row = {"pair_id": pair_id,
+               "symbol": grids[0].get("symbol") if grids else None,
+               "pair_loans_status": arms.get("pair_loans", {}).get("status"),
+               "pair_control_status": arms.get("pair_control", {}).get("status"),
+               "loans_pct_per_day": metrics.get("pair_loans"),
+               "control_pct_per_day": metrics.get("pair_control"),
+               "d_i": (metrics["pair_loans"] - metrics["pair_control"] if reason is None else None),
+               "treated": loans_created > 0,
+               "excluded_reason": reason}
+        rows.append(row)
+        if reason is not None:
+            excluded.append({"pair_id": pair_id, "reason": reason})
+            continue
+        difference = row["d_i"]
+        observations.append(difference)
+        if loans_created > 0:
+            treated_values.append(difference)
+        if max(durations.values()) > 2 * min(durations.values()):
+            duration_ratio_flagged += 1
+
+    n = len(observations)
+    mean_d = sum(observations) / n if n else None
+    sd_d = statistics.stdev(observations) if n >= 2 else None
+    t_paired = (mean_d / (sd_d / math.sqrt(n)) if n >= 4 and sd_d and sd_d > 0 else None)
+    ci_low = ci_high = None
+    if n:
+        rng = random.Random(seed)
+        boot = sorted(sum(observations[rng.randrange(n)] for _ in range(n)) / n for _ in range(draws))
+        def percentile(fraction):
+            pos = (len(boot) - 1) * fraction
+            low = int(pos)
+            high = min(low + 1, len(boot) - 1)
+            return boot[low] * (1 - (pos - low)) + boot[high] * (pos - low)
+        ci_low, ci_high = percentile(.025), percentile(.975)
+    treated_n = len(treated_values)
+    reason = []
+    if n < 15:
+        reason.append("muestra insuficiente (n<15)")
+    if ci_low is None or ci_low <= 0 <= ci_high:
+        reason.append("el IC incluye 0")
+    if not n or treated_n / n < 0.5:
+        reason.append("pocos pares con préstamos reales")
+    return {
+        "pairs": rows, "n_pairs": n, "mean_d": mean_d, "sd_d": sd_d,
+        "t_paired": t_paired, "ci_low": ci_low, "ci_high": ci_high,
+        "wins": sum(value > 0 for value in observations),
+        "treated_pairs": treated_n,
+        "mean_d_treated": sum(treated_values) / treated_n if treated_n else None,
+        "n_treated": treated_n,
+        "duration_ratio_flagged": duration_ratio_flagged,
+        "detectable_effect_80pct": 2.8 * sd_d / math.sqrt(n) if n >= 5 and sd_d is not None else None,
+        "excluded_pairs": excluded, "orphan_pairs": sum(item["reason"] == "par huérfano" for item in excluded),
+        "conclusive": not reason, "reason": reason,
+        "note": ("Observacional dentro del par; los brazos difieren en un desplazamiento de rango de ≤ 0,30 %; "
+                 "el P&L es realizado; no corrige por tamaño de celda."),
+    }
+
+
+@router.get("/loans/pairs/summary")
+def loans_pairs_summary(request: Request):
+    _authorize(request)
+    return _paired_loan_summary(request.app.state.db)
 
 
 @router.get("/{grid_id}/loans")

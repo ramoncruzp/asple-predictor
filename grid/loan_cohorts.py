@@ -31,11 +31,23 @@ def _lock_file_path(db) -> Path:
 
 
 def _open_lock_file(path: Path):
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    created = False
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        descriptor = os.open(path, os.O_RDWR)
     handle = os.fdopen(descriptor, "r+b", buffering=0)
-    if os.fstat(descriptor).st_size == 0:
+    if created:
         handle.write(b"\0")
         handle.flush()
+    else:
+        deadline = monotonic() + 1.0
+        while os.fstat(descriptor).st_size == 0 and monotonic() < deadline:
+            sleep(0.001)
+        if os.fstat(descriptor).st_size == 0:
+            handle.close()
+            raise OSError("el archivo del candado no terminó de inicializarse")
     return handle
 
 
@@ -144,3 +156,12 @@ def create_grid_with_loan_cohort(db, strategy: str, params: dict, control_every_
                 db, strategy, params, control_every_n, explicit_params=explicit_params)
             result = create(effective)
             return effective, result
+
+
+def create_loan_pair(db, create: Callable[[], dict]):
+    """Run both pair-arm creations under one fail-closed process lock."""
+    with LOAN_COHORT_LOCK:
+        with _process_creation_lock(db) as acquired:
+            if not acquired:
+                raise RuntimeError("candado entre procesos no disponible; no se abre el par")
+            return create()

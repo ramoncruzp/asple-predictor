@@ -208,6 +208,8 @@
     const totals = data.totals || {};
     const loanSummaryResult = data.loanSummaryResult;
     const loanSummary = loanSummaryResult?.ok ? loanSummaryResult.data : null;
+    const loanPairsResult = data.loanPairsResult;
+    const loanPairs = loanPairsResult?.ok ? loanPairsResult.data : null;
     const loanSummaryText = loanSummary
       ? `${loanSummary.groups.map((group) => `${esc(group.group)}: ${group.grid_count} grids, P&L ${fmtMoney(group.realized_pnl_usdt, 2)} USDT (${group.pnl_pct_capital == null ? '\u2014' : `${Number(group.pnl_pct_capital).toFixed(2)}% del capital`}; ${group.pnl_pct_capital_per_day == null ? '\u2014' : `${Number(group.pnl_pct_capital_per_day).toFixed(2)}%/d\u00eda`}), ${group.cycles_completed} ciclos, ${fmtMoney(group.commissions_usdt, 2)} USDT en comisiones, ${group.loans_created} pr\u00e9stamos creados/${group.loans_repaid} devueltos`).join(' \u00b7 ')}. ${esc(loanSummary.note)}`
       : loanSummaryResult?.error ? `No se pudo cargar el resumen de pr\u00e9stamos: ${esc(loanSummaryResult.error.message)}` : 'Cargando resumen de pr\u00e9stamos\u2026';
@@ -224,6 +226,22 @@
       }).join(' \u00b7 ')
       : '';
     const comparisonNote = loanSummary?.comparison_note ? ` ${esc(loanSummary.comparison_note)}` : '';
+    const pairReason = Array.isArray(loanPairs?.reason) ? loanPairs.reason.join('; ') : (loanPairs?.reason || '');
+    const pairState = loanPairs?.conclusive ? 'concluyente' : `no concluyente${pairReason ? ` (${esc(pairReason)})` : ''}`;
+    const pairMean = loanPairs?.mean_d == null ? '—' : `${Number(loanPairs.mean_d).toFixed(3)}%/día`;
+    const pairCi = loanPairs?.ci_low == null || loanPairs?.ci_high == null ? 'IC 95%: —'
+      : `IC 95% [${Number(loanPairs.ci_low).toFixed(3)}%; ${Number(loanPairs.ci_high).toFixed(3)}%]`;
+    const pairRows = (loanPairs?.pairs || []).map(pair => `<tr><td>${esc(pair.symbol)}</td>
+      <td class="mono">${esc(String(pair.pair_id || '').slice(0, 8))}</td>
+      <td>${esc(pair.pair_loans_status || '—')}</td><td>${esc(pair.pair_control_status || '—')}</td>
+      <td>${pair.d_i == null ? '—' : `${Number(pair.d_i).toFixed(3)}%/día`}</td></tr>`).join('');
+    const pairPanel = loanPairs
+      ? `<div class="card loan-pairs-panel"><h3>Préstamos — pares</h3>
+        <p>n=${loanPairs.n_pairs}; media ${pairMean}; ${pairCi}; ${pairState}; efecto mínimo detectable (80%): ${loanPairs.detectable_effect_80pct == null ? '—' : `${Number(loanPairs.detectable_effect_80pct).toFixed(3)}%/día`}; pares huérfanos: ${loanPairs.orphan_pairs}.</p>
+        <table class="data-table"><thead><tr><th>Símbolo</th><th>Par</th><th>Préstamos</th><th>Control</th><th>dᵢ</th></tr></thead>
+        <tbody>${pairRows || '<tr><td colspan="5">Sin pares registrados</td></tr>'}</tbody></table>
+        <p class="muted">${esc(loanPairs.note)}</p></div>`
+      : `<div class="card loan-pairs-panel"><h3>Préstamos — pares</h3><p>${loanPairsResult?.error ? `No se pudo cargar: ${esc(loanPairsResult.error.message)}` : 'Cargando…'}</p></div>`;
     const warning = data.same_symbol_warning ? `<div class="grids-warning">${esc(data.same_symbol_warning)}</div>` : '';
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
@@ -236,7 +254,8 @@
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
-      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p></div>
+      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></div>
+      ${pairPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
@@ -421,12 +440,14 @@
 
   async function loadList(container) {
     try {
-      const [grids, loanSummaryResult] = await Promise.all([
+      const [grids, loanSummaryResult, loanPairsResult] = await Promise.all([
         apiGet('/api/grids'),
         apiGet('/api/grids/loans/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
+        apiGet('/api/grids/loans/pairs/summary').then(data => ({ ok: true, data }))
+          .catch(error => ({ ok: false, error })),
       ]);
-      renderList(container, { ...grids, loanSummaryResult });
+      renderList(container, { ...grids, loanSummaryResult, loanPairsResult });
     } catch (error) {
       renderError(container, error);
     }
