@@ -110,7 +110,10 @@ def test_consensus_cache_reuses_json_until_mtime_changes(tmp_path, monkeypatch):
         return original_read(target, *args, **kwargs)
     monkeypatch.setattr(Path, "read_text", counted_read)
     first = models_config.load_vol_consensus("ADAUSDT")
-    assert models_config.load_vol_consensus("ADAUSDT") is first
+    second = models_config.load_vol_consensus("ADAUSDT")
+    assert second == first and second is not first
+    second["report"]["horizons"]["1"]["champion"] = "MUTATED"
+    assert models_config.load_vol_consensus("ADAUSDT")["report"]["horizons"]["1"]["champion"] == "GBM"
     assert len(reads) == 1
     path.write_text(json.dumps(payload("HAR")), encoding="utf-8")
     changed_ns = path.stat().st_mtime_ns + 2_000_000_000

@@ -289,7 +289,7 @@ def test_simple_simulation_accepts_max_days_and_repositories_without_market_sell
         gaps=0,
     )
     result = run_simulation(candles, strategy="simple", n=4, capital=100,
-        low=90, high=110, params={"max_days": 1})
+        low=90, high=110, params={"max_days": 1}, sigma_values=np.zeros(3))
     reached = [event for event in result["events"] if event["type"] == "MAX_DAYS_REACHED"]
     assert reached
     assert reached[0]["details"]["age_days"] >= 1
@@ -349,7 +349,7 @@ def test_max_days_engine_and_simulator_match_inventory_free_cash_and_dust(monkey
     monkeypatch.setattr(SimExchange, "process", include_same_registered_dust)
     sim = run_simulation(candles, strategy="simple", n=5, capital=1000,
         low=90, high=110, params={"max_days": 1}, fee_asset="USDT",
-        filters=exchange.filters, resync_candles=1)
+        filters=exchange.filters, resync_candles=1, sigma_values=np.zeros(3))
     monitor = _monitor_target(engine, db, exchange)
     monitor.clock = lambda: end
     monitor.run_once("SCHEDULED")

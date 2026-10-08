@@ -303,7 +303,7 @@
         const loans = loanResult.data;
         const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'
           : loans.loans_group === 'manual' ? (loans.loans_enabled ? 'Activo (configuración manual)' : 'Apagado (configuración manual)')
-          : loans.loans_group === 'loans' ? 'Activo' : (loans.loans_enabled ? 'Activo' : 'Apagado');
+          : ['loans', 'loans_v2'].includes(loans.loans_group) ? 'Activo' : (loans.loans_enabled ? 'Activo' : 'Apagado');
         const counts = loans.counts || {};
         const openRows = (loans.open_loans || []).map((loan) => `<li>Nivel prestatario ${loan.borrower_idx}; ${loan.lender_source === 'reserva' ? 'reserva' : `nivel prestamista ${loan.lender_idx}`}; ${fmtMoney(loan.amount_usdt, 2)} USDT; ${loan.age_hours == null ? 'antigüedad no disponible' : `${fmtMoney(loan.age_hours, 1)} h`}</li>`).join('');
         if (loans.loans_enabled && ['ACTIVE', 'PAUSED', 'HOLDING'].includes(summary.status)) {

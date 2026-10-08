@@ -397,10 +397,10 @@ def test_smart_target_params_are_validated_and_passed_to_existing_engine(tmp_pat
     response = client.post("/api/grids/open", json=payload(strategy="smart", target_pct=5,
         dry_run=False, confirm=True, capital=10000))
     assert response.status_code == 200, response.text
-    assert response.json()["loans_group"] == "loans"
+    assert response.json()["loans_group"] == "loans_v2"
     assert response.json()["loans_enabled"] is True
     assert response.json()["loan_lender_max_pct"] == 70.0
-    assert db.get_grid(response.json()["grid_id"])["params"]["loans_group"] == "loans"
+    assert db.get_grid(response.json()["grid_id"])["params"]["loans_group"] == "loans_v2"
     event = db.list_grid_events(grid_id=response.json()["grid_id"], event_type="GRID_OPEN_API")[0]
     assert event["details"]["params"]["target_pct"] == 5
     assert event["details"]["params"]["horizon_h"] == 4
@@ -454,9 +454,10 @@ def test_smart_loan_cohort_defaults_and_manual_overrides():
         params = grids_api._assign_loan_creation_defaults(db, "smart", {}, 3)
         assigned.append(params)
         db.rows.append({"strategy": "smart", "status": "ACTIVE", "params": params})
-    assert [item["loans_group"] for item in assigned] == ["loans", "loans", "control", "loans"]
+    assert [item["loans_group"] for item in assigned] == ["loans_v2", "loans_v2", "control", "loans_v2"]
     assert [item["loans_enabled"] for item in assigned] == [True, True, False, True]
     assert all(item["loan_lender_max_pct"] == 70.0 for item in (assigned[0], assigned[1], assigned[3]))
+    assert all(item["loan_topup_pct"] == 70.0 for item in (assigned[0], assigned[1], assigned[3]))
     assert "loan_lender_max_pct" not in assigned[2]
     manual_on = grids_api._assign_loan_creation_defaults(db, "smart", {
         "loans_enabled": True}, 3)
@@ -471,8 +472,9 @@ def test_smart_loan_cohort_defaults_and_manual_overrides():
     assert manual_on["loan_lender_max_pct"] == 70.0
     assert "loan_lender_max_pct" not in manual_off
     assert custom_cap["loan_lender_max_pct"] == 62.5
-    assert default_group_custom_cap["loans_group"] == "loans"
+    assert default_group_custom_cap["loans_group"] == "loans_v2"
     assert default_group_custom_cap["loan_lender_max_pct"] == 62.5
+    assert default_group_custom_cap["loan_topup_pct"] == 70.0
     assert simple == {}
     cli_db = CohortDB()
     cli_groups = []
@@ -480,10 +482,30 @@ def test_smart_loan_cohort_defaults_and_manual_overrides():
         params = _cli_loan_creation_params(cli_db, {}, {}, 3)
         cli_groups.append(params)
         cli_db.rows.append({"strategy": "smart", "status": "ACTIVE", "params": params})
-    assert [item["loans_group"] for item in cli_groups] == ["loans", "loans", "control"]
+    assert [item["loans_group"] for item in cli_groups] == ["loans_v2", "loans_v2", "control"]
     assert "loan_lender_max_pct" not in cli_groups[2]
     explicit_cli = _cli_loan_creation_params(cli_db, {}, {"loan_lender_max_pct": 62.5}, 3)
     assert explicit_cli["loan_lender_max_pct"] == 62.5
+
+
+def test_loans_summary_keeps_legacy_and_v2_cohorts_separate(monkeypatch):
+    class SummaryDB:
+        def get_grid_levels(self, grid_id): return []
+        def list_grid_loans(self, grid_id): return []
+    rows = [
+        {"id": 1, "symbol": "ADAUSDT", "strategy": "smart", "status": "CLOSED",
+         "params": {"loans_group": "loans"}, "capital_total": 100, "created_at": "2026-01-01T00:00:00Z",
+         "closed_at": "2026-01-02T00:00:00Z"},
+        {"id": 2, "symbol": "PEPEUSDT", "strategy": "smart", "status": "CLOSED",
+         "params": {"loans_group": "loans_v2"}, "capital_total": 100, "created_at": "2026-01-01T00:00:00Z",
+         "closed_at": "2026-01-02T00:00:00Z"},
+    ]
+    monkeypatch.setattr(grids_api, "_authorize", lambda _request: None)
+    monkeypatch.setattr(grids_api, "_all_grids", lambda _db: rows)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=SummaryDB())))
+    result = grids_api.loans_summary(request)
+    counts = {row["group"]: row["grid_count"] for row in result["groups"]}
+    assert counts["loans"] == counts["loans_v2"] == 1
 
 
 def test_shared_loan_cohort_lock_serializes_eight_creations():
@@ -508,7 +530,7 @@ def test_shared_loan_cohort_lock_serializes_eight_creations():
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         groups = list(pool.map(open_one, range(8)))
-    assert sorted(groups.count(group) for group in {"loans", "control"}) == [2, 6]
+    assert sorted(groups.count(group) for group in {"loans_v2", "control"}) == [2, 6]
     assert len({row["id"] for row in db.rows}) == 8
     assert sum(row["params"]["loans_group"] == "control" for row in db.rows) == 2
 

@@ -73,13 +73,31 @@ def test_recommendation_uses_editable_margin_and_named_risk_limits():
     assert low["prediction_signal"] is None
     assert low["range_preference_note"] is None
     expected_break, _, _, _ = break_prob(low["current_price"], low["recommended_floor"],
-        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], {**DEFAULT_SMART_PARAMS, "horizon_h": 24})
+        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], DEFAULT_SMART_PARAMS)
     assert low["pause_risk"]["break_prob"] == pytest.approx(expected_break)
+    assert low["pause_risk"]["horizon_h"] == DEFAULT_SMART_PARAMS["horizon_h"] == 4
+    expected_24h, _, _, _ = break_prob(low["current_price"], low["recommended_floor"],
+        low["recommended_ceiling"], low["range_risk"]["sigma_24h"], {**DEFAULT_SMART_PARAMS, "horizon_h": 24})
+    assert low["pause_risk_24h"]["break_prob"] == pytest.approx(expected_24h)
+    assert low["pause_risk_24h"]["horizon_h"] == 24
     assert low["pause_risk"]["pause_enter_prob"] == .10
     assert low["pause_risk"]["would_be_pausable"] == (expected_break > .10)
     assert low["range_position_warning"] == "El precio está cerca del techo: casi todo el capital quedaría en compras"
     assert low["simulations"]["label"] == "histórico, no promesa de resultado"
     assert set(low["simulations"]["strategies"]) == {"simple", "smart"}
+
+
+def test_centered_moderate_pause_risk_uses_smart_four_hour_horizon():
+    result = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT", "capital": 1000,
+        "risk": "medium", "days": 90, "range_mode": "centrado"}).body
+    assert result["range_mode"] == "centrado"
+    assert result["pause_risk"]["horizon_h"] == 4
+    assert result["pause_risk"]["would_be_pausable"] is False
+    assert result["pause_risk_24h"]["horizon_h"] == 24
+    price, sigma = result["current_price"], result["range_risk"]["sigma_24h"]
+    narrow_params = {**DEFAULT_SMART_PARAMS, "close_out_of_range_pct": .01}
+    narrow_prob, _, _, _ = break_prob(price, price * .999, price * 1.001, sigma, narrow_params)
+    assert narrow_prob > narrow_params["pause_enter_prob"]
 
 
 def test_ada_100_usdt_advisor_target_uses_gross_margin_and_keeps_dust_informational(monkeypatch):
@@ -392,6 +410,8 @@ def test_5m_simulation_uses_warmed_daily_sigma_and_monitor_cadence(monkeypatch):
 def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog):
     client = make_client()
     original = client.app.state.client.get_historical_klines
+    original_run = grid_advisor.run_simulation
+    traces = []
 
     def fail_5m(symbol, interval, lookback_days):
         if interval == "5m":
@@ -402,8 +422,11 @@ def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog
     captured = []
 
     def fake_run(candles, **kwargs):
-        captured.append(kwargs)
-        return {"metrics": {"cycles_completed": 0}}
+        captured.append((candles, kwargs))
+        trace = []
+        result = original_run(candles, trace_callback=trace.append, **kwargs)
+        traces.append(trace)
+        return result
 
     monkeypatch.setattr(grid_advisor, "run_simulation", fake_run)
     response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
@@ -414,8 +437,13 @@ def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog
     assert "symbol=ADAUSDT days=90" in caplog.text
     assert "simulated 5m download failure" in caplog.text
     assert any(record.name == grid_advisor.__name__ and record.exc_info for record in caplog.records)
-    assert captured and all(kwargs["resync_candles"] == 3 for kwargs in captured)
-    assert all(kwargs["sigma_values"] is None for kwargs in captured)
+    assert captured and all(kwargs["resync_candles"] == 3 for _, kwargs in captured)
+    assert all(kwargs["sigma_values"] is None for _, kwargs in captured)
+    hourly_close = captured[0][0].close
+    expected = ewma_sigma_24h(hourly_close, bars_per_hour=1)
+    observed = [row["sigma_24h"] for row in traces[0] if row["sigma_24h"] is not None]
+    assert np.median(observed) == pytest.approx(np.median(expected[::3]), rel=.02)
+    assert np.median(observed) < 2 * np.median(ewma_sigma_24h(hourly_close))
 
 
 def test_missing_hourly_simulation_window_is_info_without_traceback(monkeypatch, caplog):

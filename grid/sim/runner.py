@@ -124,7 +124,15 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         row["state"] = plan.initial_state
     exchange = SimExchange(capital, fee_pct, filters=filters, fee_asset=fee_asset)
     if sigma_values is None:
-        sigma = ewma_sigma_24h(closes, halflife_h) * float(sigma_scale)
+        bar_deltas = np.diff(np.asarray(candles.timestamp, dtype=np.int64))
+        median_bar_seconds = float(np.median(bar_deltas)) if len(bar_deltas) else 0.0
+        if median_bar_seconds == 300:
+            bars_per_hour = 12
+        elif median_bar_seconds == 3600:
+            bars_per_hour = 1
+        else:
+            raise ValueError("simulation candles must have 300-second or 3600-second spacing")
+        sigma = ewma_sigma_24h(closes, halflife_h, bars_per_hour=bars_per_hour) * float(sigma_scale)
     else:
         if len(sigma_values) != len(closes):
             raise ValueError("sigma_values must have one item per candle")

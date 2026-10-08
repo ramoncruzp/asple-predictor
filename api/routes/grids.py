@@ -407,7 +407,7 @@ def loans_summary(request: Request):
                      "loans_repaid": 0, "loans_transferred": 0,
                      "_pnl_known": True, "_open_days": 0.0, "_days_known": True,
                      "_capital": 0.0, "_capital_known": True}
-              for name in ("loans", "control", "manual", "sin_grupo")}
+              for name in ("loans", "loans_v2", "control", "manual", "sin_grupo")}
     grid_rows = []
     active_statuses = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}
     for grid in _all_grids(db):
@@ -415,7 +415,7 @@ def loans_summary(request: Request):
             continue
         params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
         group_name = params.get("loans_group")
-        group_name = group_name if group_name in {"loans", "control", "manual"} else "sin_grupo"
+        group_name = group_name if group_name in {"loans", "loans_v2", "control", "manual"} else "sin_grupo"
         group = groups[group_name]
         group["grid_count"] += 1
         levels = db.get_grid_levels(int(grid["id"]))

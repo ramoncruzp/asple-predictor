@@ -805,7 +805,10 @@ class DBManager:
     def get_vol_model_stats_rows(self, symbol: str, horizon_h: int) -> list[dict]:
         """Return a bounded rolling window plus all rows still awaiting maturity."""
         from models.volatility.model_stats import N_MIN, ROLLING_VERIFICATIONS
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=int(horizon_h))
+        horizon_h = max(1, int(horizon_h))
+        # Keep enough raw rows for N_MIN effective outcomes after the H-hour overlap adjustment.
+        rolling_window = max(ROLLING_VERIFICATIONS, N_MIN * horizon_h)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=horizon_h)
         if self.engine.dialect.name == "sqlite":
             cutoff = cutoff.replace(tzinfo=None)
         ranked = select(
@@ -828,7 +831,7 @@ class DBManager:
         ).join(ranked, ranked.c.id == self.vol_forecasts.c.id).where(
             self.vol_forecasts.c.symbol == symbol,
             self.vol_forecasts.c.horizon_h == int(horizon_h),
-            (ranked.c.rn <= ROLLING_VERIFICATIONS + N_MIN)
+            (ranked.c.rn <= rolling_window + N_MIN)
             | self.vol_forecasts.c.realized_logvol.is_(None)
             | self.vol_forecasts.c.verified_at.is_(None)
             | (self.vol_forecasts.c.forecast_at > cutoff),

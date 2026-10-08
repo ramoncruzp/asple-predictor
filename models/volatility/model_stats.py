@@ -137,6 +137,7 @@ def _weights_from_mse(mse, eligible, power=1):
 def adaptive_weight_history(rows, models, val_weights, now, horizon_h=None):
     """Build causal P/P2 weights at each forecast timestamp, then return latest."""
     horizon_h = max(1, int(horizon_h or (rows[0].get("horizon_h", 1) if rows else 1)))
+    rolling_window = max(ROLLING_VERIFICATIONS, N_MIN * horizon_h)
     mature = verified_rows(rows, now)
     mature_by_model = defaultdict(list)
     for row in mature:
@@ -161,7 +162,7 @@ def adaptive_weight_history(rows, models, val_weights, now, horizon_h=None):
                 window.append(error)
                 squared_errors[model] += error * error
                 positions[model] += 1
-                if len(window) > ROLLING_VERIFICATIONS:
+                if len(window) > rolling_window:
                     squared_errors[model] -= window.popleft() ** 2
             if len(window) / horizon_h >= N_MIN:
                 mse[model] = squared_errors[model] / len(window)
@@ -200,6 +201,8 @@ def adaptive_weight_history(rows, models, val_weights, now, horizon_h=None):
 
 def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
                           dispersion_models=None, historical_aggregates=None):
+    horizon_value = max(1, int(rows[0]["horizon_h"])) if rows else 1
+    rolling_window = max(ROLLING_VERIFICATIONS, N_MIN * horizon_value)
     mature = verified_rows(rows, now)
     by_model = {name: [] for name in models}
     for row in rows:
@@ -211,12 +214,12 @@ def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
         sigma = sigma_refs.get(model)
         time_cutoff = max((as_utc(r["forecast_at"]) for r in rows), default=as_utc(now)) - timedelta(hours=ROLLING_HOURS)
         recent_time = [r for r in all_verified if as_utc(r["forecast_at"]) >= time_cutoff]
-        recent_n = all_verified[-ROLLING_VERIFICATIONS:]
+        recent_n = all_verified[-rolling_window:]
         full_metrics = (historical_aggregates or {}).get(model, _metrics(all_verified, sigma))
         model_results.append({
             "model_name": model, "n_predicciones": len(by_model[model]), "n_verificadas": len(all_verified),
-            "estado": "activo" if len(all_verified) >= N_MIN else "acumulando",
-            "all": full_metrics, "bias_alert": _bias_alert(full_metrics, sigma), "last_168h": _metrics(recent_time, sigma),
+            "estado": "activo" if len(all_verified) / horizon_value >= N_MIN else "acumulando",
+            "all": full_metrics, "bias_alert": _bias_alert(full_metrics, sigma, horizon_value), "last_168h": _metrics(recent_time, sigma),
             "last_168_verifications": _metrics(recent_n, sigma),
             "streak_last_10": _metrics(all_verified[-10:], sigma),
         })
@@ -243,7 +246,7 @@ def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
             sigma = sigma_refs.get(champion)
             dispersion_rows.append({"champion": champion, "level": name,
                                     "stats": _metrics(selected, sigma),
-                                    "estado": "activo" if len(selected) >= N_MIN else "acumulando"})
+                                    "estado": "activo" if len(selected) / horizon_value >= N_MIN else "acumulando"})
     champ_pairs = []
     for row in mature:
         if champions.get(int(row["horizon_h"])) != row["model_name"]:
@@ -252,7 +255,7 @@ def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
         if iqr is not None:
             champ_pairs.append((iqr, abs(float(row["pred_logvol_cal"]) - float(row["realized_logvol"]))))
     weights = adaptive_weight_history(rows, models, val_weights, now,
-                                      horizon_h=int(rows[0]["horizon_h"]) if rows else 1)
+                                      horizon_h=horizon_value)
     return {"models": model_results, "dispersion": dispersion_rows,
             "dispersion_iqr_error_spearman": _spearman([p[0] for p in champ_pairs], [p[1] for p in champ_pairs]),
             "adaptive": weights, "n_verified": sum(
@@ -262,10 +265,10 @@ def calculate_model_stats(rows, models, champions, sigma_refs, val_weights, now,
             "validation_status_live": "en_evaluacion"}
 
 
-def _bias_alert(metrics, sigma_ref):
+def _bias_alert(metrics, sigma_ref, horizon_h=1):
     bias = metrics.get("bias_mean")
     n = int(metrics.get("n") or 0)
-    if bias is None or sigma_ref is None or n < N_MIN:
+    if bias is None or sigma_ref is None or n / max(1, int(horizon_h)) < N_MIN:
         return False
     same_sign = metrics.get("over_pct") if bias > 0 else metrics.get("under_pct") if bias < 0 else 0
     return abs(float(bias)) > 0.5 * float(sigma_ref) and float(same_sign or 0) >= 80.0

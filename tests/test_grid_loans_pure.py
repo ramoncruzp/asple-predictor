@@ -149,6 +149,43 @@ def test_plan_loan_caps_lender_by_minimum_margin_and_exchange_quantity_filters()
     assert quantity >= Decimal("0.1") and quantity * Decimal(str(lender["price"])) >= Decimal("5")
 
 
+def test_loans_v2_topup_and_lender_caps_with_minimum_notional_guard():
+    borrower = cell(2, capital="200", base="100")
+    large_lender = cell(0, state="BUY_OPEN", capital="200", price="100")
+    common = {**PARAMS, "loan_cap_pct": 100, "loan_min_margin": 1.1, "loan_min_amount": 1}
+    inert_50 = plan_loan(borrower, large_lender, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 50, "loan_lender_max_pct": 50},
+        min_notional=5, min_qty="0.1", step_size="0.1")
+    inert_70 = plan_loan(borrower, large_lender, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 50, "loan_lender_max_pct": 70},
+        min_notional=5, min_qty="0.1", step_size="0.1")
+    assert inert_50["amount"] == inert_70["amount"] == Decimal("50.00000000")
+
+    topup_70 = plan_loan(borrower, large_lender, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 70, "loan_lender_max_pct": 70},
+        min_notional=5, min_qty="0.1", step_size="0.1")
+    assert topup_70["amount"] == Decimal("70.00000000")
+
+    small_lender = cell(0, state="BUY_OPEN", capital="10", price="1")
+    small = plan_loan(borrower, small_lender, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 70, "loan_lender_max_pct": 70},
+        min_notional=5, min_qty="0.1", step_size="0.1")
+    assert small["lender_available"] == Decimal("4.50000000")
+    assert small["lender_capital_after"] >= Decimal("5.50000000")
+    assert small["amount"] == Decimal("4.50000000")
+
+    lender_50 = cell(0, state="BUY_OPEN", capital="50", price="1")
+    available_50 = plan_loan(borrower, lender_50, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 70, "loan_lender_max_pct": 70},
+        min_notional=5, min_qty="0.1", step_size="0.1")
+    assert available_50["lender_available"] == Decimal("35.00000000")
+
+    too_small = cell(0, state="BUY_OPEN", capital="6.4", price="1")
+    assert plan_loan(borrower, too_small, reserve=0, capital_total=1000,
+        params={**common, "loan_topup_pct": 70, "loan_lender_max_pct": 70},
+        min_notional=5, min_qty="0.1", step_size="0.1") is None
+
+
 def test_plan_repayment_waits_for_free_borrower_and_requires_lender_cycle():
     loan = {"lender_idx": 0, "borrower_idx": 2, "amount": 30,
             "reserve_part": 0, "status": "OPEN", "lender_cycles_at_open": 3,

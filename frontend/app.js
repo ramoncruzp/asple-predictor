@@ -277,8 +277,11 @@ function renderGridV2a(data) {
   };
   const rangeWarning=data.range_warning?`<p class="scanner-warning">El rango ${Number(data.range_pct).toFixed(1)}% supera el tope ${Number(data.risk?.max_range_pct).toFixed(0)}% del perfil elegido.</p>`:'';
   const cellWarning=data.min_cell_warning?`<p class="scanner-warning">${escapeHtml(data.min_cell_warning)}</p>`:'';
-  const pauseRisk=data.pause_risk||{};
-  const pauseWarning=Number(pauseRisk.break_prob)>Number(pauseRisk.pause_enter_prob)?`<p class="scanner-warning advisor-pause-risk">Este grid nacer\u00EDa pausable: break_prob a 24 h (${(Number(pauseRisk.break_prob)*100).toFixed(1)} %) supera pause_enter_prob (${(Number(pauseRisk.pause_enter_prob)*100).toFixed(0)} %).</p>`:'';
+  const pauseRisk=data.pause_risk||{}, pauseRisk24=data.pause_risk_24h||{};
+  const pauseHorizon=Number(pauseRisk.horizon_h||4);
+  const pausePausable=Number(pauseRisk.break_prob)>Number(pauseRisk.pause_enter_prob);
+  const pause24Pausable=Number(pauseRisk24.break_prob)>Number(pauseRisk24.pause_enter_prob);
+  const pauseWarning=pausePausable?`<p class="scanner-warning advisor-pause-risk">Este grid nacer\u00EDa pausable: break_prob en el horizonte de vigilancia de Smart (${pauseHorizon} h) supera pause_enter_prob (${(Number(pauseRisk.pause_enter_prob)*100).toFixed(0)} %).</p>`:`<p class="muted advisor-pause-risk">Riesgo de pausa calculado con el horizonte de vigilancia de Smart: ${pauseHorizon} h.${pause24Pausable?' A 24 h, la estimaci\u00F3n s\u00ED supera el umbral.':''}</p>`;
   const riskHorizons=data.range_risk?.horizons||{};
   const h24=riskHorizons[24]||riskHorizons['24']||{}, h72=riskHorizons[72]||riskHorizons['72']||{};
   const profileRisk=`<p class="advisor-profile-risk">Probabilidad de salir del rango (cota superior): 24 h ${percent(h24.exit_upper_bound)}; 72 h ${percent(h72.exit_upper_bound)}. Toque por lado: 24 h piso ${percent(h24.touch_floor)} y techo ${percent(h24.touch_ceiling)}; 72 h piso ${percent(h72.touch_floor)} y techo ${percent(h72.touch_ceiling)}.</p>`;

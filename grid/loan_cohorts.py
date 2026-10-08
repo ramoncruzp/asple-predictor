@@ -36,10 +36,11 @@ def assign_loan_creation_defaults(db, strategy: str, params: dict, control_every
                    and isinstance(row.get("params"), dict)
                    and "loans_group" in row["params"])
     interval = int(control_every_n)
-    group = "control" if interval > 0 and (assigned + 1) % interval == 0 else "loans"
+    group = "control" if interval > 0 and (assigned + 1) % interval == 0 else "loans_v2"
     effective["loans_group"] = group
-    effective["loans_enabled"] = group == "loans"
-    if group == "loans":
+    effective["loans_enabled"] = group == "loans_v2"
+    if group == "loans_v2":
+        effective["loan_topup_pct"] = 70.0
         if "loan_lender_max_pct" in explicit:
             effective["loan_lender_max_pct"] = explicit["loan_lender_max_pct"]
         else:

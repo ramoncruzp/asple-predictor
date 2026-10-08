@@ -33,6 +33,10 @@ BLOCK_HOURS = 168
 CONFIDENCE_THRESHOLDS = {"high_below": 0.10, "medium_through": 0.25, "minimum_models": 3}
 
 
+def _test_is_virgin(symbol: str, output: Path) -> bool:
+    return symbol != VOL_SYMBOL and not Path(output).exists()
+
+
 def _scores(target: np.ndarray, prediction: np.ndarray) -> dict:
     valid = np.isfinite(target) & np.isfinite(prediction)
     if not valid.any():
@@ -326,7 +330,7 @@ def main(argv=None) -> int:
         "bootstrap": {"block_size_hours": BLOCK_HOURS, "replicates": BOOTSTRAP_REPLICATES, "seed": SEED},
         "confidence_thresholds": CONFIDENCE_THRESHOLDS,
         "selection_basis": "candidate estimators fit on TRAIN; HAR_range selection, eligibility, and weights use VAL; TEST is scored only after selection",
-        "test_is_virgin": args.symbol != VOL_SYMBOL,
+        "test_is_virgin": _test_is_virgin(args.symbol, output),
         "report": report,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

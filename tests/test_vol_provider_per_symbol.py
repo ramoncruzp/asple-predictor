@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from math import log, sqrt
+import os
 import numpy as np
 import pandas as pd
 import pytest
@@ -49,6 +50,39 @@ def test_ready_ada_uses_ada_champion_and_ada_manifest(monkeypatch,tmp_path):
     view=VolatilityProvider(db,clock=lambda:NOW).get("ADAUSDT",24)
     assert view.source=="model" and view.regime=="AGITADO"
     assert view.sigma_24h==pytest.approx(.03*sqrt(24)) and db.forecast_calls==["ADAUSDT"]
+
+
+def test_symbol_manifest_cache_reuses_file_and_invalidates_on_signature_change(monkeypatch,tmp_path):
+    path = patch_symbol(monkeypatch,tmp_path,"ADAUSDT",{1:"A",2:"A",4:"A",24:"A"},manifest={"version":1})
+    provider_module._MANIFEST_CACHE.clear()
+    original_read = __import__("pathlib").Path.read_text
+    reads = []
+    def counted_read(target,*args,**kwargs):
+        if target == path: reads.append(target)
+        return original_read(target,*args,**kwargs)
+    monkeypatch.setattr(__import__("pathlib").Path,"read_text",counted_read)
+    provider = VolatilityProvider(DB([]))
+    assert provider._manifest_for("ADAUSDT")["version"] == 1
+    assert provider._manifest_for("ADAUSDT")["version"] == 1
+    assert len(reads) == 1
+    path.write_text('{"version": 2}',encoding="utf-8")
+    changed_ns = path.stat().st_mtime_ns + 2_000_000_000
+    os.utime(path, ns=(changed_ns, changed_ns))
+    assert provider._manifest_for("ADAUSDT")["version"] == 2
+    assert len(reads) == 2
+def test_symbol_manifest_cache_signature_limit_same_size_same_mtime(monkeypatch,tmp_path):
+    # límite aceptado; los manifests se reescriben completos y cambian de mtime
+    path = patch_symbol(monkeypatch,tmp_path,"ADAUSDT",{1:"A",2:"A",4:"A",24:"A"},manifest={"version":1})
+    provider_module._MANIFEST_CACHE.clear()
+    fixed_ns = path.stat().st_mtime_ns
+    os.utime(path, ns=(fixed_ns, fixed_ns))
+    provider = VolatilityProvider(DB([]))
+    assert provider._manifest_for("ADAUSDT")["version"] == 1
+    path.write_text('{"version": 2}',encoding="utf-8")
+    os.utime(path, ns=(fixed_ns, fixed_ns))
+    assert provider._manifest_for("ADAUSDT")["version"] == 1
+
+
 def test_unready_ada_uses_only_its_realized_history(monkeypatch,tmp_path):
     patch_symbol(monkeypatch,tmp_path,"ADAUSDT",{24:"ADAHAR"},ready=False)
     db,data=DB([row("XRPUSDT",24,"NexoHAR",.9)]),DataClient()

@@ -21,6 +21,27 @@ def test_sigma_is_causal():
     assert np.array_equal(baseline[:-1], ewma_sigma_24h(changed)[:-1])
 
 
+def test_sigma_scales_known_volatility_for_hourly_and_five_minute_bars():
+    rng = np.random.default_rng(206)
+    hourly = 100 * np.exp(np.cumsum(rng.normal(0, .01 / np.sqrt(24), 12000)))
+    five_minute = 100 * np.exp(np.cumsum(rng.normal(0, .01 / np.sqrt(288), 12000)))
+    hourly_sigma = ewma_sigma_24h(hourly, bars_per_hour=1)
+    five_minute_sigma = ewma_sigma_24h(five_minute, bars_per_hour=12)
+    assert np.median(hourly_sigma[3000:]) == pytest.approx(.01, abs=.002)
+    assert np.median(five_minute_sigma[3000:]) == pytest.approx(.01, abs=.002)
+
+
+def test_five_minute_default_sigma_is_bit_identical():
+    closes = np.array([100., 101., 99., 102., 103.])
+    returns = np.diff(np.log(closes), prepend=np.log(closes[0]))
+    alpha = 1.0 - np.exp(np.log(.5) / (72.0 * 12.0))
+    variance = np.zeros(len(closes), dtype=float)
+    for i in range(1, len(closes)):
+        variance[i] = (1 - alpha) * variance[i - 1] + alpha * returns[i] ** 2
+    previous = np.sqrt(variance * 288.0)
+    assert np.array_equal(ewma_sigma_24h(closes), previous)
+
+
 def test_load_reports_small_gap(tmp_path):
     origin = 1_700_000_100
     stamps = [datetime.fromtimestamp(origin + 300 * i, timezone.utc).isoformat() for i in (0, 1, 3, 4)]

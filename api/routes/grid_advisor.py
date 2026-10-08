@@ -407,9 +407,11 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     range_risk = estimate_range_risk(current, floor, ceiling, sigma_24h,
         vol_source_effective=vol_source_effective,
         vol_source_requested=volatility["requested"])
-    pause_params = {**DEFAULT_SMART_PARAMS, "horizon_h": 24}
+    pause_params = dict(DEFAULT_SMART_PARAMS)
     pause_break_prob, _, _, _ = break_prob(current, floor, ceiling, sigma_24h, pause_params)
     pause_enter_prob = float(pause_params["pause_enter_prob"])
+    pause_params_24h = {**pause_params, "horizon_h": 24}
+    pause_break_prob_24h, _, _, _ = break_prob(current, floor, ceiling, sigma_24h, pause_params_24h)
     disagreement_pct = None
     if volatility.get("champion_sigma_24h") and volatility.get("consensus_sigma_24h"):
         disagreement_pct = abs(volatility["consensus_sigma_24h"] - volatility["champion_sigma_24h"])
@@ -491,9 +493,12 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         "range_risk": {"sigma_24h": sigma_24h, "source": sigma_source,
             "horizons": range_risk,
             "disclaimer": "Estimación; las colas gruesas hacen que la probabilidad real pueda ser mayor; no validado más allá de 24 h; no es predicción de dirección."},
-        "pause_risk": {"horizon_h": 24, "break_prob": pause_break_prob,
+        "pause_risk": {"horizon_h": int(pause_params["horizon_h"]), "break_prob": pause_break_prob,
                        "pause_enter_prob": pause_enter_prob,
                        "would_be_pausable": pause_break_prob > pause_enter_prob},
+        "pause_risk_24h": {"horizon_h": 24, "break_prob": pause_break_prob_24h,
+                            "pause_enter_prob": pause_enter_prob,
+                            "would_be_pausable": pause_break_prob_24h > pause_enter_prob},
         "range_position_warning": range_position_warning,
         "range_preference_note": range_preference_note,
         "confidence": prediction.get("consensus_confidence") if prediction else None,

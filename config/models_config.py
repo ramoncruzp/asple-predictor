@@ -3,6 +3,7 @@
 import json
 import re
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 TARGET_HORIZON_CANDLES = 4
@@ -41,7 +42,7 @@ def load_vol_consensus(symbol: str) -> dict | None:
             signature = None
         cached = _VOL_CONSENSUS_CACHE.get(symbol)
         if cached is not None and cached[0] == signature:
-            return cached[1]
+            return deepcopy(cached[1])
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -61,7 +62,7 @@ def load_vol_consensus(symbol: str) -> dict | None:
             _VOL_CONSENSUS_CACHE[symbol] = (signature, None)
             return None
         _VOL_CONSENSUS_CACHE[symbol] = (signature, payload)
-        return payload
+        return deepcopy(payload)
 
 
 def vol_champions(symbol: str) -> tuple[dict[int, str], bool]:

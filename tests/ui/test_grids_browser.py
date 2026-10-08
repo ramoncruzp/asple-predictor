@@ -69,17 +69,21 @@ def test_empty_grids_state_links_to_creation_screens(live_server, ui_page):
 def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live_server, ui_page):
     grid_id = live_server.secondary_grid_id
     live_server.db.update_grid(grid_id, status="ACTIVE")
-    live_server.db.merge_grid_params(grid_id, {"loans_enabled": True, "loans_group": "loans",
+    live_server.db.merge_grid_params(grid_id, {"loans_enabled": True, "loans_group": "loans_v2",
         "loan_lender_max_pct": 70.0}, allowed=frozenset({"loans_enabled", "loans_group", "loan_lender_max_pct"}))
     ui_page.route(f"**/api/grids/{grid_id}/loans", lambda route: route.fulfill(json={
-        "grid_id": grid_id, "loans_group": "loans", "loans_enabled": True,
+        "grid_id": grid_id, "loans_group": "loans_v2", "loans_enabled": True,
         "counts": {"OPEN": 1, "REPAID": 2, "TRANSFERRED": 0, "PENDING": 0, "CANCELLED": 0},
         "total_amount_lent_usdt": 40, "average_repaid_open_hours": 3.5,
         "open_loans": [{"borrower_idx": 2, "lender_source": "reserva", "lender_idx": None,
             "amount_usdt": 10, "age_hours": 1.5}],
     }))
     ui_page.route("**/api/grids/loans/summary", lambda route: route.fulfill(json={
-        "groups": [{"group": "loans", "grid_count": 1, "realized_pnl_usdt": 5,
+        "groups": [{"group": "loans", "grid_count": 1, "realized_pnl_usdt": 3,
+            "pnl_per_open_day_usdt": 1, "pnl_pct_capital": 2.5,
+            "pnl_pct_capital_per_day": 0.5, "cycles_completed": 2, "commissions_usdt": 0.5,
+            "loans_created": 3, "loans_repaid": 2, "loans_transferred": 0},
+            {"group": "loans_v2", "grid_count": 1, "realized_pnl_usdt": 5,
             "pnl_per_open_day_usdt": 1, "pnl_pct_capital": 2.5,
             "pnl_pct_capital_per_day": 0.5, "cycles_completed": 2, "commissions_usdt": 0.5,
             "loans_created": 3, "loans_repaid": 2, "loans_transferred": 0}],
@@ -99,6 +103,8 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("Muestra pequeña")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("3 préstamos creados/2 devueltos")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("2.50% del capital")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("loans: 1 grids")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("loans_v2: 1 grids")
     ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
     expect(ui_page.locator(".loans-detail")).to_contain_text("Activo")
     expect(ui_page.locator(".loans-detail")).to_contain_text("reserva")
@@ -130,7 +136,8 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
             "smart":{"pnl_total_net_usdt":12,"max_drawdown_pct":2.5,"fees_usdt":3.5,"buy_hold_pnl_usdt":4.75,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
             "atr":2,"support_touches":3,"resistance_touches":4},"prediction_signal":None,
         "range_risk":{"sigma_24h":.02,"source":"campeón","horizons":{"24":{"touch_floor":.2,"touch_ceiling":.25,"exit_upper_bound":.4},"72":{"touch_floor":.4,"touch_ceiling":.45,"exit_upper_bound":.7}},"disclaimer":"Estimaci\u00F3n te\u00F3rica."},
-        "pause_risk":{"horizon_h":24,"break_prob":.15,"pause_enter_prob":.10,"would_be_pausable":True},
+        "pause_risk":{"horizon_h":4,"break_prob":.15,"pause_enter_prob":.10,"would_be_pausable":True},
+        "pause_risk_24h":{"horizon_h":24,"break_prob":.20,"pause_enter_prob":.10,"would_be_pausable":True},
         "disclaimer":"Estimación teórica."}
     def fulfill_advisor(route):
         payload = dict(advisor)
@@ -166,6 +173,7 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator("#grid-result")).to_contain_text("Toque por lado")
     pause_notice=ui_page.locator("#grid-result .advisor-pause-risk")
     assert pause_notice.is_visible() and "nacer\u00EDa pausable" in pause_notice.inner_text()
+    assert "horizonte de vigilancia de Smart (4 h)" in pause_notice.inner_text()
     assert ui_page.locator("#grid-result .advisor-profile-risk").evaluate("el => getComputedStyle(el).display") != "none"
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("La volatilidad está ensanchada ×1.25: la probabilidad real de salir por cada lado es menor que la indicada.")
     expect(ui_page.locator(".advisor-range-mode")).to_contain_text("se prefiere el rango centrado")

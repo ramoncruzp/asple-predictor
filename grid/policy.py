@@ -121,8 +121,8 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
         raise ValueError(f"unknown smart parameter(s): {', '.join(unknown)}")
     result = dict(DEFAULT_SMART_PARAMS)
     result.update(supplied)
-    if "loans_group" in supplied and supplied["loans_group"] not in {"loans", "control", "manual"}:
-        raise ValueError("loans_group must be loans, control, or manual")
+    if "loans_group" in supplied and supplied["loans_group"] not in {"loans", "loans_v2", "control", "manual"}:
+        raise ValueError("loans_group must be loans, loans_v2, control, or manual")
     if "dust_sweep_threshold_pct" in supplied:
         result["dust_sweep_threshold_pct"] = _number(
             supplied["dust_sweep_threshold_pct"], "dust_sweep_threshold_pct", nullable=True)

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_shared_date_and_number_formatters_in_fixed_timezone():
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js no estÃ¡ instalado; no se ejecutan los formateadores compartidos")
+        pytest.skip("Node.js no está instalado; no se ejecutan los formateadores compartidos")
     harness = r'''const fs=require('fs'),vm=require('vm');
 const window={location:{protocol:'http:',origin:'http://local'}};
 const document={addEventListener(){}};
@@ -50,7 +50,7 @@ process.stdout.write(JSON.stringify({
 def test_price_formatter_uses_four_decimals_above_one_and_significant_digits_below_one():
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js no estÃ¡ instalado; no se ejecuta formatPrice")
+        pytest.skip("Node.js no está instalado; no se ejecuta formatPrice")
     harness = r'''const fs=require('fs'),vm=require('vm');
 const window={location:{protocol:'http:',origin:'http://local'}};
 const document={addEventListener(){}};
@@ -69,7 +69,7 @@ process.stdout.write([context.formatPrice(783.00778595),context.formatPrice(0.00
 def test_dashboard_renders_explicit_missing_model_state_without_model_cards():
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js no estÃ¡ instalado; no se ejecuta el render del Dashboard")
+        pytest.skip("Node.js no está instalado; no se ejecuta el render del Dashboard")
     harness = r'''const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const elements={};
 const document={addEventListener(){},querySelector(selector){return elements[selector]||(elements[selector]={innerHTML:'',textContent:'',className:''})}};
@@ -95,7 +95,7 @@ process.stdout.write('ok');'''
 def test_dashboard_chart_preserves_time_gaps_and_local_tick_labels():
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js no estÃ¡ instalado; no se ejecutan los helpers del grÃ¡fico")
+        pytest.skip("Node.js no está instalado; no se ejecutan los helpers del gráfico")
     harness = r'''const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const document={addEventListener(){},querySelector(){return {innerHTML:'',textContent:'',className:'',classList:{toggle(){}}}}};
 const window={location:{protocol:'http:',origin:'http://local'}};
@@ -119,7 +119,7 @@ process.stdout.write('ok');'''
 def test_shadow_cards_validation_labels_and_volatility_detail_are_explicit():
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js no estÃ¡ instalado; no se ejecutan los componentes de modo sombra")
+        pytest.skip("Node.js no está instalado; no se ejecutan los componentes de modo sombra")
     harness = r'''const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const elements={};
 const document={addEventListener(){},querySelector(selector){return elements[selector]||(elements[selector]={innerHTML:'',textContent:'',className:''})}};

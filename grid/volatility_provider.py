@@ -15,6 +15,29 @@ from models.coin_onboarding import coin_is_ready
 
 logger = logging.getLogger(__name__)
 SUPPORTED_HORIZONS = frozenset({1, 2, 4, 24})
+_MANIFEST_CACHE: dict[str, tuple[tuple[int, int] | None, dict]] = {}
+_MANIFEST_CACHE_LOCK = threading.Lock()
+
+
+def _load_symbol_manifest(symbol: str) -> dict:
+    path = vol_manifest_path(symbol)
+    with _MANIFEST_CACHE_LOCK:
+        try:
+            stat = path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        cached = _MANIFEST_CACHE.get(symbol)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _MANIFEST_CACHE[symbol] = (signature, payload)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -56,10 +79,7 @@ class VolatilityProvider:
     def _manifest_for(self, symbol: str) -> dict:
         if symbol == VOL_SYMBOL:
             return self.manifest
-        try:
-            return json.loads(vol_manifest_path(symbol).read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return {}
+        return _load_symbol_manifest(symbol)
 
     def _champion_row(self, rows: list[dict], symbol: str, horizon_h: int) -> dict | None:
         champions = VOL_CHAMPIONS if symbol == VOL_SYMBOL else vol_champions(symbol)[0]

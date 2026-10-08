@@ -23,6 +23,23 @@ def test_simulation_deterministic_and_has_financial_metrics():
     )) < 1e-8
 
 
+def test_runner_infers_hourly_candles_for_sigma_and_rejects_unknown_spacing():
+    import pytest
+    rng = np.random.default_rng(206)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, .01 / np.sqrt(24), 12000)))
+    ts = np.arange(len(close), dtype=np.int64) * 3600 + 1_700_000_100
+    candles = CandleData(ts, close.copy(), close * 1.001, close * .999, close.copy(), 0)
+    seen = []
+    run_simulation(candles, n=4, capital=100, low=50, high=150, trace_callback=seen.append)
+    values = [row["sigma_24h"] for row in seen if row["sigma_24h"] is not None]
+    assert np.median(values[-100:]) == pytest.approx(.01, abs=.002)
+
+    irregular = CandleData(ts[:5] + np.array([0, 300, 900, 1800, 3600]),
+                           close[:5], close[:5] * 1.001, close[:5] * .999, close[:5], 0)
+    with pytest.raises(ValueError, match="300-second or 3600-second"):
+        run_simulation(irregular, n=4, capital=100, low=50, high=150)
+
+
 def test_reject_compound_and_loans():
     import pytest
     with pytest.raises(ValueError, match="15B-4b"):

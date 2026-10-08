@@ -30,6 +30,27 @@ def _rows(n=30, now=None):
     return rows
 
 
+def _horizon_rows(n, horizon, now):
+    rows = []
+    start = now - timedelta(hours=n + horizon + 2)
+    for i in range(n):
+        at = start + timedelta(hours=i)
+        for model, offset in (("Persistence", .2), ("GBM", 0.0),
+                              ("HAR", .03), ("NexoHAR", .06)):
+            rows.append({"symbol": "XRPUSDT", "horizon_h": horizon,
+                         "model_name": model, "forecast_at": at,
+                         "verified_at": at + timedelta(hours=horizon),
+                         "pred_logvol_cal": -5.0 + offset,
+                         "realized_logvol": -5.0})
+    pending_at = now
+    for model in ("Persistence", "GBM", "HAR", "NexoHAR"):
+        rows.append({"symbol": "XRPUSDT", "horizon_h": horizon,
+                     "model_name": model, "forecast_at": pending_at,
+                     "verified_at": None, "pred_logvol_cal": -5.0,
+                     "realized_logvol": None})
+    return rows
+
+
 def test_stats_fixed_metrics_and_active_threshold_29_30():
     now = datetime(2026, 1, 10, tzinfo=timezone.utc)
     sigma = {"GBM": 0.01, "HAR": 0.02, "Persistence": 0.03}
@@ -62,6 +83,72 @@ def test_live_gate_uses_effective_observations_n_over_h():
     assert sum(row["model_name"] == "GBM" and row["verified_at"] <= now for row in rows_below) == 59
     assert adaptive_weight_history(rows_below, models, val, now)["source"] == "val"
     assert adaptive_weight_history(rows_above, models, val, now)["source"] == "vivo"
+
+
+def test_h24_live_gate_reaches_30_effective_rows_and_keeps_short_horizons():
+    now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    models = ["Persistence", "GBM", "HAR", "NexoHAR"]
+    val = {"GBM": .4, "HAR": .4, "NexoHAR": .2, "Persistence": 0.0}
+    assert adaptive_weight_history(_horizon_rows(719, 24, now), models, val, now)["source"] == "val"
+    assert adaptive_weight_history(_horizon_rows(720, 24, now), models, val, now)["source"] == "vivo"
+    assert adaptive_weight_history(_horizon_rows(30, 1, now), models, val, now)["source"] == "vivo"
+    golden_p = {"GBM": .5, "HAR": .4, "NexoHAR": .1}
+    golden_p2 = {"GBM": .5, "HAR": .47058823529505717, "NexoHAR": .02941176470594279}
+    for horizon in (1, 2, 4):
+        state = adaptive_weight_history(_horizon_rows(168, horizon, now), models, val, now)
+        assert state["source"] == "vivo"
+        assert state["eligible"] == ["GBM", "HAR", "NexoHAR"]
+        assert state["P"] == pytest.approx(golden_p)
+        assert state["P2"] == pytest.approx(golden_p2)
+
+
+def test_h24_stats_status_and_bias_alert_use_effective_count():
+    now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    rows = _horizon_rows(59, 2, now)
+    for row in rows:
+        if row["model_name"] == "GBM" and row["realized_logvol"] is not None:
+            row["pred_logvol_cal"] = -4.8
+    stats = calculate_model_stats(rows, ["Persistence", "GBM", "HAR", "NexoHAR"],
+        {2: "GBM"}, {"GBM": .1}, {"Persistence": 0.0, "GBM": .4, "HAR": .4, "NexoHAR": .2}, now)
+    gbm = next(row for row in stats["models"] if row["model_name"] == "GBM")
+    assert gbm["n_verificadas"] == 59
+    assert gbm["estado"] == "acumulando"
+    assert gbm["bias_alert"] is False
+    at_threshold = calculate_model_stats(_horizon_rows(60, 2, now),
+        ["Persistence", "GBM", "HAR", "NexoHAR"], {2: "GBM"}, {"GBM": .1},
+        {"Persistence": 0.0, "GBM": .4, "HAR": .4, "NexoHAR": .2}, now)
+    assert next(row for row in at_threshold["models"] if row["model_name"] == "GBM")["estado"] == "activo"
+
+
+def test_db_stats_query_keeps_enough_h24_rows_for_live_gate(tmp_path):
+    now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    db = DBManager(f"sqlite:///{tmp_path / 'h24-stats.sqlite'}")
+    start = now - timedelta(hours=900)
+    models = ("Persistence", "GBM", "HAR", "NexoHAR")
+    payload = []
+    for i in range(800):
+        at = start + timedelta(hours=i)
+        for model, offset in (("Persistence", .2), ("GBM", 0.0),
+                              ("HAR", .03), ("NexoHAR", .06)):
+            payload.append({"symbol": "XRPUSDT", "horizon_h": 24,
+                "model_name": model, "forecast_at": at, "made_at": at,
+                "pred_logvol_raw": -5.0 + offset, "pred_logvol_cal": -5.0 + offset,
+                "var_factor": 1.0, "is_champion": int(model == "GBM"),
+                "realized_logvol": -5.0, "verified_at": at + timedelta(hours=24)})
+    for model in models:
+        payload.append({"symbol": "XRPUSDT", "horizon_h": 24,
+            "model_name": model, "forecast_at": now, "made_at": now,
+            "pred_logvol_raw": -5.0, "pred_logvol_cal": -5.0,
+            "var_factor": 1.0, "is_champion": int(model == "GBM"),
+            "realized_logvol": None, "verified_at": None})
+    with db.engine.begin() as conn:
+        conn.execute(db.vol_forecasts.insert(), payload)
+    rows = db.get_vol_model_stats_rows("XRPUSDT", 24)
+    assert sum(row["model_name"] == "GBM" and row["realized_logvol"] is not None for row in rows) >= 720
+    state = adaptive_weight_history(rows, list(models),
+        {"Persistence": 0.0, "GBM": .4, "HAR": .4, "NexoHAR": .2}, now)
+    assert state["source"] == "vivo"
+    db.engine.dispose()
 
 
 def test_maturity_excludes_future_and_unverified_results():

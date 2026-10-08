@@ -152,9 +152,10 @@ def test_auto_open_assigns_smart_loan_cohorts_but_leaves_simple_untouched(monkey
     service.stop()
     assert len(result["opened"]) == 3, result
     actual = [call[1]["params"] for call in engine.calls]
-    assert [params["loans_group"] for params in actual] == ["loans", "loans", "control"]
+    assert [params["loans_group"] for params in actual] == ["loans_v2", "loans_v2", "control"]
     assert [params["loans_enabled"] for params in actual] == [True, True, False]
     assert actual[0]["loan_lender_max_pct"] == actual[1]["loan_lender_max_pct"] == 70.0
+    assert actual[0]["loan_topup_pct"] == actual[1]["loan_topup_pct"] == 70.0
     assert "loan_lender_max_pct" not in actual[2]
 
     simple_cfg = settings(scanner_auto_open_strategy="simple")

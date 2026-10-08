@@ -52,6 +52,7 @@ def test_defaults_and_parameter_validation_rules():
         "loan_min_amount": 1.0,
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
+    assert validate_params({"loans_group": "loans_v2"}, 4)["loans_group"] == "loans_v2"
     assert validate_params({"pause_enter_prob": None}, 4)["pause_enter_prob"] is None
     assert validate_params({"horizon_h": 0.5}, 4)["horizon_h"] == 0.5
     bad = [

@@ -75,3 +75,7 @@ URL de (a): http://127.0.0.1:62940/api/models/page-context?symbol=XRPUSDT&interv
 Contadores revisados: model_stats.py:218 estado por verificaciones; api/routes/volatility.py:282-283 requiere fuente vivo y elegibilidad para peso_actual. model_stats.py:246 mide muestra de dispersión. model_stats.py:268 guarda bias_alert. Ninguno conmuta por sí mismo val→vivo; no se cambiaron.
 C3 ya existía en frontend/models.js:139. tests/ui/test_models_page.py:25 prueba el texto y computed style de la nota (display distinto de none, visibility visible). La corrida focal final fue 20 passed, 2 warnings in 11.72s.
 NO VERIFICADO: page-context en servidor activo. No hubo tests live ni Testnet.
+
+
+### Nota de mantenimiento 20F
+La afirmación de que el endpoint expone `consensus_selection_note` quedó obsoleta desde 20E-1; se conserva arriba como registro histórico.

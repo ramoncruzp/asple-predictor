@@ -74,13 +74,14 @@ def _timestamp(value):
     return int((stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp).timestamp())
 
 
-def ewma_sigma_24h(closes, halflife_h=72.0):
+def ewma_sigma_24h(closes, halflife_h=72.0, bars_per_hour=12):
     prices = np.asarray(closes, dtype=float)
-    if len(prices) < 2 or not np.isfinite(prices).all() or np.any(prices <= 0) or halflife_h <= 0:
-        raise CandleDataError("closes must be positive finite prices and halflife_h positive")
+    if (len(prices) < 2 or not np.isfinite(prices).all() or np.any(prices <= 0)
+            or halflife_h <= 0 or bars_per_hour <= 0):
+        raise CandleDataError("closes must be positive finite prices and scales positive")
     returns = np.diff(np.log(prices), prepend=np.log(prices[0]))
-    alpha = 1.0 - np.exp(np.log(.5) / (halflife_h * 12.0))
+    alpha = 1.0 - np.exp(np.log(.5) / (halflife_h * float(bars_per_hour)))
     variance = np.zeros(len(prices), dtype=float)
     for i in range(1, len(prices)):
         variance[i] = (1 - alpha) * variance[i - 1] + alpha * returns[i] ** 2
-    return np.sqrt(variance * 288.0)
+    return np.sqrt(variance * 24.0 * float(bars_per_hour))

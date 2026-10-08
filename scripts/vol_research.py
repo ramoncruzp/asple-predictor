@@ -274,7 +274,7 @@ def main(argv=None) -> int:
         candles = candles.loc[candles["timestamp"].between(common_start, common_end)].reset_index(drop=True)
         intraday = intraday.loc[intraday["timestamp"].between(common_start, common_end)].reset_index(drop=True)
         if candles.empty or intraday.empty:
-            raise ValueError("No hay rango de fechas comÃºn entre los datos 1h y 5m")
+            raise ValueError("No hay rango de fechas común entre los datos 1h y 5m")
     out_path = args.out or Path(
         "models/saved/vol_research_xrp_5m.json"
         if args.candles_5m is not None

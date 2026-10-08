@@ -137,7 +137,7 @@ def build_volatility_frame(
         }
         missing = required_intraday.difference(intraday.columns)
         if missing:
-            raise ValueError(f"Faltan medidas intradÃ­a: {sorted(missing)}")
+            raise ValueError(f"Faltan medidas intradía: {sorted(missing)}")
         if "timestamp" in result and "timestamp" in intraday:
             result_keys = pd.to_datetime(result["timestamp"], utc=True).dt.floor("h")
             intraday_keys = pd.to_datetime(intraday["timestamp"], utc=True).dt.floor("h")
