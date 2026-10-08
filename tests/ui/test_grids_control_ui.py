@@ -15,7 +15,7 @@ def test_grid_controls_require_preview_then_explicit_confirmation_and_do_not_tou
     assert "LIQUIDAR" in source
     assert "setOffline(" not in source
     assert "APP.apiHealthState" not in source
-    for action in ("pause", "resume", "close", "adjust", "sweep-dust", "params", "compound"):
+    for action in ("pause", "resume", "close", "adjust", "sweep-dust", "params", "compound", "disable-loans"):
         assert f'data-grid-action="{action}"' in source
 
 

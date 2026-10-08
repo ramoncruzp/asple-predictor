@@ -37,7 +37,7 @@ def test_scanner_score_defaults_are_pinned_and_low_edge_warning_travels(monkeypa
     import config.settings as settings
     cfg=settings.SCANNER_DEFAULTS
     assert cfg["max_spread_bps"] == 15
-    assert cfg["weights"] == {"cost_headroom":.35,"liquidity":.20,"historical_oscillation":.35,"trend_penalty":.10}
+    assert cfg["weights"] == {"cost_headroom":0.0,"liquidity":.20,"historical_oscillation":.35,"trend_penalty":.10}
     import grid.scanner as scanner
     original=scanner.suggest_structure
     monkeypatch.setattr(scanner,"suggest_structure",lambda *a,**k:{**original(*a,**k),

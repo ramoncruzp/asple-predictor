@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from config.settings import Settings
 from models.coin_onboarding import coin_is_ready
+from grid.loan_cohorts import create_grid_with_loan_cohort
 
 
 class GridAutoOpen:
@@ -124,13 +125,19 @@ class GridAutoOpen:
                                   "dust_estimate_pct": dust_pct, "dust_warning": dust_warning,
                                   "dust_warning_message": warning_text, "scan": row, "params": params})
                     continue
-                result = self.engine.create_grid(symbol, structure["range_low"], structure["range_high"],
-                    int(structure["n_levels"]), capital=Decimal(str(cfg.usdt_por_grid)),
-                    strategy=strategy, params=params or None)
+                effective_params, result = create_grid_with_loan_cohort(
+                    self.db, strategy, params,
+                    int(getattr(cfg, "loans_control_every_n", 3)),
+                    lambda assigned: self.engine.create_grid(
+                        symbol, structure["range_low"], structure["range_high"],
+                        int(structure["n_levels"]), capital=Decimal(str(cfg.usdt_por_grid)),
+                        strategy=strategy, params=assigned or None),
+                    explicit_params=params,
+                )
                 grid_id = int(result["id"])
                 self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN", grid_id=grid_id,
                     details={"slot": slot, "phase": "COMPLETED", "who": "auto", "symbol": symbol,
-                        "scan": row, "params": params, "strategy": strategy,
+                        "scan": row, "params": effective_params, "strategy": strategy,
                         "margin_after_fees_pct": gross_margin, "net_after_dust_pct": net_margin,
                         "dust_estimate_pct": dust_pct, "dust_warning": dust_warning,
                         "dust_warning_message": warning_text})

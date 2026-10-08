@@ -144,3 +144,55 @@ def test_exchange_cell_floor_still_blocks_scanner_structure():
     assert result["eligible"] is False
     gate = next(row for row in result["hard_filters"] if row["name"] == "structure")
     assert gate["passed"] is False
+
+
+def test_cost_headroom_is_informational_and_no_longer_changes_score(monkeypatch):
+    import grid.scanner as scanner
+    original = scanner.suggest_structure
+
+    def score_at(gross):
+        monkeypatch.setattr(scanner, "suggest_structure", lambda *a, **k: {
+            **original(*a, **k), "edge_gross_pct": gross,
+            "net_edge_pct_per_cycle": gross - 0.2,
+        })
+        return scanner.score_symbol(market(), FILTERS)
+
+    low_headroom, high_headroom = score_at(0.05), score_at(0.20)
+    low_cost = next(row for row in low_headroom["components"] if row["name"] == "cost_headroom")
+    high_cost = next(row for row in high_headroom["components"] if row["name"] == "cost_headroom")
+    assert low_cost["value"] < high_cost["value"]
+    assert low_cost["weight"] == high_cost["weight"] == 0
+    assert low_headroom["score"] == high_headroom["score"]
+    assert all(row["passed"] for row in low_headroom["hard_filters"])
+
+
+def test_cost_headroom_zero_keeps_two_symbol_ranking_on_other_components(monkeypatch):
+    import grid.scanner as scanner
+    original = scanner.suggest_structure
+
+    calls = {"count": 0}
+    def structure_for_capital(sigma, capital, *args, **kwargs):
+        result = original(sigma, capital, *args, **kwargs)
+        calls["count"] += 1
+        gross = 0.05 if calls["count"] == 1 else 0.30
+        return {**result, "edge_gross_pct": gross,
+                "net_edge_pct_per_cycle": gross - 0.2}
+
+    monkeypatch.setattr(scanner, "suggest_structure", structure_for_capital)
+    params = {"weights": {"cost_headroom": 0, "liquidity": .2,
+                          "historical_oscillation": .35, "trend_penalty": .1}}
+    higher_liquidity = {**market(), "symbol": "AAAUSDT", "volume_24h_quote": 5_000_000,
+                        "capital": 1000}
+    lower_liquidity = {**market(), "symbol": "BBBUSDT", "volume_24h_quote": 2_000_000,
+                       "capital": 1000}
+    first = score_symbol(higher_liquidity, FILTERS, params)
+    second = score_symbol(lower_liquidity, FILTERS, params)
+    first_cost = next(row for row in first["components"] if row["name"] == "cost_headroom")
+    second_cost = next(row for row in second["components"] if row["name"] == "cost_headroom")
+    first_components = {row["name"]: row for row in first["components"]}
+    second_components = {row["name"]: row for row in second["components"]}
+    assert first_cost["value"] != second_cost["value"]
+    assert first_components["liquidity"]["value"] > second_components["liquidity"]["value"]
+    assert first_components["historical_oscillation"]["value"] == second_components["historical_oscillation"]["value"]
+    assert first_components["trend_penalty"]["value"] == second_components["trend_penalty"]["value"]
+    assert first["score"] > second["score"]

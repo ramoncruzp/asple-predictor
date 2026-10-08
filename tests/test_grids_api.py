@@ -397,6 +397,10 @@ def test_smart_target_params_are_validated_and_passed_to_existing_engine(tmp_pat
     response = client.post("/api/grids/open", json=payload(strategy="smart", target_pct=5,
         dry_run=False, confirm=True, capital=10000))
     assert response.status_code == 200, response.text
+    assert response.json()["loans_group"] == "loans"
+    assert response.json()["loans_enabled"] is True
+    assert response.json()["loan_lender_max_pct"] == 70.0
+    assert db.get_grid(response.json()["grid_id"])["params"]["loans_group"] == "loans"
     event = db.list_grid_events(grid_id=response.json()["grid_id"], event_type="GRID_OPEN_API")[0]
     assert event["details"]["params"]["target_pct"] == 5
     assert event["details"]["params"]["horizon_h"] == 4
@@ -429,6 +433,103 @@ def test_smart_open_rejects_missing_sigma_in_dry_run_and_confirm(tmp_path):
     confirm = client.post("/api/grids/open", json=payload(strategy="smart", dry_run=False, confirm=True))
     assert preview.status_code == 422 and "sigma disponible" in preview.json()["detail"]
     assert confirm.status_code == 422 and "sigma disponible" in confirm.json()["detail"]
+
+
+def test_smart_loan_cohort_defaults_and_manual_overrides():
+    from scripts.grid_ctl import _cli_loan_creation_params
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from time import sleep
+    from grid.loan_cohorts import create_grid_with_loan_cohort
+
+    class CohortDB:
+        def __init__(self):
+            self.rows = []
+        def list_grids_by_status(self, statuses):
+            return [row for row in self.rows if row["status"] in statuses]
+
+    db = CohortDB()
+    assigned = []
+    for _ in range(4):
+        params = grids_api._assign_loan_creation_defaults(db, "smart", {}, 3)
+        assigned.append(params)
+        db.rows.append({"strategy": "smart", "status": "ACTIVE", "params": params})
+    assert [item["loans_group"] for item in assigned] == ["loans", "loans", "control", "loans"]
+    assert [item["loans_enabled"] for item in assigned] == [True, True, False, True]
+    assert all(item["loan_lender_max_pct"] == 70.0 for item in (assigned[0], assigned[1], assigned[3]))
+    assert "loan_lender_max_pct" not in assigned[2]
+    manual_on = grids_api._assign_loan_creation_defaults(db, "smart", {
+        "loans_enabled": True}, 3)
+    manual_off = grids_api._assign_loan_creation_defaults(db, "smart", {
+        "loans_enabled": False}, 3)
+    custom_cap = grids_api._assign_loan_creation_defaults(db, "smart", {
+        "loans_enabled": True, "loan_lender_max_pct": 62.5}, 3)
+    default_group_custom_cap = grids_api._assign_loan_creation_defaults(db, "smart", {
+        "loan_lender_max_pct": 62.5}, 3)
+    simple = grids_api._assign_loan_creation_defaults(db, "simple", {}, 3)
+    assert manual_on["loans_group"] == manual_off["loans_group"] == "manual"
+    assert manual_on["loan_lender_max_pct"] == 70.0
+    assert "loan_lender_max_pct" not in manual_off
+    assert custom_cap["loan_lender_max_pct"] == 62.5
+    assert default_group_custom_cap["loans_group"] == "loans"
+    assert default_group_custom_cap["loan_lender_max_pct"] == 62.5
+    assert simple == {}
+    cli_db = CohortDB()
+    cli_groups = []
+    for _ in range(3):
+        params = _cli_loan_creation_params(cli_db, {}, {}, 3)
+        cli_groups.append(params)
+        cli_db.rows.append({"strategy": "smart", "status": "ACTIVE", "params": params})
+    assert [item["loans_group"] for item in cli_groups] == ["loans", "loans", "control"]
+    assert "loan_lender_max_pct" not in cli_groups[2]
+    explicit_cli = _cli_loan_creation_params(cli_db, {}, {"loan_lender_max_pct": 62.5}, 3)
+    assert explicit_cli["loan_lender_max_pct"] == 62.5
+
+
+def test_shared_loan_cohort_lock_serializes_eight_creations():
+    from concurrent.futures import ThreadPoolExecutor
+    from time import sleep
+    from grid.loan_cohorts import create_grid_with_loan_cohort
+
+    class ConcurrentDB:
+        def __init__(self):
+            self.rows = []
+        def list_grids_by_status(self, statuses):
+            return [row for row in self.rows if row["status"] in statuses]
+
+    db = ConcurrentDB()
+    def open_one(index):
+        def create(params):
+            sleep(.01)
+            row = {"id": index, "status": "ACTIVE", "strategy": "smart", "params": params}
+            db.rows.append(row)
+            return row
+        return create_grid_with_loan_cohort(db, "smart", {}, 3, create)[0]["loans_group"]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        groups = list(pool.map(open_one, range(8)))
+    assert sorted(groups.count(group) for group in {"loans", "control"}) == [2, 6]
+    assert len({row["id"] for row in db.rows}) == 8
+    assert sum(row["params"]["loans_group"] == "control" for row in db.rows) == 2
+
+
+def test_smart_control_cohort_persists_without_a_lender_cap(tmp_path):
+    client, db, _exchange = app(tmp_path)
+    for _ in range(2):
+        prior = client.app.state.grid_engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5,
+            capital=1000, strategy="smart", params={"loans_enabled": False})
+        db.merge_grid_params(prior["id"], {"loans_group": "loans"},
+                             allowed=frozenset({"loans_group"}))
+        db.update_grid(prior["id"], status="CLOSED")
+    response = client.post("/api/grids/open", json=payload(strategy="smart",
+        dry_run=False, confirm=True, capital=1000))
+    assert response.status_code == 200, response.text
+    assert response.json()["loans_group"] == "control"
+    assert response.json()["loans_enabled"] is False
+    assert response.json()["loan_lender_max_pct"] is None
+    stored = db.get_grid(response.json()["grid_id"])["params"]
+    assert stored["loans_group"] == "control" and stored["loans_enabled"] is False
+    assert "loan_lender_max_pct" not in stored
 
 
 def test_public_binance_string_book_shape_scans_dry_runs_and_reuses_plan(tmp_path):

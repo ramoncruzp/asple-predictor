@@ -9,7 +9,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat
 
 from api.routes.grids import _authorize
-from grid.control_service import run_action
+from grid.control_service import run_action, _lock, _acquire_lock
 
 class AuditedValidationRoute(APIRoute):
     def get_route_handler(self):
@@ -100,3 +100,53 @@ def sweep_dust(request: Request, grid_id: int, body: EmptyBody): return _dispatc
 
 @router.post("/{grid_id}/params")
 def update_params(request: Request, grid_id: int, body: ParamsBody): return _dispatch(request, grid_id, "params", body)
+
+
+@router.post("/{grid_id}/loans/disable")
+def disable_grid_loans(request: Request, grid_id: int, body: EmptyBody):
+    _authorize(request)
+    db = getattr(request.app.state, "db", None)
+    engine = getattr(request.app.state, "grid_engine", None)
+    client = getattr(request.app.state, "testnet_client", None)
+    if client is None or getattr(getattr(client, "client", None), "testnet", None) is not True or engine is None:
+        raise HTTPException(503, "Grid Testnet no disponible o no confirmado.")
+    lock = _lock(request)
+    _acquire_lock(lock, grid_id, "disable-loans")
+    try:
+        grid = db.get_grid(int(grid_id))
+        if grid is None:
+            raise HTTPException(404, "Grid no existe.")
+        params = dict(grid.get("params") or {})
+        if grid.get("strategy") != "smart" or params.get("loans_enabled") is not True:
+            raise HTTPException(409, "El grid Smart no tiene préstamos activos.")
+        if str(grid.get("status", "")).upper() not in {"ACTIVE", "PAUSED", "HOLDING"}:
+            raise HTTPException(409, "El estado actual no permite apagar préstamos.")
+        loans = db.list_grid_loans(int(grid_id))
+        open_loans = [row for row in loans if str(row.get("status", "")).upper() == "OPEN"]
+        pending = [row for row in loans if str(row.get("status", "")).upper() == "PENDING"]
+        plan = {"action": "disable-loans", "grid_id": int(grid_id),
+                "loans_open_count": len(open_loans),
+                "loans_open_amount_usdt": sum(float(row.get("amount") or 0) for row in open_loans),
+                "pending_count": len(pending), "loans_enabled_after": False,
+                "settlement": "transferencia contable de los préstamos OPEN"}
+        if body.dry_run and body.confirm or not body.dry_run and not body.confirm:
+            raise HTTPException(422, "Ejecutar requiere dry_run=false y confirm=true.")
+        if pending:
+            raise HTTPException(409, "Hay préstamos PENDING; resuelve la saga antes de apagar préstamos.")
+        if body.dry_run:
+            return {"dry_run": True, "plan": plan}
+        transferred = engine.transfer_loans(int(grid_id), "loans_disabled")
+        remaining = [row for row in db.list_grid_loans(int(grid_id))
+                     if str(row.get("status", "")).upper() == "OPEN"]
+        if remaining:
+            raise HTTPException(409, "No se pudieron transferir todos los préstamos OPEN.")
+        db.merge_grid_params(int(grid_id), {"loans_enabled": False},
+                             allowed=frozenset({"loans_enabled"}))
+        db.add_grid_event(run_id=None, source="CLI", grid_id=int(grid_id),
+            event_type="GRID_ACTION_API", reason="disable-loans",
+            details={"who": "api", "action": "disable-loans", "loans_transferred": transferred,
+                     "loans_enabled_after": False, "dry_run": False})
+        return {"dry_run": False, "result": {"ok": True, "loans_transferred": transferred},
+                "loans_enabled": False, "loans_group": params.get("loans_group")}
+    finally:
+        lock.release()

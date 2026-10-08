@@ -13,7 +13,7 @@ SCANNER_DEFAULTS = {
     "rate_limit_seconds": 0.2,
     "retries": 2,
     "timeout_seconds": 60.0,
-    "weights": {"cost_headroom": 0.35, "liquidity": 0.20,
+    "weights": {"cost_headroom": 0.0, "liquidity": 0.20,
                 "historical_oscillation": 0.35, "trend_penalty": 0.10},
     "min_cell_floor_usdt": 5.5,
 }
@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     scanner_auto_open: bool = Field(False, validation_alias="SCANNER_AUTO_OPEN")
     scanner_auto_open_interval_hours: int = Field(6, gt=0, validation_alias="SCANNER_AUTO_OPEN_INTERVAL_HOURS")
     scanner_auto_open_max_per_run: int = Field(1, ge=0, validation_alias="SCANNER_AUTO_OPEN_MAX_PER_RUN")
-    scanner_auto_open_min_score: float = Field(0.7, ge=0, le=1, validation_alias="SCANNER_AUTO_OPEN_MIN_SCORE")
+    # Umbral equivalente tras quitar cost_headroom del score normalizado; auto-open sigue apagado.
+    scanner_auto_open_min_score: float = Field(0.538, ge=0, le=1, validation_alias="SCANNER_AUTO_OPEN_MIN_SCORE")
+    loans_control_every_n: int = Field(3, ge=0, validation_alias="LOANS_CONTROL_EVERY_N")
     same_coin_sell_tolerance_pct: float = Field(0.05, ge=0, validation_alias="SAME_COIN_SELL_TOLERANCE_PCT")
     scanner_auto_open_daily_cap: int = Field(2, ge=0, validation_alias="SCANNER_AUTO_OPEN_DAILY_CAP")
     scanner_auto_open_strategy: str = Field("simple", pattern="^(simple|smart)$", validation_alias="SCANNER_AUTO_OPEN_STRATEGY")

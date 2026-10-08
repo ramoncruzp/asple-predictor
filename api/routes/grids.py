@@ -4,6 +4,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 from decimal import Decimal
+from datetime import datetime, timezone
 from typing import Literal
 
 import numpy as np
@@ -12,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.policy import validate_params
+from grid.loan_cohorts import assign_loan_creation_defaults as _assign_loan_creation_defaults
+from grid.loan_cohorts import create_grid_with_loan_cohort
 from grid.scan_service import EXECUTION_WARNING
 from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
                             minimum_cell_threshold, minimum_cell_warning,
@@ -19,6 +22,45 @@ from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
 from grid.guards import sell_level_conflicts, sell_level_conflict_message
 
 router = APIRouter()
+
+_GRID_STATUSES = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING",
+                  "CLOSED", "CANCELLED", "FAILED", "ERROR"}
+_LOAN_STATUSES = ("OPEN", "REPAID", "TRANSFERRED", "CANCELLED", "PENDING")
+
+
+def _all_grids(db):
+    return [row for status in _GRID_STATUSES for row in db.list_grids_by_status({status})]
+
+
+def _dt_utc(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _loan_fields(params: dict | None) -> dict:
+    params = params or {}
+    return {"loans_group": params.get("loans_group"),
+            "loans_enabled": params.get("loans_enabled", False),
+            "loan_lender_max_pct": params.get("loan_lender_max_pct")}
+
+
+def _loan_open_view(loan: dict, now: datetime) -> dict:
+    created = _dt_utc(loan.get("created_at"))
+    age = max(0.0, (now - created).total_seconds() / 3600) if created else None
+    lender = loan.get("lender_idx")
+    return {"id": int(loan["id"]), "borrower_idx": int(loan["borrower_idx"]),
+            "lender_idx": None if lender is None else int(lender),
+            "lender_source": "reserva" if lender is None else "nivel",
+            "amount_usdt": float(loan.get("amount") or 0), "age_hours": age,
+            "created_at": created.isoformat() if created else None}
 
 
 def _mid(market: dict) -> Decimal:
@@ -181,7 +223,10 @@ def open_grid(request: Request, body: OpenRequest):
     scan_row = _scan_snapshot(request, symbol) if body.from_scan else None
     if body.from_scan and scan_row is None:
         _reject(db, 422, "No hay resultado elegible reciente del scan para este símbolo.", symbol, body)
-    params = dict(body.params or {})
+    raw_params = dict(body.params or {})
+    control_every_n = int(getattr(request.app.state.settings, "loans_control_every_n", 3))
+    params = (_assign_loan_creation_defaults(db, body.strategy, raw_params, control_every_n)
+              if body.dry_run else raw_params)
     if body.strategy == "smart":
         horizon = params.get("horizon_h", 4)
         if isinstance(horizon, bool) or not isinstance(horizon, (int, float)) or horizon not in {1, 2, 4, 24}:
@@ -274,7 +319,7 @@ def open_grid(request: Request, body: OpenRequest):
                 "margin_guard": margin_guard,
                 "cell_usdt": str(body.capital / Decimal(n)), "filters": filters.__dict__,
                 "cells": cell_rows, "cell_metrics_summary": cell_metrics_summary,
-                "params": params,
+                "params": params, **_loan_fields(params),
                 "guards": {"registry_active": True, "symbol_slot_available": True,
                            "max_grids_simultaneos": maximum, "target_params_valid": True,
                            "order_filters_valid": True, "free_balance_checked": False,
@@ -328,14 +373,19 @@ def open_grid(request: Request, body: OpenRequest):
             f"rango {body.range_low} a {body.range_high}).",
             symbol, body, testnet_snapshot)
     try:
-        effective = {**params}
-        result = engine.create_grid(symbol, body.range_low, body.range_high, body.n_levels,
-            capital=body.capital, strategy=body.strategy, params=effective or None)
+        effective, result = create_grid_with_loan_cohort(
+            db, body.strategy, params, control_every_n,
+            lambda assigned: engine.create_grid(
+                symbol, body.range_low, body.range_high, body.n_levels,
+                capital=body.capital, strategy=body.strategy, params=assigned or None),
+            explicit_params=raw_params,
+        )
         db.add_grid_event(run_id=None, source="CLI", event_type="GRID_OPEN_API", grid_id=int(result["id"]),
             details={"who": "api", "strategy": body.strategy, "capital": str(body.capital),
-                     "params": effective, "scan_snapshot": scan_row, "sigma_open": sigma_open})
+                     "params": effective, "scan_snapshot": scan_row, "sigma_open": sigma_open,
+                     **_loan_fields(effective)})
         return {"status": result.get("status"), "grid_id": result.get("id"), "symbol": symbol,
-                "warning": EXECUTION_WARNING}
+                **_loan_fields(effective), "warning": EXECUTION_WARNING}
     except GridConfigError as exc:
         message = str(exc).casefold()
         status = 409 if ("maximum simultaneous" in message or "already exists" in message
@@ -343,3 +393,113 @@ def open_grid(request: Request, body: OpenRequest):
         _reject(db, status, str(exc), symbol, body, testnet_snapshot)
     except Exception as exc:
         _reject(db, 422, f"No se pudo abrir el grid: {exc}", symbol, body, testnet_snapshot)
+
+
+@router.get("/loans/summary")
+def loans_summary(request: Request):
+    _authorize(request)
+    db = request.app.state.db
+    now = datetime.now(timezone.utc)
+    groups = {name: {"group": name, "grid_count": 0, "realized_pnl_usdt": 0.0,
+                     "pnl_per_open_day_usdt": None, "pnl_pct_capital": None,
+                     "pnl_pct_capital_per_day": None, "cycles_completed": 0,
+                     "commissions_usdt": 0.0, "loans_created": 0,
+                     "loans_repaid": 0, "loans_transferred": 0,
+                     "_pnl_known": True, "_open_days": 0.0, "_days_known": True,
+                     "_capital": 0.0, "_capital_known": True}
+              for name in ("loans", "control", "manual", "sin_grupo")}
+    grid_rows = []
+    active_statuses = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}
+    for grid in _all_grids(db):
+        if grid.get("strategy") != "smart":
+            continue
+        params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
+        group_name = params.get("loans_group")
+        group_name = group_name if group_name in {"loans", "control", "manual"} else "sin_grupo"
+        group = groups[group_name]
+        group["grid_count"] += 1
+        levels = db.get_grid_levels(int(grid["id"]))
+        pnl_values = [row.get("pnl") for row in levels]
+        grid_pnl_known = not any(value is None for value in pnl_values)
+        grid_pnl = sum(float(value) for value in pnl_values) if grid_pnl_known else None
+        if any(value is None for value in pnl_values):
+            group["_pnl_known"] = False
+        else:
+            group["realized_pnl_usdt"] += sum(float(value) for value in pnl_values)
+        capital = float(grid.get("capital_total") or 0)
+        if capital > 0:
+            group["_capital"] += capital
+        else:
+            group["_capital_known"] = False
+        group["cycles_completed"] += sum(int(row.get("cycles_completed") or 0) for row in levels)
+        fee_values = [row.get("fee_paid") for row in levels]
+        group["commissions_usdt"] += sum(float(value or 0) for value in fee_values)
+        created = _dt_utc(grid.get("created_at"))
+        ended = now if str(grid.get("status", "")).upper() in active_statuses else _dt_utc(grid.get("closed_at"))
+        if created is None or ended is None:
+            group["_days_known"] = False
+            grid_days = None
+        else:
+            grid_days = max(1.0, (ended - created).total_seconds() / 86400)
+            group["_open_days"] += grid_days
+        grid_rows.append({
+            "grid_id": int(grid["id"]), "symbol": grid.get("symbol"), "group": group_name,
+            "capital_usdt": capital, "realized_pnl_usdt": grid_pnl,
+            "pnl_pct_capital": (grid_pnl / capital * 100
+                                 if grid_pnl_known and capital > 0 else None),
+            "pnl_pct_capital_per_day": (grid_pnl / capital * 100 / grid_days
+                                         if grid_pnl_known and capital > 0 and grid_days else None),
+        })
+        loans = db.list_grid_loans(int(grid["id"]))
+        group["loans_created"] += len(loans)
+        group["loans_repaid"] += sum(row.get("status") == "REPAID" for row in loans)
+        group["loans_transferred"] += sum(row.get("status") == "TRANSFERRED" for row in loans)
+    for group in groups.values():
+        if not group.pop("_pnl_known"):
+            group["realized_pnl_usdt"] = None
+            group["pnl_per_open_day_usdt"] = None
+            group["pnl_pct_capital"] = None
+            group["pnl_pct_capital_per_day"] = None
+        else:
+            if group["_capital_known"] and group["_capital"] > 0:
+                group["pnl_pct_capital"] = group["realized_pnl_usdt"] / group["_capital"] * 100
+            if group["_days_known"] and group["_open_days"] > 0:
+                group["pnl_per_open_day_usdt"] = group["realized_pnl_usdt"] / group["_open_days"]
+                if group["pnl_pct_capital"] is not None:
+                    group["pnl_pct_capital_per_day"] = group["pnl_pct_capital"] / group["_open_days"]
+        group.pop("_days_known")
+        group.pop("_open_days")
+        group.pop("_capital")
+        group.pop("_capital_known")
+    return {"groups": list(groups.values()), "grids": grid_rows,
+            "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión."}
+
+
+@router.get("/{grid_id}/loans")
+def grid_loans(request: Request, grid_id: int):
+    _authorize(request)
+    db = request.app.state.db
+    grid = db.get_grid(int(grid_id))
+    if grid is None:
+        raise HTTPException(404, f"Grid {grid_id} no existe.")
+    params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
+    loans = db.list_grid_loans(int(grid_id))
+    counts = {status: sum(str(row.get("status", "")).upper() == status for row in loans)
+              for status in _LOAN_STATUSES}
+    now = datetime.now(timezone.utc)
+    repaid_hours = []
+    for row in loans:
+        if str(row.get("status", "")).upper() != "REPAID":
+            continue
+        created, closed = _dt_utc(row.get("created_at")), _dt_utc(row.get("closed_at"))
+        if created is not None and closed is not None:
+            repaid_hours.append(max(0.0, (closed - created).total_seconds() / 3600))
+    lent_statuses = {"OPEN", "REPAID", "TRANSFERRED"}
+    return {"grid_id": int(grid_id), **_loan_fields(params),
+            "counts": counts,
+            "total_amount_lent_usdt": sum(float(row.get("amount") or 0) for row in loans
+                                           if str(row.get("status", "")).upper() in lent_statuses),
+            "average_repaid_open_hours": (sum(repaid_hours) / len(repaid_hours)
+                                          if repaid_hours else None),
+            "open_loans": [_loan_open_view(row, now) for row in loans
+                           if str(row.get("status", "")).upper() == "OPEN"]}

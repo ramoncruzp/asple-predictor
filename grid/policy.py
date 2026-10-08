@@ -115,11 +115,14 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     supplied = dict(params or {})
     target_keys = {"target_pct", "target_usdt", "target_basis"}
     optional_runtime_keys = {"dust_sweep_threshold_pct", "max_days"}
-    unknown = sorted(set(supplied) - set(DEFAULT_SMART_PARAMS) - target_keys - optional_runtime_keys)
+    metadata_keys = {"loans_group"}
+    unknown = sorted(set(supplied) - set(DEFAULT_SMART_PARAMS) - target_keys - optional_runtime_keys - metadata_keys)
     if unknown:
         raise ValueError(f"unknown smart parameter(s): {', '.join(unknown)}")
     result = dict(DEFAULT_SMART_PARAMS)
     result.update(supplied)
+    if "loans_group" in supplied and supplied["loans_group"] not in {"loans", "control", "manual"}:
+        raise ValueError("loans_group must be loans, control, or manual")
     if "dust_sweep_threshold_pct" in supplied:
         result["dust_sweep_threshold_pct"] = _number(
             supplied["dust_sweep_threshold_pct"], "dust_sweep_threshold_pct", nullable=True)
@@ -220,6 +223,11 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
         if isinstance(value, bool) or int(value) != value or int(value) < minimum:
             raise ValueError(f"{key} must be an integer >= {minimum}")
         result[key] = int(value)
+    if ("loan_lender_max_pct" not in supplied
+            and (supplied.get("loans_group") == "control"
+                 or (supplied.get("loans_group") == "manual"
+                     and supplied.get("loans_enabled") is False))):
+        result.pop("loan_lender_max_pct", None)
     return result
 
 

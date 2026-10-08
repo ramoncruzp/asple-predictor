@@ -49,6 +49,9 @@
       lines.push(`Cantidad candidata a barrido: ${n(d.qty)}; residuo que permanecería: ${n(d.residual)}.`);
       lines.push(`Barrido permitido por filtros: ${d.sweepable == null ? 'no disponible' : (d.sweepable ? 'sí' : 'no')}; resultado neto estimado: $${n(d.proceeds_net)} USDT.`);
       lines.push(`Bid de referencia: ${n(plan.bid_used)} USDT; filtros Testnet aplicados.`);
+    } else if (plan.action === 'disable-loans') {
+      lines.push(`Préstamos abiertos a transferir: ${n(plan.loans_open_count)} (${n(plan.loans_open_amount_usdt)} USDT).`);
+      lines.push('La transferencia es contable; no vende activos ni cancela órdenes.');
     } else if (plan.action === 'params') {
       lines.push(`Parámetros que se actualizarían: ${n(Object.keys(plan.updates || {}).join(', ') || 'ninguno')}.`);
       lines.push(`Parámetros que se quitarían: ${n((plan.remove || []).join(', ') || 'ninguno')}.`);
@@ -105,11 +108,12 @@
     if (action === 'params' && summary.strategy === 'simple') return '<label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label>';
     if (action === 'params' && summary.strategy !== 'simple') return '<p>Deja vacio para mantener. Testnet no representa el mercado real.</p><label>Meta %<input name="target-pct" type="number" min="0.000001" step="any"></label><label>Meta USDT<input name="target-usdt" type="number" min="0.000001" step="any"></label><label><input name="clear-target" type="checkbox"> Quitar meta actual</label><label><input name="set-target-basis" type="checkbox"> Cambiar base de meta</label><select name="target-basis"><option value="cash">Caja</option><option value="equity">Equity</option></select><label>Plazo maximo (dias)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label><label>Barrido de polvo (% capital)<input name="dust-threshold" type="number" min="0" step="any"></label>';
     if (action === 'params') return '<p>Deja vacío para mantener. Testnet no representa el mercado real.</p><label>Meta %<input name="target-pct" type="number" min="0.000001" step="any"></label><label>Meta USDT<input name="target-usdt" type="number" min="0.000001" step="any"></label><label><input name="clear-target" type="checkbox"> Quitar meta actual</label><label>Plazo máximo (días)<input name="max-days" type="number" min="0.000001" step="any"></label><label><input name="clear-max-days" type="checkbox"> Quitar plazo actual</label><label>Barrido de polvo (% capital)<input name="dust-threshold" type="number" min="0" step="any"></label>';
+    if (action === 'disable-loans') return '<p>Los préstamos abiertos se liquidarán como transferencia contable antes de apagar los préstamos. Revisa el plan y confirma.</p>';
     return '';
   }
 
   async function controlFlow(gridId, action, summary, container) {
-    const apiAction = action === 'compound' ? 'params' : action;
+    const apiAction = action === 'compound' ? 'params' : action === 'disable-loans' ? 'loans/disable' : action;
     const path = `/api/grids/${gridId}/${apiAction}`;
     const gather = () => actionFields(action, document.getElementById('grid-action-dialog'));
     const initialFields = formFor(action, summary);
@@ -202,6 +206,11 @@
   function renderList(container, data) {
     const grids = data.grids || [];
     const totals = data.totals || {};
+    const loanSummaryResult = data.loanSummaryResult;
+    const loanSummary = loanSummaryResult?.ok ? loanSummaryResult.data : null;
+    const loanSummaryText = loanSummary
+      ? `${loanSummary.groups.map((group) => `${esc(group.group)}: ${group.grid_count} grids, P&L ${fmtMoney(group.realized_pnl_usdt, 2)} USDT (${group.pnl_pct_capital == null ? '—' : `${Number(group.pnl_pct_capital).toFixed(2)}% del capital`}; ${group.pnl_pct_capital_per_day == null ? '—' : `${Number(group.pnl_pct_capital_per_day).toFixed(2)}%/día`}), ${group.cycles_completed} ciclos, ${fmtMoney(group.commissions_usdt, 2)} USDT en comisiones, ${group.loans_created} préstamos creados/${group.loans_repaid} devueltos`).join(' · ')}. ${esc(loanSummary.note)}`
+      : loanSummaryResult?.error ? `No se pudo cargar el resumen de préstamos: ${esc(loanSummaryResult.error.message)}` : 'Cargando resumen de préstamos…';
     const warning = data.same_symbol_warning ? `<div class="grids-warning">${esc(data.same_symbol_warning)}</div>` : '';
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
@@ -214,6 +223,7 @@
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
+      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText}</p></div>
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
@@ -248,7 +258,7 @@
     <div class="equity-legend"><span><i class="equity-dot-realized"></i>Realizado</span><span><i class="equity-dot-inventory"></i>Con inventario</span></div>`;
   }
 
-  function renderDetail(container, detail, operations, events, daily, equity) {
+  function renderDetail(container, detail, operations, events, daily, equity, loanResult) {
     const summary = detail.summary;
     const cells = detail.cells;
     const recovery = summary.recovery_mode === true
@@ -284,6 +294,26 @@
       <td>${op.duration_hours === null ? '—' : op.duration_hours.toFixed(1) + ' h'}</td></tr>`).join('');
     const eventRows = (events.events || []).map((ev) => `<tr class="severity-${esc(ev.severity)}">
       <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(ev.reason || '')}</td></tr>`).join('');
+    let loanBlock = '';
+    let loanDisableAction = '';
+    if (summary.strategy === 'smart') {
+      if (!loanResult?.ok) {
+        loanBlock = `<div class="card inventory-block loans-detail"><h3>Préstamos entre niveles</h3><p class="grids-error">No se pudo cargar este bloque: ${esc(loanResult?.error?.message || 'error desconocido')}</p></div>`;
+      } else {
+        const loans = loanResult.data;
+        const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'
+          : loans.loans_group === 'manual' ? (loans.loans_enabled ? 'Activo (configuración manual)' : 'Apagado (configuración manual)')
+          : loans.loans_group === 'loans' ? 'Activo' : (loans.loans_enabled ? 'Activo' : 'Apagado');
+        const counts = loans.counts || {};
+        const openRows = (loans.open_loans || []).map((loan) => `<li>Nivel prestatario ${loan.borrower_idx}; ${loan.lender_source === 'reserva' ? 'reserva' : `nivel prestamista ${loan.lender_idx}`}; ${fmtMoney(loan.amount_usdt, 2)} USDT; ${loan.age_hours == null ? 'antigüedad no disponible' : `${fmtMoney(loan.age_hours, 1)} h`}</li>`).join('');
+        if (loans.loans_enabled && ['ACTIVE', 'PAUSED', 'HOLDING'].includes(summary.status)) {
+          loanDisableAction = '<button class="button secondary" data-grid-action="disable-loans">Apagar préstamos</button>';
+        }
+        loanBlock = `<div class="card inventory-block loans-detail"><h3>Préstamos entre niveles</h3><p><b>${esc(groupLabel)}</b></p>
+          <div class="inventory-grid"><div><span>Abiertos</span><b>${counts.OPEN || 0}</b></div><div><span>Devueltos</span><b>${counts.REPAID || 0}</b></div><div><span>Transferidos</span><b>${counts.TRANSFERRED || 0}</b></div><div><span>Pendientes</span><b>${counts.PENDING || 0}</b></div><div><span>Cancelados</span><b>${counts.CANCELLED || 0}</b></div><div><span>Total prestado</span><b>${fmtMoney(loans.total_amount_lent_usdt, 2)} USDT</b></div><div><span>Tiempo medio hasta devolución</span><b>${loans.average_repaid_open_hours == null ? '—' : `${fmtMoney(loans.average_repaid_open_hours, 1)} h`}</b></div></div>
+          <h4>Préstamos abiertos</h4><ul>${openRows || '<li>Sin préstamos abiertos</li>'}</ul></div>`;
+      }
+    }
 
     container.innerHTML = `
       <a class="back-link" href="#grids">&larr; Volver a Grids</a>
@@ -300,8 +330,10 @@
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
+          ${loanDisableAction}
         </div>
       </div>
+      ${loanBlock}
       ${recovery}
       <div class="metric-cards">
         <div class="card metric-card"><span>Bruta ${tooltip('Ganancia realizada antes de comisiones')}</span><b>${fmtMoney(summary.gross_realized_usdt, 2)}</b></div>
@@ -376,7 +408,12 @@
 
   async function loadList(container) {
     try {
-      renderList(container, await apiGet('/api/grids'));
+      const [grids, loanSummaryResult] = await Promise.all([
+        apiGet('/api/grids'),
+        apiGet('/api/grids/loans/summary').then(data => ({ ok: true, data }))
+          .catch(error => ({ ok: false, error })),
+      ]);
+      renderList(container, { ...grids, loanSummaryResult });
     } catch (error) {
       renderError(container, error);
     }
@@ -384,14 +421,16 @@
 
   async function loadDetail(container, gridId) {
     try {
-      const [detail, operations, events, daily, equity] = await Promise.all([
+      const [detail, operations, events, daily, equity, loanResult] = await Promise.all([
         apiGet(`/api/grids/${gridId}`),
         apiGet(`/api/grids/${gridId}/operations`),
         apiGet(`/api/grids/${gridId}/events`),
         apiGet(`/api/grids/${gridId}/daily`),
         apiGet(`/api/grids/${gridId}/equity`),
+        apiGet(`/api/grids/${gridId}/loans`).then(data => ({ ok: true, data }))
+          .catch(error => ({ ok: false, error })),
       ]);
-      renderDetail(container, detail, operations, events, daily, equity);
+      renderDetail(container, detail, operations, events, daily, equity, loanResult);
     } catch (error) {
       if (error && error.status === 404) {
         container.innerHTML = '<div class="card grids-error">Ese grid no existe.</div>';

@@ -1,8 +1,10 @@
 from config.settings import Settings
 
 
-def test_scanner_auto_open_default_threshold_is_point_seven():
-    assert Settings(_env_file=None).scanner_auto_open_min_score == 0.7
+def test_scanner_auto_open_default_threshold_matches_zero_cost_weight_score():
+    settings = Settings(_env_file=None)
+    assert settings.scanner_auto_open_min_score == 0.538
+    assert settings.scanner_weight_cost_headroom == 0.0
 
 
 def test_dust_alert_defaults_are_one_percent_of_capital_and_one_usdt():

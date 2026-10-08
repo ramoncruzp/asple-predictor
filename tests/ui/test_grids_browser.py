@@ -66,6 +66,55 @@ def test_empty_grids_state_links_to_creation_screens(live_server, ui_page):
     assert_no_js_errors(ui_page)
 
 
+def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live_server, ui_page):
+    grid_id = live_server.secondary_grid_id
+    live_server.db.update_grid(grid_id, status="ACTIVE")
+    live_server.db.merge_grid_params(grid_id, {"loans_enabled": True, "loans_group": "loans",
+        "loan_lender_max_pct": 70.0}, allowed=frozenset({"loans_enabled", "loans_group", "loan_lender_max_pct"}))
+    ui_page.route(f"**/api/grids/{grid_id}/loans", lambda route: route.fulfill(json={
+        "grid_id": grid_id, "loans_group": "loans", "loans_enabled": True,
+        "counts": {"OPEN": 1, "REPAID": 2, "TRANSFERRED": 0, "PENDING": 0, "CANCELLED": 0},
+        "total_amount_lent_usdt": 40, "average_repaid_open_hours": 3.5,
+        "open_loans": [{"borrower_idx": 2, "lender_source": "reserva", "lender_idx": None,
+            "amount_usdt": 10, "age_hours": 1.5}],
+    }))
+    ui_page.route("**/api/grids/loans/summary", lambda route: route.fulfill(json={
+        "groups": [{"group": "loans", "grid_count": 1, "realized_pnl_usdt": 5,
+            "pnl_per_open_day_usdt": 1, "pnl_pct_capital": 2.5,
+            "pnl_pct_capital_per_day": 0.5, "cycles_completed": 2, "commissions_usdt": 0.5,
+            "loans_created": 3, "loans_repaid": 2, "loans_transferred": 0}],
+        "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión.",
+    }))
+    requests = []
+    def disable(route):
+        body = route.request.post_data_json
+        requests.append(body)
+        if body["dry_run"]:
+            route.fulfill(json={"dry_run": True, "plan": {"action": "disable-loans", "loans_open_count": 1,
+                "loans_open_amount_usdt": 10, "loans_enabled_after": False}})
+        else:
+            route.fulfill(json={"dry_run": False, "result": {"ok": True, "loans_transferred": 1}})
+    ui_page.route(f"**/api/grids/{grid_id}/loans/disable", disable)
+    ui_page.goto(f"{live_server.url}/#grids")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("Muestra pequeña")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("3 préstamos creados/2 devueltos")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("2.50% del capital")
+    ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
+    expect(ui_page.locator(".loans-detail")).to_contain_text("Activo")
+    expect(ui_page.locator(".loans-detail")).to_contain_text("reserva")
+    button = ui_page.locator('[data-grid-action="disable-loans"]')
+    expect(button).to_be_visible()
+    button.click()
+    dialog = ui_page.locator("#grid-action-dialog")
+    expect(dialog).to_contain_text("transferencia contable")
+    dialog.get_by_role("button", name="Continuar").click()
+    expect(dialog).to_contain_text("Préstamos abiertos a transferir: 1")
+    dialog.get_by_role("button", name="Continuar").click()
+    expect(dialog).to_contain_text("Acción completada")
+    assert requests == [{"dry_run": True, "confirm": False}, {"dry_run": False, "confirm": True}]
+    assert_no_js_errors(ui_page)
+
+
 def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_page):
     advisor = {"symbol":"XRPUSDT","current_price":100,"recommended_floor":80.123456,"recommended_ceiling":120.987654,
         "range_pct":40,"range_mode":"centrado","recommended_range":"centrado",

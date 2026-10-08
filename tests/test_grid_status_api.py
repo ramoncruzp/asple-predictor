@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 import pytest
 from fastapi import FastAPI
 
-from api.routes import grid_status, grids
+from api.routes import grid_control, grid_status, grids
 from database.db_manager import DBManager
 from grid.engine import GridEngine
 from tests.grid_fakes import FakeExchange
@@ -84,6 +84,7 @@ def make_app(tmp_path, *, token="", testnet_client="default"):
     engine = GridEngine(db, exchange, settings) if exchange is not None else None
     api = FastAPI()
     api.include_router(grids.router, prefix="/api/grids")
+    api.include_router(grid_control.router, prefix="/api/grids")
     api.include_router(grid_status.router)
     api.state.db, api.state.settings = db, settings
     api.state.grid_engine, api.state.testnet_client = engine, exchange
@@ -312,6 +313,98 @@ def test_operations_events_daily_equity_endpoints_respond(tmp_path):
     assert client.get(f"/api/grids/{grid_id}/events").status_code == 200
     assert client.get(f"/api/grids/{grid_id}/daily").status_code == 200
     assert client.get(f"/api/grids/{grid_id}/equity").status_code == 200
+
+
+def _loan_values(grid_id, *, lender_idx=None, status="OPEN", amount=25):
+    return {"grid_id": grid_id, "lender_idx": lender_idx, "borrower_idx": 2,
+            "amount": amount, "reserve_part": amount if lender_idx is None else 0,
+            "lender_cycles_at_open": 3, "borrower_cycles_at_open": 3,
+            "plan": {"test": True}, "details": {"test": True}, "status": status}
+
+
+def test_per_grid_and_group_loan_summaries_are_read_only_and_descriptive(tmp_path):
+    client, db, _exchange, engine = make_app(tmp_path)
+    grid = engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5,
+        capital=1000, strategy="smart", params={"loans_enabled": True})
+    grid_id = grid["id"]
+    db.update_level(grid_id, 0, pnl=10)
+    db.update_grid(grid_id, status="ACTIVE")
+    db.merge_grid_params(grid_id, {"loans_group": "loans", "loans_enabled": True},
+                         allowed=frozenset({"loans_group", "loans_enabled"}))
+    opened = db.create_grid_loan(_loan_values(grid_id, lender_idx=None, amount=25))
+    db.update_grid_loan(opened["id"], status="OPEN")
+    closed_at = datetime.now(timezone.utc)
+    repaid = db.create_grid_loan(_loan_values(grid_id, lender_idx=0, amount=10))
+    db.update_grid_loan(repaid["id"], status="REPAID", closed_at=closed_at)
+    db.update_grid(grid_id, status="CLOSED", closed_at=closed_at)
+    second = engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5,
+        capital=500, strategy="smart", params={"loans_enabled": True})
+    db.update_level(second["id"], 0, pnl=20)
+    db.update_grid(second["id"], status="ACTIVE")
+    db.merge_grid_params(second["id"], {"loans_group": "loans", "loans_enabled": True},
+                         allowed=frozenset({"loans_group", "loans_enabled"}))
+    detail = client.get(f"/api/grids/{grid_id}/loans")
+    assert detail.status_code == 200
+    assert detail.json()["loans_enabled"] is True
+    assert detail.json()["counts"] == {"OPEN": 1, "REPAID": 1, "TRANSFERRED": 0,
+                                        "CANCELLED": 0, "PENDING": 0}
+    assert detail.json()["total_amount_lent_usdt"] == 35
+    assert detail.json()["average_repaid_open_hours"] is not None
+    assert detail.json()["open_loans"][0]["lender_source"] == "reserva"
+    summary = client.get("/api/grids/loans/summary")
+    assert summary.status_code == 200
+    loans_group = next(group for group in summary.json()["groups"] if group["group"] == "loans")
+    assert loans_group["grid_count"] == 2
+    assert loans_group["loans_created"] == 2 and loans_group["loans_repaid"] == 1
+    assert loans_group["pnl_pct_capital"] == pytest.approx(2.0)
+    assert loans_group["pnl_pct_capital_per_day"] == pytest.approx(1.0)
+    per_grid = {item["grid_id"]: item for item in summary.json()["grids"]}
+    assert per_grid[grid_id]["pnl_pct_capital"] == pytest.approx(1.0)
+    assert per_grid[second["id"]]["pnl_pct_capital"] == pytest.approx(4.0)
+    assert "Muestra pequeña" in summary.json()["note"]
+    assert db.get_grid_loan(opened["id"])["status"] == "OPEN"
+
+
+def test_disable_loans_requires_preview_and_confirms_transfer_under_shared_ops_lock(tmp_path, monkeypatch):
+    client, db, _exchange, engine = make_app(tmp_path)
+    client.app.state.testnet_client = SimpleNamespace(client=SimpleNamespace(testnet=True))
+    class OpsLock:
+        def __init__(self):
+            self.acquired = self.released = 0
+        def acquire(self, timeout):
+            self.acquired += 1
+            return True
+        def release(self):
+            self.released += 1
+    ops_lock = OpsLock()
+    client.app.state.grid_monitor = SimpleNamespace(ops_lock=ops_lock)
+    grid = engine.create_grid("XRPUSDT", Decimal(90), Decimal(110), 5,
+        capital=1000, strategy="smart", params={"loans_enabled": True})
+    grid_id = grid["id"]
+    db.update_grid(grid_id, status="ACTIVE")
+    db.merge_grid_params(grid_id, {"loans_group": "loans", "loans_enabled": True},
+                         allowed=frozenset({"loans_group", "loans_enabled"}))
+    loan = db.create_grid_loan(_loan_values(grid_id, lender_idx=None, amount=25))
+    db.update_grid_loan(loan["id"], status="OPEN")
+    calls = []
+
+    def transfer(grid_id, reason):
+        calls.append((grid_id, reason))
+        db.update_grid_loan(loan["id"], status="TRANSFERRED", close_reason=reason,
+                            closed_at=datetime.now(timezone.utc))
+        return 1
+
+    monkeypatch.setattr(engine, "transfer_loans", transfer)
+    path = f"/api/grids/{grid_id}/loans/disable"
+    preview = client.post(path, json={"dry_run": True, "confirm": False})
+    assert preview.status_code == 200 and preview.json()["plan"]["loans_open_count"] == 1
+    assert calls == [] and db.get_grid_loan(loan["id"])["status"] == "OPEN"
+    confirmed = client.post(path, json={"dry_run": False, "confirm": True})
+    assert confirmed.status_code == 200, confirmed.body
+    assert calls == [(grid_id, "loans_disabled")]
+    assert db.get_grid_loan(loan["id"])["status"] == "TRANSFERRED"
+    assert db.get_grid(grid_id)["params"]["loans_enabled"] is False
+    assert (ops_lock.acquired, ops_lock.released) == (2, 2)
 
 
 def test_monitor_status_endpoint(tmp_path):

@@ -16,12 +16,14 @@ def row(symbol):
 
 class DB:
     def __init__(self, maximum=5):
-        self.events, self.opened, self.maximum = [], set(), maximum
+        self.events, self.opened, self.maximum, self.grids = [], set(), maximum, []
 
     def list_grid_events(self, **kwargs): return list(self.events)
     def count_open_grids(self): return len(self.opened)
     def has_open_grid(self, symbol): return symbol in self.opened
     def get_readiness(self, symbol): return getattr(self, "readiness", {}).get(symbol)
+    def list_grids_by_status(self, statuses):
+        return [grid for grid in self.grids if grid["status"] in statuses]
     def add_grid_event(self, **event):
         result = {**event, "ts": datetime.now(timezone.utc)}
         self.events.append(result)
@@ -40,7 +42,11 @@ class Engine:
     def create_grid(self, symbol, *args, **kwargs):
         self.calls.append((symbol, kwargs))
         self.db.opened.add(symbol)
-        return {"id": len(self.calls), "status": "ACTIVE"}
+        result = {"id": len(self.calls), "status": "ACTIVE"}
+        self.db.grids.append({"id": result["id"], "symbol": symbol,
+            "strategy": kwargs.get("strategy"), "params": kwargs.get("params") or {},
+            "status": "ACTIVE"})
+        return result
 
 
 class Testnet:
@@ -52,7 +58,7 @@ def settings(**overrides):
         scanner_auto_open_max_per_run=1, scanner_auto_open_min_score=.6,
         scanner_auto_open_daily_cap=2, scanner_auto_open_strategy="simple",
         scanner_auto_open_target_pct=None, scanner_auto_open_max_days=None,
-        usdt_por_grid=100, max_grids_simultaneos=5)
+        usdt_por_grid=100, max_grids_simultaneos=5, loans_control_every_n=3)
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -134,6 +140,29 @@ def test_auto_open_allows_nonpositive_estimated_net_and_records_dust_warning():
     assert completed["details"]["dust_warning"] is True
     assert "aún no medido" in completed["details"]["dust_warning_message"]
     service.stop()
+
+
+def test_auto_open_assigns_smart_loan_cohorts_but_leaves_simple_untouched(monkeypatch):
+    monkeypatch.setattr(auto_open_module, "coin_is_ready", lambda *_args: True)
+    cfg = settings(scanner_auto_open_strategy="smart", scanner_auto_open_max_per_run=3,
+                   scanner_auto_open_daily_cap=3)
+    service, scanner, engine, db = setup(cfg)
+    scanner.scan = lambda **kwargs: {"results": [row("XRPUSDT"), row("ETHUSDT"), row("ADAUSDT")]}
+    result = service.run_once()
+    service.stop()
+    assert len(result["opened"]) == 3, result
+    actual = [call[1]["params"] for call in engine.calls]
+    assert [params["loans_group"] for params in actual] == ["loans", "loans", "control"]
+    assert [params["loans_enabled"] for params in actual] == [True, True, False]
+    assert actual[0]["loan_lender_max_pct"] == actual[1]["loan_lender_max_pct"] == 70.0
+    assert "loan_lender_max_pct" not in actual[2]
+
+    simple_cfg = settings(scanner_auto_open_strategy="simple")
+    simple, _, simple_engine, _ = setup(simple_cfg)
+    simple.run_once()
+    simple.stop()
+    simple_params = simple_engine.calls[0][1]["params"] or {}
+    assert "loans_group" not in simple_params and "loan_lender_max_pct" not in simple_params
 
 
 def test_auto_open_skips_a_coin_without_completed_onboarding(monkeypatch):

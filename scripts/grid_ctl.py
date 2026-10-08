@@ -16,6 +16,7 @@ from grid.engine import GridEngine
 from grid.monitor import GridMonitor
 from grid.levels import compute_lines, plan_cells
 from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
+from grid.loan_cohorts import assign_loan_creation_defaults, create_grid_with_loan_cohort
 from data.exchange_filters import SymbolFilters
 
 
@@ -34,6 +35,11 @@ def build_context() -> dict[str, Any]:
     monitor = GridMonitor(db, exchange, engine, settings)
     return {"settings": settings, "db": db, "exchange": exchange,
             "engine": engine, "monitor": monitor}
+
+
+def _cli_loan_creation_params(db, current: dict, explicit: dict, control_every_n: int) -> dict:
+    return assign_loan_creation_defaults(db, "smart", current, control_every_n,
+                                         explicit_params=explicit)
 
 
 def _status(context: dict[str, Any]) -> dict[str, Any]:
@@ -267,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
             calibration_params.update(params)
             effective = (validate_params(calibration_params, args.n)
                          if args.strategy == "smart" or args.max_days is not None else None)
+            cohort_base = dict(effective or {})
+            control_every_n = int(getattr(settings, "loans_control_every_n", 3))
+            if args.strategy == "smart" and args.dry_run and effective is not None:
+                effective = _cli_loan_creation_params(
+                    context["db"], effective, params, control_every_n)
             if effective and (effective.get("target_pct") is not None or effective.get("target_usdt") is not None):
                 target_goals = []
                 if effective.get("target_pct") is not None:
@@ -307,21 +318,37 @@ def main(argv: list[str] | None = None) -> int:
                     "distributable_capital": str(distributable),
                     "params": effective, "calibrated": calibration_id is not None,
                     "calibration_id": calibration_id,
+                    "loans_group": None if effective is None else effective.get("loans_group"),
+                    "loans_enabled": None if effective is None else effective.get("loans_enabled"),
+                    "loan_lender_max_pct": None if effective is None else effective.get("loan_lender_max_pct"),
                     "validations": {"min_notional_with_margin": True, "min_step_pct": float(step / low * 100),
                                     "planned_buy_cells": sum(plan.initial_state == "BUY_OPEN" for plan in plans)},
                 }
             else:
-                grid = engine.create_grid(symbol, low, high, args.n, args.capital,
-                                          strategy=args.strategy, params=effective,
-                                          stop_loss_pct=stop_loss, calibration_id=calibration_id)
+                effective, grid = create_grid_with_loan_cohort(
+                    context["db"], args.strategy, cohort_base, control_every_n,
+                    lambda assigned: engine.create_grid(
+                        symbol, low, high, args.n, args.capital, strategy=args.strategy,
+                        params=assigned or None, stop_loss_pct=stop_loss,
+                        calibration_id=calibration_id),
+                    explicit_params=params,
+                )
+                grid = context["db"].get_grid(int(grid["id"]))
                 context["db"].add_grid_event(run_id=None, source="CLI", event_type="GRID_OPENED",
                                              grid_id=int(grid["id"]), reason="operator_open",
                                              details={"strategy": args.strategy, "params": effective,
+                                                      "loans_group": None if effective is None else effective.get("loans_group"),
+                                                      "loans_enabled": None if effective is None else effective.get("loans_enabled"),
+                                                      "loan_lender_max_pct": None if effective is None else effective.get("loan_lender_max_pct"),
                                                       "calibrated": calibration_id is not None,
                                                       "calibration_id": calibration_id,
                                                       "explicit_params_prevailed": bool((params or stop_loss is not None) and calibration_id is not None),
                                                       "range_low": str(low), "range_high": str(high)})
-                result = {"grid": grid, "calibrated": calibration_id is not None,
+                result = {"grid": grid,
+                          "loans_group": None if effective is None else effective.get("loans_group"),
+                          "loans_enabled": None if effective is None else effective.get("loans_enabled"),
+                          "loan_lender_max_pct": None if effective is None else effective.get("loan_lender_max_pct"),
+                          "calibrated": calibration_id is not None,
                           "calibration_id": calibration_id,
                           "explicit_params_prevailed": bool((params or stop_loss is not None) and calibration_id is not None)}
         elif args.command == "close":
