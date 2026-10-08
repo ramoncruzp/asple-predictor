@@ -220,3 +220,25 @@ def test_structure_distribution_matches_a_is_not_counted_as_different():
     }
     summary = _structure_distribution(structures_by_window, elig, "X")
     assert summary["windows_differ_from_a_fixed_10_9pct"] == 0
+
+
+def test_smart_functional_cell_floor_limits_suggested_levels_to_fifteen():
+    from grid.structure import functional_cell_threshold
+    minimum = functional_cell_threshold(FILTERS, "smart")
+    assert minimum == Decimal("6.5")
+    result = suggest_structure(0.03, 100, 100, FILTERS, .1,
+        min_spacing_pct=.8, min_cell_usdt=minimum, min_margin_after_fees_pct=.7)
+    assert result["feasible"] is True
+    assert result["n_levels"] <= 15
+    assert result["cell_usdt"] >= Decimal("6.5")
+
+
+def test_simple_functional_cell_floor_keeps_existing_minimum():
+    from grid.structure import functional_cell_threshold
+    assert functional_cell_threshold(FILTERS, "simple") == Decimal("5.5")
+
+
+def test_functional_cell_multiplier_is_shared_and_runtime_adjustable(monkeypatch):
+    import grid.structure as structure
+    monkeypatch.setattr(structure, "GRID_CELL_FUNCTIONAL_MULT", 1.4)
+    assert structure.functional_cell_threshold(FILTERS, "smart") == Decimal("7.0")

@@ -150,6 +150,25 @@ class VolatilityProvider:
                 return self._realized_for_horizon(normalized, requested_h)
             return None
 
+    def sigma_surface_context(self, symbol: str, realized_30d: dict, monitor_h: int = 4) -> dict:
+        def champion(horizon: int, field: str):
+            view = self.get(symbol, horizon_h=horizon)
+            value = getattr(view, field, None) if view is not None and view.source == "model" else None
+            reason = None if value is not None else (
+                getattr(view, "fallback_reason", None) if view is not None else self.last_reason
+            ) or f"pron\u00F3stico campe\u00F3n de {horizon} h no disponible"
+            return {"value": value, "source": "campe\u00F3n", "window": f"{horizon} h", "reason": reason}
+
+        realized_value = realized_30d.get("value") if isinstance(realized_30d, dict) else None
+        realized_reason = realized_30d.get("reason") if isinstance(realized_30d, dict) else "volatilidad realizada no disponible"
+        return {
+            "realized_30d": {"value": realized_value, "source": "realizada", "window": "30 d",
+                             "reason": realized_reason if realized_value is None else None},
+            "champion_24h": champion(24, "sigma_24h"),
+            "champion_monitor_h": champion(int(monitor_h), "sigma_h"),
+            "monitor_h": int(monitor_h),
+        }
+
     def _realized_for_horizon(self, symbol: str, horizon_h: int) -> VolView | None:
         view = self._realized(symbol)
         if view is None or horizon_h == 24:

@@ -18,6 +18,8 @@ SCANNER_DEFAULTS = {
     "min_cell_floor_usdt": 5.5,
 }
 
+GRID_CELL_FUNCTIONAL_MULT = 1.3
+
 
 class Settings(BaseSettings):
     """Typed application configuration."""

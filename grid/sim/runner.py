@@ -10,7 +10,7 @@ from decimal import Decimal
 import numpy as np
 
 from data.exchange_filters import SymbolFilters
-from grid.adjust import plan_adjust
+from grid.adjust import plan_adjust_with_shrink
 from grid.levels import compute_lines, plan_cells
 from grid.policy import PolicyDecision, adjust_decision, evaluate_grid, evaluate_target, evaluate_max_days, stoploss_candidates, validate_params
 from grid.sim.data import ewma_sigma_24h
@@ -312,10 +312,11 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                 if action == "ADJUST":
                     grid = {"n_levels": n, "range_low": active_low, "range_high": active_high,
                             "capital_total": capital, "params": effective}
-                    adjust = plan_adjust(grid, cells, decision.metrics["range_low"],
+                    adjust = plan_adjust_with_shrink(grid, cells, decision.metrics["range_low"],
                                          decision.metrics["range_high"], decision.metrics["n_levels"],
                                          close, filters, type("Settings", (), {"grid_min_step_pct": .003,
-                                         "capital_max_por_nivel_pct": .30})())
+                                         "capital_max_por_nivel_pct": .30})(),
+                                         enabled=effective.get("adjust_shrink_n", True))
                     if adjust.ok and adjust.mapping:
                         free_capital = sum((c["capital"] for c in cells
                                             if c["state"] in {"IDLE", "BUY_OPEN", "DONE"}

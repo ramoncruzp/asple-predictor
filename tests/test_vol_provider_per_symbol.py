@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 import grid.volatility_provider as provider_module
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
 from grid.volatility_provider import VolatilityProvider
@@ -99,3 +100,32 @@ def test_short_horizon_falls_back_to_fresh_xrp_24h(targets,reason):
 def test_stale_xrp_24h_remains_unavailable():
     provider=VolatilityProvider(DB([row("XRPUSDT",24,"NexoHAR",.01,age_h=3)]),clock=lambda:NOW)
     assert provider.get("XRPUSDT",24) is None and provider.last_reason=="stale"
+
+
+def test_sigma_surface_context_labels_sources_windows_and_unavailable_reason(monkeypatch):
+    provider = VolatilityProvider(DB([]), clock=lambda: NOW)
+    calls = []
+    def get(symbol, horizon_h=24):
+        calls.append((symbol, horizon_h))
+        if horizon_h == 24:
+            return SimpleNamespace(source="model", sigma_24h=.12, sigma_h=.12, fallback=False, fallback_reason=None)
+        if horizon_h == 4:
+            return SimpleNamespace(source="model", sigma_24h=.06, sigma_h=.03, fallback=False, fallback_reason=None)
+        provider.last_reason = "forecast_unavailable"
+        return None
+    monkeypatch.setattr(provider, "get", get)
+    surfaces = provider.sigma_surface_context("ADAUSDT",
+        {"value": .08, "source": "realized", "window": "30d"}, monitor_h=4)
+    assert calls == [("ADAUSDT", 24), ("ADAUSDT", 4)]
+    assert surfaces["realized_30d"]["value"] == .08
+    assert surfaces["champion_24h"]["value"] == .12
+    assert surfaces["champion_24h"]["source"] == "campe\u00F3n" and surfaces["champion_24h"]["window"] == "24 h"
+    assert surfaces["champion_monitor_h"]["value"] == .03
+    assert surfaces["champion_monitor_h"]["window"] == "4 h"
+
+    monkeypatch.setattr(provider, "get", lambda symbol, horizon_h=24: None)
+    provider.last_reason = "forecast_unavailable"
+    missing = provider.sigma_surface_context("ADAUSDT",
+        {"value": None, "reason": "sin 30 d\u00EDas"}, monitor_h=4)
+    assert missing["realized_30d"]["value"] is None and missing["realized_30d"]["reason"] == "sin 30 d\u00EDas"
+    assert missing["champion_24h"]["value"] is None and missing["champion_24h"]["reason"] == "forecast_unavailable"

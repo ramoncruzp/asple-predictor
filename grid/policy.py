@@ -23,6 +23,7 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "max_loss_pct": 10.0,
     "stop_loss_pct": 5.0,
     "adjust_enabled": True,
+    "adjust_shrink_n": True,
     "adjust_trigger_z": 0.75,
     "adjust_cooldown_h": 6,
     "adjust_trapped_cap_pct": 30.0,
@@ -174,6 +175,9 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     enabled = result["adjust_enabled"]
     if not isinstance(enabled, bool):
         raise ValueError("adjust_enabled must be boolean")
+    shrink_n = result["adjust_shrink_n"]
+    if not isinstance(shrink_n, bool):
+        raise ValueError("adjust_shrink_n must be boolean")
     result["adjust_trigger_z"] = _number(result["adjust_trigger_z"], "adjust_trigger_z")
     if result["adjust_trigger_z"] <= 0:
         raise ValueError("adjust_trigger_z must be greater than zero")

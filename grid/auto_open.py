@@ -9,6 +9,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config.settings import Settings
 from models.coin_onboarding import coin_is_ready
 from grid.loan_cohorts import create_grid_with_loan_cohort
+from grid.structure import functional_cell_threshold
+from grid.sim.runner import FILTERS as DEFAULT_FILTERS
 
 
 class GridAutoOpen:
@@ -103,6 +105,26 @@ class GridAutoOpen:
                         details={"slot": slot, "phase": "FAILED", "who": "auto", "symbol": symbol,
                                  "reason": "structure_infeasible", "scan": row, "params": params})
                     continue
+                if strategy == "smart":
+                    info_getter = getattr(self.testnet_client, "get_symbol_info", None)
+                    if info_getter is None:
+                        info_getter = getattr(getattr(self.engine, "exchange", None), "get_symbol_info", None)
+                    filters = (type(DEFAULT_FILTERS).from_symbol_info(info_getter(symbol))
+                               if info_getter is not None else DEFAULT_FILTERS)
+                    minimum_cell = functional_cell_threshold(filters, strategy)
+                    capital = Decimal(str(cfg.usdt_por_grid))
+                    feasible_levels = int(capital // minimum_cell)
+                    if feasible_levels < 4:
+                        self.db.add_grid_event(run_id=None, source="CLI", event_type="AUTO_OPEN",
+                            details={"slot": slot, "phase": "FAILED", "who": "auto", "symbol": symbol,
+                                "reason": "capital_below_smart_functional_cell_floor", "minimum_cell_usdt": str(minimum_cell)})
+                        continue
+                    if int(structure["n_levels"]) > feasible_levels:
+                        structure = dict(structure)
+                        old_levels = int(structure["n_levels"])
+                        structure["n_levels"] = feasible_levels
+                        structure["cell_usdt"] = capital / feasible_levels
+                        structure["spacing_pct"] = float(structure["spacing_pct"]) * old_levels / feasible_levels
                 minimum_margin = float(getattr(cfg, "grid_min_margin_after_fees_pct",
                                                 getattr(cfg, "grid_min_net_margin_pct", .7)))
                 fee = float(row.get("fee_pct", getattr(cfg, "scanner_fee_pct", .1)))

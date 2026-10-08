@@ -72,7 +72,14 @@ def app(tmp_path, *, token="", maximum=5, balance="100000"):
     api.include_router(router, prefix="/api/grids")
     api.state.db, api.state.settings = db, settings
     api.state.grid_engine, api.state.testnet_client = engine, exchange
-    api.state.vol_provider = SimpleNamespace(get=lambda symbol, horizon_h=24: SimpleNamespace(sigma_24h=.01))
+    api.state.vol_provider = SimpleNamespace(
+        get=lambda symbol, horizon_h=24: SimpleNamespace(sigma_24h=.01),
+        sigma_surface_context=lambda symbol, realized_30d, monitor_h=4: {
+            "realized_30d": {"value": realized_30d["value"], "source": "realizada", "window": "30 d", "reason": None},
+            "champion_24h": {"value": .03, "source": "campe\u00F3n", "window": "24 h", "reason": None},
+            "champion_monitor_h": {"value": .02, "source": "campe\u00F3n", "window": f"{monitor_h} h", "reason": None},
+            "monitor_h": monitor_h,
+        })
     api.state.grid_scan_service = service
     return LocalClient(api), db, exchange
 
@@ -141,6 +148,11 @@ def test_dry_run_builds_plan_without_exchange_orders_and_confirm_is_required(tmp
     assert response.json()["sigma_open"]["source"] == "realized"
     assert response.json()["sigma_open"]["window"] == "30d"
     assert response.json()["sigma_open"]["value"] > 0
+    surfaces = response.json()["sigma_surfaces"]
+    assert surfaces["realized_30d"]["value"] == response.json()["sigma_open"]["value"]
+    assert surfaces["realized_30d"]["source"] == "realizada" and surfaces["realized_30d"]["window"] == "30 d"
+    assert surfaces["champion_24h"] == {"value": .03, "source": "campe\u00F3n", "window": "24 h", "reason": None}
+    assert surfaces["champion_monitor_h"] == {"value": .02, "source": "campe\u00F3n", "window": "4 h", "reason": None}
     assert response.json()["testnet_in_range"] is True
     assert response.json()["testnet_price_guard"]["allowed"] is True
     assert exchange.create_calls == []
@@ -724,3 +736,38 @@ def test_smart_open_accepts_supported_horizons(tmp_path, horizon):
         strategy="smart", params={"horizon_h": horizon}))
     assert response.status_code == 200, response.text
     assert response.json()["params"]["horizon_h"] == horizon
+
+
+def test_smart_manual_cell_below_functional_floor_is_allowed_with_warning(tmp_path):
+    from dataclasses import replace
+    client, _db, _exchange = app(tmp_path)
+    original = client.app.state.grid_scan_service._market
+    def fine_market(symbol, capital, deadline):
+        market, filters = original(symbol, capital, deadline)
+        return market, replace(filters, step_size=Decimal("0.001"), min_qty=Decimal("0.001"))
+    client.app.state.grid_scan_service._market = fine_market
+    response = client.post("/api/grids/open", json=payload(strategy="smart", capital=31,
+        range_low=90, range_high=110, n_levels=5))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert Decimal(body["cell_usdt"]) == Decimal("6.2")
+    assert "no podrá ajustarse ni prestar" in body["functional_cell_warning"]
+
+
+def test_smart_auto_structure_uses_functional_cell_floor_and_simple_stays_unchanged(tmp_path):
+    from dataclasses import replace
+    client, _db, _exchange = app(tmp_path)
+    original = client.app.state.grid_scan_service._market
+    def fine_market(symbol, capital, deadline):
+        market, filters = original(symbol, capital, deadline)
+        return market, replace(filters, step_size=Decimal("0.001"), min_qty=Decimal("0.001"))
+    client.app.state.grid_scan_service._market = fine_market
+    smart = client.post("/api/grids/open", json=payload(strategy="smart", capital=100,
+        range_low=None, range_high=None, n_levels=None))
+    assert smart.status_code == 200, smart.text
+    assert smart.json()["n_levels"] <= 15
+    assert Decimal(smart.json()["cell_usdt"]) >= Decimal("6.5")
+    simple = client.post("/api/grids/open", json=payload(strategy="simple", capital=100, n_levels=18))
+    assert simple.status_code == 200, simple.text
+    assert simple.json()["n_levels"] == 18
+    assert simple.json()["functional_cell_warning"] is None

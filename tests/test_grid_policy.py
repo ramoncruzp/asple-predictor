@@ -40,6 +40,7 @@ def test_defaults_and_parameter_validation_rules():
         "pause_max_h": 48, "close_out_of_range_pct": 5.0,
         "max_loss_pct": 10.0, "stop_loss_pct": 5.0,
         "adjust_enabled": True, "adjust_trigger_z": 0.75,
+        "adjust_shrink_n": True,
         "adjust_cooldown_h": 6, "adjust_trapped_cap_pct": 30.0,
         "adjust_n": None,
         "compound_enabled": False, "compound_ratio": 1.0,

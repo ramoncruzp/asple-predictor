@@ -142,12 +142,13 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
         "suggested_grids":20,"capital":1000,"capital_per_grid":50,"spacing_pct":2,
         "margin_target_pct":.7,"fee_pct":.1,"dust_estimate_pct":.2,"net_margin_pct":1.6,
         "net_per_cycle_usdt":.8,"target_met":True,"estimated_cycles_to_target":9,"min_cell_usdt":"5",
-        "min_cell_warning":None,"range_warning":False,"risk":{"label":"Moderado","max_range_pct":45,
+        "min_cell_warning":None,"functional_cell_warning":"Este grid no podrá ajustarse ni prestar: el capital por celda está bajo el mínimo funcional.","range_warning":False,"risk":{"label":"Moderado","max_range_pct":45,
             "meaning":"Equilibrio","capital_below_price_pct":50,"unrealized_loss_at_floor_usdt":120},
         "simulations":{"label":"histórico, no promesa de resultado","sim_start":"2026-10-01T00:00:00+00:00","sim_days":12,"window_warning":"Ventana corta (menos de 30 días): poca evidencia.","strategies":{"simple":{"pnl_total_net_usdt":10,"max_drawdown_pct":1.25,"fees_usdt":2.5,"buy_hold_pnl_usdt":3.75,"cycles_completed":4},
             "smart":{"pnl_total_net_usdt":12,"max_drawdown_pct":2.5,"fees_usdt":3.5,"buy_hold_pnl_usdt":4.75,"cycles_completed":5}}},"analysis":{"main_support":90,"main_resistance":110,
             "atr":2,"support_touches":3,"resistance_touches":4},"prediction_signal":None,
         "range_risk":{"sigma_24h":.02,"source":"campeón","horizons":{"24":{"touch_floor":.2,"touch_ceiling":.25,"exit_upper_bound":.4},"72":{"touch_floor":.4,"touch_ceiling":.45,"exit_upper_bound":.7}},"disclaimer":"Estimaci\u00F3n te\u00F3rica."},
+        "sigma_surfaces":{"realized_30d":{"value":.01,"source":"realizada","window":"30 d"},"champion_24h":{"value":.02,"source":"campe\u00f3n","window":"24 h"},"champion_monitor_h":{"value":.03,"source":"campe\u00f3n","window":"4 h"},"monitor_h":4},
         "pause_risk":{"horizon_h":4,"break_prob":.15,"pause_enter_prob":.10,"would_be_pausable":True},
         "pause_risk_24h":{"horizon_h":24,"break_prob":.20,"pause_enter_prob":.10,"would_be_pausable":True},
         "disclaimer":"Estimación teórica."}
@@ -168,6 +169,10 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator(".advisor-cascade")).to_contain_text("comisiones")
     expect(ui_page.locator(".advisor-risk")).to_contain_text("Pérdida no realizada estimada al piso")
     assert ui_page.locator("#grid-result .advisor-risk > p.scanner-warning:empty").count() == 0
+    expect(ui_page.locator("#grid-result")).to_contain_text("Este grid no podrá ajustarse ni prestar")
+    expect(ui_page.locator(".advisor-sigma-surfaces")).to_contain_text("\u03C3 realizada 30 d: 1.000%")
+    expect(ui_page.locator(".advisor-sigma-surfaces")).to_contain_text("\u03C3 campe\u00F3n 24 h: 2.000%")
+    expect(ui_page.locator(".advisor-sigma-surfaces")).to_contain_text("\u03C3 campe\u00F3n vigilancia 4 h: 3.000%")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("histórico, no promesa de resultado")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Inicio histórico: 2026-10-01T00:00:00+00:00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Ventana corta")
@@ -399,6 +404,7 @@ def test_scanner_compound_open_preview_sends_settings_and_displays_them(live_ser
         "range_low": "90", "range_high": "110", "n_levels": 4,
         "levels": ["90", "95", "100", "105", "110"], "current_price": "101",
         "cell_usdt": "25", "cells": [],
+        "sigma_surfaces":{"realized_30d":{"value":.01,"source":"realizada","window":"30 d"},"champion_24h":{"value":.03,"source":"campe\u00f3n","window":"24 h"},"champion_monitor_h":{"value":.02,"source":"campe\u00f3n","window":"4 h"},"monitor_h":4},
         "margin_guard": {"allowed": True, "actual_pct": 4.7, "minimum_pct": .7}})
         if route.request.method == "POST" else route.continue_())
     ui_page.goto(f"{live_server.url}/#scanner")
@@ -421,6 +427,9 @@ def test_scanner_compound_open_preview_sends_settings_and_displays_them(live_ser
     expect(graph).to_contain_text("4 niveles")
     expect(graph).to_contain_text("escala lineal USDT")
     expect(ui_page.locator("#sc-dialog")).to_contain_text("Inter\u00e9s compuesto: reinvertir 35%")
+    expect(ui_page.locator(".dry-run-sigma-surfaces")).to_contain_text("\u03C3 realizada 30 d: 1.000%")
+    expect(ui_page.locator(".dry-run-sigma-surfaces")).to_contain_text("\u03C3 campe\u00F3n 24 h: 3.000%")
+    expect(ui_page.locator(".dry-run-sigma-surfaces")).to_contain_text("\u03C3 campe\u00F3n vigilancia 4 h: 2.000%")
 
 
 def test_scanner_dialog_displays_server_order_count_and_outside_signed_distances(live_server, ui_page):

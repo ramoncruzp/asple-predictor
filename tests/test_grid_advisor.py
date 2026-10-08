@@ -594,3 +594,36 @@ def test_advisor_simulation_passes_candle_data_for_ada_and_xrp(monkeypatch):
             assert isinstance(row.get("pnl_total_net_usdt"), (int, float))
             assert isinstance(row.get("max_drawdown_pct"), (int, float))
             assert isinstance(row.get("cycles_completed"), int)
+
+
+def test_advisor_reports_realized_and_champion_sigma_surfaces(monkeypatch):
+    monkeypatch.setattr(volatility_route, "forecast", lambda request, symbol: {"forecasts": [
+        {"horizon_h": 24, "move_1sigma_pct": 4.0, "stale": False},
+        {"horizon_h": 4, "move_1sigma_pct": 2.0, "stale": False},
+    ]})
+    client = make_client()
+    x = np.arange(900, dtype=float)
+    close = 100 + 2 * np.sin(x / 11) + .01 * x
+    client.app.state.client.frame = pd.DataFrame({
+        "close": close, "high": close + .8, "low": close - .8, "open": close - .1,
+        "volume": np.full(len(x), 1000),
+        "timestamp": pd.date_range("2026-08-01", periods=len(x), freq="h", tz="UTC"),
+    })
+    result = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "capital": 1000,
+        "risk": "medium", "days": 90, "range_mode": "centrado"}).body
+    surfaces = result["sigma_surfaces"]
+    assert surfaces["realized_30d"]["source"] == "realizada"
+    assert surfaces["realized_30d"]["window"] == "30 d" and surfaces["realized_30d"]["value"] is not None
+    assert surfaces["champion_24h"] == {"value": .04, "source": "campe\u00F3n", "window": "24 h", "reason": None}
+    assert surfaces["champion_monitor_h"] == {"value": .02, "source": "campe\u00F3n", "window": "4 h", "reason": None}
+    assert result["range_risk"]["sigma_24h"] == pytest.approx(.04)
+
+
+def test_advisor_requests_volatility_stats_only_for_horizon_24(monkeypatch):
+    calls = []
+    monkeypatch.setattr(volatility_route, "model_stats", lambda request, symbol, horizon: (
+        calls.append((symbol, horizon)) or {"horizons": [{"models": []}]}))
+    selection = {"effective": "campeon", "consensus": None}
+    grid_advisor._model_volatility_advisories(
+        SimpleNamespace(), selection, {"champion": "Persistence"}, symbol="XRPUSDT")
+    assert calls == [("XRPUSDT", 24)]

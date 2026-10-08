@@ -378,8 +378,17 @@ def test_adjust_rejections_match_engine_and_simulator(reason, params, capital, w
     sim_reasons = [(",".join(event.get("reason") or []) if isinstance(event.get("reason"), list)
                     else str(event.get("reason") or "")) for event in sim["events"]
                    if event.get("type") == "ADJUST_REJECTED"]
-    assert reason in engine_reasons, f"engine blocked reasons={engine_reasons}"
-    assert reason in sim_reasons, f"sim blocked reasons={sim_reasons}"
+    if reason == "capital_per_cell_below_min_notional_margin":
+        engine_adjusts = [event for event in real["events"] if event.get("event_type") == "GRID_ADJUSTED"]
+        sim_adjusts = [event for event in sim["events"] if event.get("type") == "ADJUST"]
+        assert engine_adjusts and sim_adjusts
+        for event in [engine_adjusts[-1], sim_adjusts[-1]]:
+            details = event.get("details") or {}
+            assert details["source"] == "CAPITAL_SHRINK"
+            assert details["n_to"] < details["n_from"]
+    else:
+        assert reason in engine_reasons, f"engine blocked reasons={engine_reasons}"
+        assert reason in sim_reasons, f"sim blocked reasons={sim_reasons}"
 
 
 def test_unavailable_sigma_is_reported_by_both_replays():

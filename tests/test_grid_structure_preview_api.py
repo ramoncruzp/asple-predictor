@@ -51,7 +51,7 @@ def test_preview_returns_three_variants_and_matches_structure_math(tmp_path, mon
     response = client.post("/api/grids/structure-preview", json={"symbol":"XRPUSDT", "capital":"100", "strategy":"simple", "target_usdt":"1"})
     assert response.status_code == 200, response.body
     body = response.json()
-    assert set(body) == {"symbol", "strategy", "capital", "minimum_margin_after_fees_pct", "mid", "fee_pct", "variants", "edited", "definitions", "data_source", "warning", "minimum_cell_usdt", "min_cell_warning", "dust_target_pct", "dust_min_cell_usdt"}
+    assert set(body) == {"symbol", "strategy", "capital", "minimum_margin_after_fees_pct", "mid", "fee_pct", "variants", "edited", "definitions", "data_source", "warning", "minimum_cell_usdt", "min_cell_warning", "functional_cell_warning", "dust_target_pct", "dust_min_cell_usdt"}
     assert set(body["variants"]) == {"balanced", "wide"}
     assert body["definitions"]["merged_variants"] and body["definitions"]["balanced"] and body["definitions"]["wide"]
     balanced = body["variants"]["balanced"]

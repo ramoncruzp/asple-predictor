@@ -11,6 +11,12 @@ def _battle(ui_page, live_server):
 
 def test_battle_cards_explain_zero_signals_unavailable_and_unconfigured_models(ui_page, live_server):
     _battle(ui_page, live_server)
+    disclaimer = ui_page.locator(".battle-score-disclaimer")
+    expect(disclaimer).to_be_visible()
+    expect(disclaimer).to_contain_text("no son probabilidades calibradas")
+    expect(disclaimer).to_contain_text("reponderan las clases")
+    expect(disclaimer).to_contain_text("0,60")
+    expect(disclaimer).to_contain_text("27 % real")
     result = ui_page.evaluate("""() => {
       const t=window.BattlePageTest;
       const no=t.card({available:true},{bullish_count:0,neutral_count:12,verified_count:19,base_rate:.42});

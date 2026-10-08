@@ -12,6 +12,7 @@ from math import exp, floor, isfinite, sqrt
 from typing import Any
 
 from data.exchange_filters import SymbolFilters
+from config.settings import GRID_CELL_FUNCTIONAL_MULT
 
 MAX_LEVELS = 60
 MIN_LEVELS = 4
@@ -28,6 +29,23 @@ def _dec(value: Any) -> Decimal:
 
 def minimum_cell_threshold(filters: SymbolFilters, configured_floor: Decimal | str | float = MIN_TYPICAL_CELL_USDT) -> Decimal:
     return max(filters.min_notional, MIN_TYPICAL_CELL_USDT, _dec(configured_floor))
+
+
+def functional_cell_threshold(filters: SymbolFilters, strategy: str,
+                              configured_floor: Decimal | str | float = Decimal("5.5")) -> Decimal:
+    base = minimum_cell_threshold(filters, configured_floor)
+    if str(strategy).lower() != "smart":
+        return base
+    return max(base, filters.min_notional * _dec(GRID_CELL_FUNCTIONAL_MULT))
+
+
+def functional_cell_warning(capital: Decimal | str | float, levels: int | None,
+                            minimum_cell: Decimal | str | float, strategy: str) -> str | None:
+    if str(strategy).lower() != "smart" or levels is None or levels < 1:
+        return None
+    if _dec(capital) / Decimal(levels) < _dec(minimum_cell):
+        return "Este grid no podrá ajustarse ni prestar: el capital por celda está bajo el mínimo funcional."
+    return None
 
 
 def minimum_cell_warning(capital: Decimal | str | float, levels: int | None,

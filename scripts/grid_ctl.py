@@ -17,6 +17,7 @@ from grid.monitor import GridMonitor
 from grid.levels import compute_lines, plan_cells
 from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
 from grid.loan_cohorts import assign_loan_creation_defaults, create_grid_with_loan_cohort
+from grid.structure import functional_cell_threshold, functional_cell_warning
 from data.exchange_filters import SymbolFilters
 
 
@@ -298,8 +299,10 @@ def main(argv: list[str] | None = None) -> int:
             reserve = args.capital * reserve_pct / Decimal(100)
             distributable = args.capital - reserve
             minimum_cell = distributable / Decimal(args.n)
-            if minimum_cell < filters.min_notional * Decimal("1.1"):
-                raise ValueError("capital por celda debe ser al menos min_notional × 1.1")
+            exchange_minimum_cell = filters.min_notional * Decimal("1.1")
+            required_cell = functional_cell_threshold(filters, args.strategy, exchange_minimum_cell)
+            if minimum_cell < exchange_minimum_cell:
+                raise ValueError(f"capital por celda debe ser al menos min_notional ? 1.1")
             if step / low < Decimal("0.003"):
                 raise ValueError("paso mínimo entre niveles: 0.30%")
             lines = compute_lines(low, high, args.n, filters)
@@ -314,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                     "range": {"low": str(low), "high": str(high)},
                     "levels": [str(value) for value in lines],
                     "capital_per_cell": str(minimum_cell),
+                    "functional_cell_warning": functional_cell_warning(args.capital, args.n, required_cell, args.strategy),
                     "reserve": str(reserve),
                     "distributable_capital": str(distributable),
                     "params": effective, "calibrated": calibration_id is not None,

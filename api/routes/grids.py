@@ -19,6 +19,7 @@ from grid.loan_cohorts import create_grid_with_loan_cohort
 from grid.scan_service import EXECUTION_WARNING
 from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
                             minimum_cell_threshold, minimum_cell_warning,
+                            functional_cell_threshold, functional_cell_warning,
                             evaluate_levels, evaluate_preview_position, suggest_structure)
 from grid.guards import sell_level_conflicts, sell_level_conflict_message
 
@@ -114,6 +115,22 @@ def _sigma_open(request, market: dict) -> dict:
     sigma = float(np.std(np.diff(np.log(closes)), ddof=1) * np.sqrt(24)) if len(closes) > 2 else 0.0
     days = int(getattr(request.app.state.settings, "scanner_history_days", 30))
     return {"value": sigma, "source": "realized", "window": f"{days}d"}
+
+
+def _sigma_surfaces(request, symbol: str, sigma_open: dict) -> dict:
+    days = int(getattr(request.app.state.settings, "scanner_history_days", 30))
+    realized = {**sigma_open, "reason": None if days >= 30 else "la ventana configurada es menor de 30 d\u00EDas"}
+    provider = getattr(request.app.state, "vol_provider", None)
+    if provider is None or not hasattr(provider, "sigma_surface_context"):
+        return {"realized_30d": {"value": None if days < 30 else sigma_open.get("value"),
+                                 "source": "realizada", "window": "30 d",
+                                 "reason": realized["reason"] or "proveedor de volatilidad no disponible"},
+                "champion_24h": {"value": None, "source": "campe\u00F3n", "window": "24 h",
+                                 "reason": "proveedor de volatilidad no disponible"},
+                "champion_monitor_h": {"value": None, "source": "campe\u00F3n", "window": "4 h",
+                                       "reason": "proveedor de volatilidad no disponible"},
+                "monitor_h": 4}
+    return provider.sigma_surface_context(symbol, realized, monitor_h=4)
 
 
 def _margin_guard(request, low, high, n, capital, mid, filters):
@@ -314,7 +331,8 @@ def open_grid(request: Request, body: OpenRequest):
             structure = suggest_structure(sigma, body.capital, mid,
                 filters, float(request.app.state.settings.scanner_fee_pct),
                 min_spacing_pct=float(request.app.state.settings.scanner_min_spacing_pct),
-                min_cell_usdt=max(filters.min_notional * Decimal("1.1"), Decimal("5.5")),
+                min_cell_usdt=functional_cell_threshold(filters, body.strategy,
+                    max(filters.min_notional * Decimal("1.1"), Decimal("5.5"))),
                 min_margin_after_fees_pct=float(getattr(request.app.state.settings,
                     "grid_min_margin_after_fees_pct", getattr(request.app.state.settings,
                     "grid_min_net_margin_pct", .7))))
@@ -331,8 +349,9 @@ def open_grid(request: Request, body: OpenRequest):
                 request.app.state.settings)
             cell_rows, cell_metrics_summary = evaluate_cell_margins(
                 cells, filters, getattr(request.app.state.settings, "scanner_fee_pct", .1))
-            minimum_cell = minimum_cell_threshold(
-                filters, max(filters.min_notional * Decimal("1.1"), Decimal("5.5")))
+            minimum_cell = functional_cell_threshold(filters, body.strategy,
+                max(filters.min_notional * Decimal("1.1"), Decimal("5.5")))
+            functional_minimum = functional_cell_threshold(filters, "smart")
             dust_min_cell = minimum_cell_for_dust_limit(filters, mid)
             active_orders = sum(cell.initial_state in {"BUY_OPEN", "SELL_OPEN"} for cell in cells)
             position = evaluate_preview_position(mid, lines[0], lines[-1])
@@ -356,7 +375,9 @@ def open_grid(request: Request, body: OpenRequest):
                 "testnet_in_range": testnet_in_range, "testnet_price_guard": testnet_price_guard,
                 "initial_order_count": active_orders, **position,
                 "suggested_structure": structure, "sigma_open": sigma_open,
+                "sigma_surfaces": _sigma_surfaces(request, symbol, sigma_open),
                 "min_cell_warning": minimum_cell_warning(body.capital, n, minimum_cell),
+                "functional_cell_warning": functional_cell_warning(body.capital, n, functional_minimum, body.strategy),
                 "dust_target_pct": "0.1", "dust_min_cell_usdt": str(dust_min_cell),
                 "margin_guard": margin_guard,
                 "cell_usdt": str(body.capital / Decimal(n)), "filters": filters.__dict__,

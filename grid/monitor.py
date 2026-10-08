@@ -15,6 +15,8 @@ from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_de
                          build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
                          plan_dust_sweep, profit_close_retry_delay, stoploss_candidates, PolicyDecision)
 from grid.volatility_provider import VolatilityProvider
+from data.exchange_filters import SymbolFilters
+from grid.adjust import plan_adjust_with_shrink
 from grid.reconciliation import expected_inventory_by_asset
 from data.testnet_client import TestnetOrderError
 
@@ -580,6 +582,21 @@ class GridMonitor:
                             decision = PolicyDecision("MAX_DAYS", (), {**decision.metrics,
                                 "max_days": max_days_result})
                         if decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"} and adjust.action == "ADJUST":
+                            try:
+                                filters = SymbolFilters.from_symbol_info(
+                                    self.engine.exchange.get_symbol_info(current["symbol"]))
+                                shrink_plan = plan_adjust_with_shrink(
+                                    current, levels, adjust.metrics["range_low"], adjust.metrics["range_high"],
+                                    adjust.metrics["n_levels"], mid, filters, self.settings,
+                                    enabled=(current.get("params") or {}).get("adjust_shrink_n", True))
+                                if shrink_plan.ok and shrink_plan.details.get("source") == "CAPITAL_SHRINK":
+                                    adjust = PolicyDecision("ADJUST", adjust.reasons, {**adjust.metrics,
+                                        "n_levels": shrink_plan.details["n_levels"],
+                                        "n_from": shrink_plan.details["n_from"],
+                                        "n_to": shrink_plan.details["n_to"],
+                                        "source": "CAPITAL_SHRINK"})
+                            except Exception:
+                                self.logger.warning("grid=%s could not preflight capital shrink", grid_id, exc_info=True)
                             preview = self.engine.preview_adjust(
                                 grid_id, adjust.metrics["range_low"], adjust.metrics["range_high"],
                                 adjust.metrics["n_levels"],
@@ -624,7 +641,7 @@ class GridMonitor:
                                 result = self.engine.adjust_grid(
                                     grid_id, decision.metrics["range_low"], decision.metrics["range_high"],
                                     decision.metrics["n_levels"], reason="policy_adjust",
-                                    details={**decision.metrics, "source": "MONITOR"},
+                                    details={**decision.metrics, "source": decision.metrics.get("source", "MONITOR")},
                                 )
                                 if not result.get("ok"):
                                     raise RuntimeError(result.get("reason") or "adjust rejected")

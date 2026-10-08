@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from data.exchange_filters import SymbolFilters
 from grid.levels import GridConfigError, compute_lines
+
+MIN_LEVELS = 4
+CAPITAL_CELL_REJECTION = "capital_per_cell_below_min_notional_margin"
 
 
 @dataclass(frozen=True)
@@ -124,3 +127,23 @@ def plan_adjust(
         empty["reason"] = str(exc)
         empty["details"] = {"reason": str(exc)}
         return AdjustPlan(**empty)
+
+
+def plan_adjust_with_shrink(
+    grid: dict, cells: list[dict], new_low: Any, new_high: Any, new_n: int | None,
+    mid: Any, filters: SymbolFilters, settings: Any, *, enabled: bool = True,
+) -> AdjustPlan:
+    """Retry a capital-blocked adjustment with the largest feasible lower level count."""
+    original_n = int(grid.get("n_levels", len(cells)) if new_n is None else new_n)
+    first = plan_adjust(grid, cells, new_low, new_high, original_n, mid, filters, settings)
+    if first.ok or not enabled or first.reason != CAPITAL_CELL_REJECTION:
+        return first
+    params = grid.get("params") or {}
+    min_free = int(params.get("min_free_cells", 2))
+    lowest_n = max(MIN_LEVELS, min_free + 1)
+    for candidate_n in range(original_n - 1, lowest_n - 1, -1):
+        candidate = plan_adjust(grid, cells, new_low, new_high, candidate_n, mid, filters, settings)
+        if candidate.ok:
+            return replace(candidate, details={**candidate.details,
+                "n_from": original_n, "n_to": candidate_n, "source": "CAPITAL_SHRINK"})
+    return first

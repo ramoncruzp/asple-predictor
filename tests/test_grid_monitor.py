@@ -727,3 +727,48 @@ def test_coin_onboarding_start_failure_does_not_prevent_lifespan_start(tmp_path,
     asyncio.run(run_lifespan())
     assert "No se pudo iniciar el servicio de preparación de monedas" in caplog.text
     assert "No se pudo detener el servicio de preparación de monedas" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("policy_action", "adjust_action", "expected_event"),
+    [("NONE", "ADJUST", "GRID_ADJUSTED"), ("PAUSE", "NONE", "GRID_PAUSED")],
+)
+def test_monitor_adjust_and_pause_keep_their_decisions_after_removed_noop(
+    monkeypatch, policy_action, adjust_action, expected_event
+):
+    import grid.monitor as monitor_module
+    from grid.policy import PolicyDecision
+
+    # Reproduce the former A2 expression: it is an identity for every action.
+    before_phase21 = lambda decision: (
+        decision if decision.action == "CLOSE_REPOSITORY" else decision
+    )
+    requested = (
+        PolicyDecision("ADJUST", (), {"range_low": 85, "range_high": 115, "n_levels": 5})
+        if adjust_action == "ADJUST" else PolicyDecision("NONE", (), {})
+    )
+    policy = PolicyDecision(policy_action, ("test_reason",), {"break_prob": .2})
+    expected = before_phase21(requested if adjust_action == "ADJUST" else policy)
+    monkeypatch.setattr(monitor_module, "evaluate_grid", lambda *a, **k: policy)
+    monkeypatch.setattr(monitor_module, "adjust_decision", lambda *a, **k: requested)
+
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    engine.vol_provider = SimpleNamespace(
+        get=lambda symbol, horizon_h=24: SimpleNamespace(
+            sigma_24h=.02, source="model", fallback=False
+        )
+    )
+    grid = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 4})
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=engine.vol_provider)
+
+    result = monitor.run_once()
+    events = db.list_grid_events(grid_id=grid["id"], event_type=expected_event)
+
+    assert result["status"] == "OK"
+    assert len(events) == 1
+    assert expected.action == {"GRID_ADJUSTED": "ADJUST", "GRID_PAUSED": "PAUSE"}[expected_event]
+    if expected_event == "GRID_ADJUSTED":
+        assert db.get_grid(grid["id"])["range_low"] == 85
+        assert db.get_grid(grid["id"])["range_high"] == 115
+    else:
+        assert db.get_grid(grid["id"])["status"] == "PAUSED"

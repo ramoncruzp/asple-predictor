@@ -14,7 +14,8 @@ from grid.levels import compute_lines
 from grid.scan_service import DATA_SOURCE, EXECUTION_WARNING
 from grid.structure import (DUST_TARGET_PCT, MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_for_dust_limit, minimum_cell_threshold,
-                            minimum_cell_warning)
+                            minimum_cell_warning, functional_cell_threshold,
+                            functional_cell_warning)
 
 router = APIRouter()
 DEFAULT_WIDE_K_WIDTH = 3.0
@@ -183,9 +184,9 @@ def structure_preview(request: Request, body: StructurePreviewRequest):
         min_spacing = float(settings.scanner_min_spacing_pct)
         min_margin = float(getattr(settings, "grid_min_margin_after_fees_pct",
                                    getattr(settings, "grid_min_net_margin_pct", .7)))
-        min_cell = minimum_cell_threshold(filters, max(
-            filters.min_notional * Decimal("1.1"),
-            Decimal(str(settings.scanner_min_cell_floor_usdt))))
+        manual_min_cell = minimum_cell_threshold(filters, max(
+            filters.min_notional * Decimal("1.1"), Decimal(str(settings.scanner_min_cell_floor_usdt))))
+        min_cell = functional_cell_threshold(filters, body.strategy, manual_min_cell)
         k_balanced = body.k_width or 2.0
         target_amount = _target_amount(body)
         balanced_width = _raw_width_pct(sigma, mid, k_balanced) if sigma > 0 else 0.0
@@ -239,18 +240,20 @@ def structure_preview(request: Request, body: StructurePreviewRequest):
             wide_high, wide_levels, body, mid, filters, fee,
             min_spacing, min_cell, min_margin, target_amount,
             reason="No hay nivel mínimo que cumpla margen tras comisiones y mínimo de celda.")
-        edited = _custom_variant(body, mid, filters, fee, min_spacing, min_cell, min_margin,
+        edited = _custom_variant(body, mid, filters, fee, min_spacing, manual_min_cell, min_margin,
             body.margin_target_pct if body.margin_target_pct is not None else min_margin, target_amount) \
             if body.range_low is not None else None
         variants = (balanced_variant, dense_variant, wide_variant)
         for variant in variants:
             variant["minimum_cell_usdt"] = str(min_cell)
             variant["min_cell_warning"] = minimum_cell_warning(body.capital, variant.get("n_levels"), min_cell)
+            variant["functional_cell_warning"] = functional_cell_warning(body.capital, variant.get("n_levels"), min_cell, body.strategy)
             variant["dust_target_pct"] = float(DUST_TARGET_PCT)
             variant["dust_min_cell_usdt"] = str(minimum_cell_for_dust_limit(filters, mid))
         if edited is not None:
-            edited["minimum_cell_usdt"] = str(min_cell)
-            edited["min_cell_warning"] = minimum_cell_warning(body.capital, edited.get("n_levels"), min_cell)
+            edited["minimum_cell_usdt"] = str(manual_min_cell)
+            edited["min_cell_warning"] = minimum_cell_warning(body.capital, edited.get("n_levels"), manual_min_cell)
+            edited["functional_cell_warning"] = functional_cell_warning(body.capital, edited.get("n_levels"), min_cell, body.strategy)
             edited["dust_target_pct"] = float(DUST_TARGET_PCT)
             edited["dust_min_cell_usdt"] = str(minimum_cell_for_dust_limit(filters, mid))
     except Exception:
@@ -264,6 +267,8 @@ def structure_preview(request: Request, body: StructurePreviewRequest):
         "minimum_cell_usdt": str(min_cell),
         "min_cell_warning": minimum_cell_warning(body.capital,
             (edited or balanced_variant).get("n_levels"), min_cell),
+        "functional_cell_warning": functional_cell_warning(body.capital,
+            (edited or balanced_variant).get("n_levels"), min_cell, body.strategy),
         "dust_target_pct": float(DUST_TARGET_PCT),
         "dust_min_cell_usdt": str(minimum_cell_for_dust_limit(filters, mid)),
         "definitions": {

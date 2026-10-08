@@ -208,3 +208,23 @@ def test_unready_coin_event_is_once_per_state_and_repeats_after_state_change(mon
         "coin_not_ready:error",
     ]
     service.stop()
+
+
+def test_smart_auto_open_reduces_levels_to_functional_cell_floor(monkeypatch):
+    monkeypatch.setattr(auto_open_module, "coin_is_ready", lambda *_args: True)
+    cfg = settings(scanner_auto_open_strategy="smart", scanner_auto_open_max_per_run=1,
+                   scanner_auto_open_daily_cap=1, usdt_por_grid=100)
+    service, scanner, _engine, _db = setup(cfg)
+    smart_row = row("XRPUSDT")
+    smart_row["suggested_structure"]["n_levels"] = 18
+    scanner.scan = lambda **kwargs: {"results": [smart_row]}
+    captured = []
+    class CaptureEngine(Engine):
+        def create_grid(self, symbol, *args, **kwargs):
+            captured.append(args[2])
+            return super().create_grid(symbol, *args, **kwargs)
+    service.engine = CaptureEngine(service.db)
+    result = service.run_once()
+    service.stop()
+    assert len(result["opened"]) == 1
+    assert captured == [15]

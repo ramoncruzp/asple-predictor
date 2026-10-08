@@ -14,7 +14,8 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
                                   VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
 from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
-                            minimum_cell_threshold, minimum_cell_warning)
+                            minimum_cell_threshold, minimum_cell_warning,
+                            functional_cell_threshold, functional_cell_warning)
 from grid.sim.data import CandleData, ewma_sigma_24h
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
 from grid.range_risk import estimate_range_risk
@@ -242,16 +243,36 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     ceiling = resistance + profile["ceiling_atr"] * atr
     requested_vol_source = VOL_SOURCE
     forecast24 = None
+    forecast4 = None
     try:
         from api.routes.volatility import forecast as volatility_forecast
         model_forecast = volatility_forecast(request, symbol)
-        forecast24 = next(row for row in model_forecast["forecasts"]
-                          if int(row["horizon_h"]) == 24)
+        forecasts = model_forecast["forecasts"]
+        forecast24 = next((row for row in forecasts if int(row["horizon_h"]) == 24), None)
+        forecast4 = next((row for row in forecasts if int(row["horizon_h"]) == 4), None)
     except Exception:
         forecast24 = None
+        forecast4 = None
     volatility = _resolve_volatility_source(symbol, forecast24, requested_vol_source)
     sigma_realized_24h = float(np.std(np.diff(np.log(np.asarray(close, dtype=float))), ddof=1) * np.sqrt(24))
     sigma_24h = volatility["sigma_24h"] or sigma_realized_24h
+    recent_30d = np.asarray(close.tail(30 * 24), dtype=float)
+    sigma_realized_30d = (float(np.std(np.diff(np.log(recent_30d)), ddof=1) * np.sqrt(24))
+                          if days >= 30 and len(recent_30d) >= 30 * 24 else None)
+    sigma_champion_4h = (float(forecast4["move_1sigma_pct"]) / 100.0
+                         if forecast4 and not forecast4.get("stale")
+                         and forecast4.get("move_1sigma_pct") is not None else None)
+    sigma_surfaces = {
+        "realized_30d": {"value": sigma_realized_30d, "source": "realizada", "window": "30 d",
+                         "reason": None if sigma_realized_30d is not None else "no hay 30 d\u00EDas completos de velas horarias"},
+        "champion_24h": {"value": volatility.get("champion_sigma_24h"), "source": "campe\u00F3n",
+                         "window": "24 h", "reason": None if volatility.get("champion_sigma_24h") is not None
+                         else volatility.get("reason") or "pron\u00F3stico campe\u00F3n de 24 h no disponible"},
+        "champion_monitor_h": {"value": sigma_champion_4h, "source": "campe\u00F3n", "window": "4 h",
+                               "reason": None if sigma_champion_4h is not None
+                               else "pron\u00F3stico campe\u00F3n de 4 h ausente u obsoleto"},
+        "monitor_h": 4,
+    }
     vol_source_effective = volatility["effective"]
     source_label = {"campeon": "campeón", "consenso": "consenso"}.get(vol_source_effective)
     sigma_source = (f"pronóstico {source_label} {symbol} 24 h"
@@ -301,7 +322,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
             _market, filters = service._market(symbol, capital, service.clock() + float(request.app.state.settings.scanner_timeout_seconds))
         except Exception:
             filters = SIM_FILTERS
-    min_cell = minimum_cell_threshold(filters)
+    min_cell = functional_cell_threshold(filters, "smart")
     evaluation = None
     grids = MIN_LEVELS
     for count in range(MAX_LEVELS, MIN_LEVELS - 1, -1):
@@ -473,6 +494,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         "target_met": target_met,
         "estimated_cycles_to_target": target_cycles, "min_cell_usdt": str(min_cell),
         "min_cell_warning": minimum_cell_warning(capital, grids, min_cell),
+        "functional_cell_warning": functional_cell_warning(capital, grids, min_cell, "smart"),
         "range_warning": range_pct > profile["max_range_pct"],
         "range_structural": range_structural,
         "range_centered": centered,
@@ -491,6 +513,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
             "window_warning": simulation_meta["window_warning"],
             "resolution": simulation_resolution, "resync_minutes": resync_minutes,
             "strategies": simulations},
+        "sigma_surfaces": sigma_surfaces,
         "range_risk": {"sigma_24h": sigma_24h, "source": sigma_source,
             "horizons": range_risk,
             "disclaimer": "Estimación; las colas gruesas hacen que la probabilidad real pueda ser mayor; no validado más allá de 24 h; no es predicción de dirección."},

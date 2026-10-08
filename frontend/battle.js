@@ -107,7 +107,7 @@
 
   function render(payload) {
     state.payload = payload;
-    root().innerHTML = `<p class="battle-context"><strong>${esc(payload.context?.symbol || 'XRPUSDT')} \u00B7 ${esc(payload.context?.interval || '1h')}</strong><small>\u00DAnico par con modelos de direcci\u00F3n hoy</small></p><div class="battle-score-grid">${renderCards(payload)}</div>${renderMatrix(payload)}${renderRanking(payload)}${renderHistory(payload)}`;
+    root().innerHTML = `<p class="battle-context"><strong>${esc(payload.context?.symbol || 'XRPUSDT')} \u00B7 ${esc(payload.context?.interval || '1h')}</strong><small>\u00DAnico par con modelos de direcci\u00F3n hoy</small></p><p class="muted battle-score-disclaimer">Los puntajes de A, B y C no son probabilidades calibradas: reponderan las clases. En la auditor\u00EDa, el umbral 0,60 correspondi\u00F3 a \u224827 % real.</p><div class="battle-score-grid">${renderCards(payload)}</div>${renderMatrix(payload)}${renderRanking(payload)}${renderHistory(payload)}`;
   }
 
   function downloadCsv() {
