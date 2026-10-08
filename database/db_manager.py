@@ -62,6 +62,7 @@ class DBManager:
             Column("is_champion", Integer, nullable=False),
             Column("realized_logvol", Float),
             Column("verified_at", DateTime(timezone=True)),
+            Column("artifact_version", String, nullable=True),
             UniqueConstraint(
                 "symbol", "horizon_h", "model_name", "forecast_at",
                 name="uq_vol_forecasts_identity",
@@ -248,6 +249,7 @@ class DBManager:
         )
         self.metadata.create_all(self.engine)
         self._migrate_widen_columns()
+        self._migrate_vol_forecast_columns()
         self._seed_widen_defaults()
         self._migrate_grid_columns()
         with self.engine.begin() as conn:
@@ -309,6 +311,14 @@ class DBManager:
                     disagreement_pct_active=VOL_WIDEN_DISAGREEMENT_PCT,
                     status="settings", audit_actor="config:default",
                 ))
+
+    def _migrate_vol_forecast_columns(self) -> None:
+        """Add nullable forecast provenance without rewriting existing rows."""
+        if self.engine.dialect.name == "sqlite":
+            with self.engine.begin() as conn:
+                present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('vol_forecasts')")}
+                if "artifact_version" not in present:
+                    conn.exec_driver_sql("ALTER TABLE vol_forecasts ADD COLUMN artifact_version TEXT")
 
     def _migrate_grid_columns(self) -> None:
         """Idempotently add the approved 15B columns to existing SQLite databases."""
@@ -644,6 +654,7 @@ class DBManager:
             "pred_logvol_cal": float(row["pred_logvol_cal"]),
             "var_factor": float(row["var_factor"]),
             "is_champion": int(bool(row["is_champion"])),
+            "artifact_version": row.get("artifact_version"),
         } for row in rows]
         with self.engine.begin() as conn:
             if self.engine.dialect.name == "sqlite":
@@ -802,6 +813,17 @@ class DBManager:
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
 
+    def get_vol_forecast_version_counts(self, symbol: str, horizon_h: int) -> dict[str, int]:
+        statement = select(
+            self.vol_forecasts.c.artifact_version, func.count().label("n")
+        ).where(
+            self.vol_forecasts.c.symbol == symbol,
+            self.vol_forecasts.c.horizon_h == int(horizon_h),
+        ).group_by(self.vol_forecasts.c.artifact_version)
+        with self.engine.connect() as conn:
+            return {str(row["artifact_version"] or "legacy/null"): int(row["n"])
+                    for row in conn.execute(statement).mappings()}
+
     def get_vol_model_stats_rows(self, symbol: str, horizon_h: int) -> list[dict]:
         """Return a bounded rolling window plus all rows still awaiting maturity."""
         from models.volatility.model_stats import N_MIN, ROLLING_VERIFICATIONS
@@ -849,7 +871,7 @@ class DBManager:
         err = f.pred_logvol_cal - f.realized_logvol
         pred_var = func.exp(2.0 * f.pred_logvol_cal)
         actual_var = func.exp(2.0 * f.realized_logvol)
-        ratio_each = pred_var / actual_var
+        ratio_each = actual_var / pred_var
         columns = [f.model_name.label("model_name"), func.count().label("n"),
                    func.avg(err).label("bias_mean"), func.avg(err * err).label("mse"),
                    func.avg(func.abs(err)).label("mae"), func.avg(pred_var).label("pred_var"),
@@ -876,7 +898,7 @@ class DBManager:
                 sigma = sigma_refs.get(model)
                 hit1 = int(row.get(f"{model}_hit1") or 0) if sigma is not None else 0
                 hit2 = int(row.get(f"{model}_hit2") or 0) if sigma is not None else 0
-                ratio = (float(row["pred_var"]) / float(row["actual_var"])) if row["actual_var"] else None
+                ratio = (float(row["actual_var"]) / float(row["pred_var"])) if row["pred_var"] else None
                 result[model] = {
                     "n": n, "mse": float(row["mse"]), "mae": float(row["mae"]),
                     "qlike": float(row["qlike"]), "var_ratio": ratio,

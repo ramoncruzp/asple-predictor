@@ -184,8 +184,9 @@ def plan_loan(
         if step <= 0:
             return None
         valid_min_qty = (minimum_qty / step).to_integral_value(rounding=ROUND_CEILING) * step
-        margin = _d(params["loan_min_margin"])
-        required_remaining = max(_d(min_notional) * margin, valid_min_qty * price)
+        min_notional_qty = (_d(min_notional) / price / step).to_integral_value(
+            rounding=ROUND_CEILING) * step
+        required_remaining = max(min_notional_qty, valid_min_qty) * price
         lender_available = min(
             lender_capital * _d(params["loan_lender_max_pct"]) / 100,
             max(Decimal(0), lender_capital - required_remaining),

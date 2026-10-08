@@ -34,7 +34,7 @@ def _all_grids(db):
 
 
 def _bootstrap_cohort_comparison(cohort_values, control_values, *, seed=20260908, draws=2000,
-                                 excluded_cohort=0, excluded_control=0):
+                                 excluded_cohort=0, excluded_control=0, cohort_loans_created=0):
     n_cohort, n_control = len(cohort_values), len(control_values)
     result = {"diff_pct_per_day": None, "ci_low": None, "ci_high": None,
               "n_cohort": n_cohort, "n_control": n_control,
@@ -60,7 +60,11 @@ def _bootstrap_cohort_comparison(cohort_values, control_values, *, seed=20260908
         weight = position - lower
         return boot_differences[lower] * (1 - weight) + boot_differences[upper] * weight
     result["ci_low"], result["ci_high"] = percentile(0.025), percentile(0.975)
-    if n_cohort < 2 or n_control < 2:
+    if n_cohort < 10 or n_control < 10:
+        result["reason"] = "muestra insuficiente"
+        return result
+    if cohort_loans_created <= 0:
+        result["reason"] = "sin préstamos creados"
         return result
     if result["ci_low"] <= 0 <= result["ci_high"]:
         result["reason"] = "el IC incluye 0"
@@ -521,10 +525,12 @@ def loans_summary(request: Request):
     comparisons = {
         "loans_vs_control": _bootstrap_cohort_comparison(
             cohort_samples["loans"], cohort_samples["control"], seed=20260908,
-            excluded_cohort=cohort_excluded["loans"], excluded_control=cohort_excluded["control"]),
+            excluded_cohort=cohort_excluded["loans"], excluded_control=cohort_excluded["control"],
+            cohort_loans_created=groups["loans"]["loans_created"]),
         "loans_v2_vs_control": _bootstrap_cohort_comparison(
             cohort_samples["loans_v2"], cohort_samples["control"], seed=20260909,
-            excluded_cohort=cohort_excluded["loans_v2"], excluded_control=cohort_excluded["control"]),
+            excluded_cohort=cohort_excluded["loans_v2"], excluded_control=cohort_excluded["control"],
+            cohort_loans_created=groups["loans_v2"]["loans_created"]),
     }
     comparison_note = ("P&L realizado por capital y d\u00edas abiertos con m\u00ednimo de 1 d\u00eda; no ajusta tama\u00f1o de celda ni moneda. "
         "Observacional: el grupo control se asigna en cada 3.er grid. Los grids excluidos por "

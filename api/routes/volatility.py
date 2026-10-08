@@ -316,6 +316,7 @@ def model_stats(
             name = model["model_name"]
             model["bias_log"] = (model.get("all") or {}).get("bias_mean")
             model["var_ratio"] = (model.get("all") or {}).get("var_ratio")
+            model["qlike"] = (model.get("all") or {}).get("qlike")
             model["peso_actual"] = (
                 adaptive.get("P", {}).get(name, 0.0)
                 if model["estado"] == "activo" and name in adaptive.get("eligible", [])
@@ -325,11 +326,14 @@ def model_stats(
             model["peso_p2"] = adaptive.get("P2", {}).get(name, 0.0)
             model["fuente_pesos"] = adaptive.get("source", "val")
             model["razon_peso"] = (
-                "acumulando: requiere 30 verificaciones y MSE no superior a Persistence"
+                "acumulando: requiere 30·H verificaciones y MSE no superior a Persistence"
                 if model["estado"] != "activo" or name not in adaptive.get("eligible", [])
                 or adaptive.get("source") != "vivo"
                 else None
             )
+        version_query = getattr(request.app.state.db, "get_vol_forecast_version_counts", None)
+        stats["artifact_version_counts"] = (version_query(symbol, current_horizon)
+                                               if version_query else {})
         stats["horizon_h"] = current_horizon
         stats["symbol"] = symbol
         stats["n_min"] = N_MIN

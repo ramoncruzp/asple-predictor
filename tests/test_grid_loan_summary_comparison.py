@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import api.routes.grids as grids_api
 
 
-def _summary(monkeypatch, cohort_pnls, control_pnls, zero_day_ids=(), duration_days_by_id=None):
+def _summary(monkeypatch, cohort_pnls, control_pnls, zero_day_ids=(), duration_days_by_id=None, loans_by_group=None):
     rows = []
     pnl_by_id = {}
     next_id = 1
@@ -21,7 +21,9 @@ def _summary(monkeypatch, cohort_pnls, control_pnls, zero_day_ids=(), duration_d
     class DB:
         def get_grid_levels(self, grid_id):
             return [{"pnl": pnl_by_id[grid_id], "cycles_completed": 2, "fee_paid": 0.5}]
-        def list_grid_loans(self, grid_id): return []
+        def list_grid_loans(self, grid_id):
+            group = next(row["params"]["loans_group"] for row in rows if row["id"] == grid_id)
+            return [{"status": "OPEN"}] * int((loans_by_group or {}).get(group, 0))
     monkeypatch.setattr(grids_api, "_authorize", lambda _request: None)
     monkeypatch.setattr(grids_api, "_all_grids", lambda _db: rows)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=DB())))
@@ -29,8 +31,8 @@ def _summary(monkeypatch, cohort_pnls, control_pnls, zero_day_ids=(), duration_d
 
 
 def test_bootstrap_cohort_comparison_is_reproducible_and_reports_small_sample(monkeypatch):
-    result1 = _summary(monkeypatch, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    result2 = _summary(monkeypatch, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    result1 = _summary(monkeypatch, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], loans_by_group={"loans": 1})
+    result2 = _summary(monkeypatch, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], loans_by_group={"loans": 1})
     pair1 = result1["cohort_comparisons"]["loans_vs_control"]
     pair2 = result2["cohort_comparisons"]["loans_vs_control"]
     assert pair1 == pair2
@@ -52,7 +54,7 @@ def test_one_grid_per_cohort_is_not_conclusive_and_marks_small_sample(monkeypatc
 
 
 def test_separated_ten_grid_cohorts_can_be_conclusive(monkeypatch):
-    result = _summary(monkeypatch, [100] * 10, [0] * 10)
+    result = _summary(monkeypatch, [100] * 10, [0] * 10, loans_by_group={"loans": 1})
     pair = result["cohort_comparisons"]["loans_vs_control"]
     assert pair["n_cohort"] == pair["n_control"] == 10
     assert pair["ci_low"] > 0
@@ -97,3 +99,10 @@ def test_three_day_grid_uses_actual_three_days_for_cohort_metric(monkeypatch):
     result = _summary(monkeypatch, [30], [0], duration_days_by_id={1: 3})
     pair = result["cohort_comparisons"]["loans_vs_control"]
     assert pair["diff_pct_per_day"] == 1.0
+
+
+def test_separated_cohorts_without_actual_loan_are_not_conclusive(monkeypatch):
+    result = _summary(monkeypatch, [100] * 10, [0] * 10)
+    pair = result["cohort_comparisons"]["loans_vs_control"]
+    assert pair["conclusive"] is False
+    assert pair["reason"] == "sin préstamos creados"

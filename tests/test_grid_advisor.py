@@ -176,8 +176,15 @@ def test_advisor_widens_only_low_dispersion_and_bias_is_informational(monkeypatc
     assert low["range_centered"]["sigma_widen_factor"] == pytest.approx(1.25)
     assert low["volatility_advisory"]["bias_alerts"] == [{"model_name":"NexoHAR","direction":"sobreestima"}]
     assert low["volatility_advisory"]["accumulating_models"] == [
-        {"model_name":"NexoHAR","n_verificadas":10,"n_min":30}]
+        {"model_name":"NexoHAR","n_verificadas":10,"n_min":720}]
     assert low["volatility_advisory"]["show_comparison"] is True
+    monkeypatch.setattr(volatility_route, "model_stats", lambda *a, **k: _stats_response(False, n=400))
+    still_accumulating = make_client().get("/api/grid/recommend", query={"symbol":"XRPUSDT", "range_mode":"estructural"}).body
+    assert still_accumulating["volatility_advisory"]["accumulating_models"] == [
+        {"model_name":"NexoHAR", "n_verificadas":400, "n_min":720}]
+    monkeypatch.setattr(volatility_route, "model_stats", lambda *a, **k: _stats_response(False, n=720))
+    enough = make_client().get("/api/grid/recommend", query={"symbol":"XRPUSDT", "range_mode":"estructural"}).body
+    assert enough["volatility_advisory"]["accumulating_models"] == []
     assert low["range_risk"]["horizons"]["24"]["vol_source_effective"] == "consenso"
     low_sigma = low["range_risk"]["sigma_24h"]
     monkeypatch.setattr(volatility_route, "model_stats", lambda *a, **k: _stats_response(False))

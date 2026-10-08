@@ -590,7 +590,6 @@ class GridMonitor:
                         if adjust.action == "ADJUST" and decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}:
                             decision = adjust
                         elif adjust.action == "BLOCKED":
-                            decision = decision if decision.action == "CLOSE_REPOSITORY" else decision
                             blocked_reason = ",".join(adjust.reasons) or "plan_invalid"
                             recent = self.db.list_grid_events(grid_id=grid_id, event_type="ADJUST_BLOCKED", limit=100)
                             already_logged = any(

@@ -212,3 +212,10 @@ def test_vol_training_request_validation_and_artifacts_endpoint(tmp_path, monkey
     assert artifacts_response.json() == {"symbol":"XRPUSDT","artifact_trained_at":"disk-time","loaded_trained_at":"loaded-time",
         "data_range":{"start":"a","end":"b"},"consensus":{"created_at":"study-time","source_csv":"xrp_5m.csv","source_csv_sha256_short":"123456789abc"}}
 
+
+
+def test_training_data_loader_rejects_missing_five_minute_source(tmp_path):
+    hourly = tmp_path / "hourly.csv"
+    pd.DataFrame({"timestamp": ["2026-01-01T00:00:00Z"], "close": [1.0]}).to_csv(hourly, index=False)
+    with pytest.raises(ValueError, match="Falta el CSV de velas de 5 min"):
+        trainer._load_data(hourly, None)

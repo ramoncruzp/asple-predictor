@@ -40,7 +40,7 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "loan_cooldown_cycles": 2,
     "loan_min_margin": 1.1,
     "loan_cap_pct": 30.0,
-    "loan_min_amount": 1.0,
+    "loan_min_amount": 0.2,
 }
 DEFAULT_GRID_FEE_PCT = 0.1
 PROFIT_CLOSE_RETRY_MAX = 8

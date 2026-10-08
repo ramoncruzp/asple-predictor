@@ -95,6 +95,8 @@ def validate_refresh_csv(path: Path, interval: str, min_rows: int, *, now=None) 
 
 
 def _load_data(candles_path: Path, candles_5m_path: Path | None):
+    if candles_5m_path is None or not Path(candles_5m_path).is_file():
+        raise ValueError("Falta el CSV de velas de 5 min; no se entrenará con respaldo de 1 h")
     candles = pd.read_csv(candles_path)
     for column in ("timestamp", "close_time"):
         if column in candles:
@@ -145,6 +147,7 @@ def _train_volatility_models_impl(
         "symbol": symbol,
         "trained_at": trained_at.isoformat(),
         "data_range": {"start": hourly_times.min().isoformat(), "end": hourly_times.max().isoformat()},
+        "used_intraday": intraday is not None,
         "horizons": {},
     }
     if symbol == VOL_SYMBOL:

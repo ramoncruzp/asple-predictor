@@ -173,14 +173,15 @@ def _model_volatility_advisories(request, selection, forecast24, symbol=VOL_SYMB
     except Exception:
         return [], []
     accumulating, bias_alerts = [], []
-    from models.volatility.model_stats import N_MIN
+    from models.volatility.model_stats import minimum_effective_verifications
     for name in model_names:
         item = by_name.get(name)
         if item is None:
             continue
         n = int(item.get("n_verificadas") or 0)
-        if n < N_MIN:
-            accumulating.append({"model_name": name, "n_verificadas": n, "n_min": N_MIN})
+        n_min = minimum_effective_verifications(24)
+        if n < n_min:
+            accumulating.append({"model_name": name, "n_verificadas": n, "n_min": n_min})
         if item.get("bias_alert"):
             bias = (item.get("all") or {}).get("bias_mean")
             bias_alerts.append({"model_name": name,

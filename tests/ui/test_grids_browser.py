@@ -246,7 +246,7 @@ def test_dashboard_shows_model_stats_accumulating_and_active(live_server, ui_pag
     ui_page.goto(f"{live_server.url}/#dashboard")
     expect(ui_page.locator("#vol-model-stats")).to_contain_text("Modelos y ponderación 4h")
     expect(ui_page.locator("#vol-model-stats")).to_contain_text("GBM")
-    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Errores dentro de 1\u03c3 / 2\u03c3 (log-vol)")
+    expect(ui_page.locator("#vol-model-stats")).to_contain_text("Errores dentro de 1\u03c3 / 2\u03c3 (log-vol; no varianza)")
     expect(ui_page.locator("#vol-model-stats")).to_contain_text("Sobre/Sub %")
     expect(ui_page.locator("#vol-model-stats")).to_contain_text("60.0% / 40.0%")
     expect(ui_page.locator("#vol-model-stats")).to_contain_text("Sesgo sostenido (revisar)")
@@ -962,7 +962,7 @@ def test_dashboard_shows_b_and_c_as_comparison_only_not_validated_models(live_se
     ui_page.goto(f"{live_server.url}/#dashboard")
     expect(ui_page.locator(".model-card.model-b")).to_contain_text("No validado")
     expect(ui_page.locator(".model-card.model-c")).to_contain_text("No validado")
-    expect(ui_page.locator("#consensus-card .eyebrow")).to_have_text("PROBABILIDAD DEL MODELO A")
+    expect(ui_page.locator("#consensus-card .eyebrow")).to_have_text("PUNTAJE DEL MODELO A")
     expect(ui_page.locator("#consensus-card .big-prob")).to_have_text("62.00%")
     assert_no_js_errors(ui_page)
 

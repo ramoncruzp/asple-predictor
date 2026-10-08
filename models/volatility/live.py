@@ -161,6 +161,7 @@ class VolPredictor:
                         "pred_logvol_cal": raw_value + 0.5 * float(np.log(var_factor)),
                         "var_factor": var_factor,
                         "is_champion": champion,
+                        "artifact_version": self.manifest.get("artifact_version") or self.manifest.get("trained_at"),
                         "price": float(hourly.iloc[latest_index]["close"]),
                     })
                 except Exception:

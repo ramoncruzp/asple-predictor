@@ -87,6 +87,7 @@ def test_training_produces_artifact_and_manifest_on_synthetic_data(tmp_path):
     loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert loaded["horizons"]["1"]["Persistence"]["var_factor"] > 0.0
     assert loaded["horizons"]["1"]["Persistence"]["r2_cal"] is not None
+    assert loaded["used_intraday"] is True
     assert "p33" in manifest["regime_percentiles_24h"]
     assert "p66" in manifest["regime_percentiles_24h"]
 

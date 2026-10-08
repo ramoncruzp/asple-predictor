@@ -13,7 +13,7 @@ from database.db_manager import DBManager
 from models.volatility.model_stats import (
     MAX_MODEL_WEIGHT, N_MIN, adaptive_weight_history, calculate_model_stats,
     capped_normalize, dispersion_bucket, forward_consensus_metrics, is_mature_verified,
-    LIVE_VALIDATION_MIN_EFFECTIVE,
+    LIVE_VALIDATION_MIN_EFFECTIVE, minimum_effective_verifications, _metrics,
 )
 
 
@@ -340,7 +340,8 @@ def test_capped_normalize_limits_single_model_dominance():
 def test_model_stats_api_returns_accumulating_for_empty_symbol_horizon():
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         vol_predictor=SimpleNamespace(symbol="XRPUSDT"), vol_loop=SimpleNamespace(latest={}),
-        db=SimpleNamespace(get_vol_model_stats_rows=lambda symbol, horizon: []),
+        db=SimpleNamespace(get_vol_model_stats_rows=lambda symbol, horizon: [],
+                           get_vol_forecast_version_counts=lambda symbol, horizon: {"legacy/null": 2}),
     )))
     body = model_stats(request, symbol="XRPUSDT", horizon=4)
     horizon = body["horizons"][0]
@@ -351,6 +352,7 @@ def test_model_stats_api_returns_accumulating_for_empty_symbol_horizon():
                and model["peso_actual"] == 0 for model in horizon["models"])
     assert horizon["adaptive"]["source"] == "val"
     assert horizon["forward"]["outcomes_used"] == 0
+    assert horizon["artifact_version_counts"] == {"legacy/null": 2}
 
 
 def test_model_stats_cache_is_keyed_by_horizon_and_invalidated_by_latest_forecast(monkeypatch):
@@ -402,3 +404,36 @@ def test_forecast_applies_saved_p_variance_factor_only_when_marked_applied(tmp_p
     assert consensus["validation_status_live"] == "en_evaluacion"
     assert consensus["validation_status"] == "not_validated"
     assert consensus["sigma_pct"] == pytest.approx(100 * exp(-5) * 1.1)
+
+
+
+def test_var_ratio_and_qlike_use_variance_scale():
+    rows = [
+        {"pred_logvol_cal": 0.0, "realized_logvol": 0.0},
+        {"pred_logvol_cal": 0.0, "realized_logvol": 0.5},
+    ]
+    result = _metrics(rows, None)
+    assert result["var_ratio"] == pytest.approx((1 + exp(1)) / 2)
+    assert result["qlike"] == pytest.approx((0 + (exp(1) - 1 - 1)) / 2)
+    perfect = _metrics([{"pred_logvol_cal": .2, "realized_logvol": .2}], None)
+    assert perfect["var_ratio"] == pytest.approx(1)
+    assert perfect["qlike"] == pytest.approx(0)
+
+
+def test_effective_verification_threshold_uses_horizon_and_168_floor():
+    assert minimum_effective_verifications(1) == 168
+    assert minimum_effective_verifications(24) == 720
+
+
+def test_vol_forecast_artifact_version_is_nullable_and_counted(tmp_path):
+    db = DBManager(f"sqlite:///{tmp_path / 'artifact-version.sqlite'}")
+    db._migrate_vol_forecast_columns()
+    db._migrate_vol_forecast_columns()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = {"symbol": "XRPUSDT", "horizon_h": 4, "model_name": "GBM",
+        "forecast_at": now, "made_at": now, "pred_logvol_raw": -.1,
+        "pred_logvol_cal": -.1, "var_factor": 1.0, "is_champion": True}
+    assert db.save_vol_forecasts([base]) == 1
+    versioned = dict(base, forecast_at=now + timedelta(hours=1), artifact_version="model-v2")
+    assert db.save_vol_forecasts([versioned]) == 1
+    assert db.get_vol_forecast_version_counts("XRPUSDT", 4) == {"legacy/null": 1, "model-v2": 1}

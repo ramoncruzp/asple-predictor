@@ -220,7 +220,7 @@
         const interval = comparison.ci_low == null || comparison.ci_high == null ? 'IC 95%: \u2014'
           : `IC 95% [${Number(comparison.ci_low).toFixed(2)}%; ${Number(comparison.ci_high).toFixed(2)}%]`;
         const smallSample = comparison.small_sample ? ' \u00b7 muestra peque\u00f1a' : '';
-        return `<span>${esc(cohort)} vs control: ${status}; \u0394 ${difference}; ${interval}; n=${comparison.n_cohort}/${comparison.n_control}${smallSample}</span>`;
+        return `<span>${esc(cohort)} vs control: ${status}; \u0394 ${difference}; ${interval}; n=${comparison.n_cohort}/${comparison.n_control}; ${esc(comparison.reason || 'muestra suficiente')}${smallSample}</span>`;
       }).join(' \u00b7 ')
       : '';
     const comparisonNote = loanSummary?.comparison_note ? ` ${esc(loanSummary.comparison_note)}` : '';

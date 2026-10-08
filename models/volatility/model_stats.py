@@ -19,6 +19,11 @@ MIN_LIVE_ELIGIBLE = 3
 LIVE_VALIDATION_MIN_EFFECTIVE = 50
 
 
+def minimum_effective_verifications(horizon_h: int) -> int:
+    """Raw rows needed for at least 30 horizon-adjusted observations and 168 rows."""
+    return max(ROLLING_VERIFICATIONS, N_MIN * max(1, int(horizon_h)))
+
+
 def as_utc(value):
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -51,7 +56,7 @@ def _metrics(rows, sigma_ref):
     errors = np.asarray([float(r["pred_logvol_cal"]) - float(r["realized_logvol"]) for r in rows])
     predicted_var = np.exp(2.0 * np.asarray([float(r["pred_logvol_cal"]) for r in rows]))
     realized_var = np.exp(2.0 * np.asarray([float(r["realized_logvol"]) for r in rows]))
-    ratio = predicted_var / realized_var
+    ratio = realized_var / predicted_var
     qlike = float(np.mean(ratio - np.log(ratio) - 1.0))
     abs_error = np.abs(errors)
     hit1 = int(np.sum(abs_error <= sigma_ref)) if sigma_ref is not None else 0
@@ -59,7 +64,7 @@ def _metrics(rows, sigma_ref):
     over = int(np.sum(errors > 0))
     under = int(np.sum(errors < 0))
     return {"n": n, "mse": float(np.mean(errors ** 2)), "mae": float(np.mean(abs_error)),
-            "qlike": qlike, "var_ratio": float(np.mean(predicted_var) / np.mean(realized_var)),
+            "qlike": qlike, "var_ratio": float(np.mean(realized_var) / np.mean(predicted_var)),
             "bias_mean": float(np.mean(errors)), "over_pct": over * 100.0 / n,
             "under_pct": under * 100.0 / n, "success_1sigma": hit1,
             "success_2sigma": hit2, "failures": n - hit2 if sigma_ref is not None else 0,
