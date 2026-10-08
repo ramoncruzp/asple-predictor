@@ -2,6 +2,7 @@
 
 import json
 import re
+import threading
 from pathlib import Path
 
 TARGET_HORIZON_CANDLES = 4
@@ -23,6 +24,8 @@ VOL_MODELS = [
 ]
 VOL_CHAMPIONS = {1: "GBM", 2: "GBM", 4: "GBM", 24: "NexoHAR"}
 VOL_ARTIFACT_DIR = "models/saved/vol"
+_VOL_CONSENSUS_CACHE: dict[str, tuple[tuple[int, int] | None, dict | None]] = {}
+_VOL_CONSENSUS_LOCK = threading.Lock()
 
 
 def load_vol_consensus(symbol: str) -> dict | None:
@@ -30,21 +33,35 @@ def load_vol_consensus(symbol: str) -> dict | None:
     if symbol == VOL_SYMBOL:
         return None
     path = vol_consensus_path(symbol)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
-        return None
-    horizons = payload["report"].get("horizons", {})
-    if payload.get("symbol") != symbol or not isinstance(horizons, dict):
-        return None
-    if not all(str(h) in horizons for h in VOL_HORIZONS):
-        return None
-    if any(not isinstance(horizons[str(h)], dict) or horizons[str(h)].get("champion") not in VOL_MODELS
-           for h in VOL_HORIZONS):
-        return None
-    return payload
+    with _VOL_CONSENSUS_LOCK:
+        try:
+            stat = path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        cached = _VOL_CONSENSUS_CACHE.get(symbol)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            payload = None
+        if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
+            _VOL_CONSENSUS_CACHE[symbol] = (signature, None)
+            return None
+        horizons = payload["report"].get("horizons", {})
+        if payload.get("symbol") != symbol or not isinstance(horizons, dict):
+            _VOL_CONSENSUS_CACHE[symbol] = (signature, None)
+            return None
+        if not all(str(h) in horizons for h in VOL_HORIZONS):
+            _VOL_CONSENSUS_CACHE[symbol] = (signature, None)
+            return None
+        if any(not isinstance(horizons[str(h)], dict) or horizons[str(h)].get("champion") not in VOL_MODELS
+               for h in VOL_HORIZONS):
+            _VOL_CONSENSUS_CACHE[symbol] = (signature, None)
+            return None
+        _VOL_CONSENSUS_CACHE[symbol] = (signature, payload)
+        return payload
 
 
 def vol_champions(symbol: str) -> tuple[dict[int, str], bool]:

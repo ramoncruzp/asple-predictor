@@ -40,7 +40,7 @@ class UIServer:
     secondary_grid_id: int
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def chromium_browser():
     with playwright_sync.sync_playwright() as playwright:
         try:

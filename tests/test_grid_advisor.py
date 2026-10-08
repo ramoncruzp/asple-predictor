@@ -413,8 +413,23 @@ def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog
     assert response["simulations"]["resync_minutes"] == 180
     assert "symbol=ADAUSDT days=90" in caplog.text
     assert "simulated 5m download failure" in caplog.text
+    assert any(record.name == grid_advisor.__name__ and record.exc_info for record in caplog.records)
     assert captured and all(kwargs["resync_candles"] == 3 for kwargs in captured)
     assert all(kwargs["sigma_values"] is None for kwargs in captured)
+
+
+def test_missing_hourly_simulation_window_is_info_without_traceback(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=grid_advisor.__name__)
+    monkeypatch.setattr(grid_advisor, "_simulation_window", lambda *_: (None, {"sim_start": None,
+        "sim_days": 0, "window_warning": "no entry"}))
+    response = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+        "risk": "low", "range_mode": "estructural"}).body
+    assert response["simulations"]["resolution"] == "1h"
+    assert "simulaci\u00f3n aproximada: velas de 1 h" in response["simulations"]["window_warning"]
+    fallback_logs = [record for record in caplog.records if record.name == grid_advisor.__name__
+                     and "Advisor 5m fallback" in record.message]
+    assert len(fallback_logs) == 1 and fallback_logs[0].levelname == "INFO"
+    assert fallback_logs[0].exc_info is None
 
 
 def test_5m_download_over_25_seconds_falls_back(monkeypatch, caplog):

@@ -134,3 +134,16 @@ def test_battle_chart_keeps_final_ticks_inside_narrow_viewport(ui_page, live_ser
     }""")
     assert result["offset"] >= 8
     assert result["width"] <= result["viewport"]
+
+
+def test_battle_notes_when_history_reaches_the_100_row_limit(ui_page, live_server):
+    _battle(ui_page, live_server)
+    ui_page.evaluate("""() => window.BattlePageTest.render({status:{models:[{model_name:'model_a'}]},
+      context:{symbol:'XRPUSDT',interval:'1h',models:{}},conditions:{},history:Array.from({length:120},(_,i)=>({
+        predicted_at:`2026-10-06T12:${String(i%60).padStart(2,'0')}:00Z`,symbol:'XRPUSDT',model_name:'model_a',
+        signal:'ALCISTA',probability_up:.7,is_verified:true,was_correct:true}))})""")
+    for _ in range(3):
+        ui_page.locator("[data-battle-more]").click()
+    expect(ui_page.locator("#battle-content > section:last-of-type tbody tr")).to_have_count(100)
+    expect(ui_page.locator("[data-battle-limit-note]")).to_have_text("Mostrando las últimas 100")
+    assert ui_page.locator("[data-battle-more]").count() == 0

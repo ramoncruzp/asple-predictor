@@ -252,11 +252,25 @@ def test_volatility_presentation_separates_labels_values_and_notes(ui_page, live
     assert re.search(r"Campeón\s+GBM\s+σ 0\.79%", rendered["summary"])
     assert re.search(r"Fuente efectiva de pesos\s+vivo\s+Confianza de pesos: alta", rendered["summary"])
     assert "Validaci\u00f3n en vivo" in rendered["summary"] and "En evaluaci\u00f3n" in rendered["summary"]
+    assert "VOL_SOURCE" not in rendered["summary"] and "no expuesto por el endpoint" not in rendered["summary"]
     assert "en_evaluacion" not in rendered["summary"]
     assert re.search(r"Cobertura en vivo 4h\s+1σ", rendered["coverage"])
     assert re.search(r"Factor de ampliación\s+activo", rendered["factor"])
     assert rendered["summaryDisplay"] == "flex"
     assert rendered["factorDisplay"] == "grid"
+
+
+def test_volatility_chart_label_explains_hourly_sigma_and_four_hour_conversion(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    title = ui_page.evaluate("""() => {
+      const chart=document.createElement('div'); chart.id='models-vol-history'; chart.style.width='320px'; document.body.append(chart);
+      document.body.insertAdjacentHTML('beforeend','<p id="models-vol-history-empty"></p>');
+      const titles=[];
+      window.LightweightCharts={createChart(){return {addLineSeries(options){titles.push(options.title);return {setData(){}}},timeScale(){return {fitContent(){}}}}}};
+      window.ModelsPageTest.renderVolHistory([{forecast_at:'2026-10-06T15:00:00Z',pred_vol_pct:2,realized_vol_pct:3}],4,'champion');
+      return titles[0];
+    }""")
+    assert "σ/h" in title and "σ 4h = σ/h × √4" in title
 
 
 def test_vol_training_has_own_card_and_volatility_specific_dialog(ui_page, live_server):
@@ -405,6 +419,8 @@ def test_models_page_selector_horizon_and_apply_confirmation(live_server, ui_pag
     expect(ui_page.locator("#models-vol-table tbody tr").first).to_contain_text("GBM")
     expect(qlike).to_contain_text("▲")
     expect(ui_page.locator("#models-vol-live-table")).to_contain_text("Activo")
+    live_identity = ui_page.locator("#models-vol-live-table tbody tr td:nth-child(2)").first.inner_text()
+    assert "GBMCampeón" not in live_identity and "Campeón" in live_identity and "Volatilidad" in live_identity
     expect(ui_page.locator("#models-vol-history-empty")).to_contain_text("Historial: error de red")
     expect(ui_page.locator("#models-vol-history")).not_to_contain_text("Cargando")
     expect(ui_page.locator("#models-vol-short-history")).to_contain_text("Historial: error de red")

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import config.models_config as models_config
 import models.volatility.live as live_module
 import scripts.train_vol_models as trainer
 from config.models_config import VOL_ARTIFACT_DIR, vol_artifact_dir, vol_base, vol_consensus_path, vol_manifest_path
@@ -92,6 +93,33 @@ def test_symbol_paths_validation_and_xrp_cli_defaults():
             vol_base(symbol)
 
 
+def test_consensus_cache_reuses_json_until_mtime_changes(tmp_path, monkeypatch):
+    path = tmp_path / "consensus_ada.json"
+    def payload(champion):
+        return {"symbol": "ADAUSDT", "report": {"horizons": {
+            str(h): {"champion": champion} for h in models_config.VOL_HORIZONS
+        }}}
+    path.write_text(json.dumps(payload("GBM")), encoding="utf-8")
+    monkeypatch.setattr(models_config, "vol_consensus_path", lambda _symbol: path)
+    models_config._VOL_CONSENSUS_CACHE.clear()
+    original_read = Path.read_text
+    reads = []
+    def counted_read(target, *args, **kwargs):
+        if target == path:
+            reads.append(target)
+        return original_read(target, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    first = models_config.load_vol_consensus("ADAUSDT")
+    assert models_config.load_vol_consensus("ADAUSDT") is first
+    assert len(reads) == 1
+    path.write_text(json.dumps(payload("HAR")), encoding="utf-8")
+    changed_ns = path.stat().st_mtime_ns + 2_000_000_000
+    os.utime(path, ns=(changed_ns, changed_ns))
+    updated = models_config.load_vol_consensus("ADAUSDT")
+    assert updated["report"]["horizons"]["1"]["champion"] == "HAR"
+    assert len(reads) == 2
+
+
 def test_refresh_paths_and_min_days_are_symbol_scoped_and_offline(tmp_path, monkeypatch):
     calls, validations, trained = [], [], []
     cache = tmp_path / "cache"
@@ -147,6 +175,7 @@ def test_ada_cli_training_writes_only_ada_artifacts_and_preserves_xrp(tmp_path, 
     assert (ada_dir / "manifest_ada.json").is_file()
     assert (ada_dir / "Persistence_1h.joblib").is_file()
     assert json.loads((ada_dir / "manifest_ada.json").read_text(encoding="utf-8"))["symbol"] == "ADAUSDT"
+    assert "champions" not in json.loads((ada_dir / "manifest_ada.json").read_text(encoding="utf-8"))
     xrp_after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in artifact_root.iterdir() if p.is_file()}
     assert xrp_after == xrp_before
     assert {p.name for p in ada_dir.iterdir()} == {"manifest_ada.json", "Persistence_1h.joblib"}

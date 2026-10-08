@@ -145,9 +145,10 @@ def _train_volatility_models_impl(
         "symbol": symbol,
         "trained_at": trained_at.isoformat(),
         "data_range": {"start": hourly_times.min().isoformat(), "end": hourly_times.max().isoformat()},
-        "champions": {str(key): value for key, value in VOL_CHAMPIONS.items()},
         "horizons": {},
     }
+    if symbol == VOL_SYMBOL:
+        manifest["champions"] = {str(key): value for key, value in VOL_CHAMPIONS.items()}
     pending_artifacts: list[tuple[Path, Path]] = []
 
     for horizon in horizons:

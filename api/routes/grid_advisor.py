@@ -351,7 +351,11 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
                                    if window_5m is not None else None)
         simulation_resolution = "5m"
     except Exception as exc:
-        logger.warning("Advisor 5m fallback for symbol=%s days=%s", symbol, days, exc_info=True)
+        if (simulation_window_1h is None and isinstance(exc, ValueError)
+                and str(exc) == "no hay inicio de ventana horaria para acotar la descarga"):
+            logger.info("Advisor 5m fallback for symbol=%s days=%s: no hourly simulation window", symbol, days)
+        else:
+            logger.warning("Advisor 5m fallback for symbol=%s days=%s", symbol, days, exc_info=True)
         fallback_notice = "simulaci\u00f3n aproximada: velas de 1 h"
         prior_warning = simulation_meta_1h.get("window_warning")
         simulation_meta = {**simulation_meta_1h,
