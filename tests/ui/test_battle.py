@@ -30,6 +30,15 @@ def test_battle_cards_explain_zero_signals_unavailable_and_unconfigured_models(u
     assert "XGBoost" in result["cards"] and "model_d" not in result["cards"]
 
 
+def test_battle_cards_show_unverifiable_late_count(ui_page, live_server):
+    _battle(ui_page, live_server)
+    cards = ui_page.evaluate("""() => window.BattlePageTest.renderCards({
+      status:{models:[{model_name:'model_a',available:true}]},
+      context:{models:{model_a:{n_unverifiable_late:3}}}
+    })""")
+    assert f"3 no verificables tard{chr(237)}as" in cards
+
+
 def test_battle_restores_validation_tooltips_winners_and_signal_chips(ui_page, live_server):
     _battle(ui_page, live_server)
     result = ui_page.evaluate("""() => {

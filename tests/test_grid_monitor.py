@@ -338,12 +338,37 @@ def test_monitor_uses_per_symbol_horizon_cache_and_records_snapshot_contract(mon
     assert by_grid[third["id"]]["sigma_monitor_h"] == pytest.approx(.02)
 
 
+def test_monitor_pause_shadow_requires_a_24h_champion_forecast(monkeypatch):
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    class Provider:
+        def get(self, symbol, horizon_h=24):
+            source = "realized" if int(horizon_h) == 24 else "model"
+            return SimpleNamespace(sigma_24h=.02, source=source, fallback=False)
+    engine.vol_provider = Provider()
+    grid = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 4})
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=engine.vol_provider)
+
+    result = monitor.run_once()
+    with db.engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT break_prob_4h, break_prob_24h, would_pause_24h "
+            "FROM pause_shadow_observations WHERE grid_id=? AND run_id=?",
+            (grid["id"], result["run_id"]),
+        ).one()
+    assert row[0] is not None
+    assert row[1] is None and row[2] is None
+
+
 def test_monitor_deduplicates_fallback_event_and_rearms_after_fresh_forecast(monkeypatch):
     _freeze_monitor_policy(monkeypatch)
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     class Provider:
         def __init__(self): self.index = 0
         def get(self, symbol, horizon_h=24):
+            if int(horizon_h) != 4:
+                return SimpleNamespace(sigma_24h=.02, source="model", fallback=False,
+                    fallback_reason=None)
             self.index += 1
             fallback = self.index in {1, 2, 4}
             return SimpleNamespace(sigma_24h=.02, source="model", fallback=fallback,

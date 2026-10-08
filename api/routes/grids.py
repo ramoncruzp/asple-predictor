@@ -885,6 +885,12 @@ def loans_pairs_summary(request: Request):
     return _paired_loan_summary(request.app.state.db)
 
 
+@router.get("/pause-shadow/summary")
+def pause_shadow_summary(request: Request):
+    _authorize(request)
+    return request.app.state.db.get_pause_shadow_summary()
+
+
 @router.get("/{grid_id}/loans")
 def grid_loans(request: Request, grid_id: int):
     _authorize(request)

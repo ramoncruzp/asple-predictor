@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_decision,
-                         build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
+                         break_prob, build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
                          plan_dust_sweep, profit_close_retry_delay, stoploss_candidates, PolicyDecision)
 from grid.volatility_provider import VolatilityProvider
 from data.exchange_filters import SymbolFilters
@@ -68,6 +68,32 @@ class GridMonitor:
         )
         if saved:
             self._event_count += 1
+
+    def _record_pause_shadow(self, grid, run_id, now, mid, sigma_4h, sigma_24h, actual_action):
+        """Persist audit-only pause probabilities; failures never affect policy actions."""
+        try:
+            params = dict(grid.get("params") or {})
+            low, high = float(grid["range_low"]), float(grid["range_high"])
+            def probability(horizon, sigma):
+                if sigma is None or not math.isfinite(float(sigma)) or float(sigma) <= 0:
+                    return None, None
+                effective = {**params, "horizon_h": horizon}
+                value = float(break_prob(float(mid), low, high, float(sigma), effective)[0])
+                enter = effective.get("pause_enter_prob", 0.10)
+                return value, None if enter is None else value >= float(enter)
+            p4, pause4 = probability(4, sigma_4h)
+            p24, pause24 = probability(24, sigma_24h)
+            self.db.add_pause_shadow_observation({
+                "run_id": run_id, "grid_id": int(grid["id"]), "ts": now,
+                "symbol": str(grid["symbol"]), "break_prob_4h": p4,
+                "would_pause_4h": None if pause4 is None else int(pause4),
+                "break_prob_24h": p24,
+                "would_pause_24h": None if pause24 is None else int(pause24),
+                "paused_actual": int(actual_action == "PAUSE"), "price": float(mid),
+                "range_low": low, "range_high": high,
+            })
+        except Exception:
+            self.logger.warning("grid=%s pause-shadow observation failed", grid.get("id"), exc_info=True)
 
     def start(self) -> None:
         interval = max(1, int(self.settings.grid_monitor_interval))
@@ -618,6 +644,25 @@ class GridMonitor:
                                 self._emit({"event_type": "ADJUST_BLOCKED", "grid_id": grid_id,
                                     "reason": blocked_reason, "price": mid,
                                     "details": {**adjust.metrics, "blocked_reason": blocked_reason}})
+                        shadow_views = {}
+                        for horizon in (4, 24):
+                            key = (current["symbol"], horizon)
+                            if key not in vol_cache:
+                                try:
+                                    vol_cache[key] = self.vol_provider.get(current["symbol"], horizon)
+                                except Exception:
+                                    vol_cache[key] = None
+                            shadow_views[horizon] = vol_cache.get(key)
+                        view_24h = shadow_views[24]
+                        sigma_24h_champion = (getattr(view_24h, "sigma_24h", None)
+                                              if view_24h is not None
+                                              and getattr(view_24h, "source", None) == "model" else None)
+                        self._record_pause_shadow(
+                            current, run_id, now, mid,
+                            None if shadow_views[4] is None else getattr(shadow_views[4], "sigma_24h", None),
+                            sigma_24h_champion,
+                            decision.action,
+                        )
                         vol_source = None if view is None else getattr(view, "source", "model")
                         sigma_monitor_h = (None if sigma is None else sigma * math.sqrt(monitor_h / 24.0))
                         metrics = {**decision.metrics, "sigma_monitor_h": sigma_monitor_h,

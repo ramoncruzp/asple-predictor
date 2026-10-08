@@ -80,6 +80,18 @@ def test_models_page_renders_no_signal_evidence_and_low_effective_sample(ui_page
     assert "0 % de acierto" not in rendered["zero"]
 
 
+def test_models_direction_table_shows_unverifiable_late_count(ui_page, live_server):
+    _page_with_empty_api(ui_page, live_server)
+    text = ui_page.evaluate("""() => {
+      const row=window.ModelsPageTest.renderDirectionRow('model_a',
+        {display_name:'XGBoost',available:true},
+        {total_predictions:4,verified_count:2,pending_count:2,n_unverifiable_late:3}, {}, null);
+      const root=document.createElement('table'); root.innerHTML=row; document.body.append(root);
+      const value=root.innerText; root.remove(); return value;
+    }""")
+    assert f"3 no verificables tard{chr(237)}as" in text
+
+
 def test_few_data_interpretation_is_prominent_and_distinct_from_muted_text(ui_page, live_server):
     _page_with_empty_api(ui_page, live_server)
     result = ui_page.evaluate("""() => {

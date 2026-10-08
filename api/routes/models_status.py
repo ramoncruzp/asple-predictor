@@ -127,12 +127,15 @@ def page_context(
             summaries[name] = aggregate(symbol, interval, name)
         else:
             rows = db.get_predictions_with_outcomes(symbol=symbol, interval=interval, model_name=name, limit=100000)
+            unverifiable_late = [row for row in rows if row.get("verification_status") == "unverifiable_late"]
+            rows = [row for row in rows if row.get("verification_status") != "unverifiable_late"]
             verified = [row for row in rows if row.get("is_verified")]
             bullish = [row for row in rows if str(row.get("signal") or "").upper() == "ALCISTA"]
             evaluated = [row for row in bullish if row.get("was_correct") is not None]
             actual = [str(row.get("actual_direction") or "").upper() for row in verified]
             summaries[name] = {
                 "total_predictions": len(rows), "verified_count": len(verified),
+                "n_unverifiable_late": len(unverifiable_late),
                 "pending_count": len(rows) - len(verified), "bullish_count": len(bullish),
                 "bullish_correct": sum(row.get("was_correct") is True for row in evaluated),
                 "bullish_failed": sum(row.get("was_correct") is False for row in evaluated),

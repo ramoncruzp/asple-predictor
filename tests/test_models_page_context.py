@@ -31,6 +31,7 @@ def test_models_page_context_scopes_signal_counts_and_reads_only_registry():
         "total_predictions": 4, "verified_count": 3, "pending_count": 1,
         "bullish_count": 3, "bullish_correct": 1, "bullish_failed": 1,
         "bullish_pending": 1, "neutral_count": 1, "base_rate": 2 / 3,
+        "n_unverifiable_late": 0,
         "predictions_before_last_training": None,
     }
     assert all(call["symbol"] == ACTIVE_SYMBOL and call["interval"] == ACTIVE_INTERVAL for call in db.calls)

@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, case, create_engine, event, exists, func, select, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, case, create_engine, event, exists, func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
@@ -39,12 +39,14 @@ class DBManager:
             Column("model_name", String, nullable=False), Column("predicted_at", DateTime(timezone=True), nullable=False),
             Column("verify_at", DateTime(timezone=True), nullable=False), Column("probability_up", Float, nullable=False),
             Column("signal", String, nullable=False), Column("confidence", String, nullable=False),
-            Column("features_snapshot", String), Column("price_at_prediction", Float, nullable=False), Column("market_condition", String))
+            Column("features_snapshot", String), Column("price_at_prediction", Float, nullable=False), Column("market_condition", String),
+            Column("verification_status", String), Column("verify_delay_h", Float))
         self.outcomes = Table("outcomes", self.metadata,
             Column("id", Integer, primary_key=True), Column("prediction_id", String, nullable=False),
             Column("verified_at", DateTime(timezone=True), nullable=False), Column("price_at_verification", Float, nullable=False),
             Column("price_change_pct", Float, nullable=False), Column("actual_direction", String, nullable=False),
-            Column("was_correct", Integer, nullable=True), Column("why_correct", String), Column("why_wrong", String))
+            Column("was_correct", Integer, nullable=True), Column("why_correct", String), Column("why_wrong", String),
+            Column("verify_delay_h", Float))
         self.conditions = Table("model_accuracy_by_condition", self.metadata,
             Column("id", Integer, primary_key=True), Column("model_name", String, nullable=False), Column("condition_name", String, nullable=False),
             Column("total_predictions", Integer, default=0), Column("correct_predictions", Integer, default=0), Column("accuracy", Float, default=0.0), Column("last_updated", DateTime(timezone=True)))
@@ -199,6 +201,16 @@ class DBManager:
             Column("events_written", Integer, nullable=False, default=0),
             Column("duration_ms", Integer), Column("note", String),
         )
+        self.pause_shadow_observations = Table(
+            "pause_shadow_observations", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("run_id", Integer, nullable=True), Column("grid_id", Integer, nullable=True),
+            Column("ts", DateTime(timezone=True), nullable=True), Column("symbol", String, nullable=True),
+            Column("break_prob_4h", Float, nullable=True), Column("would_pause_4h", Integer, nullable=True),
+            Column("break_prob_24h", Float, nullable=True), Column("would_pause_24h", Integer, nullable=True),
+            Column("paused_actual", Integer, nullable=True), Column("price", Float, nullable=True),
+            Column("range_low", Float, nullable=True), Column("range_high", Float, nullable=True),
+        )
         self.grid_events = Table(
             "grid_events", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
@@ -248,6 +260,7 @@ class DBManager:
             Column("source", String),
         )
         self.metadata.create_all(self.engine)
+        self._migrate_direction_verification_columns()
         self._migrate_widen_columns()
         self._migrate_vol_forecast_columns()
         self._seed_widen_defaults()
@@ -290,6 +303,25 @@ class DBManager:
                     conn.exec_driver_sql(
                         f"ALTER TABLE vol_widen_suggestions ADD COLUMN IF NOT EXISTS {column.name} {sql_type(column)}"
                     )
+
+    def _migrate_direction_verification_columns(self) -> None:
+        """Add nullable direction-verification provenance without rewriting rows."""
+        additions = {
+            "predictions": {"verification_status": "TEXT", "verify_delay_h": "FLOAT"},
+            "outcomes": {"verify_delay_h": "FLOAT"},
+        }
+        with self.engine.begin() as conn:
+            for table, columns in additions.items():
+                if self.engine.dialect.name == "sqlite":
+                    present = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info('{table}')")}
+                    for name, sql_type in columns.items():
+                        if name not in present:
+                            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                elif self.engine.dialect.name == "postgresql":
+                    for name, sql_type in columns.items():
+                        conn.exec_driver_sql(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {sql_type}"
+                        )
 
     def _seed_widen_defaults(self) -> None:
         """Persist configured per-horizon defaults once, without altering other tables."""
@@ -370,7 +402,8 @@ class DBManager:
                   "model_name": prediction_dict["model_name"], "predicted_at": predicted_at, "verify_at": verify_at,
                   "probability_up": float(prediction_dict["probability_up"]), "signal": prediction_dict["signal"], "confidence": prediction_dict["confidence"],
                   "features_snapshot": self._json(prediction_dict.get("features_snapshot")), "price_at_prediction": float(prediction_dict["price_at_prediction"]),
-                  "market_condition": self._json(prediction_dict.get("market_condition"))}
+                  "market_condition": self._json(prediction_dict.get("market_condition")),
+                  "verification_status": "pending", "verify_delay_h": None}
         with self.engine.begin() as conn:
             conn.execute(self.predictions.insert().values(**values))
         return prediction_id
@@ -393,7 +426,8 @@ class DBManager:
         with self.engine.connect() as conn:
             return bool(conn.execute(stmt).scalar_one())
 
-    def save_outcome(self, prediction_id: str, price_at_verification: float) -> dict:
+    def save_outcome(self, prediction_id: str, price_at_verification: float,
+                     verify_delay_h: float | None = None) -> dict:
         with self.engine.begin() as conn:
             p = conn.execute(select(self.predictions).where(self.predictions.c.prediction_id == prediction_id)).mappings().one()
             change = (float(price_at_verification) - p["price_at_prediction"]) / p["price_at_prediction"] * 100
@@ -404,23 +438,55 @@ class DBManager:
             outcome = {"prediction_id": prediction_id, "verified_at": datetime.now(timezone.utc), "price_at_verification": float(price_at_verification),
                        "price_change_pct": change, "actual_direction": actual, "was_correct": correct,
                        "why_correct": self._json({"signal": p["signal"]}) if correct is not None and correct else None,
-                       "why_wrong": self._json({"signal": p["signal"], "actual_direction": actual}) if correct is not None and not correct else None}
+                       "why_wrong": self._json({"signal": p["signal"], "actual_direction": actual}) if correct is not None and not correct else None,
+                       "verify_delay_h": None if verify_delay_h is None else float(verify_delay_h)}
             conn.execute(self.outcomes.insert().values(**outcome))
+            conn.execute(self.predictions.update().where(
+                self.predictions.c.prediction_id == prediction_id
+            ).values(verification_status="verified", verify_delay_h=verify_delay_h))
         return outcome
+
+    def mark_prediction_unverifiable_late(self, prediction_id: str, verify_delay_h: float) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(self.predictions.update().where(
+                self.predictions.c.prediction_id == prediction_id
+            ).values(verification_status="unverifiable_late", verify_delay_h=float(verify_delay_h)))
+
+    def count_unverifiable_late(self, symbol=None, interval=None, model_name=None) -> int:
+        statement = select(func.count(self.predictions.c.id)).where(
+            self.predictions.c.verification_status == "unverifiable_late"
+        )
+        if symbol is not None:
+            statement = statement.where(self.predictions.c.symbol == symbol)
+        if interval is not None:
+            statement = statement.where(self.predictions.c.interval == interval)
+        if model_name is not None:
+            statement = statement.where(self.predictions.c.model_name == model_name)
+        with self.engine.connect() as conn:
+            return int(conn.execute(statement).scalar_one() or 0)
 
     def get_pending_verifications(self) -> list[dict]:
         now = datetime.now(timezone.utc)
-        stmt = select(self.predictions).where(self.predictions.c.verify_at <= now).where(~self.predictions.c.prediction_id.in_(select(self.outcomes.c.prediction_id)))
+        stmt = select(self.predictions).where(
+            self.predictions.c.verify_at <= now,
+            or_(self.predictions.c.verification_status.is_(None),
+                self.predictions.c.verification_status != "unverifiable_late"),
+            ~self.predictions.c.prediction_id.in_(select(self.outcomes.c.prediction_id)),
+        )
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings().all()]
 
     def get_accuracy_by_model(self, model_name: str, last_n_days: int = 30) -> dict:
         cutoff = datetime.now(timezone.utc) - timedelta(days=last_n_days)
+        valid = or_(self.predictions.c.verification_status.is_(None),
+                    self.predictions.c.verification_status != "unverifiable_late")
         stmt = select(
-            func.count(self.predictions.c.id).label("total"),
-            func.count(self.outcomes.c.id).label("verified"),
-            func.count(self.outcomes.c.was_correct).label("evaluated"),
+            func.count(func.distinct(case((valid, self.predictions.c.id)))).label("total"),
+            func.count(func.distinct(case((valid, self.outcomes.c.id)))).label("verified"),
+            func.count(case((valid, self.outcomes.c.was_correct))).label("evaluated"),
             func.coalesce(func.sum(self.outcomes.c.was_correct), 0).label("correct"),
+            func.count(func.distinct(case((self.predictions.c.verification_status == "unverifiable_late",
+                                           self.predictions.c.id)))).label("unverifiable_late"),
         ).select_from(
             self.predictions.outerjoin(self.outcomes, self.predictions.c.prediction_id == self.outcomes.c.prediction_id)
         ).where(self.predictions.c.model_name == model_name, self.predictions.c.predicted_at >= cutoff)
@@ -428,16 +494,21 @@ class DBManager:
             row = conn.execute(stmt).mappings().one()
         total, verified, evaluated, correct = int(row["total"]), int(row["verified"]), int(row["evaluated"]), int(row["correct"])
         return {"model_name": model_name, "total_predictions": total, "verified_predictions": verified,
+                "unverifiable_late_count": int(row["unverifiable_late"]),
                 "evaluated_predictions": evaluated, "correct_predictions": correct, "accuracy": correct / evaluated if evaluated else None,
                 "last_n_days": last_n_days}
 
     def get_battle_stats(self, model_name: str) -> dict:
         """Return all-time battle counts, including pending predictions."""
+        valid = or_(self.predictions.c.verification_status.is_(None),
+                    self.predictions.c.verification_status != "unverifiable_late")
         stmt = select(
-            func.count(self.predictions.c.id).label("total"),
-            func.count(self.outcomes.c.id).label("verified"),
-            func.count(self.outcomes.c.was_correct).label("evaluated"),
+            func.count(func.distinct(case((valid, self.predictions.c.id)))).label("total"),
+            func.count(func.distinct(case((valid, self.outcomes.c.id)))).label("verified"),
+            func.count(case((valid, self.outcomes.c.was_correct))).label("evaluated"),
             func.coalesce(func.sum(self.outcomes.c.was_correct), 0).label("correct"),
+            func.count(func.distinct(case((self.predictions.c.verification_status == "unverifiable_late",
+                                           self.predictions.c.id)))).label("unverifiable_late"),
         ).select_from(
             self.predictions.outerjoin(
                 self.outcomes,
@@ -458,6 +529,7 @@ class DBManager:
             "neutral_count": verified - evaluated,
             "correct_count": correct,
             "pending_count": total - verified,
+            "n_unverifiable_late": int(row["unverifiable_late"]),
             "accuracy": correct / evaluated if evaluated else None,
         }
 
@@ -470,7 +542,11 @@ class DBManager:
             "post_macd_cross": lambda features, market: bool(features.get("macd_cross", False)),
         }
         with self.engine.connect() as conn:
-            predictions = conn.execute(select(self.predictions.c.prediction_id, self.predictions.c.features_snapshot, self.predictions.c.market_condition).where(self.predictions.c.model_name == model_name)).mappings().all()
+            predictions = conn.execute(select(self.predictions.c.prediction_id, self.predictions.c.features_snapshot, self.predictions.c.market_condition).where(
+                self.predictions.c.model_name == model_name,
+                or_(self.predictions.c.verification_status.is_(None),
+                    self.predictions.c.verification_status != "unverifiable_late"),
+            )).mappings().all()
             outcomes = {row.prediction_id: row.was_correct for row in conn.execute(select(self.outcomes.c.prediction_id, self.outcomes.c.was_correct)).all()}
         result = []
         for condition_name, rule in condition_rules.items():
@@ -515,6 +591,7 @@ class DBManager:
             for row in conn.execute(stmt).mappings():
                 item = dict(row)
                 item["is_verified"] = item.get("verified_at") is not None
+                item["is_unverifiable_late"] = item.get("verification_status") == "unverifiable_late"
                 item["was_correct"] = item.get("was_correct") if item["is_verified"] else None
                 rows.append(item)
             return rows
@@ -524,15 +601,17 @@ class DBManager:
         joined = self.predictions.outerjoin(
             self.outcomes, p.prediction_id == o.prediction_id,
         )
+        valid = or_(p.verification_status.is_(None), p.verification_status != "unverifiable_late")
         bullish = p.signal == "ALCISTA"
         columns = [
-            func.count(func.distinct(p.id)).label("total_predictions"),
-            func.count(func.distinct(o.id)).label("verified_count"),
-            func.coalesce(func.sum(case((bullish, 1), else_=0)), 0).label("bullish_count"),
-            func.coalesce(func.sum(case((bullish & (o.was_correct == 1), 1), else_=0)), 0).label("bullish_correct"),
-            func.coalesce(func.sum(case((bullish & (o.was_correct == 0), 1), else_=0)), 0).label("bullish_failed"),
-            func.coalesce(func.sum(case((p.signal == "NEUTRAL", 1), else_=0)), 0).label("neutral_count"),
-            func.coalesce(func.sum(case((o.actual_direction == "UP", 1), else_=0)), 0).label("base_up"),
+            func.count(func.distinct(case((valid, p.id)))).label("total_predictions"),
+            func.count(func.distinct(case((valid, o.id)))).label("verified_count"),
+            func.coalesce(func.sum(case((valid & bullish, 1), else_=0)), 0).label("bullish_count"),
+            func.coalesce(func.sum(case((valid & bullish & (o.was_correct == 1), 1), else_=0)), 0).label("bullish_correct"),
+            func.coalesce(func.sum(case((valid & bullish & (o.was_correct == 0), 1), else_=0)), 0).label("bullish_failed"),
+            func.coalesce(func.sum(case((valid & (p.signal == "NEUTRAL"), 1), else_=0)), 0).label("neutral_count"),
+            func.coalesce(func.sum(case((valid & (o.actual_direction == "UP"), 1), else_=0)), 0).label("base_up"),
+            func.count(func.distinct(case((p.verification_status == "unverifiable_late", p.id)))).label("n_unverifiable_late"),
         ]
         statement = select(*columns).select_from(joined).where(
             p.symbol == symbol, p.interval == interval, p.model_name == model_name,
@@ -546,6 +625,7 @@ class DBManager:
         return {
             "total_predictions": total, "verified_count": verified,
             "pending_count": total - verified, "bullish_count": bullish_count,
+            "n_unverifiable_late": int(row["n_unverifiable_late"] or 0),
             "bullish_correct": correct, "bullish_failed": failed,
             "bullish_pending": bullish_count - correct - failed,
             "neutral_count": int(row["neutral_count"] or 0),
@@ -573,6 +653,7 @@ class DBManager:
             rows = conn.execute(stmt).mappings().all()
 
         verified = list(rows)
+        unverifiable_late = self.count_unverifiable_late(symbol, interval, model_name)
         all_returns = [float(row["price_change_pct"]) / 100 for row in verified]
         base_rate = (
             sum(row["actual_direction"] == "UP" for row in verified) / len(verified)
@@ -620,6 +701,7 @@ class DBManager:
             "symbol": symbol,
             "interval": interval,
             "n_verified_total": len(verified),
+            "n_unverifiable_late": unverifiable_late,
             "base_rate": base_rate,
             "mean_return_all": sum(all_returns) / len(all_returns) if all_returns else None,
             "n_signals": len(signals),
@@ -800,6 +882,7 @@ class DBManager:
             "coverage_1sigma": inside_1sigma / n if n else None,
             "coverage_2sigma": inside_2sigma / n if n else None,
             "sample_sufficient": n >= 30,
+            "n_unverifiable_late": self.count_unverifiable_late(symbol, interval, model_name),
         }
 
     def get_latest_vol_forecasts(self, symbol: str) -> list[dict]:
@@ -1520,6 +1603,74 @@ class DBManager:
         with self.engine.begin() as conn:
             conn.execute(self.grid_snapshots.insert(), values)
         return len(values)
+
+    def add_pause_shadow_observation(self, values: dict) -> int:
+        with self.engine.begin() as conn:
+            result = conn.execute(self.pause_shadow_observations.insert().values(**values))
+            return int(result.inserted_primary_key[0])
+
+    @staticmethod
+    def _shadow_utc(value):
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    def get_pause_shadow_summary(self) -> dict:
+        with self.engine.connect() as conn:
+            observations = [dict(row) for row in conn.execute(select(self.pause_shadow_observations)
+                .order_by(self.pause_shadow_observations.c.ts, self.pause_shadow_observations.c.id)).mappings()]
+            gaps = [self._shadow_utc(row[0]) for row in conn.execute(select(self.grid_events.c.ts).where(
+                self.grid_events.c.event_type == "RUN_GAP")).all()]
+        by_grid = {}
+        for row in observations:
+            if row.get("grid_id") is None or row.get("ts") is None:
+                continue
+            row["ts"] = self._shadow_utc(row["ts"])
+            by_grid.setdefault(int(row["grid_id"]), []).append(row)
+        result = {}
+        for horizon in (4, 24):
+            groups = {"actual_paused": {True: [], False: []}, "shadow_24h": {True: [], False: []}}
+            excluded_gap = 0
+            for grid_rows in by_grid.values():
+                for origin in grid_rows:
+                    end = origin["ts"] + timedelta(hours=horizon)
+                    if not any(row["ts"] >= end for row in grid_rows):
+                        continue
+                    if any(origin["ts"] < gap <= end for gap in gaps):
+                        excluded_gap += 1
+                        continue
+                    future = [row for row in grid_rows if origin["ts"] < row["ts"] <= end
+                              and row.get("price") is not None]
+                    if not future or origin.get("range_low") is None or origin.get("range_high") is None:
+                        continue
+                    low, high = float(origin["range_low"]), float(origin["range_high"])
+                    if low <= 0 or high <= low:
+                        continue
+                    excursions = [max(0.0, (low - float(row["price"])) / low * 100.0,
+                                      (float(row["price"]) - high) / high * 100.0) for row in future]
+                    outcome = {"exit": any(value > 0 for value in excursions),
+                               "over_1_9_pct": any(value > 1.9 for value in excursions),
+                               "max_excursion_pct": max(excursions)}
+                    for dimension, key in (("actual_paused", "paused_actual"), ("shadow_24h", "would_pause_24h")):
+                        classification = origin.get(key)
+                        if classification is not None:
+                            groups[dimension][bool(classification)].append(outcome)
+            window = {}
+            for dimension, classes in groups.items():
+                window[dimension] = {}
+                for label, values in classes.items():
+                    n = len(values)
+                    window[dimension]["paused" if label else "not_paused"] = {
+                        "n": n, "exits": sum(item["exit"] for item in values),
+                        "exits_over_1_9_pct": sum(item["over_1_9_pct"] for item in values),
+                        "mean_max_excursion_pct": (sum(item["max_excursion_pct"] for item in values) / n) if n else None,
+                        "reason": "muestra insuficiente" if n < 20 else None,
+                    }
+            result[f"{horizon}h"] = {**window, "excluded_run_gap_windows": excluded_gap,
+                "reason": "muestra insuficiente", "criterion":
+                "Solo considerar que 4 h es mejor con al menos 20 salidas observadas y si las salidas >1,9 % sin pausa real no superan las de la pausa sombra 24 h; este endpoint no emite veredicto."}
+        result["method"] = "Ventanas completas por grid; salida si una observación del monitor cruza el rango inicial; huecos RUN_GAP excluidos. Las observaciones de monitor pueden omitir excursiones intraperiodo."
+        return result
 
     def list_grid_snapshots(
         self, grid_id: int | None = None, run_id: int | None = None, limit: int = 1000,

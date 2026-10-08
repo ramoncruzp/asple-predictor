@@ -19,7 +19,10 @@
   }
 
   function renderCards(payload) {
-    return (payload.status?.models || []).map(model => `<article class="card battle-score"><h3>${d.modelHeader(model.model_name)} ${d.validationStatusTag(model)}</h3>${card(model, payload.context?.models?.[model.model_name])}<a href="#models">Ver estado y detalle en Modelos</a></article>`).join('');
+    return (payload.status?.models || []).map(model => {
+      const counts = payload.context?.models?.[model.model_name] || {};
+      return `<article class="card battle-score"><h3>${d.modelHeader(model.model_name)} ${d.validationStatusTag(model)}</h3>${card(model, counts)}<small class="battle-unverifiable-late">${count(counts.n_unverifiable_late)} no verificables tard\u00EDas</small><a href="#models">Ver estado y detalle en Modelos</a></article>`;
+    }).join('');
   }
 
   function renderMatrix(payload) {
