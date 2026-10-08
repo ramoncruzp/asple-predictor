@@ -9,6 +9,7 @@ from api.routes import grid_advisor, volatility as volatility_route
 from config.models_config import VOL_CHAMPIONS
 from grid.sim.runner import FILTERS
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
+from grid.sim.data import ewma_sigma_24h
 from tests.test_grid_status_api import LocalClient
 
 
@@ -23,9 +24,12 @@ def candles():
 class Market:
     def __init__(self):
         self.frame = candles()
+        self.frame_5m = self.frame.copy()
+        self.frame_5m["timestamp"] = pd.date_range(
+            self.frame.timestamp.iloc[0], periods=len(self.frame), freq="5min", tz="UTC")
 
     def get_historical_klines(self, symbol, interval, lookback_days):
-        return self.frame
+        return self.frame_5m if interval == "5m" else self.frame
 
 
 def make_client():
@@ -330,6 +334,66 @@ def test_advisor_simulation_resets_nonzero_index_and_reports_short_history(monke
         assert "KeyError: 0" not in row.get("unavailable", "")
         assert "Historia disponible para simular 46,8 d\u00edas de 90 pedidos" in row["window_warning"]
         assert "el precio entr\u00f3 al rango" in row["window_warning"]
+
+
+def test_5m_simulation_uses_warmed_daily_sigma_and_monitor_cadence(monkeypatch):
+    client = make_client()
+    rng = np.random.default_rng(207)
+    returns = rng.normal(0, .01 / np.sqrt(288), 9000)
+    closes = 100 * np.exp(np.cumsum(returns))
+    stamps = pd.date_range("2026-01-01", periods=len(closes), freq="5min", tz="UTC")
+    frame_5m = pd.DataFrame({"timestamp": stamps, "open": closes,
+        "high": closes * 1.001, "low": closes * .999, "close": closes})
+    client.app.state.client.frame_5m = frame_5m
+    client.app.state.settings.grid_monitor_interval = 900
+    captured = []
+
+    def fake_run(candles, **kwargs):
+        captured.append((candles, kwargs))
+        return {"metrics": {"cycles_completed": 0}}
+
+    monkeypatch.setattr(grid_advisor, "run_simulation", fake_run)
+    response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+        "risk": "low", "range_mode": "estructural"}).body
+    assert response["simulations"]["resolution"] == "5m"
+    assert response["simulations"]["resync_minutes"] == 15
+    assert len(captured) == 2
+    candles, kwargs = captured[0]
+    sigma_values = kwargs["sigma_values"]
+    assert kwargs["resync_candles"] == 3
+    assert len(sigma_values) == len(candles.close)
+    assert np.all(np.diff(candles.timestamp) == 300)
+    assert np.isfinite(sigma_values).all()
+    assert sigma_values[0] > 0
+    assert float(np.median(sigma_values)) == pytest.approx(.01, abs=.005)
+    theoretical = ewma_sigma_24h(closes, halflife_h=72)
+    assert float(np.median(theoretical[1000:])) == pytest.approx(.01, abs=.005)
+
+
+def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch):
+    client = make_client()
+    original = client.app.state.client.get_historical_klines
+
+    def fail_5m(symbol, interval, lookback_days):
+        if interval == "5m":
+            raise RuntimeError("simulated 5m download failure")
+        return original(symbol, interval, lookback_days)
+
+    client.app.state.client.get_historical_klines = fail_5m
+    captured = []
+
+    def fake_run(candles, **kwargs):
+        captured.append(kwargs)
+        return {"metrics": {"cycles_completed": 0}}
+
+    monkeypatch.setattr(grid_advisor, "run_simulation", fake_run)
+    response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+        "risk": "low", "range_mode": "estructural"}).body
+    assert response["simulations"]["resolution"] == "1h"
+    assert "simulación aproximada: velas de 1 h" in response["simulations"]["window_warning"]
+    assert response["simulations"]["resync_minutes"] == 180
+    assert captured and all(kwargs["resync_candles"] == 3 for kwargs in captured)
+    assert all(kwargs["sigma_values"] is None for kwargs in captured)
 
 
 def test_advisor_simulation_passes_candle_data_for_ada_and_xrp(monkeypatch):

@@ -152,6 +152,7 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("histórico, no promesa de resultado")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Inicio histórico: 2026-10-01T00:00:00+00:00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Ventana corta")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Velas de 5 min, evaluación cada 15 min")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Equity final estimada: $1,010.00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("P&L neto (USDT): $10.00")
     expect(ui_page.locator(".advisor-simulation")).to_contain_text("Drawdown m\u00e1ximo (%): 1.25%")

@@ -11,7 +11,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
 from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_threshold, minimum_cell_warning)
-from grid.sim.data import CandleData
+from grid.sim.data import CandleData, ewma_sigma_24h
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
 from grid.range_risk import estimate_range_risk
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
@@ -26,6 +26,8 @@ RISK_LEVELS = {
              "meaning": "Piso profundo: cubre caídas mayores; inmoviliza más capital y aumenta la pérdida no realizada posible."},
 }
 router = APIRouter()
+SIMULATION_FALLBACK_RESYNC_CANDLES = 3
+MIN_5M_SIMULATION_CANDLES = 2
 CENTERED_TOUCH_TARGETS = {"low": 0.50, "medium": 0.30, "high": 0.15}
 CENTERED_Z = {risk: NormalDist().inv_cdf(1.0 - probability / 2.0)
               for risk, probability in CENTERED_TOUCH_TARGETS.items()}
@@ -267,7 +269,42 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     net_per_cycle_after_dust_usdt = capital / grids * evaluation["net_edge_pct"] / 100
     target_cycles = ceil(capital * margin_target_pct / 100 / net_per_cycle_usdt) if net_per_cycle_usdt > 0 else None
     prediction = request.app.state.prediction_loop.latest.get((symbol, ACTIVE_INTERVAL))
-    simulation_window, simulation_meta = _simulation_window(df, floor, ceiling, days)
+    simulation_window_1h, simulation_meta_1h = _simulation_window(df, floor, ceiling, days)
+    simulation_window, simulation_meta = simulation_window_1h, simulation_meta_1h
+    simulation_resolution = "1h"
+    resync_candles = SIMULATION_FALLBACK_RESYNC_CANDLES
+    simulation_sigma_values = None
+    try:
+        frame_5m = request.app.state.client.get_historical_klines(
+            symbol, "5m", lookback_days=days)
+        if frame_5m is None or len(frame_5m) < MIN_5M_SIMULATION_CANDLES:
+            raise ValueError("menos de dos velas de 5 min")
+        frame_5m = frame_5m.reset_index(drop=True)
+        window_5m, meta_5m = _simulation_window(frame_5m, floor, ceiling, days)
+        if window_5m is None or len(window_5m) < MIN_5M_SIMULATION_CANDLES:
+            raise ValueError("menos de dos velas de 5 min en la ventana")
+        sigma_5m_full = ewma_sigma_24h(
+            np.asarray(frame_5m["close"], dtype=float), halflife_h=72)
+        monitor_interval = int(getattr(request.app.state.settings, "grid_monitor_interval", 900))
+        resync_candles = max(1, round(monitor_interval / 300))
+        simulation_window, simulation_meta = window_5m, meta_5m
+        simulation_sigma_values = (sigma_5m_full[window_5m.index.to_numpy(dtype=int)]
+                                   if window_5m is not None else None)
+        simulation_resolution = "5m"
+    except Exception:
+        fallback_notice = "simulaci\u00f3n aproximada: velas de 1 h"
+        prior_warning = simulation_meta_1h.get("window_warning")
+        simulation_meta = {**simulation_meta_1h,
+                           "window_warning": (f"{fallback_notice} - {prior_warning}"
+                                              if prior_warning else fallback_notice)}
+        simulation_window = simulation_window_1h
+        simulation_resolution = "1h"
+        resync_candles = SIMULATION_FALLBACK_RESYNC_CANDLES
+        simulation_sigma_values = None
+    candle_minutes = 5 if simulation_resolution == "5m" else 60
+    resync_minutes = resync_candles * candle_minutes
+    simulation_meta = {**simulation_meta, "resolution": simulation_resolution,
+                       "resync_minutes": resync_minutes}
     simulation_candles = None
     if simulation_window is not None:
         timestamps = (pd.to_datetime(simulation_window["timestamp"], utc=True)
@@ -282,9 +319,13 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     if simulation_window is not None and simulation_meta["sim_days"] + 0.5 < days:
         available = f"{simulation_meta['sim_days']:.1f}".replace(".", ",")
         start_date = str(simulation_meta["sim_start"])[:10]
-        simulation_meta["window_warning"] = (
+        short_history_warning = (
             f"Historia disponible para simular {available} días de {days} pedidos; "
             f"el precio entr\u00f3 al rango el {start_date}."
+        )
+        prior_warning = simulation_meta.get("window_warning")
+        simulation_meta["window_warning"] = (
+            f"{prior_warning} {short_history_warning}" if prior_warning else short_history_warning
         )
     simulations = {}
     for strategy in ("simple", "smart"):
@@ -293,7 +334,8 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
             continue
         try:
             result = run_simulation(simulation_candles, strategy=strategy, n=grids, capital=capital,
-                low=floor, high=ceiling, fee_pct=fee_pct, filters=filters)
+                low=floor, high=ceiling, fee_pct=fee_pct, filters=filters,
+                resync_candles=resync_candles, sigma_values=simulation_sigma_values)
             simulations[strategy] = {**simulation_meta, **result["metrics"]}
         except Exception as exc:
             simulations[strategy] = {**simulation_meta,
@@ -379,7 +421,9 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
                  "unrealized_loss_at_floor_usdt": loss_at_floor},
         "simulations": {"label": "histórico, no promesa de resultado",
             "sim_start": simulation_meta["sim_start"], "sim_days": simulation_meta["sim_days"],
-            "window_warning": simulation_meta["window_warning"], "strategies": simulations},
+            "window_warning": simulation_meta["window_warning"],
+            "resolution": simulation_resolution, "resync_minutes": resync_minutes,
+            "strategies": simulations},
         "range_risk": {"sigma_24h": sigma_24h, "source": sigma_source,
             "horizons": range_risk,
             "disclaimer": "Estimación; las colas gruesas hacen que la probabilidad real pueda ser mayor; no validado más allá de 24 h; no es predicción de dirección."},
