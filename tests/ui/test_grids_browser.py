@@ -87,6 +87,14 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
             "pnl_per_open_day_usdt": 1, "pnl_pct_capital": 2.5,
             "pnl_pct_capital_per_day": 0.5, "cycles_completed": 2, "commissions_usdt": 0.5,
             "loans_created": 3, "loans_repaid": 2, "loans_transferred": 0}],
+        "cohort_comparisons": {"loans_vs_control": {"cohort": "loans",
+            "diff_pct_per_day": 0.25, "ci_low": -0.5, "ci_high": 1.0,
+            "n_cohort": 1, "n_control": 1, "conclusive": False,
+            "reason": "muestra insuficiente", "small_sample": True},
+            "loans_v2_vs_control": {"cohort": "loans_v2", "diff_pct_per_day": None,
+            "ci_low": None, "ci_high": None, "n_cohort": 0, "n_control": 1,
+            "conclusive": False, "reason": "muestra insuficiente", "small_sample": True}},
+        "comparison_note": "P&L realizado por capital y d\u00eda abierto; no ajusta tama\u00f1o de celda ni moneda. Observacional: control es cada 3.er grid.",
         "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión.",
     }))
     requests = []
@@ -105,6 +113,10 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("2.50% del capital")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("loans: 1 grids")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("loans_v2: 1 grids")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("loans vs control: no concluyente")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("muestra peque\u00f1a")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("IC 95%")
+    expect(ui_page.locator(".loans-summary-line")).to_contain_text("Observacional")
     ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
     expect(ui_page.locator(".loans-detail")).to_contain_text("Activo")
     expect(ui_page.locator(".loans-detail")).to_contain_text("reserva")

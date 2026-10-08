@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import random
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Literal
@@ -30,6 +31,43 @@ _LOAN_STATUSES = ("OPEN", "REPAID", "TRANSFERRED", "CANCELLED", "PENDING")
 
 def _all_grids(db):
     return [row for status in _GRID_STATUSES for row in db.list_grids_by_status({status})]
+
+
+def _bootstrap_cohort_comparison(cohort_values, control_values, *, seed=20260908, draws=2000,
+                                 excluded_cohort=0, excluded_control=0):
+    n_cohort, n_control = len(cohort_values), len(control_values)
+    result = {"diff_pct_per_day": None, "ci_low": None, "ci_high": None,
+              "n_cohort": n_cohort, "n_control": n_control,
+              "excluded_cohort": excluded_cohort, "excluded_control": excluded_control,
+              "conclusive": False, "reason": "muestra insuficiente",
+              "small_sample": n_cohort < 10 or n_control < 10}
+    if not n_cohort or not n_control:
+        return result
+    cohort_mean = sum(cohort_values) / n_cohort
+    control_mean = sum(control_values) / n_control
+    result["diff_pct_per_day"] = cohort_mean - control_mean
+    rng = random.Random(seed)
+    boot_differences = []
+    for _ in range(draws):
+        sampled_cohort = sum(cohort_values[rng.randrange(n_cohort)] for _ in range(n_cohort)) / n_cohort
+        sampled_control = sum(control_values[rng.randrange(n_control)] for _ in range(n_control)) / n_control
+        boot_differences.append(sampled_cohort - sampled_control)
+    boot_differences.sort()
+    def percentile(fraction):
+        position = (len(boot_differences) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(boot_differences) - 1)
+        weight = position - lower
+        return boot_differences[lower] * (1 - weight) + boot_differences[upper] * weight
+    result["ci_low"], result["ci_high"] = percentile(0.025), percentile(0.975)
+    if n_cohort < 2 or n_control < 2:
+        return result
+    if result["ci_low"] <= 0 <= result["ci_high"]:
+        result["reason"] = "el IC incluye 0"
+        return result
+    result["conclusive"] = True
+    result["reason"] = None
+    return result
 
 
 def _dt_utc(value):
@@ -409,6 +447,8 @@ def loans_summary(request: Request):
                      "_capital": 0.0, "_capital_known": True}
               for name in ("loans", "loans_v2", "control", "manual", "sin_grupo")}
     grid_rows = []
+    cohort_samples = {name: [] for name in ("loans", "loans_v2", "control")}
+    cohort_excluded = {name: 0 for name in cohort_samples}
     active_statuses = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}
     for grid in _all_grids(db):
         if grid.get("strategy") != "smart":
@@ -440,8 +480,15 @@ def loans_summary(request: Request):
             group["_days_known"] = False
             grid_days = None
         else:
-            grid_days = max(1.0, (ended - created).total_seconds() / 86400)
+            actual_open_days = (ended - created).total_seconds() / 86400
+            grid_days = max(1.0, actual_open_days)
             group["_open_days"] += grid_days
+        if group_name in cohort_samples:
+            if (grid_pnl_known and capital > 0 and created is not None and ended is not None
+                    and actual_open_days > 0):
+                cohort_samples[group_name].append(grid_pnl / capital / grid_days * 100)
+            else:
+                cohort_excluded[group_name] += 1
         grid_rows.append({
             "grid_id": int(grid["id"]), "symbol": grid.get("symbol"), "group": group_name,
             "capital_usdt": capital, "realized_pnl_usdt": grid_pnl,
@@ -471,7 +518,19 @@ def loans_summary(request: Request):
         group.pop("_open_days")
         group.pop("_capital")
         group.pop("_capital_known")
+    comparisons = {
+        "loans_vs_control": _bootstrap_cohort_comparison(
+            cohort_samples["loans"], cohort_samples["control"], seed=20260908,
+            excluded_cohort=cohort_excluded["loans"], excluded_control=cohort_excluded["control"]),
+        "loans_v2_vs_control": _bootstrap_cohort_comparison(
+            cohort_samples["loans_v2"], cohort_samples["control"], seed=20260909,
+            excluded_cohort=cohort_excluded["loans_v2"], excluded_control=cohort_excluded["control"]),
+    }
+    comparison_note = ("P&L realizado por capital y d\u00edas abiertos con m\u00ednimo de 1 d\u00eda; no ajusta tama\u00f1o de celda ni moneda. "
+        "Observacional: el grupo control se asigna en cada 3.er grid. Los grids excluidos por "
+        "P&L desconocido, capital no v\u00e1lido o duraci\u00f3n no positiva se cuentan en cada comparaci\u00f3n.")
     return {"groups": list(groups.values()), "grids": grid_rows,
+            "cohort_comparisons": comparisons, "comparison_note": comparison_note,
             "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión."}
 
 

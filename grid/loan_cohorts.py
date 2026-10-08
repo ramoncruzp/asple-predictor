@@ -2,13 +2,91 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
+import logging
+import os
+from pathlib import Path
+import tempfile
 from threading import Lock
+from time import monotonic, sleep
 from typing import Callable
 
 
 LOAN_COHORT_LOCK = Lock()
+# debe ser mayor que el peor caso de una apertura (varias órdenes en Testnet).
+_PROCESS_LOCK_TIMEOUT_SECONDS = 120.0
+_PROCESS_LOCK_RETRY_SECONDS = 0.05
+_LOGGER = logging.getLogger(__name__)
 _GRID_STATUSES = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING",
                   "CLOSED", "CANCELLED", "FAILED", "ERROR"}
+
+
+def _lock_file_path(db) -> Path:
+    engine = getattr(db, "engine", None)
+    url = getattr(engine, "url", None)
+    identity = str(url) if url is not None else "asple-grid-loan-cohort-default"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / f"asple-loan-cohort-{digest}.lock"
+
+
+def _open_lock_file(path: Path):
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(descriptor, "r+b", buffering=0)
+    if os.fstat(descriptor).st_size == 0:
+        handle.write(b"\0")
+        handle.flush()
+    return handle
+
+
+def _try_os_lock(handle):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_os_lock(handle):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _process_creation_lock(db):
+    try:
+        handle = _open_lock_file(_lock_file_path(db))
+    except OSError as exc:
+        _LOGGER.warning("No se pudo abrir el candado de cohortes entre procesos; se usa el candado local: %s", exc)
+        yield False
+        return
+    acquired = False
+    deadline = monotonic() + _PROCESS_LOCK_TIMEOUT_SECONDS
+    try:
+        while not acquired:
+            try:
+                _try_os_lock(handle)
+                acquired = True
+            except OSError as exc:
+                if monotonic() >= deadline:
+                    raise TimeoutError("Tiempo agotado esperando el candado de cohortes entre procesos") from exc
+                sleep(_PROCESS_LOCK_RETRY_SECONDS)
+        yield True
+    finally:
+        if acquired:
+            try:
+                _release_os_lock(handle)
+            finally:
+                handle.close()
+        else:
+            handle.close()
 
 
 def _all_grids(db):
@@ -53,15 +131,16 @@ def assign_loan_creation_defaults(db, strategy: str, params: dict, control_every
 def create_grid_with_loan_cohort(db, strategy: str, params: dict, control_every_n: int,
                                  create: Callable[[dict], dict], *,
                                  explicit_params: dict | None = None):
-    """Serialize cohort counting and Smart-grid creation within this process.
+    """Serialize counting and creation in this process and across processes sharing the DB URL.
 
-    The lock does not coordinate separate worker or CLI processes.
+    The temp-file lock does not coordinate other machines or a different DB URL.
     """
     if str(strategy).lower() != "smart":
         effective = dict(params)
         return effective, create(effective)
     with LOAN_COHORT_LOCK:
-        effective = assign_loan_creation_defaults(
-            db, strategy, params, control_every_n, explicit_params=explicit_params)
-        result = create(effective)
-        return effective, result
+        with _process_creation_lock(db):
+            effective = assign_loan_creation_defaults(
+                db, strategy, params, control_every_n, explicit_params=explicit_params)
+            result = create(effective)
+            return effective, result

@@ -209,8 +209,21 @@
     const loanSummaryResult = data.loanSummaryResult;
     const loanSummary = loanSummaryResult?.ok ? loanSummaryResult.data : null;
     const loanSummaryText = loanSummary
-      ? `${loanSummary.groups.map((group) => `${esc(group.group)}: ${group.grid_count} grids, P&L ${fmtMoney(group.realized_pnl_usdt, 2)} USDT (${group.pnl_pct_capital == null ? '—' : `${Number(group.pnl_pct_capital).toFixed(2)}% del capital`}; ${group.pnl_pct_capital_per_day == null ? '—' : `${Number(group.pnl_pct_capital_per_day).toFixed(2)}%/día`}), ${group.cycles_completed} ciclos, ${fmtMoney(group.commissions_usdt, 2)} USDT en comisiones, ${group.loans_created} préstamos creados/${group.loans_repaid} devueltos`).join(' · ')}. ${esc(loanSummary.note)}`
-      : loanSummaryResult?.error ? `No se pudo cargar el resumen de préstamos: ${esc(loanSummaryResult.error.message)}` : 'Cargando resumen de préstamos…';
+      ? `${loanSummary.groups.map((group) => `${esc(group.group)}: ${group.grid_count} grids, P&L ${fmtMoney(group.realized_pnl_usdt, 2)} USDT (${group.pnl_pct_capital == null ? '\u2014' : `${Number(group.pnl_pct_capital).toFixed(2)}% del capital`}; ${group.pnl_pct_capital_per_day == null ? '\u2014' : `${Number(group.pnl_pct_capital_per_day).toFixed(2)}%/d\u00eda`}), ${group.cycles_completed} ciclos, ${fmtMoney(group.commissions_usdt, 2)} USDT en comisiones, ${group.loans_created} pr\u00e9stamos creados/${group.loans_repaid} devueltos`).join(' \u00b7 ')}. ${esc(loanSummary.note)}`
+      : loanSummaryResult?.error ? `No se pudo cargar el resumen de pr\u00e9stamos: ${esc(loanSummaryResult.error.message)}` : 'Cargando resumen de pr\u00e9stamos\u2026';
+    const cohortComparisonText = loanSummary
+      ? Object.entries(loanSummary.cohort_comparisons || {}).map(([key, comparison]) => {
+        const cohort = key.startsWith('loans_v2') ? 'loans_v2' : 'loans';
+        const status = comparison.conclusive ? 'concluyente' : 'no concluyente';
+        const difference = comparison.diff_pct_per_day == null ? '\u2014'
+          : `${Number(comparison.diff_pct_per_day).toFixed(2)}% capital/d\u00eda`;
+        const interval = comparison.ci_low == null || comparison.ci_high == null ? 'IC 95%: \u2014'
+          : `IC 95% [${Number(comparison.ci_low).toFixed(2)}%; ${Number(comparison.ci_high).toFixed(2)}%]`;
+        const smallSample = comparison.small_sample ? ' \u00b7 muestra peque\u00f1a' : '';
+        return `<span>${esc(cohort)} vs control: ${status}; \u0394 ${difference}; ${interval}; n=${comparison.n_cohort}/${comparison.n_control}${smallSample}</span>`;
+      }).join(' \u00b7 ')
+      : '';
+    const comparisonNote = loanSummary?.comparison_note ? ` ${esc(loanSummary.comparison_note)}` : '';
     const warning = data.same_symbol_warning ? `<div class="grids-warning">${esc(data.same_symbol_warning)}</div>` : '';
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
@@ -223,7 +236,7 @@
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
-      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText}</p></div>
+      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p></div>
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
