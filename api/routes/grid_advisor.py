@@ -1,4 +1,8 @@
 from __future__ import annotations
+import inspect
+import logging
+import threading
+import time
 from decimal import Decimal
 from math import asinh, ceil, isfinite, sqrt
 from statistics import NormalDist
@@ -15,7 +19,7 @@ from grid.sim.data import CandleData, ewma_sigma_24h
 from grid.sim.runner import FILTERS as SIM_FILTERS, run_simulation
 from grid.range_risk import estimate_range_risk
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 RISK_LEVELS = {
     "low": {"label": "Conservador", "floor_atr": 1.0, "ceiling_atr": 0.25, "max_range_pct": 25.0,
@@ -26,8 +30,58 @@ RISK_LEVELS = {
              "meaning": "Piso profundo: cubre caídas mayores; inmoviliza más capital y aumenta la pérdida no realizada posible."},
 }
 router = APIRouter()
+logger = logging.getLogger(__name__)
 SIMULATION_FALLBACK_RESYNC_CANDLES = 3
 MIN_5M_SIMULATION_CANDLES = 2
+FIVE_MINUTE_CACHE_TTL_SECONDS = 300
+FIVE_MINUTE_DOWNLOAD_TIMEOUT_SECONDS = 25
+FIVE_MINUTE_WARMUP_DAYS = 9
+_five_minute_cache = {}
+_five_minute_cache_guard = threading.Lock()
+_five_minute_key_locks = {}
+_five_minute_cache_clock = time.monotonic
+
+
+def _supports_keyword(method, name):
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.name == name or parameter.kind == inspect.Parameter.VAR_KEYWORD
+               for parameter in parameters)
+
+
+def _cached_5m_frame(client, symbol, days, warm_start):
+    key = (symbol.upper(), int(days))
+    with _five_minute_cache_guard:
+        key_lock = _five_minute_key_locks.setdefault(key, threading.Lock())
+    started = _five_minute_cache_clock()
+    deadline = started + FIVE_MINUTE_DOWNLOAD_TIMEOUT_SECONDS
+    with key_lock:
+        now = _five_minute_cache_clock()
+        if now >= deadline:
+            raise TimeoutError("La descarga de velas de 5 min super\u00f3 25 segundos")
+        cached = _five_minute_cache.get(key)
+        if cached and now - cached["cached_at"] < FIVE_MINUTE_CACHE_TTL_SECONDS:
+            cached_frame = cached["frame"]
+            cached_start = (pd.to_datetime(cached_frame["timestamp"].iloc[0], utc=True)
+                            if len(cached_frame) and "timestamp" in cached_frame else None)
+            if cached_start is not None and cached_start <= pd.Timestamp(warm_start):
+                return cached_frame.copy()
+        method = client.get_historical_klines
+        kwargs = {"lookback_days": int(days)}
+        if _supports_keyword(method, "start_time"):
+            kwargs["start_time"] = warm_start
+        else:
+            adjusted_days = max(1, ceil((datetime.now(timezone.utc) - warm_start).total_seconds() / 86400))
+            kwargs["lookback_days"] = min(int(days), adjusted_days)
+        if _supports_keyword(method, "deadline_monotonic"):
+            kwargs["deadline_monotonic"] = deadline
+        frame = method(symbol, "5m", **kwargs)
+        if _five_minute_cache_clock() - started > FIVE_MINUTE_DOWNLOAD_TIMEOUT_SECONDS:
+            raise TimeoutError("La descarga de velas de 5 min super\u00f3 25 segundos")
+        _five_minute_cache[key] = {"cached_at": _five_minute_cache_clock(), "frame": frame.copy()}
+        return frame.copy()
 CENTERED_TOUCH_TARGETS = {"low": 0.50, "medium": 0.30, "high": 0.15}
 CENTERED_Z = {risk: NormalDist().inv_cdf(1.0 - probability / 2.0)
               for risk, probability in CENTERED_TOUCH_TARGETS.items()}
@@ -275,8 +329,13 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     resync_candles = SIMULATION_FALLBACK_RESYNC_CANDLES
     simulation_sigma_values = None
     try:
-        frame_5m = request.app.state.client.get_historical_klines(
-            symbol, "5m", lookback_days=days)
+        if simulation_window_1h is None:
+            raise ValueError("no hay inicio de ventana horaria para acotar la descarga")
+        hourly_start = pd.to_datetime(simulation_window_1h["timestamp"].iloc[0], utc=True).to_pydatetime()
+        requested_start = pd.to_datetime(df["timestamp"].iloc[0], utc=True).to_pydatetime()
+        warm_start = max(requested_start, hourly_start - timedelta(days=FIVE_MINUTE_WARMUP_DAYS))
+        frame_5m = _cached_5m_frame(
+            request.app.state.client, symbol, days, warm_start)
         if frame_5m is None or len(frame_5m) < MIN_5M_SIMULATION_CANDLES:
             raise ValueError("menos de dos velas de 5 min")
         frame_5m = frame_5m.reset_index(drop=True)
@@ -291,7 +350,8 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         simulation_sigma_values = (sigma_5m_full[window_5m.index.to_numpy(dtype=int)]
                                    if window_5m is not None else None)
         simulation_resolution = "5m"
-    except Exception:
+    except Exception as exc:
+        logger.warning("Advisor 5m fallback for symbol=%s days=%s", symbol, days, exc_info=True)
         fallback_notice = "simulaci\u00f3n aproximada: velas de 1 h"
         prior_warning = simulation_meta_1h.get("window_warning")
         simulation_meta = {**simulation_meta_1h,

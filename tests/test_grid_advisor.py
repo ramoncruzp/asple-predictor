@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 import numpy as np
 import pandas as pd
@@ -27,12 +28,19 @@ class Market:
         self.frame_5m = self.frame.copy()
         self.frame_5m["timestamp"] = pd.date_range(
             self.frame.timestamp.iloc[0], periods=len(self.frame), freq="5min", tz="UTC")
+        self.history_calls = []
 
-    def get_historical_klines(self, symbol, interval, lookback_days):
-        return self.frame_5m if interval == "5m" else self.frame
+    def get_historical_klines(self, symbol, interval, lookback_days, start_time=None, deadline_monotonic=None):
+        self.history_calls.append({"symbol": symbol, "interval": interval, "lookback_days": lookback_days,
+                                   "start_time": start_time, "deadline_monotonic": deadline_monotonic})
+        frame = self.frame_5m if interval == "5m" else self.frame
+        if interval == "5m" and start_time is not None:
+            frame = frame.loc[frame.timestamp >= pd.Timestamp(start_time)]
+        return frame.copy().reset_index(drop=True)
 
 
 def make_client():
+    grid_advisor._five_minute_cache.clear()
     frame = candles()
     app = FastAPI()
     app.include_router(grid_advisor.router, prefix="/api/grid")
@@ -344,14 +352,22 @@ def test_5m_simulation_uses_warmed_daily_sigma_and_monitor_cadence(monkeypatch):
     stamps = pd.date_range("2026-01-01", periods=len(closes), freq="5min", tz="UTC")
     frame_5m = pd.DataFrame({"timestamp": stamps, "open": closes,
         "high": closes * 1.001, "low": closes * .999, "close": closes})
+    frame_1h = frame_5m.iloc[::12].reset_index(drop=True)
+    client.app.state.client.frame = frame_1h
     client.app.state.client.frame_5m = frame_5m
     client.app.state.settings.grid_monitor_interval = 900
+    original_window = grid_advisor._simulation_window
+    def delayed_in_range_window(frame, floor, ceiling, days):
+        offset = 10 * 24 if len(frame) < 1000 else 9 * 24 * 12
+        selected = frame.iloc[offset:]
+        start = selected.timestamp.iloc[0]
+        meta = {"sim_start": start.isoformat(), "sim_days": 21.0, "window_warning": None}
+        return selected, meta
+    monkeypatch.setattr(grid_advisor, "_simulation_window", delayed_in_range_window)
     captured = []
-
     def fake_run(candles, **kwargs):
         captured.append((candles, kwargs))
         return {"metrics": {"cycles_completed": 0}}
-
     monkeypatch.setattr(grid_advisor, "run_simulation", fake_run)
     response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
         "risk": "low", "range_mode": "estructural"}).body
@@ -365,12 +381,15 @@ def test_5m_simulation_uses_warmed_daily_sigma_and_monitor_cadence(monkeypatch):
     assert np.all(np.diff(candles.timestamp) == 300)
     assert np.isfinite(sigma_values).all()
     assert sigma_values[0] > 0
+    requested_start = client.app.state.client.history_calls[-1]["start_time"]
+    assert requested_start == pd.Timestamp("2026-01-02T00:00:00Z").to_pydatetime()
+    assert pd.Timestamp(requested_start) <= pd.Timestamp(response["simulations"]["sim_start"]) - pd.Timedelta(days=9)
     assert float(np.median(sigma_values)) == pytest.approx(.01, abs=.005)
     theoretical = ewma_sigma_24h(closes, halflife_h=72)
-    assert float(np.median(theoretical[1000:])) == pytest.approx(.01, abs=.005)
+    assert float(np.median(theoretical[3000:])) == pytest.approx(.01, abs=.005)
 
 
-def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch):
+def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog):
     client = make_client()
     original = client.app.state.client.get_historical_klines
 
@@ -390,10 +409,81 @@ def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch):
     response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
         "risk": "low", "range_mode": "estructural"}).body
     assert response["simulations"]["resolution"] == "1h"
-    assert "simulación aproximada: velas de 1 h" in response["simulations"]["window_warning"]
+    assert "simulaci\u00f3n aproximada: velas de 1 h" in response["simulations"]["window_warning"]
     assert response["simulations"]["resync_minutes"] == 180
+    assert "symbol=ADAUSDT days=90" in caplog.text
+    assert "simulated 5m download failure" in caplog.text
     assert captured and all(kwargs["resync_candles"] == 3 for kwargs in captured)
     assert all(kwargs["sigma_values"] is None for kwargs in captured)
+
+
+def test_5m_download_over_25_seconds_falls_back(monkeypatch, caplog):
+    client = make_client()
+    original = client.app.state.client.get_historical_klines
+    now = [time.monotonic()]
+    monkeypatch.setattr(grid_advisor, "_five_minute_cache_clock", lambda: now[0])
+    def slow_5m(symbol, interval, lookback_days, start_time=None, deadline_monotonic=None):
+        if interval == "5m":
+            now[0] += grid_advisor.FIVE_MINUTE_DOWNLOAD_TIMEOUT_SECONDS + 1
+        return original(symbol, interval, lookback_days, start_time, deadline_monotonic)
+    client.app.state.client.get_historical_klines = slow_5m
+    response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+        "risk": "low", "range_mode": "estructural"}).body
+    assert response["simulations"]["resolution"] == "1h"
+    assert "simulaci\u00f3n aproximada" in response["simulations"]["window_warning"]
+    assert "super\u00f3 25 segundos" in caplog.text
+
+
+def test_5m_frame_cache_reuses_within_ttl_and_expires(monkeypatch):
+    client = make_client()
+    now = [time.monotonic()]
+    monkeypatch.setattr(grid_advisor, "_five_minute_cache_clock", lambda: now[0])
+    for _ in range(2):
+        response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+            "risk": "low", "range_mode": "estructural"})
+        assert response.status_code == 200
+    five_minute_calls = lambda: sum(call["interval"] == "5m" for call in client.app.state.client.history_calls)
+    assert five_minute_calls() == 1
+    now[0] += grid_advisor.FIVE_MINUTE_CACHE_TTL_SECONDS + 1
+    response = client.get("/api/grid/recommend", query={"symbol": "ADAUSDT", "days": 90,
+        "risk": "low", "range_mode": "estructural"})
+    assert response.status_code == 200
+    assert five_minute_calls() == 2
+
+
+def test_5m_cache_serializes_concurrent_downloads():
+    from concurrent.futures import ThreadPoolExecutor
+    client = make_client()
+    original = client.app.state.client.get_historical_klines
+    def slow_fetch(*args, **kwargs):
+        if args[1] == "5m":
+            time.sleep(.05)
+        return original(*args, **kwargs)
+    client.app.state.client.get_historical_klines = slow_fetch
+    warm_start = pd.Timestamp("2026-09-01T00:00:00Z").to_pydatetime()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        frames = list(pool.map(lambda _: grid_advisor._cached_5m_frame(
+            client.app.state.client, "ADAUSDT", 90, warm_start), range(2)))
+    assert all(not frame.empty for frame in frames)
+    assert sum(call["interval"] == "5m" for call in client.app.state.client.history_calls) == 1
+
+
+def test_binance_klines_accepts_start_time_and_checks_deadline():
+    from datetime import datetime, timezone
+    from data.binance_client import BinanceClient
+    calls = []
+    api = BinanceClient.__new__(BinanceClient)
+    api.client = SimpleNamespace(get_klines=lambda **kwargs: calls.append(kwargs) or [])
+    api._request_with_retries = lambda operation, **_kwargs: operation()
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    frame = api.get_historical_klines("ADAUSDT", "5m", lookback_days=90, start_time=start)
+    assert frame.empty
+    assert calls[0]["startTime"] == int(start.timestamp() * 1000)
+    assert calls[0]["limit"] == 1000
+    calls.clear()
+    with pytest.raises(TimeoutError, match="deadline"):
+        api.get_historical_klines("ADAUSDT", "5m", start_time=start, deadline_monotonic=0)
+    assert calls == []
 
 
 def test_advisor_simulation_passes_candle_data_for_ada_and_xrp(monkeypatch):

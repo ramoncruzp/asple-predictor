@@ -34,7 +34,7 @@ class ApiClient {
   modelsStatus() { return this.get('/api/models/status'); }
   shadowStatus() { return this.get('/api/models/shadow-status'); }
   conditions(model) { return this.get('/api/models/accuracy-by-condition', { model }); }
-  grid(params) { return this.get('/api/grid/recommend', params); }
+  grid(params) { return this.get('/api/grid/recommend', params, 45000); }
   coinsAvailable() { return this.get('/api/coins/available'); }
   coinsList(includeInactive = false) { return this.get(`/api/coins${includeInactive ? '?include_inactive=true' : ''}`); }
   addCoin(symbol, notes) { return this.post('/api/coins', { symbol, notes: notes || null }); }

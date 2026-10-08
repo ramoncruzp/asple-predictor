@@ -1009,3 +1009,25 @@ def test_detail_compound_modal_shows_current_values_and_confirms_update(live_ser
     assert calls[1]["dry_run"] is False and calls[1]["confirm"] is True
     assert calls[1]["compound_ratio"] == 0.25
     assert_no_js_errors(ui_page)
+
+
+def test_advisor_uses_45_second_timeout_and_other_gets_keep_default(live_server, ui_page):
+    ui_page.goto(f"{live_server.url}/#grid")
+    timeouts = ui_page.evaluate("""async () => {
+        const client = new ApiClient();
+        const seen = [];
+        const originalSetTimeout = window.setTimeout;
+        const originalClearTimeout = window.clearTimeout;
+        client._fetch = async () => ({ok: true, json: async () => ({})});
+        window.setTimeout = (_callback, delay) => { seen.push(delay); return seen.length; };
+        window.clearTimeout = () => {};
+        try {
+            await client.grid({symbol: 'ADAUSDT'});
+            await client.get('/api/health');
+        } finally {
+            window.setTimeout = originalSetTimeout;
+            window.clearTimeout = originalClearTimeout;
+        }
+        return seen;
+    }""")
+    assert timeouts == [45000, 10000]

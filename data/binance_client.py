@@ -89,7 +89,8 @@ class BinanceClient:
         ) from last_error
 
     def get_historical_klines(
-        self, symbol: str, interval: str, lookback_days: int = 90
+        self, symbol: str, interval: str, lookback_days: int = 90, *,
+        start_time: datetime | None = None, deadline_monotonic: float | None = None,
     ) -> pd.DataFrame:
         """Download historical candles, paging at Binance's 1000-candle limit."""
         binance_symbol = self._binance_symbol(symbol)
@@ -98,13 +99,17 @@ class BinanceClient:
             raise ValueError("lookback_days debe ser mayor que cero")
 
         end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=lookback_days)
-        start_ms = int(start_time.timestamp() * 1000)
+        requested_start = start_time or (end_time - timedelta(days=lookback_days))
+        if requested_start.tzinfo is None:
+            requested_start = requested_start.replace(tzinfo=timezone.utc)
+        start_ms = int(requested_start.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         rows: list[list[Any]] = []
         cursor_ms = start_ms
 
         while cursor_ms < end_ms:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("Kline download exceeded its monotonic deadline")
             page = self._request_with_retries(
                 lambda: self.client.get_klines(
                     symbol=binance_symbol, interval=interval,
