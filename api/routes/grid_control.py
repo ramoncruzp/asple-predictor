@@ -68,6 +68,7 @@ class ParamsBody(ActionBase):
     max_days: float | None = None
     dust_sweep_threshold_pct: float | None = None
     compound_enabled: StrictBool | None = None
+    adjust_idle_shrink: StrictBool | None = None
     compound_ratio: StrictFloat | None = None
     compound_max_growth_pct: StrictFloat | None = None
 

@@ -1098,6 +1098,63 @@ def test_detail_compound_modal_shows_current_values_and_confirms_update(live_ser
     assert_no_js_errors(ui_page)
 
 
+def test_detail_idle_shrink_button_states_and_activation_warning(live_server, ui_page):
+    grid_id = live_server.secondary_grid_id
+    live_server.db.update_grid(grid_id, status="ACTIVE")
+    state = {"enabled": False, "global": True}
+    def loans(route):
+        route.fulfill(json={"grid_id": grid_id, "loans_group": None, "loans_enabled": False,
+            "idle_shrink_enabled": state["enabled"],
+            "idle_shrink_global_enabled": state["global"],
+            "counts": {}, "total_amount_lent_usdt": 0,
+            "average_repaid_open_hours": None, "open_loans": []})
+    ui_page.route(f"**/api/grids/{grid_id}/loans", loans)
+    calls = []
+    def params(route):
+        body = route.request.post_data_json
+        calls.append(body)
+        if body["dry_run"]:
+            route.fulfill(json={"dry_run": True, "plan": {"action": "params",
+                "updates": {"adjust_idle_shrink": body["adjust_idle_shrink"]}, "remove": []}})
+        else:
+            state["enabled"] = body["adjust_idle_shrink"]
+            route.fulfill(json={"dry_run": False, "result": {"ok": True},
+                "status": "ACTIVE", "status_after": "ACTIVE", "outcome": "completed", "errors": []})
+    ui_page.route(f"**/api/grids/{grid_id}/params", params)
+    ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
+    activate = ui_page.locator('[data-grid-action="idle-shrink-on"]')
+    expect(activate).to_be_visible()
+    expect(activate).to_be_enabled()
+    activate.click()
+    dialog = ui_page.locator("#grid-action-dialog")
+    warning = ("Regla apagada por defecto: en simulación XRP no mejoró la ganancia. "
+        "Quita niveles sin ciclos en 24 h y no se puede revertir sin reabrir el grid. "
+        "La primera evaluación solo guarda una línea base.")
+    expect(dialog).to_contain_text(warning)
+    dialog.get_by_role("button", name="Continuar", exact=True).click()
+    expect(dialog.get_by_role("heading", name="Revisar plan")).to_be_visible()
+    expect(dialog).to_contain_text(warning)
+    dialog.get_by_role("button", name="Continuar", exact=True).click()
+    expect(dialog).to_contain_text("Acción completada")
+    assert calls == [
+        {"adjust_idle_shrink": True, "dry_run": True, "confirm": False},
+        {"adjust_idle_shrink": True, "dry_run": False, "confirm": True},
+    ]
+
+    state.update({"enabled": False, "global": False})
+    ui_page.reload()
+    disabled = ui_page.get_by_role("button", name=(
+        "Interruptor global apagado: añade ADJUST_IDLE_SHRINK_ENABLED=true al .env y reinicia"))
+    expect(disabled).to_be_visible()
+    expect(disabled).to_be_disabled()
+
+    state.update({"enabled": True, "global": False})
+    ui_page.reload()
+    expect(ui_page.locator('[data-grid-action="idle-shrink-off"]')).to_have_text(
+        "Apagar reducción de niveles ociosos")
+    assert_no_js_errors(ui_page)
+
+
 def test_advisor_uses_45_second_timeout_and_other_gets_keep_default(live_server, ui_page):
     ui_page.goto(f"{live_server.url}/#grid")
     timeouts = ui_page.evaluate("""async () => {

@@ -70,3 +70,17 @@ def test_level_adjust_summary_route_is_read_only_and_returns_default_switch(tmp_
     payload = response.json()
     assert payload["idle_shrink_enabled"] is False
     assert payload["verdicts"]["idle_shrink"]["verdict"] == "en prueba"
+
+
+def test_grid_loans_contract_exposes_idle_shrink_grid_and_global_switch(monkeypatch):
+    grid = {"id": 12, "status": "ACTIVE", "strategy": "smart",
+            "params": {"adjust_idle_shrink": True}}
+    class DB:
+        def get_grid(self, grid_id): return grid if grid_id == 12 else None
+        def list_grid_loans(self, grid_id): return []
+    monkeypatch.setattr(grids_api, "_authorize", lambda _request: None)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        db=DB(), settings=SimpleNamespace(adjust_idle_shrink_enabled=False))))
+    payload = grids_api.grid_loans(request, 12)
+    assert payload["idle_shrink_enabled"] is True
+    assert payload["idle_shrink_global_enabled"] is False

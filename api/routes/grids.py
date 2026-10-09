@@ -1044,6 +1044,9 @@ def grid_loans(request: Request, grid_id: int):
             repaid_hours.append(max(0.0, (closed - created).total_seconds() / 3600))
     lent_statuses = {"OPEN", "REPAID", "TRANSFERRED"}
     return {"grid_id": int(grid_id), **_loan_fields(params),
+            "idle_shrink_enabled": params.get("adjust_idle_shrink") is True,
+            "idle_shrink_global_enabled": bool(getattr(request.app.state.settings,
+                                                        "adjust_idle_shrink_enabled", False)),
             "counts": counts,
             "total_amount_lent_usdt": sum(float(row.get("amount") or 0) for row in loans
                                            if str(row.get("status", "")).upper() in lent_statuses),

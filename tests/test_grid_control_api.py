@@ -178,6 +178,49 @@ def test_params_simple_grid_accepts_compound_and_rejects_other_smart_keys(tmp_pa
     assert client.post("/api/grids/1/params", json={"compound_ratio":0}).status_code == 422
 
 
+def test_params_toggle_idle_shrink_respects_global_switch_and_preserves_params(tmp_path):
+    client, db, _, _ = build_client(tmp_path)
+    client.app.state.settings.adjust_idle_shrink_enabled = True
+    original = dict(db.grid["params"])
+    preview = client.post("/api/grids/1/params", json={"adjust_idle_shrink":True,
+        "dry_run":True,"confirm":False})
+    assert preview.status_code == 200, preview.body
+    assert preview.body["plan"]["updates"]["adjust_idle_shrink"] is True
+    assert db.grid["params"] == original
+    enabled = client.post("/api/grids/1/params", json={"adjust_idle_shrink":True,
+        "dry_run":False,"confirm":True})
+    assert enabled.status_code == 200, enabled.body
+    assert db.grid["params"]["adjust_idle_shrink"] is True
+    assert db.grid["params"]["dust_cash_proceeds"] == "2"
+    assert db.grid["params"]["dust_sweep_seq"] == 2
+    assert db.events[-1]["event_type"] == "GRID_ACTION_API"
+
+    client.app.state.settings.adjust_idle_shrink_enabled = False
+    before_rejected_enable = dict(db.grid["params"])
+    rejected = client.post("/api/grids/1/params", json={"adjust_idle_shrink":True})
+    assert rejected.status_code == 422
+    assert rejected.body["detail"] == "interruptor global apagado (ADJUST_IDLE_SHRINK_ENABLED en el .env)"
+    assert db.grid["params"] == before_rejected_enable
+
+    disabled = client.post("/api/grids/1/params", json={"adjust_idle_shrink":False,
+        "dry_run":False,"confirm":True})
+    assert disabled.status_code == 200, disabled.body
+    assert db.grid["params"]["adjust_idle_shrink"] is False
+    assert db.grid["params"]["dust_cash_proceeds"] == "2"
+
+    non_boolean = client.post("/api/grids/1/params", json={"adjust_idle_shrink":"true"})
+    assert non_boolean.status_code == 422
+
+
+def test_params_adjust_idle_shrink_rejects_simple_grid(tmp_path):
+    client, db, _, _ = build_client(tmp_path)
+    db.grid["strategy"] = "simple"
+    client.app.state.settings.adjust_idle_shrink_enabled = True
+    response = client.post("/api/grids/1/params", json={"adjust_idle_shrink":True})
+    assert response.status_code == 422
+    assert response.body["detail"] == "El motor simple solo admite plazo e interés compuesto."
+
+
 def test_null_params_remove_meta_without_clobbering_runtime_state(tmp_path):
     client, db, _, _ = build_client(tmp_path)
     db.grid["params"].update({"target_pct":2,"max_days":30,"target_close_plan":{"phase":"COMPLETE"}})

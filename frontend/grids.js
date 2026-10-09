@@ -83,6 +83,8 @@
   }
 
   function actionFields(action, card) {
+    if (action === 'idle-shrink-on') return { adjust_idle_shrink: true };
+    if (action === 'idle-shrink-off') return { adjust_idle_shrink: false };
     if (action === 'pause') return { reason: card.querySelector('[name="pause-reason"]')?.value || null };
     if (action === 'close') return { mode: card.querySelector('[name="close-mode"]:checked')?.value || 'repository' };
     if (action === 'adjust') return { new_low: Number(card.querySelector('[name="new-low"]')?.value), new_high: Number(card.querySelector('[name="new-high"]')?.value), n: Number(card.querySelector('[name="new-n"]')?.value) || null };
@@ -101,6 +103,7 @@
   }
 
   function formFor(action, summary) {
+    if (action === 'idle-shrink-on') return '<p>Regla apagada por defecto: en simulación XRP no mejoró la ganancia. Quita niveles sin ciclos en 24 h y no se puede revertir sin reabrir el grid. La primera evaluación solo guarda una línea base.</p>';
     if (action === 'compound') return `<p>Requiere USDT libre; el cambio se aplica a ciclos futuros y no modifica \u00f3rdenes abiertas. Testnet no est\u00e1 validado.</p><label><input name="compound-enabled" type="checkbox" ${summary.compound_enabled ? 'checked' : ''}> Activar inter\u00e9s compuesto</label><label>Reinversi\u00f3n de ganancia (%)<input name="compound-ratio" type="number" min="1" max="100" step="any" value="${Number(summary.compound_ratio ?? 1) * 100}" required></label><label>Tope de crecimiento del capital (%)<input name="compound-cap" type="number" min="0.01" step="any" value="${Number(summary.compound_max_growth_pct ?? 100)}" required></label><p class="muted">El capital asignado no se puede cambiar mientras el grid est\u00e1 abierto.</p>`;
     if (action === 'pause') return '<label>Motivo breve<input name="pause-reason" maxlength="120"></label>';
     if (action === 'close') return '<fieldset class="grid-close-modes"><legend>Modo de cierre</legend><label><input type="radio" name="close-mode" value="liquidate"> Vender todo a mercado</label><label><input type="radio" name="close-mode" value="profit_repository"> Vender lo positivo y pasar lo negativo al grid especial</label><p>Otras opciones</p><label><input type="radio" name="close-mode" value="repository" checked> Pasar todas las celdas al repositorio</label><label><input type="radio" name="close-mode" value="cancel"> Solo cancelar órdenes (deja monedas sueltas)</label></fieldset>';
@@ -113,11 +116,11 @@
   }
 
   async function controlFlow(gridId, action, summary, container) {
-    const apiAction = action === 'compound' ? 'params' : action === 'disable-loans' ? 'loans/disable' : action;
+    const apiAction = ['compound', 'idle-shrink-on', 'idle-shrink-off'].includes(action) ? 'params' : action === 'disable-loans' ? 'loans/disable' : action;
     const path = `/api/grids/${gridId}/${apiAction}`;
     const gather = () => actionFields(action, document.getElementById('grid-action-dialog'));
     const initialFields = formFor(action, summary);
-    showActionDialog(container, action === 'compound' ? 'Inter\u00e9s compuesto' : `Preparar ${action}`, `${initialFields}<p class="muted">Las cifras son una estimación de Testnet; Testnet no representa el mercado real.</p>`, async () => {
+    showActionDialog(container, action === 'compound' ? 'Inter\u00e9s compuesto' : action === 'idle-shrink-on' ? 'Activar reducci\u00f3n de niveles ociosos' : action === 'idle-shrink-off' ? 'Apagar reducci\u00f3n de niveles ociosos' : `Preparar ${action}`, `${initialFields}<p class="muted">Las cifras son una estimación de Testnet; Testnet no representa el mercado real.</p>`, async () => {
       const input = gather();
       if (action === 'params') {
         const modal = document.getElementById('grid-action-dialog');
@@ -129,7 +132,7 @@
       const first = await apiPost(path, { ...input, dry_run: true, confirm: false });
       const preview = JSON.stringify(first.plan, null, 2);
       const liquidation = action === 'close' && input.mode === 'liquidate';
-      showActionDialog(container, 'Revisar plan', `<p>Plan estimado en Testnet. Testnet no representa el mercado real.</p><ul>${planLines(first.plan)}</ul><details><summary>Detalle técnico</summary><pre>${esc(preview)}</pre></details>${liquidation ? '<label>Escribe LIQUIDAR<input name="liquidate-confirm" autocomplete="off"></label>' : ''}`, async () => {
+      showActionDialog(container, 'Revisar plan', `<p>Plan estimado en Testnet. Testnet no representa el mercado real.</p>${action === 'idle-shrink-on' ? formFor(action, summary) : ''}<ul>${planLines(first.plan)}</ul><details><summary>Detalle técnico</summary><pre>${esc(preview)}</pre></details>${liquidation ? '<label>Escribe LIQUIDAR<input name="liquidate-confirm" autocomplete="off"></label>' : ''}`, async () => {
         if (liquidation && document.getElementById('grid-action-dialog').querySelector('[name="liquidate-confirm"]').value !== 'LIQUIDAR') throw new Error('Escribe LIQUIDAR para confirmar la venta a mercado.');
         const result = await apiPost(path, { ...input, ...(liquidation ? { confirm_text: 'LIQUIDAR' } : {}), dry_run: false, confirm: true });
         if (result.outcome === 'partial') {
@@ -350,11 +353,21 @@
       <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(ev.reason || '')}</td></tr>`).join('');
     let loanBlock = '';
     let loanDisableAction = '';
+    let idleShrinkAction = '';
     if (summary.strategy === 'smart') {
       if (!loanResult?.ok) {
         loanBlock = `<div class="card inventory-block loans-detail"><h3>Préstamos entre niveles</h3><p class="grids-error">No se pudo cargar este bloque: ${esc(loanResult?.error?.message || 'error desconocido')}</p></div>`;
       } else {
         const loans = loanResult.data;
+        if (['ACTIVE', 'PAUSED'].includes(summary.status)) {
+          if (loans.idle_shrink_enabled) {
+            idleShrinkAction = '<button class="button secondary" data-grid-action="idle-shrink-off">Apagar reducción de niveles ociosos</button>';
+          } else if (loans.idle_shrink_global_enabled) {
+            idleShrinkAction = '<button class="button secondary" data-grid-action="idle-shrink-on">Activar reducción de niveles ociosos</button>';
+          } else {
+            idleShrinkAction = '<button class="button secondary" disabled>Interruptor global apagado: añade ADJUST_IDLE_SHRINK_ENABLED=true al .env y reinicia</button>';
+          }
+        }
         const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'
           : loans.loans_group === 'manual' ? (loans.loans_enabled ? 'Activo (configuración manual)' : 'Apagado (configuración manual)')
           : ['loans', 'loans_v2'].includes(loans.loans_group) ? 'Activo' : (loans.loans_enabled ? 'Activo' : 'Apagado');
@@ -385,6 +398,7 @@
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
           ${loanDisableAction}
+          ${idleShrinkAction}
         </div>
       </div>
       ${loanBlock}
