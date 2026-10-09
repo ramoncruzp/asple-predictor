@@ -62,6 +62,16 @@ def test_select_borrower_requires_each_state_inventory_cycles_recent_sell_and_co
                            {**params, "loan_cooldown_cycles": 2}) is None
 
 
+def test_default_one_cycle_borrower_qualifies_but_explicit_three_does_not():
+    params = validate_params({"loans_enabled": True}, 6)
+    borrower = cell(1, cycles=1)
+    recent_sell = [event("SELL_FILLED", 1, 0.5)]
+    assert params["loan_borrower_min_cycles"] == 1
+    assert select_borrower([borrower], recent_sell, [], NOW, params) == borrower
+    assert select_borrower([borrower], recent_sell, [], NOW,
+                           {**params, "loan_borrower_min_cycles": 3}) is None
+
+
 def test_select_borrower_applies_cycle_cooldown_and_deterministic_newest_sell_order():
     params = {**PARAMS, "loan_cooldown_cycles": 2}
     first, second = cell(1, cycles=6), cell(2, cycles=5)

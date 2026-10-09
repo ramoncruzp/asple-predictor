@@ -40,7 +40,7 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "loans_enabled": False,
     "reserve_pct": 0.0,
     "loan_idle_h": 12.0,
-    "loan_borrower_min_cycles": 3,
+    "loan_borrower_min_cycles": 1,
     "loan_recent_sell_h": 1.0,
     "loan_topup_pct": 50.0,
     "loan_lender_max_pct": 50.0,
