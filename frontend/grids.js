@@ -210,6 +210,8 @@
     const loanSummary = loanSummaryResult?.ok ? loanSummaryResult.data : null;
     const loanPairsResult = data.loanPairsResult;
     const loanPairs = loanPairsResult?.ok ? loanPairsResult.data : null;
+    const levelAdjustResult = data.levelAdjustResult;
+    const levelAdjust = levelAdjustResult?.ok ? levelAdjustResult.data : null;
     const loanSummaryText = loanSummary
       ? `${loanSummary.groups.map((group) => `${esc(group.group)}: ${group.grid_count} grids, P&L ${fmtMoney(group.realized_pnl_usdt, 2)} USDT (${group.pnl_pct_capital == null ? '\u2014' : `${Number(group.pnl_pct_capital).toFixed(2)}% del capital`}; ${group.pnl_pct_capital_per_day == null ? '\u2014' : `${Number(group.pnl_pct_capital_per_day).toFixed(2)}%/d\u00eda`}), ${group.cycles_completed} ciclos, ${fmtMoney(group.commissions_usdt, 2)} USDT en comisiones, ${group.loans_created} pr\u00e9stamos creados/${group.loans_repaid} devueltos`).join(' \u00b7 ')}. ${esc(loanSummary.note)}`
       : loanSummaryResult?.error ? `No se pudo cargar el resumen de pr\u00e9stamos: ${esc(loanSummaryResult.error.message)}` : 'Cargando resumen de pr\u00e9stamos\u2026';
@@ -242,6 +244,25 @@
         <tbody>${pairRows || '<tr><td colspan="5">Sin pares registrados</td></tr>'}</tbody></table>
         <p class="muted">${esc(loanPairs.note)}</p></div>`
       : `<div class="card loan-pairs-panel"><h3>Préstamos — pares</h3><p>${loanPairsResult?.error ? `No se pudo cargar: ${esc(loanPairsResult.error.message)}` : 'Cargando…'}</p></div>`;
+    const levelPairRows = levelAdjust ? Object.entries(levelAdjust.verdicts || {}).map(([factor, result]) => {
+      const pair = levelAdjust.pairs?.[factor] || {};
+      const verdict = result?.verdict || 'en prueba';
+      const excluded = (pair.excluded_pairs || []).map(item => `${String(item.pair_id).slice(0, 8)}: ${item.reason}`).join(' · ') || 'ninguno';
+      return `<tr><td>${esc(factor)}</td><td>${esc(verdict)}</td><td>n=${Number(pair.n_pairs || 0)}; excluidos: ${esc(excluded)}</td></tr>`;
+    }).join('') : '';
+    const levelRows = levelAdjust ? (levelAdjust.grids || []).map(grid => {
+      const reasons = Object.entries(grid.idle_omissions || {}).map(([reason, count]) => `${reason}: ${count}`).join(', ') || 'sin omisiones';
+      const blocked = Object.entries(grid.adjust_blocked || {}).map(([reason, count]) => `${reason}: ${count}`).join(', ') || 'sin bloqueos';
+      const idleBlocked = grid.idle_blocked_reason ? `; ${grid.idle_blocked_reason}` : '';
+      return `<tr><td>${grid.grid_id}</td><td>${esc(grid.symbol || '—')}</td>
+        <td>${grid.adjustments?.MONITOR || 0} monitor; ${grid.adjustments?.CAPITAL_SHRINK || 0} con reducción; ${esc(blocked)}</td>
+        <td>${grid.idle_evaluations || 0}; aplicadas ${grid.idle_applied || 0}; ${esc(reasons + idleBlocked)}</td></tr>`;
+    }).join('') : '';
+    const levelPanel = `<div class="card level-adjust-panel"><h3>Vigilancia de niveles</h3>
+      <p>Interruptor global: ${levelAdjust?.idle_shrink_enabled ? 'encendido' : 'apagado'}. ${esc(levelAdjust?.note || 'apagado por defecto; sin evidencia de mejora en simulación.')}</p>
+      ${levelAdjust ? `<table class="data-table"><thead><tr><th>Grid</th><th>Símbolo</th><th>Nivel 2 aplicado</th><th>Nivel 3 aplicado</th><th>Evaluación nivel 3</th></tr></thead><tbody>${levelRows || '<tr><td colspan="5">Sin grids Smart</td></tr>'}</tbody></table>
+        <table class="data-table"><thead><tr><th>Factor</th><th>Veredicto</th><th>Pares incompletos</th></tr></thead><tbody>${levelPairRows}</tbody></table>`
+        : `<p>${levelAdjustResult?.error ? `No se pudo cargar: ${esc(levelAdjustResult.error.message)}` : 'Cargando…'}</p>`}</div>`;
     const warning = data.same_symbol_warning ? `<div class="grids-warning">${esc(data.same_symbol_warning)}</div>` : '';
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
@@ -256,6 +277,7 @@
       </div>
       <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></div>
       ${pairPanel}
+      ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
@@ -440,14 +462,16 @@
 
   async function loadList(container) {
     try {
-      const [grids, loanSummaryResult, loanPairsResult] = await Promise.all([
+      const [grids, loanSummaryResult, loanPairsResult, levelAdjustResult] = await Promise.all([
         apiGet('/api/grids'),
         apiGet('/api/grids/loans/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
         apiGet('/api/grids/loans/pairs/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
+        apiGet('/api/grids/level-adjust/summary').then(data => ({ ok: true, data }))
+          .catch(error => ({ ok: false, error })),
       ]);
-      renderList(container, { ...grids, loanSummaryResult, loanPairsResult });
+      renderList(container, { ...grids, loanSummaryResult, loanPairsResult, levelAdjustResult });
     } catch (error) {
       renderError(container, error);
     }

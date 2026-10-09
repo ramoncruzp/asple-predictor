@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     grid_monitor_gap_minutes: int = Field(20, validation_alias="GRID_MONITOR_GAP_MINUTES")
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
     grid_policy_enabled: bool = Field(True, validation_alias="GRID_POLICY_ENABLED")
+    adjust_idle_shrink_enabled: bool = Field(False, validation_alias="ADJUST_IDLE_SHRINK_ENABLED")
     scanner_min_volume_24h: float = Field(SCANNER_DEFAULTS["min_volume_24h"], gt=0, validation_alias="SCANNER_MIN_VOLUME_24H")
     scanner_max_spread_bps: float = Field(SCANNER_DEFAULTS["max_spread_bps"], gt=0, validation_alias="SCANNER_MAX_SPREAD_BPS")
     scanner_min_spacing_pct: float = Field(SCANNER_DEFAULTS["min_spacing_pct"], gt=0, validation_alias="SCANNER_MIN_SPACING_PCT")

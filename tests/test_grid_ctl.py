@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts import grid_ctl
 
 
@@ -55,3 +57,10 @@ def test_grid_ctl_run_once_calls_monitor_without_starting_scheduler(monkeypatch,
     monkeypatch.setattr(grid_ctl, "build_context", lambda: {"monitor": FakeMonitor()})
     assert grid_ctl.main(["run-once"]) == 0
     assert json.loads(capsys.readouterr().out) == {"trigger": "SCHEDULED", "status": "OK"}
+
+
+def test_open_pair_cli_exposes_factor_choices(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        grid_ctl.main(["open-pair", "--help"])
+    assert exit_info.value.code == 0
+    assert "--factor {loans,idle_shrink,capital_shrink}" in capsys.readouterr().out

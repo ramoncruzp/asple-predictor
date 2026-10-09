@@ -13,7 +13,8 @@ from typing import Any, Callable
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_decision,
                          break_prob, build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
-                         plan_dust_sweep, profit_close_retry_delay, stoploss_candidates, PolicyDecision)
+                         idle_shrink_decision, plan_dust_sweep, profit_close_retry_delay,
+                         stoploss_candidates, PolicyDecision)
 from grid.volatility_provider import VolatilityProvider
 from data.exchange_filters import SymbolFilters
 from grid.adjust import plan_adjust_with_shrink
@@ -60,12 +61,15 @@ class GridMonitor:
         if event.get("persisted"):
             self._event_count += 1
             return
-        saved = self.db.add_grid_event(
+        event_values = dict(
             run_id=self._run_id, source="MONITOR", grid_id=event.get("grid_id"),
             level_idx=event.get("level_idx"), client_order_id=event.get("client_order_id"),
             order_id=event.get("order_id"), event_type=event["event_type"],
             reason=event.get("reason"), price=event.get("price"), details=event.get("details"),
         )
+        if event.get("ts") is not None:
+            event_values["ts"] = event["ts"]
+        saved = self.db.add_grid_event(**event_values)
         if saved:
             self._event_count += 1
 
@@ -601,6 +605,57 @@ class GridMonitor:
                             current, levels, mid, sigma, now,
                             (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
                         )
+                        params = current.get("params") or {}
+                        if (adjust.action == "NONE" and decision.action not in
+                                {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}
+                                and params.get("adjust_idle_shrink") is True
+                                and getattr(self.settings, "adjust_idle_shrink_enabled", False)):
+                            prior_eval = self.db.list_grid_events(
+                                grid_id=grid_id, event_type="IDLE_SHRINK_EVAL", limit=1)
+                            prior_details = (prior_eval[0].get("details") or {}) if prior_eval else {}
+                            idle = idle_shrink_decision(
+                                current, levels, mid, now,
+                                (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
+                                prior_details.get("cycles_snapshot") if prior_eval else None,
+                                prior_eval[0].get("ts") if prior_eval else None,
+                                global_enabled=True)
+                            if idle.metrics.get("should_record"):
+                                realized = sum(float(row.get("pnl") or 0) for row in levels)
+                                unrealized = sum((mid - float(row.get("entry_price") or 0))
+                                    * float(row.get("held_qty") or 0) for row in levels
+                                    if float(row.get("held_qty") or 0) > 0)
+                                idle_details = {**idle.metrics,
+                                    "pnl_realized": realized,
+                                    "equity": float(current.get("capital_total") or 0)
+                                              + realized + unrealized,
+                                    "decision": idle.action,
+                                    "omission_reason": idle.metrics.get("reason")}
+                                self._emit({"event_type": "IDLE_SHRINK_EVAL", "grid_id": grid_id,
+                                    "reason": idle.metrics.get("reason"), "price": mid,
+                                    "ts": now,
+                                    "details": idle_details})
+                            if idle.action == "ADJUST":
+                                try:
+                                    idle_plan = plan_adjust_with_shrink(
+                                        current, levels, idle.metrics["range_low"],
+                                        idle.metrics["range_high"], idle.metrics["n_levels"],
+                                        mid, SymbolFilters.from_symbol_info(
+                                            self.engine.exchange.get_symbol_info(current["symbol"])),
+                                        self.settings, enabled=params.get("adjust_shrink_n", True))
+                                    if idle_plan.ok:
+                                        idle = PolicyDecision("ADJUST", (), {**idle.metrics,
+                                            "range_low": float(idle_plan.lines[0]),
+                                            "range_high": float(idle_plan.lines[-1]),
+                                            "n_levels": len(idle_plan.lines) - 1,
+                                            "n_from": idle_plan.details.get("n_from", idle.metrics["n_from"]),
+                                            "n_to": idle_plan.details.get("n_to", idle.metrics["n_to"])})
+                                    else:
+                                        idle = PolicyDecision("BLOCKED", (idle_plan.reason or "plan_invalid",),
+                                            {**idle.metrics, "plan_reason": idle_plan.reason})
+                                except Exception as exc:
+                                    idle = PolicyDecision("BLOCKED", ("plan_invalid",),
+                                        {**idle.metrics, "plan_error": str(exc)})
+                                adjust = idle
                         if target_plan and target_plan["reached"]:
                             decision = PolicyDecision("TARGET", (), {**decision.metrics, "target": target_plan})
                         if max_days_result["expired"] and (max_days_plan_started

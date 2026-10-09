@@ -10,6 +10,7 @@ from grid.policy import (
     break_prob,
     evaluate_grid,
     free_cells,
+    idle_shrink_decision,
     norm_cdf,
     stoploss_candidates,
     total_pnl_pct,
@@ -41,6 +42,9 @@ def test_defaults_and_parameter_validation_rules():
         "max_loss_pct": 10.0, "stop_loss_pct": 5.0,
         "adjust_enabled": True, "adjust_trigger_z": 0.75,
         "adjust_shrink_n": True,
+        "adjust_idle_shrink": False, "idle_every_h": 24.0,
+        "idle_frac_min": 0.4, "idle_remove_frac": 0.5,
+        "idle_n_min": 6, "idle_mode": "width",
         "adjust_cooldown_h": 6, "adjust_trapped_cap_pct": 30.0,
         "adjust_n": None,
         "compound_enabled": False, "compound_ratio": 1.0,
@@ -123,6 +127,95 @@ def test_trapped_capital_counts_only_old_sell_inventory_and_reports_unknown_age(
 
 def test_free_cells_counts_only_idle_and_buy_open():
     assert free_cells([cell("IDLE"), cell("BUY_OPEN"), cell("SELL_OPEN"), cell("DONE")]) == 2
+
+
+def test_idle_shrink_waits_for_baseline_then_shrinks_idle_levels():
+    params = {**DEFAULT_SMART_PARAMS, "adjust_idle_shrink": True}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    cells = [cell(level_idx=i, cycles_completed=(1 if i < 5 else 0)) for i in range(10)]
+    first = idle_shrink_decision(grid, cells, 100, NOW, None, None, None,
+                                 global_enabled=True)
+    assert first.action == "NONE" and first.metrics["reason"] == "no_baseline"
+    baseline = {str(i): 0 for i in range(10)}
+    second = idle_shrink_decision(grid, cells, 100, NOW + timedelta(hours=24), None,
+                                  baseline, NOW, global_enabled=True)
+    assert second.action == "ADJUST"
+    assert second.metrics["idle_count"] == 5
+    assert second.metrics["n_levels"] == 8
+    assert second.metrics["source"] == "IDLE_SHRINK"
+    expected_half = log(110 / 90) / 2
+    assert second.metrics["range_low"] == pytest.approx(100 * exp(-expected_half))
+    assert second.metrics["range_high"] == pytest.approx(100 * exp(expected_half))
+
+
+def test_idle_shrink_global_switch_and_window_gap_are_noops():
+    params = {**DEFAULT_SMART_PARAMS, "adjust_idle_shrink": True}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    cells = [cell(level_idx=i, cycles_completed=(1 if i < 5 else 0)) for i in range(10)]
+    disabled = idle_shrink_decision(grid, cells, 100, NOW, None, {}, NOW,
+                                    global_enabled=False)
+    assert disabled.action == "NONE" and disabled.metrics["reason"] == "global_disabled"
+    gap = idle_shrink_decision(grid, cells, 100, NOW + timedelta(hours=49), None,
+                               {str(i): 0 for i in range(10)}, NOW, global_enabled=True)
+    assert gap.action == "NONE" and gap.metrics["reason"] == "window_gap"
+
+
+def test_idle_shrink_rebaselines_when_adjust_happened_after_prior_evaluation():
+    params = {**DEFAULT_SMART_PARAMS, "adjust_idle_shrink": True}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    cells = [cell(level_idx=i, cycles_completed=0) for i in range(10)]
+    previous = {str(i): 0 for i in range(10)}
+    decision = idle_shrink_decision(
+        grid, cells, 100, NOW + timedelta(hours=30), NOW + timedelta(hours=25),
+        previous, NOW, global_enabled=True)
+    assert params["idle_every_h"] >= params["adjust_cooldown_h"]
+    assert decision.action == "NONE"
+    assert decision.metrics["reason"] == "adjusted_since_baseline"
+    assert decision.metrics["should_record"] is True
+
+
+def test_idle_shrink_evaluates_normally_when_adjust_predates_prior_evaluation():
+    params = {**DEFAULT_SMART_PARAMS, "adjust_idle_shrink": True}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    cells = [cell(level_idx=i, cycles_completed=(1 if i < 5 else 0)) for i in range(10)]
+    previous = {str(i): 0 for i in range(10)}
+    decision = idle_shrink_decision(
+        grid, cells, 100, NOW + timedelta(hours=24), NOW - timedelta(hours=30),
+        previous, NOW, global_enabled=True)
+    assert decision.action == "ADJUST"
+    assert decision.metrics["source"] == "IDLE_SHRINK"
+
+
+def test_idle_shrink_spacing_mode_cooldown_trapped_and_free_cell_guards():
+    params = {**DEFAULT_SMART_PARAMS, "adjust_idle_shrink": True,
+              "idle_mode": "spacing", "adjust_cooldown_h": 6,
+              "adjust_trapped_cap_pct": 30}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    baseline = {str(i): 0 for i in range(10)}
+    cells = [cell(level_idx=i, cycles_completed=(1 if i < 5 else 0)) for i in range(10)]
+    spacing = idle_shrink_decision(grid, cells, 100, NOW + timedelta(hours=24), None,
+        baseline, NOW, global_enabled=True)
+    assert spacing.action == "ADJUST" and spacing.metrics["n_to"] == 8
+    assert log(spacing.metrics["range_high"] / spacing.metrics["range_low"]) == pytest.approx(
+        log(110 / 90) * 0.8)
+    cooldown_params = {**params, "idle_every_h": 2}
+    cooldown = idle_shrink_decision({**grid, "params": cooldown_params}, cells, 100, NOW,
+        NOW - timedelta(hours=5), baseline, NOW - timedelta(hours=3), global_enabled=True)
+    assert cooldown.metrics["reason"] == "cooldown"
+    trapped_cells = [cell("SELL_OPEN", level_idx=0, entry_price=40, held_qty=1,
+                          bought_at=NOW - timedelta(hours=25))] + cells[1:]
+    trapped = idle_shrink_decision(grid, trapped_cells, 100, NOW + timedelta(hours=24),
+        None, baseline, NOW, global_enabled=True)
+    assert trapped.metrics["reason"] == "trapped_capital_pct"
+    occupied = [cell("SELL_OPEN", level_idx=i) for i in range(10)]
+    no_free = idle_shrink_decision(grid, occupied, 100, NOW + timedelta(hours=24),
+        None, baseline, NOW, global_enabled=True)
+    assert no_free.metrics["reason"] == "free_cells"
 
 
 def test_total_pnl_includes_realized_and_known_entry_inventory_and_reports_unknown_entry():

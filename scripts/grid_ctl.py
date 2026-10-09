@@ -171,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     pair_parser.add_argument("--n-levels", required=True, type=int)
     pair_parser.add_argument("--capital-per-arm", required=True, type=Decimal)
     pair_parser.add_argument("--pair-seed", type=int)
+    pair_parser.add_argument("--factor", choices=("loans", "idle_shrink", "capital_shrink"), default="loans")
     pair_parser.add_argument("--dry-run", action="store_true", help="preview only; this is the default")
     pair_parser.add_argument("--execute", action="store_true", help="execute both Testnet arms")
     pair_parser.add_argument("--confirm", action="store_true", help="required with --execute")
@@ -240,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             body = PairOpenRequest(
                 symbol=args.symbol, capital=args.capital_per_arm, range_low=args.range_low,
                 range_high=args.range_high, n_levels=args.n_levels, pair_seed=args.pair_seed,
+                factor=args.factor,
                 dry_run=not args.execute, confirm=args.confirm,
             )
             result = open_loan_pair(request, body)

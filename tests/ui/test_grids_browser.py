@@ -133,6 +133,33 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
     assert_no_js_errors(ui_page)
 
 
+def test_level_adjust_panel_shows_switch_legend_and_three_verdicts(live_server, ui_page):
+    ui_page.route("**/api/grids/level-adjust/summary", lambda route: route.fulfill(json={
+        "idle_shrink_enabled": False,
+        "note": "apagado por defecto; sin evidencia de mejora en simulación.",
+        "grids": [{"grid_id": 9, "symbol": "ADAUSDT",
+            "adjustments": {"MONITOR": 1, "CAPITAL_SHRINK": 2, "IDLE_SHRINK": 0},
+            "idle_evaluations": 3, "idle_applied": 0, "idle_omissions": {"cooldown": 3},
+            "idle_blocked_reason": "interruptor_global_apagado"}],
+        "verdicts": {"idle_shrink": {"verdict": "en prueba"},
+            "capital_shrink": {"verdict": "apagar definitivamente"},
+            "sample_only": {"verdict": "candidato a activar por defecto (decide Ramón)"}},
+        "pairs": {"idle_shrink": {"n_pairs": 4, "excluded_pairs": []},
+            "capital_shrink": {"n_pairs": 20, "excluded_pairs": [{"pair_id": "p1", "reason": "brazos no cerrados"}]}}
+    }))
+    ui_page.goto(f"{live_server.url}/#grids")
+    panel = ui_page.locator(".level-adjust-panel")
+    expect(panel).to_contain_text("Vigilancia de niveles")
+    expect(panel).to_contain_text("apagado por defecto; sin evidencia de mejora en simulación")
+    expect(panel).to_contain_text("en prueba")
+    expect(panel).to_contain_text("apagar definitivamente")
+    expect(panel).to_contain_text("candidato a activar por defecto (decide Ramón)")
+    expect(panel).to_contain_text("capital_shrink")
+    expect(panel).to_contain_text("cooldown: 3")
+    expect(panel).to_contain_text("interruptor_global_apagado")
+    assert panel.locator("[class*=success], [class*=failure], [class*=positive], [class*=negative]").count() == 0
+
+
 def test_loan_pairs_panel_renders_conclusive_and_nonconclusive_without_verdict_colors(live_server, ui_page):
     summary = {"n_pairs": 20, "mean_d": 0.25, "sd_d": 0.1, "t_paired": 11.18,
         "ci_low": 0.12, "ci_high": 0.38, "wins": 15, "treated_pairs": 12,

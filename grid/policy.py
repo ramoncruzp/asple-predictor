@@ -24,6 +24,12 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "stop_loss_pct": 5.0,
     "adjust_enabled": True,
     "adjust_shrink_n": True,
+    "adjust_idle_shrink": False,
+    "idle_every_h": 24,
+    "idle_frac_min": 0.4,
+    "idle_remove_frac": 0.5,
+    "idle_n_min": 6,
+    "idle_mode": "width",
     "adjust_trigger_z": 0.75,
     "adjust_cooldown_h": 6,
     "adjust_trapped_cap_pct": 30.0,
@@ -178,6 +184,23 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     shrink_n = result["adjust_shrink_n"]
     if not isinstance(shrink_n, bool):
         raise ValueError("adjust_shrink_n must be boolean")
+    idle_shrink = result["adjust_idle_shrink"]
+    if not isinstance(idle_shrink, bool):
+        raise ValueError("adjust_idle_shrink must be boolean")
+    result["idle_every_h"] = _number(result["idle_every_h"], "idle_every_h")
+    if result["idle_every_h"] <= 0:
+        raise ValueError("idle_every_h must be greater than zero")
+    for key in ("idle_frac_min", "idle_remove_frac"):
+        result[key] = _number(result[key], key)
+        if not 0 < result[key] <= 1:
+            raise ValueError(f"{key} must be in (0, 1]")
+    idle_n_min = result["idle_n_min"]
+    if isinstance(idle_n_min, bool) or int(idle_n_min) != idle_n_min or int(idle_n_min) < 2:
+        raise ValueError("idle_n_min must be an integer >= 2")
+    result["idle_n_min"] = int(idle_n_min)
+    result["idle_mode"] = str(result["idle_mode"]).lower()
+    if result["idle_mode"] not in {"width", "spacing"}:
+        raise ValueError("idle_mode must be width or spacing")
     result["adjust_trigger_z"] = _number(result["adjust_trigger_z"], "adjust_trigger_z")
     if result["adjust_trigger_z"] <= 0:
         raise ValueError("adjust_trigger_z must be greater than zero")
@@ -438,7 +461,7 @@ def adjust_decision(
         return PolicyDecision("NONE", (), details)
     reasons = []
     if last_adjust_at is not None:
-        elapsed = (_as_utc(now) - _as_utc(last_adjust_at)).total_seconds() / 3600
+        elapsed = _adjust_cooldown_elapsed(now, last_adjust_at)
         details["cooldown_elapsed_h"] = elapsed
         if elapsed < params["adjust_cooldown_h"]:
             reasons.append("cooldown")
@@ -446,8 +469,7 @@ def adjust_decision(
     details["trapped_capital_pct"] = trapped
     if trapped >= params["adjust_trapped_cap_pct"]:
         reasons.append("trapped_capital_pct")
-    free = sum(row.get("state") in {"IDLE", "BUY_OPEN", "DONE"} and
-               float(row.get("held_qty") or 0) <= 0 for row in cells)
+    free = _adjust_free_cells(cells)
     details["free_cells"] = free
     if free < params["min_free_cells"]:
         reasons.append("free_cells")
@@ -459,6 +481,95 @@ def adjust_decision(
     details.update({"range_low": new_low, "range_high": new_high,
                     "n_levels": params["adjust_n"] or n_levels,
                     "source": "MONITOR"})
+    return PolicyDecision("ADJUST", (), details)
+
+
+def _adjust_cooldown_elapsed(now: datetime, last_adjust_at: datetime) -> float:
+    return (_as_utc(now) - _as_utc(last_adjust_at)).total_seconds() / 3600.0
+
+
+def _adjust_free_cells(cells: list[dict]) -> int:
+    return sum(row.get("state") in {"IDLE", "BUY_OPEN", "DONE"}
+               and float(row.get("held_qty") or 0) <= 0 for row in cells)
+
+
+def idle_shrink_decision(
+    grid: Mapping[str, Any], cells: list[dict], mid: float, now: datetime,
+    last_adjust_at: datetime | None, previous_snapshot: Mapping[str, Any] | None,
+    previous_eval_at: datetime | None, *, global_enabled: bool = False,
+) -> PolicyDecision:
+    """Pure opt-in rule that removes levels with no completed cycles in the last window."""
+    raw = grid.get("params") or {}
+    if not global_enabled:
+        return PolicyDecision("NONE", (), {"reason": "global_disabled", "should_record": False})
+    if (grid.get("strategy", "simple") != "smart" or grid.get("status") != "ACTIVE"
+            or raw.get("adjust_enabled", False) is not True
+            or raw.get("adjust_idle_shrink", False) is not True):
+        return PolicyDecision("NONE", (), {"reason": "not_enabled", "should_record": False})
+    n_levels = int(grid.get("n_levels", len(cells)))
+    params = validate_params(raw, max(2, n_levels))
+    now_utc = _as_utc(now)
+    snapshot = {str(int(row["level_idx"])): int(row.get("cycles_completed") or 0)
+                for row in cells if row.get("level_idx") is not None}
+    details: dict[str, Any] = {"n": n_levels, "cycles_snapshot": snapshot,
+                               "should_record": True, "evaluated_at": now_utc.isoformat()}
+    if previous_snapshot is None or previous_eval_at is None:
+        return PolicyDecision("NONE", (), {**details, "reason": "no_baseline"})
+    if last_adjust_at is not None and _as_utc(last_adjust_at) > _as_utc(previous_eval_at):
+        return PolicyDecision("NONE", (), {**details, "reason": "adjusted_since_baseline"})
+    if previous_eval_at is not None:
+        elapsed_h = (now_utc - _as_utc(previous_eval_at)).total_seconds() / 3600.0
+        details["window_h"] = elapsed_h
+        if elapsed_h < params["idle_every_h"]:
+            return PolicyDecision("NONE", (), {**details, "reason": "not_due", "should_record": False})
+        if elapsed_h > 2 * params["idle_every_h"]:
+            return PolicyDecision("NONE", (), {**details, "reason": "window_gap"})
+
+    active = [row for row in cells if row.get("state") != "DONE"]
+    n = min(n_levels, len(active)) if active else n_levels
+    idle = [row for row in active
+            if float(row.get("held_qty") or 0) <= 0
+            and str(int(row.get("level_idx"))) in previous_snapshot
+            and int(row.get("cycles_completed") or 0)
+                == int(previous_snapshot[str(int(row.get("level_idx")))])]
+    idle_count = len(idle)
+    idle_frac = idle_count / n if n else 0.0
+    details.update({"n": n, "idle_count": idle_count, "idle_frac": idle_frac,
+                    "capital_per_cell": float(grid.get("capital_total") or 0) / max(n, 1)})
+    reason = None
+    if n <= params["idle_n_min"]:
+        reason = "idle_n_min"
+    elif idle_frac < params["idle_frac_min"]:
+        reason = "idle_frac_min"
+    elif last_adjust_at is not None and (
+            _adjust_cooldown_elapsed(now_utc, last_adjust_at) < params["adjust_cooldown_h"]):
+        reason = "cooldown"
+    else:
+        trapped, _unknown = _trapped_details(cells, now_utc, params, float(grid["capital_total"]))
+        details["trapped_capital_pct"] = trapped
+        if trapped >= params["adjust_trapped_cap_pct"]:
+            reason = "trapped_capital_pct"
+        else:
+            available = _adjust_free_cells(cells)
+            details["free_cells"] = available
+            if available < params["min_free_cells"]:
+                reason = "free_cells"
+    if reason:
+        return PolicyDecision("NONE", (), {**details, "reason": reason})
+
+    remove = max(1, int(idle_count * params["idle_remove_frac"]))
+    n_new = max(params["idle_n_min"], n - remove)
+    if n_new >= n:
+        return PolicyDecision("NONE", (), {**details, "reason": "no_reduction"})
+    width = log(float(grid["range_high"]) / float(grid["range_low"]))
+    if params["idle_mode"] == "spacing":
+        width *= n_new / n
+    half = width / 2
+    mid = _number(mid, "mid")
+    new_low, new_high = mid / exp(half), mid * exp(half)
+    details.update({"range_low": new_low, "range_high": new_high, "n_levels": n_new,
+                    "source": "IDLE_SHRINK", "n_from": n, "n_to": n_new,
+                    "mode": params["idle_mode"]})
     return PolicyDecision("ADJUST", (), details)
 
 

@@ -9,7 +9,7 @@ import secrets
 import statistics
 import uuid
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
@@ -240,6 +240,7 @@ class PairOpenRequest(BaseModel):
     confirm: StrictBool = False
     pair_seed: int | None = None
     pair_id: str | None = None
+    factor: Literal["loans", "idle_shrink", "capital_shrink"] = "loans"
 
     @model_validator(mode="after")
     def valid_pair_range(self):
@@ -512,12 +513,21 @@ _PAIR_OFFSETS_PCT = (0.10, 0.15, 0.20, 0.30)
 
 
 def _pair_arm_body(body: PairOpenRequest, arm: str, low: Decimal, high: Decimal,
-                   *, dry_run: bool, confirm: bool) -> OpenRequest:
+                   *, dry_run: bool, confirm: bool, factor: str = "loans") -> OpenRequest:
     params = dict(body.params or {})
     params.pop("loans_group", None)
-    params["loans_enabled"] = arm == "pair_loans"
-    if arm == "pair_loans":
-        params.update({"loan_topup_pct": 70.0, "loan_lender_max_pct": 70.0})
+    if factor == "loans":
+        params["loans_enabled"] = arm == "pair_loans"
+        params["adjust_idle_shrink"] = False
+        if arm == "pair_loans":
+            params.update({"loan_topup_pct": 70.0, "loan_lender_max_pct": 70.0})
+    elif factor == "idle_shrink":
+        params["loans_enabled"] = False
+        params["adjust_idle_shrink"] = arm == "pair_idle_on"
+    elif factor == "capital_shrink":
+        params["loans_enabled"] = False
+        params["adjust_idle_shrink"] = False
+        params["adjust_shrink_n"] = arm == "pair_shrink_on"
     return OpenRequest(
         symbol=body.symbol, strategy="smart", capital=body.capital,
         range_low=low, range_high=high, n_levels=body.n_levels,
@@ -527,10 +537,18 @@ def _pair_arm_body(body: PairOpenRequest, arm: str, low: Decimal, high: Decimal,
     )
 
 
+def _pair_arms(factor: str) -> tuple[str, str]:
+    return {"loans": ("pair_loans", "pair_control"),
+            "idle_shrink": ("pair_idle_on", "pair_idle_off"),
+            "capital_shrink": ("pair_shrink_on", "pair_shrink_off")}[factor]
+
+
 def _build_pair_plans(request: Request, body: PairOpenRequest, first_arm: str):
+    factor = body.factor
     first = _open_grid(request, _pair_arm_body(
-        body, first_arm, body.range_low, body.range_high, dry_run=True, confirm=False))
-    second_arm = "pair_control" if first_arm == "pair_loans" else "pair_loans"
+        body, first_arm, body.range_low, body.range_high, dry_run=True, confirm=False, factor=factor))
+    arms = _pair_arms(factor)
+    second_arm = arms[1] if first_arm == arms[0] else arms[0]
     conflicts = []
     chosen = None
     second_plan = None
@@ -539,7 +557,7 @@ def _build_pair_plans(request: Request, body: PairOpenRequest, first_arm: str):
         low, high = body.range_low * (1 + offset), body.range_high * (1 + offset)
         try:
             candidate = _open_grid(request, _pair_arm_body(
-                body, second_arm, low, high, dry_run=True, confirm=False))
+                body, second_arm, low, high, dry_run=True, confirm=False, factor=factor))
         except HTTPException as exc:
             if exc.status_code == 409 and "sell level conflict" in str(exc.detail).casefold():
                 continue
@@ -573,6 +591,10 @@ def open_loan_pair(request: Request, body: PairOpenRequest):
     if not body.dry_run and not body.confirm:
         raise HTTPException(422, "confirm=true es obligatorio para ejecutar una apertura de par.")
     db = request.app.state.db
+    factor = body.factor
+    if factor == "idle_shrink" and not getattr(request.app.state.settings,
+                                                "adjust_idle_shrink_enabled", False):
+        raise HTTPException(422, "idle_shrink est bloqué par el interruptor global apagado.")
     maximum = int(request.app.state.settings.max_grids_simultaneos)
     if maximum - int(db.count_open_grids()) < 2:
         raise HTTPException(409, "El par necesita al menos dos cupos libres de max_grids_simultaneos.")
@@ -595,12 +617,13 @@ def open_loan_pair(request: Request, body: PairOpenRequest):
         raise HTTPException(422, f"Capital por celda inferior al piso funcional Smart ({floor} USDT).")
 
     pair_seed = body.pair_seed if body.pair_seed is not None else secrets.randbits(64)
-    first_arm = random.Random(pair_seed).choice(("pair_loans", "pair_control"))
+    pair_arms = _pair_arms(factor)
+    first_arm = random.Random(pair_seed).choice(pair_arms)
     first_arm, second_arm, first_plan, second_plan, selected_offset = _build_pair_plans(
         request, body, first_arm)
     pair_id = body.pair_id or str(uuid.uuid4())
     if body.dry_run:
-        return {"dry_run": True, "pair_id": pair_id, "pair_seed": pair_seed,
+        return {"dry_run": True, "pair_id": pair_id, "pair_seed": pair_seed, "factor": factor,
                 "pair_first_arm": first_arm, "pair_offset_pct": selected_offset,
                 "arms": [{"arm": first_arm, "plan": first_plan},
                          {"arm": second_arm, "plan": second_plan}],
@@ -610,11 +633,11 @@ def open_loan_pair(request: Request, body: PairOpenRequest):
     def create_pair():
         if maximum - int(db.count_open_grids()) < 2:
             raise HTTPException(409, "El par necesita al menos dos cupos libres.")
-        first_metadata = {"pair_id": pair_id, "pair_seed": pair_seed,
+        first_metadata = {"pair_id": pair_id, "pair_seed": pair_seed, "pair_factor": factor,
                           "pair_arm": first_arm, "pair_first_arm": first_arm,
-                          "pair_offset_pct": 0.0, "loans_group": first_arm}
+                          "pair_offset_pct": 0.0, "loans_group": first_arm if factor == "loans" else "manual"}
         first_body = _pair_arm_body(body, first_arm, body.range_low, body.range_high,
-                                    dry_run=False, confirm=True)
+                                    dry_run=False, confirm=True, factor=factor)
         first_result = _open_grid(request, first_body, pair_metadata=first_metadata,
                                   pair_created_callback=created.append)
         offset_list = [value for value in _PAIR_OFFSETS_PCT if value >= selected_offset]
@@ -623,14 +646,15 @@ def open_loan_pair(request: Request, body: PairOpenRequest):
             offset = Decimal(str(offset_pct)) / Decimal(100)
             second_body = _pair_arm_body(
                 body, second_arm, body.range_low * (1 + offset), body.range_high * (1 + offset),
-                dry_run=False, confirm=True)
-            second_metadata = {"pair_id": pair_id, "pair_seed": pair_seed,
+                dry_run=False, confirm=True, factor=factor)
+            second_metadata = {"pair_id": pair_id, "pair_seed": pair_seed, "pair_factor": factor,
                                "pair_arm": second_arm, "pair_first_arm": first_arm,
-                               "pair_offset_pct": offset_pct, "loans_group": second_arm}
+                               "pair_offset_pct": offset_pct,
+                               "loans_group": second_arm if factor == "loans" else "manual"}
             try:
                 second_result = _open_grid(request, second_body, pair_metadata=second_metadata,
                                            pair_created_callback=created.append)
-                return {"dry_run": False, "pair_id": pair_id, "pair_seed": pair_seed,
+                return {"dry_run": False, "pair_id": pair_id, "pair_seed": pair_seed, "factor": factor,
                         "pair_first_arm": first_arm, "pair_offset_pct": offset_pct,
                         "grids": [first_result, second_result], "warning": EXECUTION_WARNING}
             except HTTPException as exc:
@@ -771,13 +795,15 @@ def loans_summary(request: Request):
             "note": "Muestra pequeña y mercado distinto por grid: es una guía, no una conclusión."}
 
 
-def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
+def _paired_loan_summary(db, *, factor="loans", now=None, draws=2000, seed=20261008):
     now = now or datetime.now(timezone.utc)
+    expected_arms = _pair_arms(factor)
+    treated_arm, control_arm = expected_arms
     pairs = {}
     for grid in _all_grids(db):
         params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
         pair_id = params.get("pair_id")
-        if pair_id:
+        if pair_id and params.get("pair_factor", "loans") == factor:
             pairs.setdefault(str(pair_id), []).append(grid)
 
     rows, excluded, observations = [], [], []
@@ -789,7 +815,7 @@ def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
         reason = None
         if any((grid.get("params") or {}).get("pair_status") == "orphan" for grid in grids):
             reason = "par huérfano"
-        elif len(grids) != 2 or set(arms) != {"pair_loans", "pair_control"}:
+        elif len(grids) != 2 or set(arms) != set(expected_arms):
             reason = "brazos incompletos o duplicados"
         elif any(str(grid.get("status", "")).upper() not in terminal for grid in grids):
             reason = "brazos no cerrados"
@@ -818,25 +844,37 @@ def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
                     break
                 durations[arm_name] = duration_days
                 metrics[arm_name] = sum(float(value) for value in pnl_values) / capital / max(1.0, duration_days) * 100
-                if arm_name == "pair_loans":
+                if arm_name == treated_arm and factor == "loans":
                     loans_created = len(db.list_grid_loans(int(grid["id"])))
 
+        treated = loans_created > 0 if factor == "loans" else False
+        if reason is None and factor != "loans":
+            list_events = getattr(db, "list_grid_events", None)
+            if callable(list_events):
+                source = "IDLE_SHRINK" if factor == "idle_shrink" else "CAPITAL_SHRINK"
+                treated = any(event.get("event_type") == "GRID_ADJUSTED"
+                    and (event.get("details") or {}).get("source") == source
+                    for event in list_events(grid_id=int(arms[treated_arm]["id"]), limit=10000))
         row = {"pair_id": pair_id,
                "symbol": grids[0].get("symbol") if grids else None,
-               "pair_loans_status": arms.get("pair_loans", {}).get("status"),
-               "pair_control_status": arms.get("pair_control", {}).get("status"),
+               "pair_loans_status": arms.get(treated_arm, {}).get("status"),
+               "pair_control_status": arms.get(control_arm, {}).get("status"),
                "loans_pct_per_day": metrics.get("pair_loans"),
                "control_pct_per_day": metrics.get("pair_control"),
-               "d_i": (metrics["pair_loans"] - metrics["pair_control"] if reason is None else None),
-               "treated": loans_created > 0,
+               "d_i": (metrics[treated_arm] - metrics[control_arm] if reason is None else None),
+               "treated": treated,
                "excluded_reason": reason}
+        if factor != "loans":
+            row.update({"pair_factor": factor, "treated_arm": treated_arm, "control_arm": control_arm,
+                        "treated_pct_per_day": metrics.get(treated_arm),
+                        "control_pct_per_day": metrics.get(control_arm)})
         rows.append(row)
         if reason is not None:
             excluded.append({"pair_id": pair_id, "reason": reason})
             continue
         difference = row["d_i"]
         observations.append(difference)
-        if loans_created > 0:
+        if treated:
             treated_values.append(difference)
         if max(durations.values()) > 2 * min(durations.values()):
             duration_ratio_flagged += 1
@@ -862,8 +900,10 @@ def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
     if ci_low is None or ci_low <= 0 <= ci_high:
         reason.append("el IC incluye 0")
     if not n or treated_n / n < 0.5:
-        reason.append("pocos pares con préstamos reales")
+        reason.append("pocos pares con aplicaciones tratadas" if factor != "loans"
+                      else "pocos pares con préstamos reales")
     return {
+        **({"factor": factor} if factor != "loans" else {}),
         "pairs": rows, "n_pairs": n, "mean_d": mean_d, "sd_d": sd_d,
         "t_paired": t_paired, "ci_low": ci_low, "ci_high": ci_high,
         "wins": sum(value > 0 for value in observations),
@@ -880,15 +920,107 @@ def _paired_loan_summary(db, *, now=None, draws=2000, seed=20261008):
 
 
 @router.get("/loans/pairs/summary")
-def loans_pairs_summary(request: Request):
+def loans_pairs_summary(request: Request, factor: Literal["loans", "idle_shrink", "capital_shrink"] = "loans"):
     _authorize(request)
-    return _paired_loan_summary(request.app.state.db)
+    return _paired_loan_summary(request.app.state.db, factor=factor)
 
 
 @router.get("/pause-shadow/summary")
 def pause_shadow_summary(request: Request):
     _authorize(request)
     return request.app.state.db.get_pause_shadow_summary()
+
+
+def _adjust_verdict(summary: dict) -> dict:
+    low, high, n = summary.get("ci_low"), summary.get("ci_high"), int(summary.get("n_pairs") or 0)
+    if n >= 20 and high is not None and high <= 0:
+        verdict = "apagar definitivamente"
+    elif n >= 20 and low is not None and low > 0:
+        verdict = "candidato a activar por defecto (decide Ramón)"
+    else:
+        verdict = "en prueba"
+    return {"n_pairs": n, "ci_low": low, "ci_high": high, "verdict": verdict}
+
+
+def _snapshot_pnl_by_time(db, grid_id: int) -> list[tuple[datetime, float]]:
+    rows = db.list_grid_snapshots(grid_id=grid_id, limit=10000)
+    grouped: dict[datetime, float] = {}
+    for row in rows:
+        ts = _dt_utc(row.get("ts"))
+        if ts is None:
+            continue
+        grouped[ts] = grouped.get(ts, 0.0) + float(row.get("pnl_realized") or 0) + float(row.get("unrealized_pnl") or 0)
+    return sorted(grouped.items())
+
+
+@router.get("/level-adjust/summary")
+def level_adjust_summary(request: Request):
+    _authorize(request)
+    db = request.app.state.db
+    idle_pairs = _paired_loan_summary(db, factor="idle_shrink")
+    capital_pairs = _paired_loan_summary(db, factor="capital_shrink")
+    grids = []
+    for grid in _all_grids(db):
+        if grid.get("strategy") != "smart":
+            continue
+        grid_id = int(grid["id"])
+        events = list(reversed(db.list_grid_events(grid_id=grid_id, limit=10000)))
+        adjustments = [event for event in events if event.get("event_type") == "GRID_ADJUSTED"]
+        counts = {source: 0 for source in ("MONITOR", "CAPITAL_SHRINK", "IDLE_SHRINK")}
+        applications = []
+        for event in adjustments:
+            details = event.get("details") or {}
+            source = str(details.get("source") or "MONITOR").upper()
+            counts[source] = counts.get(source, 0) + 1
+            ts = _dt_utc(event.get("ts"))
+            snapshots = _snapshot_pnl_by_time(db, grid_id) if ts else []
+            def at_offset(hours, before):
+                target = ts + timedelta(hours=hours if not before else -hours)
+                candidates = [value for stamp, value in snapshots
+                              if (stamp <= target if before else stamp >= target)]
+                return candidates[-1] if before and candidates else candidates[0] if candidates else None
+            old_new = details.get("new") or {}
+            old = details.get("old") or {}
+            applications.append({"source": source, "ts": ts.isoformat() if ts else None,
+                "n_from": old.get("n"), "n_to": old_new.get("n"),
+                "pnl_24h_before": at_offset(24, True), "pnl_24h_after": at_offset(24, False),
+                "pnl_72h_before": at_offset(72, True), "pnl_72h_after": at_offset(72, False),
+                "label": "descriptivo, no causal"})
+        blocked: dict[str, int] = {}
+        for event in events:
+            if event.get("event_type") == "ADJUST_BLOCKED":
+                reason = str(event.get("reason") or (event.get("details") or {}).get("blocked_reason") or "sin motivo")
+                blocked[reason] = blocked.get(reason, 0) + 1
+        idle_evals = [event for event in events if event.get("event_type") == "IDLE_SHRINK_EVAL"]
+        omitted: dict[str, int] = {}
+        initial_n = ((adjustments[0].get("details") or {}).get("old") or {}).get("n") if adjustments else grid.get("n_levels")
+        trajectory = [{"ts": str(grid.get("created_at")), "n": initial_n, "source": "OPEN"}]
+        trajectory.extend({"ts": event.get("ts").isoformat() if isinstance(event.get("ts"), datetime)
+                           else str(event.get("ts")),
+                           "n": (event.get("details") or {}).get("new", {}).get("n"),
+                           "source": (event.get("details") or {}).get("source", "MONITOR")}
+                          for event in adjustments)
+        for event in idle_evals:
+            details = event.get("details") or {}
+            if details.get("omission_reason"):
+                reason = str(details["omission_reason"])
+                omitted[reason] = omitted.get(reason, 0) + 1
+        grids.append({"grid_id": grid_id, "symbol": grid.get("symbol"),
+            "adjustments": counts, "adjust_blocked": blocked,
+            "idle_evaluations": len(idle_evals), "idle_omissions": omitted,
+            "idle_blocked_reason": ("interruptor_global_apagado"
+                if (grid.get("params") or {}).get("adjust_idle_shrink") is True
+                and not getattr(request.app.state.settings, "adjust_idle_shrink_enabled", False) else None),
+            "idle_applied": counts.get("IDLE_SHRINK", 0), "n_trajectory": trajectory,
+            "pnl_after_adjustments": applications})
+    settings = request.app.state.settings
+    return {"idle_shrink_enabled": bool(getattr(settings, "adjust_idle_shrink_enabled", False)),
+        "idle_shrink_default": False, "grids": grids,
+        "verdicts": {"idle_shrink": _adjust_verdict(idle_pairs),
+                     "capital_shrink": _adjust_verdict(capital_pairs)},
+        "pairs": {"idle_shrink": idle_pairs, "capital_shrink": capital_pairs},
+        "note": "La regla queda apagada por defecto; sin evidencia de mejora en simulación. "
+                "Las comparaciones descriptivas no son causales."}
 
 
 @router.get("/{grid_id}/loans")

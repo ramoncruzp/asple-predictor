@@ -47,6 +47,29 @@ def smart_pair(candles, *, params=None, sigma_scale=1.0, halflife_h=72.0,
     return real, sim, sim_trace
 
 
+def test_idle_shrink_simulator_calls_same_decision_only_when_explicitly_enabled(monkeypatch):
+    import grid.sim.runner as runner_module
+    calls = []
+    def decision(*args, **kwargs):
+        calls.append(kwargs.get("global_enabled"))
+        return runner_module.PolicyDecision("NONE", (), {
+            "reason": "no_baseline", "should_record": True,
+            "cycles_snapshot": {str(i): 0 for i in range(6)}})
+    monkeypatch.setattr(runner_module, "idle_shrink_decision", decision)
+    candles = candles_for([100.0] * 8)
+    params = {"adjust_idle_shrink": True}
+    default = run_simulation(candles, strategy="smart", n=6, capital=12000,
+        low=94, high=106, params=params, filters=CandleFakeExchange().filters,
+        sigma_values=[0.01] * len(candles.close))
+    assert calls == []
+    enabled = run_simulation(candles, strategy="smart", n=6, capital=12000,
+        low=94, high=106, params=params, filters=CandleFakeExchange().filters,
+        sigma_values=[0.01] * len(candles.close), idle_shrink_enabled=True)
+    assert calls and all(value is True for value in calls)
+    assert not any(event["type"] == "IDLE_SHRINK_EVAL" for event in default["events"])
+    assert any(event["type"] == "IDLE_SHRINK_EVAL" for event in enabled["events"])
+
+
 def canonical_sim_decisions(snapshot):
     return [(event["type"], tuple(event.get("reason") or ()))
             for event in snapshot["events"]]

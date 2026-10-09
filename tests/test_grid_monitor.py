@@ -291,6 +291,147 @@ def monitor_settings():
     )
 
 
+def test_monitor_idle_shrink_persists_evaluation_and_applies_planned_reduction(monkeypatch):
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    settings = monitor_settings()
+    settings.adjust_idle_shrink_enabled = True
+    now = datetime.now(timezone.utc)
+    grid = engine.create_grid("XRPUSDT", 90, 110, 10, strategy="smart",
+        params={"adjust_idle_shrink": True})
+    levels = db.get_grid_levels(grid["id"])
+    snapshot = {str(row["level_idx"]): int(row["cycles_completed"]) for row in levels}
+    db.add_grid_event(run_id=None, source="MONITOR", event_type="IDLE_SHRINK_EVAL",
+        grid_id=grid["id"], ts=now - timedelta(hours=24),
+        details={"cycles_snapshot": snapshot, "decision": "NONE", "reason": "no_baseline"})
+    provider = SimpleNamespace(get=lambda *_args, **_kwargs:
+        SimpleNamespace(sigma_24h=.02, source="model", fallback=False))
+    monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: now, vol_provider=provider)
+    result = monitor.run_once()
+    evaluations = db.list_grid_events(grid_id=grid["id"], event_type="IDLE_SHRINK_EVAL", limit=5)
+    adjusted = db.list_grid_events(grid_id=grid["id"], event_type="GRID_ADJUSTED", limit=5)
+    assert result["status"] == "OK"
+    assert evaluations[0]["details"]["idle_count"] == 10
+    assert evaluations[0]["details"]["equity"] is not None
+    assert adjusted[0]["details"]["source"] == "IDLE_SHRINK"
+    assert adjusted[0]["details"]["n_from"] == 10
+    assert adjusted[0]["details"]["n_to"] == adjusted[0]["details"]["new"]["n"]
+    assert adjusted[0]["details"]["new"]["n"] < 10
+
+
+def test_monitor_idle_shrink_reports_final_capital_shrink_level(monkeypatch):
+    import grid.monitor as monitor_module
+
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    settings = monitor_settings()
+    settings.adjust_idle_shrink_enabled = True
+    now = datetime.now(timezone.utc)
+    grid = engine.create_grid("XRPUSDT", 90, 110, 10, strategy="smart",
+        params={"adjust_idle_shrink": True})
+    snapshot = {str(row["level_idx"]): int(row["cycles_completed"])
+                for row in db.get_grid_levels(grid["id"])}
+    db.add_grid_event(run_id=None, source="MONITOR", event_type="IDLE_SHRINK_EVAL",
+        grid_id=grid["id"], ts=now - timedelta(hours=24),
+        details={"cycles_snapshot": snapshot, "decision": "NONE"})
+    calls = []
+
+    def plan_with_forced_capital_reduction(_grid, _cells, low, high, n, _mid,
+                                           _filters, _settings, *, enabled=True):
+        calls.append(n)
+        if len(calls) == 1:
+            idle_n = max(4, n - 1)
+            return SimpleNamespace(ok=True, reason=None,
+                lines=tuple(Decimal(str(low)) + (Decimal(str(high)) - Decimal(str(low)))
+                            * index / idle_n for index in range(idle_n + 1)),
+                details={"source": "IDLE_SHRINK", "n_from": n, "n_to": idle_n})
+        final_n = max(4, n - 1)
+        return SimpleNamespace(ok=True, reason=None, lines=(),
+            details={"source": "CAPITAL_SHRINK", "n_levels": final_n,
+                     "n_from": n, "n_to": final_n})
+
+    monkeypatch.setattr(monitor_module, "plan_adjust_with_shrink", plan_with_forced_capital_reduction)
+    monkeypatch.setattr(engine, "preview_adjust", lambda *_a, **_k: {"ok": True})
+
+    def record_adjust(grid_id, low, high, n_levels, *, reason, details):
+        db.add_grid_event(run_id=None, source="MONITOR", event_type="GRID_ADJUSTED",
+            grid_id=grid_id, reason=reason,
+            details={**details, "new": {"low": low, "high": high, "n": n_levels}})
+        return {"ok": True, "changed": True}
+
+    monkeypatch.setattr(engine, "adjust_grid", record_adjust)
+    provider = SimpleNamespace(get=lambda *_args, **_kwargs:
+        SimpleNamespace(sigma_24h=.02, source="model", fallback=False))
+    monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: now, vol_provider=provider)
+    result = monitor.run_once()
+    adjusted = db.list_grid_events(grid_id=grid["id"], event_type="GRID_ADJUSTED", limit=1)
+    assert result["status"] == "OK"
+    assert len(calls) == 2 and calls[1] < calls[0]
+    assert adjusted[0]["details"]["source"] == "CAPITAL_SHRINK"
+    assert adjusted[0]["details"]["n_from"] == calls[1]
+    assert adjusted[0]["details"]["n_to"] == calls[1] - 1
+    assert adjusted[0]["details"]["new"]["n"] == calls[1] - 1
+
+
+def test_monitor_records_rejected_idle_shrink_plan_without_applying(monkeypatch):
+    import grid.monitor as monitor_module
+    from grid.adjust import AdjustPlan
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    settings = monitor_settings()
+    settings.adjust_idle_shrink_enabled = True
+    now = datetime.now(timezone.utc)
+    grid = engine.create_grid("XRPUSDT", 90, 110, 10, strategy="smart",
+        params={"adjust_idle_shrink": True})
+    snapshot = {str(row["level_idx"]): int(row["cycles_completed"])
+                for row in db.get_grid_levels(grid["id"])}
+    db.add_grid_event(run_id=None, source="MONITOR", event_type="IDLE_SHRINK_EVAL",
+        grid_id=grid["id"], ts=now - timedelta(hours=24), details={"cycles_snapshot": snapshot})
+    monkeypatch.setattr(monitor_module, "plan_adjust_with_shrink", lambda *a, **k:
+        AdjustPlan(False, "test_reject", (), (), (), (), (), Decimal(0), Decimal(0), {}))
+    provider = SimpleNamespace(get=lambda *_args, **_kwargs:
+        SimpleNamespace(sigma_24h=.02, source="model", fallback=False))
+    monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: now, vol_provider=provider)
+    before = dict(db.get_grid(grid["id"]))
+    result = monitor.run_once()
+    rejected = db.list_grid_events(grid_id=grid["id"], event_type="ADJUST_BLOCKED", limit=5)
+    assert result["status"] == "OK"
+    assert db.list_grid_events(grid_id=grid["id"], event_type="GRID_ADJUSTED", limit=5) == []
+    assert rejected[0]["reason"] == "test_reject"
+    assert db.get_grid(grid["id"])["n_levels"] == before["n_levels"]
+
+
+def test_monitor_rebaselines_idle_shrink_after_its_own_adjustment(monkeypatch):
+    _freeze_monitor_policy(monkeypatch)
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    settings = monitor_settings()
+    settings.adjust_idle_shrink_enabled = True
+    now = datetime.now(timezone.utc) - timedelta(seconds=2)
+    grid = engine.create_grid("XRPUSDT", 90, 110, 10, strategy="smart",
+        params={"adjust_idle_shrink": True})
+    snapshot = {str(row["level_idx"]): int(row["cycles_completed"])
+                for row in db.get_grid_levels(grid["id"])}
+    db.add_grid_event(run_id=None, source="MONITOR", event_type="IDLE_SHRINK_EVAL",
+        grid_id=grid["id"], ts=now - timedelta(hours=24),
+        details={"cycles_snapshot": snapshot, "decision": "NONE"})
+    provider = SimpleNamespace(get=lambda *_args, **_kwargs:
+        SimpleNamespace(sigma_24h=.02, source="model", fallback=False))
+    first_monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: now,
+                                vol_provider=provider)
+    first_monitor.run_once()
+    evaluations = db.list_grid_events(grid_id=grid["id"], event_type="IDLE_SHRINK_EVAL", limit=5)
+    adjusted = db.list_grid_events(grid_id=grid["id"], event_type="GRID_ADJUSTED", limit=5)
+    assert adjusted and evaluations[0]["ts"] < adjusted[0]["ts"]
+
+    next_monitor = GridMonitor(db, exchange, engine, settings,
+        clock=lambda: now + timedelta(hours=25), vol_provider=provider)
+    next_monitor.run_once()
+    next_evaluation = db.list_grid_events(
+        grid_id=grid["id"], event_type="IDLE_SHRINK_EVAL", limit=5)[0]
+    assert next_evaluation["details"]["reason"] == "adjusted_since_baseline"
+    assert next_evaluation["details"]["should_record"] is True
+
+
 def _freeze_monitor_policy(monkeypatch):
     import grid.monitor as monitor_module
     from grid.policy import PolicyDecision

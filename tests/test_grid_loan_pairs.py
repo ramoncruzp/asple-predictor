@@ -111,6 +111,90 @@ def test_paired_summary_can_be_conclusive_only_with_treated_pairs(monkeypatch):
     assert result["detectable_effect_80pct"] == 0
 
 
+def test_paired_summary_filters_factor_and_counts_only_treated_adjustment(monkeypatch):
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    rows = []
+    for factor, arms in (("loans", ("pair_loans", "pair_control")),
+                         ("idle_shrink", ("pair_idle_on", "pair_idle_off"))):
+        for arm in arms:
+            rows.append({"id": len(rows) + 1, "symbol": "ADAUSDT", "status": "CLOSED",
+                "capital_total": 100.0, "created_at": now - timedelta(days=3),
+                "closed_at": now - timedelta(days=1), "params": {"pair_id": factor,
+                "pair_factor": factor, "pair_arm": arm}})
+    class DB:
+        def get_grid_levels(self, _grid_id): return [{"pnl": 1.0}]
+        def list_grid_loans(self, _grid_id): return []
+        def list_grid_events(self, *, grid_id, limit):
+            return ([{"event_type": "GRID_ADJUSTED", "details": {"source": "IDLE_SHRINK"}}]
+                    if grid_id == 3 else [])
+    monkeypatch.setattr(grids_api, "_all_grids", lambda _db: rows)
+    idle = grids_api._paired_loan_summary(DB(), factor="idle_shrink")
+    loans = grids_api._paired_loan_summary(DB())
+    assert idle["factor"] == "idle_shrink" and idle["n_pairs"] == 1
+    assert idle["treated_pairs"] == 1 and idle["pairs"][0]["pair_id"] == "idle_shrink"
+    assert idle["excluded_pairs"] == []
+    assert "factor" not in loans and loans["n_pairs"] == 1
+    assert loans["excluded_pairs"] == []
+
+
+def test_pair_arm_contracts_and_global_idle_switch_guard(monkeypatch):
+    body = PairOpenRequest(symbol="ADAUSDT", capital=1000, range_low=90, range_high=110,
+        n_levels=5, factor="idle_shrink")
+    treated = grids_api._pair_arm_body(body, "pair_idle_on", body.range_low, body.range_high,
+        dry_run=True, confirm=False, factor="idle_shrink")
+    control = grids_api._pair_arm_body(body, "pair_idle_off", body.range_low, body.range_high,
+        dry_run=True, confirm=False, factor="idle_shrink")
+    assert treated.params["loans_enabled"] is control.params["loans_enabled"] is False
+    assert treated.params["adjust_idle_shrink"] is True
+    assert control.params["adjust_idle_shrink"] is False
+    capital = PairOpenRequest(symbol="ADAUSDT", capital=1000, range_low=90, range_high=110,
+        n_levels=5, factor="capital_shrink")
+    cap_on = grids_api._pair_arm_body(capital, "pair_shrink_on", capital.range_low,
+        capital.range_high, dry_run=True, confirm=False, factor="capital_shrink")
+    cap_off = grids_api._pair_arm_body(capital, "pair_shrink_off", capital.range_low,
+        capital.range_high, dry_run=True, confirm=False, factor="capital_shrink")
+    assert cap_on.params["adjust_shrink_n"] is True and cap_off.params["adjust_shrink_n"] is False
+    request = _pair_request(_PairDB())
+    monkeypatch.setattr(grids_api, "_authorize", lambda _request: None)
+    with pytest.raises(HTTPException) as error:
+        grids_api.open_loan_pair(request, body)
+    assert error.value.status_code == 422 and "interruptor" in error.value.detail
+
+
+@pytest.mark.parametrize("factor, treated_arm, flag", [
+    ("idle_shrink", "pair_idle_on", "adjust_idle_shrink"),
+    ("capital_shrink", "pair_shrink_on", "adjust_shrink_n"),
+])
+def test_pair_creation_saves_factor_and_uses_only_factor_flag(monkeypatch, factor, treated_arm, flag):
+    db = _PairDB()
+    request = _pair_request(db)
+    request.app.state.settings.adjust_idle_shrink_enabled = True
+    monkeypatch.setattr(grids_api, "_authorize", lambda _request: None)
+    monkeypatch.setattr(grids_api, "coin_is_ready", lambda *_args: True)
+    monkeypatch.setattr(grids_api, "create_loan_pair", lambda _db, create: create())
+    seen = []
+    def fake_open(_request, arm_body, *, pair_metadata=None, pair_created_callback=None):
+        if arm_body.dry_run:
+            return {"dry_run": True, "filters": {"tick_size": "0.01"},
+                "cells": [{"sell_price": str(value)} for value in _sell_prices(arm_body)]}
+        grid_id = len(db.grids) + 1
+        db.grids[grid_id] = {"id": grid_id, "params": dict(arm_body.params)}
+        pair_created_callback(grid_id)
+        grids_api._persist_pair_metadata(db, {"id": grid_id}, pair_metadata)
+        seen.append((arm_body, dict(pair_metadata)))
+        return {"grid_id": grid_id, "status": "ACTIVE", **pair_metadata}
+    monkeypatch.setattr(grids_api, "_open_grid", fake_open)
+    body = PairOpenRequest(symbol="ADAUSDT", capital=1000, range_low=90, range_high=110,
+        n_levels=5, factor=factor, dry_run=False, confirm=True, pair_seed=23, pair_id=f"pair-{factor}")
+    result = grids_api.open_loan_pair(request, body)
+    assert result["factor"] == factor and len(seen) == 2
+    assert {meta["pair_factor"] for _arm, meta in seen} == {factor}
+    treated = next(arm for arm, meta in seen if meta["pair_arm"] == treated_arm)
+    control = next(arm for arm, meta in seen if meta["pair_arm"] != treated_arm)
+    assert treated.params[flag] is True and control.params[flag] is False
+    assert treated.params["loans_enabled"] is control.params["loans_enabled"] is False
+
+
 class _PairDB:
     engine = SimpleNamespace(url="sqlite:///pair-test.sqlite")
     def __init__(self, count=0):

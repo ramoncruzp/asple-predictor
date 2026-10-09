@@ -12,7 +12,8 @@ import numpy as np
 from data.exchange_filters import SymbolFilters
 from grid.adjust import plan_adjust_with_shrink
 from grid.levels import compute_lines, plan_cells
-from grid.policy import PolicyDecision, adjust_decision, evaluate_grid, evaluate_target, evaluate_max_days, stoploss_candidates, validate_params
+from grid.policy import (PolicyDecision, adjust_decision, evaluate_grid, evaluate_target,
+                         evaluate_max_days, idle_shrink_decision, stoploss_candidates, validate_params)
 from grid.sim.data import ewma_sigma_24h
 from grid.sim.exchange import SimExchange, SimInsufficientFunds
 from grid.sim.metrics import calculate_metrics
@@ -80,7 +81,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    width_pct=None, fee_pct=.1, resync_candles=3, params=None,
                    halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
                    fee_asset=None, include_details=False, trace_callback=None,
-                   sigma_values=None):
+                   sigma_values=None, idle_shrink_enabled=False):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -212,6 +213,30 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                         {"strategy": "smart", "status": status, "params": effective, "n_levels": n,
                          "range_low": active_low, "range_high": active_high, "capital_total": capital},
                         policy_cells, float(close), sigma_now, now, last_adjust_at)
+                    if (adjust_decision_result.action == "NONE" and idle_shrink_enabled
+                            and effective.get("adjust_idle_shrink") is True):
+                        prior_event = next((event for event in reversed(events)
+                            if event.get("type") == "IDLE_SHRINK_EVAL"), None)
+                        prior_details = (prior_event or {}).get("details") or {}
+                        idle_decision = idle_shrink_decision(
+                            {"strategy": "smart", "status": status, "params": effective, "n_levels": n,
+                             "range_low": active_low, "range_high": active_high, "capital_total": capital},
+                            policy_cells, float(close), now, last_adjust_at,
+                            prior_details.get("cycles_snapshot") if prior_event else None,
+                            (datetime.fromtimestamp(int(prior_event["ts"]), timezone.utc)
+                             if prior_event else None), global_enabled=True)
+                        if idle_decision.metrics.get("should_record"):
+                            realized = sum(float(cell.get("pnl") or 0) for cell in cells)
+                            unrealized = sum((float(close) - float(cell.get("entry_price") or 0))
+                                * float(cell.get("held_qty") or 0) for cell in cells
+                                if float(cell.get("held_qty") or 0) > 0)
+                            events.append({"ts": int(ts), "type": "IDLE_SHRINK_EVAL",
+                                "reason": idle_decision.metrics.get("reason"),
+                                "details": {**idle_decision.metrics, "decision": idle_decision.action,
+                                    "omission_reason": idle_decision.metrics.get("reason"),
+                                    "pnl_realized": realized, "equity": float(capital) + realized + unrealized}})
+                        if idle_decision.action == "ADJUST":
+                            adjust_decision_result = idle_decision
                     if adjust_decision_result.action == "ADJUST":
                         action = "ADJUST"
                         decision = adjust_decision_result
