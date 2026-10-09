@@ -884,6 +884,81 @@ def test_scanner_disables_unready_coin_only_in_create_selector(live_server, ui_p
     expect(gram).to_have_text("GRAMUSDT (sin modelo)")
 
 
+def _mock_scanner_use_flow(ui_page, coins, symbol):
+    ui_page.route("**/api/coins", lambda route: route.fulfill(json=coins))
+    ui_page.route("**/api/grids", lambda route: route.fulfill(json={"grids": []}))
+    ui_page.route("**/api/grids/structure-preview", lambda route: route.fulfill(json={
+        "fee_pct": .1, "variants": {"balanced": {"feasible": True}},
+        "edited": {"feasible": True, "range_low": "90", "range_high": "110",
+            "n_levels": 4, "spacing_pct": 5, "edge_gross_pct": 4.8,
+            "edge_after_dust_pct": 4.7},
+    }))
+    ui_page.route("**/api/grids/scan", lambda route: route.fulfill(json={"results": [{
+        "symbol": symbol, "eligible": True, "score": .5, "fee_pct": .1,
+        "components": [], "warnings": [],
+        "suggested_structure": {"range_low": "90", "range_high": "110",
+            "n_levels": 4, "spacing_pct": 5},
+    }]}))
+
+
+def test_scanner_use_symbol_shows_ack_hint_and_unlocks_preview(live_server, ui_page):
+    _mock_scanner_use_flow(ui_page, [
+        {"symbol": "XRPUSDT", "ready": True, "readiness": {"state": "lista"}},
+        {"symbol": "GRAMUSDT", "ready": False,
+         "readiness": {"state": "datos_insuficientes", "history_days": 99}},
+    ], "GRAMUSDT")
+    ui_page.goto(f"{live_server.url}/#scanner")
+    ui_page.locator("#sc-run").click()
+    use_button = ui_page.locator(".sc-use-symbol[data-symbol='GRAMUSDT']")
+    expect(use_button).to_be_visible()
+    use_button.click()
+    ack = ui_page.locator("#sc-unready-ack")
+    hint = ui_page.locator("#sc-unready-ack-hint")
+    preview = ui_page.locator("#sc-preview-open")
+    expect(ack).to_be_visible()
+    expect(ui_page.locator("#sc-unready-ack-container")).to_contain_text("99 d\u00edas")
+    expect(hint).to_be_visible()
+    expect(hint).to_have_text("Marca la casilla de acuse de esta moneda para continuar")
+    expect(preview).to_be_disabled()
+    ack.check()
+    expect(preview).to_be_enabled()
+    expect(hint).to_be_hidden()
+
+
+def test_scanner_advisor_prefill_shows_ack_hint_and_unlocks_preview(live_server, ui_page):
+    _mock_scanner_coin_readiness(ui_page)
+    ui_page.add_init_script("sessionStorage.setItem('asple-advisor-open', JSON.stringify({symbol:'GRAMUSDT'}));")
+    ui_page.route("**/api/grids/structure-preview", lambda route: route.fulfill(json={
+        "fee_pct": .1, "variants": {"balanced": {"feasible": True}},
+        "edited": {"feasible": True, "range_low": "90", "range_high": "110",
+            "n_levels": 4, "spacing_pct": 5, "edge_gross_pct": 4.8,
+            "edge_after_dust_pct": 4.7},
+    }))
+    ui_page.goto(f"{live_server.url}/#scanner")
+    expect(ui_page.locator("#sc-symbol")).to_have_value("GRAMUSDT")
+    expect(ui_page.locator("#sc-unready-ack")).to_be_visible()
+    expect(ui_page.locator("#sc-unready-ack-hint")).to_be_visible()
+    preview = ui_page.locator("#sc-preview-open")
+    expect(preview).to_be_disabled()
+    ui_page.locator("#sc-unready-ack").check()
+    expect(preview).to_be_enabled()
+    expect(ui_page.locator("#sc-unready-ack-hint")).to_be_hidden()
+
+
+def test_scanner_use_ready_symbol_does_not_show_ack(live_server, ui_page):
+    ready_coins = [
+        {"symbol": "XRPUSDT", "ready": True, "readiness": {"state": "lista"}},
+        {"symbol": "GRAMUSDT", "ready": True, "readiness": {"state": "lista"}},
+    ]
+    _mock_scanner_use_flow(ui_page, ready_coins, "GRAMUSDT")
+    ui_page.goto(f"{live_server.url}/#scanner")
+    ui_page.locator("#sc-run").click()
+    ui_page.locator(".sc-use-symbol[data-symbol='GRAMUSDT']").click()
+    expect(ui_page.locator("#sc-unready-ack-container")).to_be_hidden()
+    assert ui_page.locator("#sc-unready-ack").count() == 0
+    expect(ui_page.locator("#sc-unready-ack-hint")).to_be_hidden()
+
+
 def test_scanner_data_insufficient_ack_gates_preview_and_confirmation(live_server, ui_page):
     coins = [
         {"symbol": "XRPUSDT", "ready": True, "readiness": {"state": "lista"}},
