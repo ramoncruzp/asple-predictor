@@ -29,3 +29,24 @@
 - 2b necesita una copia de base con el esquema esperado (`verification_status` y demás columnas del script) o una migración normal de la copia antes del dry-run; no se hizo ninguna migración.
 - 2d necesita un dry-run que use una BD temporal/copia y configuración explícita sin leer credenciales de `.env`; no se ejecutó.
 - No se hizo stage, commit ni push. El commit quedó pendiente porque la prueba live no pudo satisfacer la condición de cierre.
+
+
+## 2a + 2b reintento
+
+| Punto | Estado | Evidencia |
+|---|---|---|
+| 2a - descarga de velas | HECHO | El primer intento en sandbox dio `WinError 10013`; la elevación autorizada para el comando público se completó correctamente: 17 519 velas XRPUSDT 1h. Primera vela `2024-10-09T02:00:00Z`; última `2026-10-09T00:00:00Z`. No hay saltos superiores a 1 h en el CSV refrescado; 0 desde el 27-sep. Se añadieron 288 velas posteriores a `2026-09-27T00:00:00Z`. |
+| 2b - migración y dry-run en copia | HECHO | Copiados DB, WAL y SHM a `%TEMP%\asple_copy2`. La inicialización directa `DBManager('sqlite:///...')` aplicó `metadata.create_all`, migraciones, semillas e índices solamente en la copia (`database/db_manager.py:262-267`); no se cargó `Settings`, `.env` ni credenciales. `predictions` contiene tras migrar `verification_status` y `verify_delay_h`; `outcomes` contiene `verify_delay_h`. Dry-run ejecutado sin `--apply`, con `data/cache/xrp_1h.csv`.
+
+### Métricas de re-puntuación
+
+| Modelo | n real | Tasa base antes -> después | Precisión antes -> después | Filas re-puntuables | Sin vela |
+|---|---:|---:|---:|---:|---:|
+| A (`model_a`) | 64 | 21.875% -> 18.750% | 28.571% (7) -> 28.571% (7) | 64 | 0 |
+| B (`model_b`) | 25 | 20.000% -> 20.000% | 88.235% (17) -> 94.118% (17) | 25 | 0 |
+| C (`model_c`) | 47 | 25.532% -> 21.277% | No calculable (0 etiquetas) -> no calculable (0 etiquetas) | 47 | 0 |
+| **Total** | **136** |  |  | **136** | **0** |
+
+Filas sin vela que seguirían contaminadas: 0; primera/última fecha: ninguna. `unverifiable_late`: 0. El CSV termina en `2026-10-09T00:00:00Z`. El script está en modo dry-run, por lo que `updated_rows=0`: no se escribió ni siquiera en la copia.
+
+Hash SHA-256 de `asple_predictor.db` viva antes y después: `7e9b5f876cda5c84fe2d4b83f4dcc3015363a680dd096bbb11e8ac9454055a94` / `7e9b5f876cda5c84fe2d4b83f4dcc3015363a680dd096bbb11e8ac9454055a94` (igual: True). La carpeta temporal se eliminó. La descarga autorizada solo actualizó `data/cache/xrp_1h.csv`; no hubo stage, commit ni push.
