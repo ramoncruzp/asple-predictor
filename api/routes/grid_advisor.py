@@ -230,9 +230,18 @@ def _level(values, current):
 def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Query(1000, gt=0), risk: str = Query("medium", pattern="^(low|medium|high)$"), days: int = Query(90, ge=1, le=365), margin_target_pct: float = Query(.7, gt=0, le=10), range_mode: str = Query("centrado", pattern="^(centrado|estructural)$")):
     symbol = symbol.strip().upper().replace("/", "")
     db=getattr(request.app.state,"db",None)
+    readiness = (db.get_readiness(symbol) or {}) if db is not None else {}
+    readiness_state = readiness.get("state") or "pendiente"
+    unready_coin = False
     if not coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol):
-        state=(db.get_readiness(symbol) or {}).get("state") or "pendiente"
-        raise HTTPException(409,detail=f"La moneda {symbol} aún no está lista: {state}. Espera a que termine la preparación.")
+        if readiness_state == "datos_insuficientes":
+            unready_coin = True
+        else:
+            raise HTTPException(409,detail=f"La moneda {symbol} aún no está lista: {readiness_state}. Espera a que termine la preparación.")
+    unready_coin_warning = (
+        "Moneda sin modelo (historial insuficiente): la volatilidad es la realizada de 30 días; "
+        "sin validación estadística."
+    ) if unready_coin else None
     df = request.app.state.client.get_historical_klines(symbol, ACTIVE_INTERVAL, lookback_days=days)
     close, high, low = df["close"], df["high"], df["low"]
     current = float(close.iloc[-1])
@@ -484,6 +493,8 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     if actual_range_mode == "centrado" and centered["limited_by_profile"]:
         range_mode_reason = "Rango centrado limitado por el perfil."
     return {"symbol": symbol, "capital": capital, "current_price": current, "recommended_floor": floor,
+        **({"unready_coin_warning": unready_coin_warning,
+            "history_days": readiness.get("history_days")} if unready_coin else {}),
         "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids,
         "capital_per_grid": capital / grids, "spacing_pct": evaluation["spacing_pct"],
         "margin_target_pct": margin_target_pct, "fee_pct": fee_pct,

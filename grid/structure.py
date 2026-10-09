@@ -44,7 +44,7 @@ def functional_cell_warning(capital: Decimal | str | float, levels: int | None,
     if str(strategy).lower() != "smart" or levels is None or levels < 1:
         return None
     if _dec(capital) / Decimal(levels) < _dec(minimum_cell):
-        return "Este grid no podrá ajustarse ni prestar: el capital por celda está bajo el mínimo funcional."
+        return "Con este capital por celda el grid no podrá prestar ni añadir niveles; solo podrá reducirlos. Está bajo el mínimo funcional."
     return None
 
 

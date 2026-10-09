@@ -212,6 +212,7 @@ class OpenRequest(BaseModel):
     target_basis: Literal["cash", "equity"] = "cash"
     max_days: Decimal | None = Field(default=None, gt=0)
     params: dict | None = None
+    allow_unready_coin: StrictBool = False
     dry_run: StrictBool = True
     confirm: StrictBool = False
 
@@ -316,9 +317,19 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
     coin = db.get_coin(symbol)
     if not coin or int(coin.get("active", 0)) != 1:
         _reject(db, 422, "El símbolo debe estar activo en Coin Registry.", symbol, body)
+    readiness = db.get_readiness(symbol) or {}
+    state = readiness.get("state") or "pendiente"
+    unready_coin = False
     if not coin_is_ready(db,getattr(request.app.state,"vol_registry",None),symbol):
-        state=(db.get_readiness(symbol) or {}).get("state") or "pendiente"
-        _reject(db,409,f"La moneda {symbol} aún no está lista: {state}. Espera a que termine la preparación.",symbol,body)
+        if body.allow_unready_coin and state == "datos_insuficientes":
+            unready_coin = True
+        else:
+            _reject(db,409,f"La moneda {symbol} aún no está lista: {state}. Espera a que termine la preparación.",symbol,body)
+    history_days = readiness.get("history_days") if unready_coin else None
+    unready_coin_warning = (
+        "Moneda sin modelo (historial insuficiente): la volatilidad es la realizada de 30 días; "
+        "sin validación estadística."
+    ) if unready_coin else None
     maximum = int(request.app.state.settings.max_grids_simultaneos)
     if db.count_open_grids() >= maximum:
         _reject(db, 409, f"Se alcanzó max_grids_simultaneos ({maximum}).", symbol, body)
@@ -426,6 +437,8 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
                 "cell_usdt": str(body.capital / Decimal(n)), "filters": filters.__dict__,
                 "cells": cell_rows, "cell_metrics_summary": cell_metrics_summary,
                 "params": params, **_loan_fields(params),
+                **({"unready_coin": True, "history_days": history_days,
+                    "unready_coin_warning": unready_coin_warning} if unready_coin else {}),
                 "guards": {"registry_active": True, "symbol_slot_available": True,
                            "max_grids_simultaneos": maximum, "target_params_valid": True,
                            "order_filters_valid": True, "free_balance_checked": False,
@@ -497,9 +510,12 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
         db.add_grid_event(run_id=None, source="CLI", event_type="GRID_OPEN_API", grid_id=int(result["id"]),
             details={"who": "api", "strategy": body.strategy, "capital": str(body.capital),
                      "params": effective, "scan_snapshot": scan_row, "sigma_open": sigma_open,
-                     **_loan_fields(effective), **(pair_metadata or {})})
+                     **_loan_fields(effective), **(pair_metadata or {}),
+                     **({"unready_coin": True, "history_days": history_days} if unready_coin else {})})
         return {"status": result.get("status"), "grid_id": result.get("id"), "symbol": symbol,
-                **_loan_fields(effective), **(pair_metadata or {}), "warning": EXECUTION_WARNING}
+                **_loan_fields(effective), **(pair_metadata or {}), "warning": EXECUTION_WARNING,
+                **({"unready_coin": True, "history_days": history_days,
+                    "unready_coin_warning": unready_coin_warning} if unready_coin else {})}
     except GridConfigError as exc:
         message = str(exc).casefold()
         status = 409 if ("maximum simultaneous" in message or "already exists" in message

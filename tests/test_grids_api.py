@@ -718,6 +718,60 @@ def test_open_rejects_nonready_coin_and_records_same_rejection(monkeypatch,tmp_p
     assert events and "ADAUSDT" in events[-1]["reason"]
 
 
+def _mark_gram_unready(monkeypatch, db, state):
+    db.add_or_reactivate_coin("GRAMUSDT")
+    db.set_readiness("GRAMUSDT", state, stage_detail=state, history_days=99)
+    monkeypatch.setattr(grids_api, "coin_is_ready", lambda *_: False)
+
+
+def test_open_smart_allows_only_explicit_data_insufficient_coin_and_audits_it(monkeypatch, tmp_path):
+    client, db, exchange = app(tmp_path)
+    _mark_gram_unready(monkeypatch, db, "datos_insuficientes")
+    exchange.get_symbol_info = lambda _symbol: fake_symbol_info()
+    warning = ("Moneda sin modelo (historial insuficiente): la volatilidad es la realizada "
+               "de 30 d\u00edas; sin validaci\u00f3n estad\u00edstica.")
+    preview = client.post("/api/grids/open", json=payload(symbol="GRAMUSDT", strategy="smart",
+        allow_unready_coin=True, capital=10000))
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    assert preview_body["unready_coin"] is True
+    assert preview_body["history_days"] == 99
+    assert preview_body["unready_coin_warning"] == warning
+    assert exchange.create_calls == []
+
+    opened = client.post("/api/grids/open", json=payload(symbol="GRAMUSDT", strategy="smart",
+        allow_unready_coin=True, capital=10000, range_low=preview_body["range_low"],
+        range_high=preview_body["range_high"], n_levels=preview_body["n_levels"],
+        dry_run=False, confirm=True))
+    assert opened.status_code == 200, opened.text
+    event = db.list_grid_events(grid_id=opened.json()["grid_id"], event_type="GRID_OPEN_API")[0]
+    assert event["details"]["unready_coin"] is True
+    assert event["details"]["history_days"] == 99
+
+
+def test_open_data_insufficient_coin_requires_flag_and_strict_boolean(monkeypatch, tmp_path):
+    client, db, exchange = app(tmp_path)
+    _mark_gram_unready(monkeypatch, db, "datos_insuficientes")
+    missing = client.post("/api/grids/open", json=payload(symbol="GRAMUSDT", strategy="smart"))
+    assert missing.status_code == 409
+    assert "datos_insuficientes" in missing.json()["detail"]
+    assert exchange.create_calls == []
+    invalid = client.post("/api/grids/open", json=payload(symbol="GRAMUSDT",
+        allow_unready_coin="true"))
+    assert invalid.status_code == 422
+
+
+@pytest.mark.parametrize("state", ["pendiente", "error", "entrenando", "descargando", "consensuando"])
+def test_open_flag_does_not_bypass_other_unready_states(monkeypatch, tmp_path, state):
+    client, db, exchange = app(tmp_path)
+    _mark_gram_unready(monkeypatch, db, state)
+    response = client.post("/api/grids/open", json=payload(symbol="GRAMUSDT",
+        allow_unready_coin=True))
+    assert response.status_code == 409
+    assert state in response.json()["detail"]
+    assert exchange.create_calls == []
+
+
 def test_smart_open_rejects_unsupported_horizon_before_provider_or_market(tmp_path):
     client, _db, exchange = app(tmp_path)
     provider_calls = []
@@ -751,7 +805,7 @@ def test_smart_manual_cell_below_functional_floor_is_allowed_with_warning(tmp_pa
     assert response.status_code == 200, response.text
     body = response.json()
     assert Decimal(body["cell_usdt"]) == Decimal("6.2")
-    assert "no podrá ajustarse ni prestar" in body["functional_cell_warning"]
+    assert "no podrá prestar ni añadir niveles; solo podrá reducirlos" in body["functional_cell_warning"]
 
 
 def test_smart_auto_structure_uses_functional_cell_floor_and_simple_stays_unchanged(tmp_path):

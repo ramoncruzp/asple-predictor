@@ -479,6 +479,37 @@ def test_monitor_uses_per_symbol_horizon_cache_and_records_snapshot_contract(mon
     assert by_grid[third["id"]]["sigma_monitor_h"] == pytest.approx(.02)
 
 
+def test_monitor_passes_fresh_realized_volatility_to_smart_policy(monkeypatch):
+    import grid.monitor as monitor_module
+    from grid.policy import PolicyDecision
+
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    class Provider:
+        last_reason = None
+        def get(self, symbol, horizon_h=24):
+            return SimpleNamespace(sigma_24h=.02, source="realized", stale=False,
+                                   fallback=False)
+    provider = Provider()
+    engine.vol_provider = provider
+    grid = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart", params={"horizon_h": 4})
+    seen_sigmas = []
+    monkeypatch.setattr(monitor_module, "evaluate_grid", lambda *args, **kwargs: (
+        seen_sigmas.append(args[7]) or PolicyDecision("NONE", (), {"sigma_24h": args[7]})))
+    monkeypatch.setattr(monitor_module, "adjust_decision", lambda *args, **kwargs:
+        PolicyDecision("NONE", (), {}))
+
+    result = GridMonitor(db, exchange, engine, monitor_settings(),
+                         vol_provider=provider).run_once()
+
+    assert result["status"] == "OK"
+    assert seen_sigmas == [.02]
+    assert db.list_grid_events(grid_id=grid["id"], event_type="VOL_UNAVAILABLE") == []
+    snapshot = next(row for row in db.list_grid_snapshots(grid_id=grid["id"], run_id=result["run_id"])
+                    if row["level_idx"] is None)
+    assert snapshot["source"] == "realized"
+    assert snapshot["sigma_monitor_h"] == pytest.approx(.02 * (4 / 24) ** .5)
+
+
 def test_monitor_pause_shadow_requires_a_24h_champion_forecast(monkeypatch):
     _freeze_monitor_policy(monkeypatch)
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")

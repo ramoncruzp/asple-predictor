@@ -333,6 +333,21 @@ def test_advisor_recommendation_rejects_coin_not_ready(monkeypatch):
     assert exc.value.status_code==409 and "ADAUSDT" in exc.value.detail and "entrenando" in exc.value.detail
 
 
+def test_advisor_allows_data_insufficient_coin_with_realized_volatility_warning(monkeypatch):
+    client = make_client()
+    class DB:
+        def get_readiness(self, symbol): return {"state": "datos_insuficientes", "history_days": 99}
+    client.app.state.db = DB()
+    client.app.state.vol_registry = None
+    monkeypatch.setattr(grid_advisor, "coin_is_ready", lambda *_: False)
+    result = client.get("/api/grid/recommend", query={"symbol": "GRAMUSDT"}).body
+    assert result["symbol"] == "GRAMUSDT"
+    assert result["unready_coin_warning"] == (
+        "Moneda sin modelo (historial insuficiente): la volatilidad es la realizada "
+        "de 30 d\u00edas; sin validaci\u00f3n estad\u00edstica.")
+    assert result["sigma_surfaces"]["realized_30d"]["source"] == "realizada"
+
+
 def test_ready_ada_advisor_uses_its_model_without_xrp_widening(monkeypatch):
     monkeypatch.setattr(volatility_route, "forecast", lambda request, symbol: _forecast24("baja"))
     monkeypatch.setattr(grid_advisor, "vol_champions", lambda _symbol: (VOL_CHAMPIONS, True))
