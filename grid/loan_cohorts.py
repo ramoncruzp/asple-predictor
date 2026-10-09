@@ -46,8 +46,10 @@ def _open_lock_file(path: Path):
         while os.fstat(descriptor).st_size == 0 and monotonic() < deadline:
             sleep(0.001)
         if os.fstat(descriptor).st_size == 0:
-            handle.close()
-            raise OSError("el archivo del candado no terminó de inicializarse")
+            # Recover an orphaned empty file; only byte existence is needed for locking.
+            handle.seek(0)
+            handle.write(b"\0")
+            handle.flush()
     return handle
 
 

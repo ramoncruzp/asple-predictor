@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import multiprocessing
 import random
 import sqlite3
@@ -388,3 +389,43 @@ def test_pair_creation_fails_closed_when_process_lock_is_unavailable(monkeypatch
     with pytest.raises(RuntimeError, match="candado entre procesos no disponible"):
         cohorts.create_loan_pair(db, lambda: called.append("created"))
     assert called == []
+
+
+def test_grid_ctl_open_pair_defaults_to_dry_run_and_requires_confirm(tmp_path, monkeypatch, capsys):
+    from scripts import grid_ctl
+    from tests.test_grids_api import app as make_test_app
+    client, db, exchange = make_test_app(tmp_path)
+    context = {"settings": client.app.state.settings, "db": db,
+               "exchange": exchange, "engine": client.app.state.grid_engine,
+               "app": client.app}
+    monkeypatch.setattr(grid_ctl, "build_context", lambda: context)
+    args = ["open-pair", "--symbol", "XRPUSDT", "--range-low", "90",
+            "--range-high", "110", "--n-levels", "5", "--capital-per-arm", "1000"]
+
+    assert grid_ctl.main(args) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["dry_run"] is True and len(dry["arms"]) == 2
+    assert exchange.create_calls == [] and db.count_open_grids() == 0
+
+    assert grid_ctl.main(args + ["--execute"]) == 2
+    assert "--confirm" in capsys.readouterr().err
+    assert db.count_open_grids() == 0
+
+
+def test_grid_ctl_open_pair_confirm_creates_two_simulated_grids(tmp_path, monkeypatch, capsys):
+    from scripts import grid_ctl
+    from tests.test_grids_api import app as make_test_app
+    client, db, exchange = make_test_app(tmp_path)
+    context = {"settings": client.app.state.settings, "db": db,
+               "exchange": exchange, "engine": client.app.state.grid_engine,
+               "app": client.app}
+    monkeypatch.setattr(grid_ctl, "build_context", lambda: context)
+    args = ["open-pair", "--symbol", "XRPUSDT", "--range-low", "90",
+            "--range-high", "110", "--n-levels", "5", "--capital-per-arm", "1000",
+            "--execute", "--confirm", "--pair-seed", "23"]
+
+    assert grid_ctl.main(args) == 0
+    opened = json.loads(capsys.readouterr().out)
+    assert opened["dry_run"] is False and len(opened["grids"]) == 2
+    assert db.count_open_grids() == 2
+    assert len(exchange.create_calls) > 0

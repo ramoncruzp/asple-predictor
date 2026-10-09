@@ -35,7 +35,7 @@ def test_symbol_study_writes_only_ada_and_never_overwrites(tmp_path, monkeypatch
     monkeypatch.setattr(study, "evaluate_dataset", lambda candles, intra, symbol: complete_report(symbol)["report"])
     assert study.main(["--symbol", "ADAUSDT", "--candles", str(hourly), "--candles-5m", str(five)]) == 0
     saved = json.loads(output.read_text(encoding="utf-8"))
-    assert saved["symbol"] == "ADAUSDT" and saved["test_is_virgin"] is True
+    assert saved["symbol"] == "ADAUSDT" and saved["test_is_virgin"] is None
     assert saved["source_csv_sha256"] == hashlib.sha256(b"five").hexdigest()
     assert seen["paths"] == (hourly, five)
     assert hashlib.sha256(xrp.read_bytes()).hexdigest() == xrp_hash

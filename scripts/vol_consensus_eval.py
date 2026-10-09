@@ -33,8 +33,38 @@ BLOCK_HOURS = 168
 CONFIDENCE_THRESHOLDS = {"high_below": 0.10, "medium_through": 0.25, "minimum_models": 3}
 
 
-def _test_is_virgin(symbol: str, output: Path) -> bool:
-    return symbol != VOL_SYMBOL and not Path(output).exists()
+def _test_is_virgin(symbol: str, manifest: dict | None) -> bool | None:
+    """Return whether each TEST interval is disjoint from TRAIN, or None if unknown."""
+    if symbol == VOL_SYMBOL:
+        return False
+    report = (manifest or {}).get("report", manifest or {})
+    horizons = report.get("horizons") if isinstance(report, dict) else None
+    if not isinstance(horizons, dict) or not horizons:
+        return None
+    for result in horizons.values():
+        split_ranges = result.get("split_ranges") if isinstance(result, dict) else None
+        train = split_ranges.get("train") if isinstance(split_ranges, dict) else None
+        test = split_ranges.get("test") if isinstance(split_ranges, dict) else None
+        if not isinstance(train, dict) or not isinstance(test, dict):
+            return None
+        try:
+            train_start, train_end = pd.Timestamp(train["start"]), pd.Timestamp(train["end"])
+            test_start, test_end = pd.Timestamp(test["start"]), pd.Timestamp(test["end"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (train_start <= test_end) and (test_start <= train_end):
+            return False
+    return True
+
+
+def _date_range(frame: pd.DataFrame) -> dict | None:
+    if frame.empty:
+        return None
+    column = "close_time" if "close_time" in frame else "timestamp" if "timestamp" in frame else None
+    if column is None:
+        return None
+    times = pd.to_datetime(frame[column], utc=True)
+    return {"start": times.min().isoformat(), "end": times.max().isoformat()}
 
 
 def _scores(target: np.ndarray, prediction: np.ndarray) -> dict:
@@ -240,6 +270,7 @@ def evaluate_horizon(data: pd.DataFrame, horizon: int, symbol: str = VOL_SYMBOL)
     return {
         "horizon_h": horizon,
         "rows": {"valid": len(rows), "train": len(train), "validation": len(val), "test": len(test), "embargo_each_boundary": horizon},
+        "split_ranges": {"train": _date_range(train), "test": _date_range(test)},
         "champion": champion,
         "selected_estimators": selected_estimators,
         "eligible_models": eligible,
@@ -330,7 +361,7 @@ def main(argv=None) -> int:
         "bootstrap": {"block_size_hours": BLOCK_HOURS, "replicates": BOOTSTRAP_REPLICATES, "seed": SEED},
         "confidence_thresholds": CONFIDENCE_THRESHOLDS,
         "selection_basis": "candidate estimators fit on TRAIN; HAR_range selection, eligibility, and weights use VAL; TEST is scored only after selection",
-        "test_is_virgin": _test_is_virgin(args.symbol, output),
+        "test_is_virgin": _test_is_virgin(args.symbol, report),
         "report": report,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -7,10 +7,12 @@ import json
 import sys
 import warnings
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Any
 
 from config.settings import Settings
 from data.testnet_client import TestnetClient
+from data.binance_client import BinanceClient
 from database.db_manager import DBManager
 from grid.engine import GridEngine
 from grid.monitor import GridMonitor
@@ -19,6 +21,8 @@ from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
 from grid.loan_cohorts import assign_loan_creation_defaults, create_grid_with_loan_cohort
 from grid.structure import functional_cell_threshold, functional_cell_warning
 from data.exchange_filters import SymbolFilters
+from grid.scan_service import GridScanService
+from grid.volatility_provider import VolatilityProvider
 
 
 def build_context() -> dict[str, Any]:
@@ -34,8 +38,14 @@ def build_context() -> dict[str, Any]:
     )
     engine = GridEngine(db, exchange, settings)
     monitor = GridMonitor(db, exchange, engine, settings)
+    public_client = BinanceClient("", "")
+    app = SimpleNamespace(state=SimpleNamespace(
+        settings=settings, db=db, grid_engine=engine, testnet_client=exchange,
+        grid_scan_service=GridScanService(db, public_client, settings),
+        vol_provider=VolatilityProvider(db, data_client=public_client), vol_registry=None,
+    ))
     return {"settings": settings, "db": db, "exchange": exchange,
-            "engine": engine, "monitor": monitor}
+            "engine": engine, "monitor": monitor, "app": app}
 
 
 def _cli_loan_creation_params(db, current: dict, explicit: dict, control_every_n: int) -> dict:
@@ -154,6 +164,16 @@ def main(argv: list[str] | None = None) -> int:
     open_parser.add_argument("--calibration", help="use latest or a validated calibration ID")
     open_parser.add_argument("--dry-run", action="store_true")
     open_parser.add_argument("--yes", action="store_true")
+    pair_parser = subparsers.add_parser("open-pair", help="preview or open a paired loan/control experiment")
+    pair_parser.add_argument("--symbol", required=True)
+    pair_parser.add_argument("--range-low", required=True, type=Decimal)
+    pair_parser.add_argument("--range-high", required=True, type=Decimal)
+    pair_parser.add_argument("--n-levels", required=True, type=int)
+    pair_parser.add_argument("--capital-per-arm", required=True, type=Decimal)
+    pair_parser.add_argument("--pair-seed", type=int)
+    pair_parser.add_argument("--dry-run", action="store_true", help="preview only; this is the default")
+    pair_parser.add_argument("--execute", action="store_true", help="execute both Testnet arms")
+    pair_parser.add_argument("--confirm", action="store_true", help="required with --execute")
     close = subparsers.add_parser("close", help="close one grid")
     close.add_argument("grid_id", type=int)
     close.add_argument("--mode", required=True, choices=("cancel", "liquidate", "repository"))
@@ -175,6 +195,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "adjust" and not args.dry_run and not args.yes:
         print("error: adjust requiere --yes para enviar órdenes", file=sys.stderr)
+        return 2
+    if args.command == "open-pair" and args.execute and not args.confirm:
+        print("error: open-pair --execute requiere --confirm", file=sys.stderr)
+        return 2
+    if args.command == "open-pair" and args.confirm and not args.execute:
+        print("error: --confirm requiere --execute", file=sys.stderr)
+        return 2
+    if args.command == "open-pair" and args.dry_run and args.execute:
+        print("error: --dry-run y --execute son incompatibles", file=sys.stderr)
         return 2
     try:
         context = build_context()
@@ -198,6 +227,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"grid {args.grid_id} does not exist")
             result = {"grid_id": int(args.grid_id),
                       "loans": context["db"].list_grid_loans(int(args.grid_id))}
+        elif args.command == "open-pair":
+            from fastapi import Request
+            from api.routes.grids import PairOpenRequest, open_loan_pair
+            app = context["app"]
+            token = str(getattr(context["settings"], "grid_api_token", "") or "").strip()
+            headers = [] if not token else [(b"x-api-token", token.encode("utf-8"))]
+            scope = {"type": "http", "app": app, "method": "POST", "path": "/api/grids/pair",
+                     "headers": headers, "client": ("127.0.0.1", 0), "server": ("127.0.0.1", 80),
+                     "scheme": "http", "query_string": b""}
+            request = Request(scope)
+            body = PairOpenRequest(
+                symbol=args.symbol, capital=args.capital_per_arm, range_low=args.range_low,
+                range_high=args.range_high, n_levels=args.n_levels, pair_seed=args.pair_seed,
+                dry_run=not args.execute, confirm=args.confirm,
+            )
+            result = open_loan_pair(request, body)
         elif args.command == "adjust":
             if str(getattr(context["settings"], "environment", "")).casefold() != "testnet":
                 raise RuntimeError("grid adjust solo permite environment=testnet")

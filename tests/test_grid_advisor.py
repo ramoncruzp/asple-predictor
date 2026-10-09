@@ -414,6 +414,22 @@ def test_5m_simulation_uses_warmed_daily_sigma_and_monitor_cadence(monkeypatch):
     assert float(np.median(theoretical[3000:])) == pytest.approx(.01, abs=.005)
 
 
+def test_advisor_simulation_uses_recommended_levels_and_requested_grid_capital(monkeypatch):
+    captured = []
+    monkeypatch.setattr(grid_advisor, "run_simulation", lambda candles, **kwargs:
+                        (captured.append(kwargs) or {"metrics": {"cycles_completed": 0}}))
+    response = make_client().get("/api/grid/recommend", query={
+        "symbol": "ADAUSDT", "capital": 100, "risk": "low", "days": 30,
+        "range_mode": "estructural",
+    }).body
+    assert response["suggested_grids"] <= 15
+    assert len(captured) == 2
+    assert {call["n"] for call in captured} == {response["suggested_grids"]}
+    assert response["capital"] == 100
+    assert all(call["capital"] == response["capital"] for call in captured)
+    assert response["capital_per_grid"] == pytest.approx(100 / response["suggested_grids"])
+
+
 def test_5m_download_failure_falls_back_to_hourly_simulation(monkeypatch, caplog):
     client = make_client()
     original = client.app.state.client.get_historical_klines
