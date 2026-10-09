@@ -1,6 +1,8 @@
 (function () {
   let timer = null;
   let loading = false;
+  let pendingFlag = null;
+  let flagsLoading = false;
   const esc = value => String(value ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => window.ASPLEFormat?.formatUsdt(value) ?? (value == null ? '\u2014' : `$${Number(value).toFixed(2)}`);
   async function get(path) {
@@ -58,6 +60,40 @@
       });
     }
   }
+  function renderGlobalFlags(flags) {
+    const container = document.getElementById('global-settings-content');
+    if (!container) return;
+    container.innerHTML = (flags || []).map(flag => `<article class="global-flag-row" data-flag-key="${esc(flag.key)}"><div class="global-flag-copy"><h3>${esc(flag.label)}</h3><p>${esc(flag.description)}</p><small class="muted">Estado: <b>${flag.current ? 'Encendido' : 'Apagado'}</b> \u00b7 Origen: ${esc(flag.origin)}${flag.requires_restart ? ' \u00b7 Requiere reiniciar' : ' \u00b7 Efecto en vivo'}</small></div><button class="button secondary" type="button" data-flag-change="${esc(flag.key)}" data-flag-value="${flag.current ? 'false' : 'true'}">${flag.current ? 'Apagar' : 'Encender'}</button></article>`).join('') || '<p class="muted">No hay interruptores editables.</p>';
+  }
+  async function loadGlobalFlags() {
+    if (flagsLoading) return;
+    flagsLoading = true;
+    const container = document.getElementById('global-settings-content');
+    try {
+      const result = await get('/api/settings/flags');
+      renderGlobalFlags(result.flags);
+    } catch (error) {
+      if (container) container.innerHTML = `<p class="cuenta-error">No se pudieron cargar los ajustes globales: ${esc(error.message)}</p>`;
+    } finally { flagsLoading = false; }
+  }
+  async function applyGlobalFlag() {
+    if (!pendingFlag) return;
+    const confirmButton = document.getElementById('global-flag-confirm');
+    const status = document.getElementById('global-settings-status');
+    confirmButton.disabled = true;
+    status.textContent = 'Guardando el ajuste\u2026';
+    try {
+      await post('/api/settings/flags', {
+        key: pendingFlag.key, value: pendingFlag.value, dry_run: false, confirm: true,
+      });
+      document.getElementById('global-flag-dialog').close();
+      status.textContent = 'Ajuste global actualizado.';
+      pendingFlag = null;
+      await loadGlobalFlags();
+    } catch (error) {
+      status.textContent = error.message || 'No se pudo guardar el ajuste global.';
+    } finally { confirmButton.disabled = false; }
+  }
   async function load(force) {
     if (loading || (!force && location.hash !== '#cuenta')) return;
     loading = true;
@@ -66,8 +102,21 @@
     catch (error) { if (error.status === 403) accountTokenPrompt(container); else container.innerHTML = `<div class="card cuenta-error">No se pudo cargar la cuenta: ${esc(error.message)}</div>`; }
     finally { loading = false; }
   }
-  window.loadCuenta = () => { load(true); if (timer) clearInterval(timer); timer = setInterval(() => load(false), 15000); };
+  window.loadCuenta = () => { loadGlobalFlags(); load(true); if (timer) clearInterval(timer); timer = setInterval(() => load(false), 15000); };
   document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('global-settings-content')?.addEventListener('click', event => {
+      const button = event.target.closest('[data-flag-change]');
+      if (!button) return;
+      const key = button.dataset.flagChange;
+      const value = button.dataset.flagValue === 'true';
+      const row = button.closest('[data-flag-key]');
+      pendingFlag = { key, value };
+      document.getElementById('global-flag-dialog-message').textContent =
+        `${value ? 'Encender' : 'Apagar'} el interruptor ${row.querySelector('h3').textContent}. El cambio se guardar\u00e1 y aplicar\u00e1 sin reiniciar.`;
+      document.getElementById('global-flag-dialog').showModal();
+    });
+    document.getElementById('global-flag-confirm')?.addEventListener('click', applyGlobalFlag);
+    document.getElementById('global-flag-dialog')?.addEventListener('close', () => { pendingFlag = null; });
     document.getElementById('cuenta-refresh')?.addEventListener('click', () => load(true));
     document.getElementById('testnet-credentials-form')?.addEventListener('submit', async event => {
       event.preventDefault();

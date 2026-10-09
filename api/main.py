@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from config.settings import Settings
+from config.settings import Settings, apply_app_flag_overrides
 from data.binance_client import BinanceClient
 from data.testnet_client import TestnetClient
 from database.db_manager import DBManager
@@ -27,7 +27,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
                                   SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_SYMBOL, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings
 from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     key = "" if settings.binance_api_key.startswith("tu_") else settings.binance_api_key
     secret = "" if settings.binance_api_secret.startswith("tu_") else settings.binance_api_secret
     client, db = BinanceClient(key, secret), DBManager(settings.database_url)
+    apply_app_flag_overrides(settings, db)
     training_job_service = TrainingJobService(db, root=Path(__file__).resolve().parents[1])
     try:
         training_job_service.recover_interrupted()
@@ -213,6 +214,7 @@ app.include_router(grid_status.router, tags=["grid-status"])
 app.include_router(grid_control.router, prefix="/api/grids", tags=["grid-control"])
 app.include_router(grid_structure.router, prefix="/api/grids", tags=["grid-structure"])
 app.include_router(grid_account.router)
+app.include_router(app_settings.router, prefix="/api/settings", tags=["app-settings"])
 
 @app.get("/api/health")
 async def health(request: Request):

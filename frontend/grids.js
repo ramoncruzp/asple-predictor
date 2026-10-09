@@ -365,7 +365,7 @@
           } else if (loans.idle_shrink_global_enabled) {
             idleShrinkAction = '<button class="button secondary" data-grid-action="idle-shrink-on">Activar reducción de niveles ociosos</button>';
           } else {
-            idleShrinkAction = '<button class="button secondary" disabled>Interruptor global apagado: añade ADJUST_IDLE_SHRINK_ENABLED=true al .env y reinicia</button>';
+            idleShrinkAction = '<a class="button secondary" href="#cuenta">Interruptor global apagado: act\u00edvalo en Cuenta \u2192 Ajustes globales</a>';
           }
         }
         const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'

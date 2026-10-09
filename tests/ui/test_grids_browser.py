@@ -1243,10 +1243,10 @@ def test_detail_idle_shrink_button_states_and_activation_warning(live_server, ui
 
     state.update({"enabled": False, "global": False})
     ui_page.reload()
-    disabled = ui_page.get_by_role("button", name=(
-        "Interruptor global apagado: añade ADJUST_IDLE_SHRINK_ENABLED=true al .env y reinicia"))
-    expect(disabled).to_be_visible()
-    expect(disabled).to_be_disabled()
+    settings_link = ui_page.get_by_role("link", name=(
+        "Interruptor global apagado: act\u00edvalo en Cuenta \u2192 Ajustes globales"))
+    expect(settings_link).to_be_visible()
+    assert settings_link.get_attribute("href") == "#cuenta"
 
     state.update({"enabled": True, "global": False})
     ui_page.reload()

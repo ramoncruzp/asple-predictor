@@ -221,6 +221,13 @@ class DBManager:
             Column("event_type", String, nullable=False), Column("reason", String),
             Column("price", Float), Column("details", Text),
         )
+        self.app_flag_overrides = Table(
+            "app_flag_overrides", self.metadata,
+            Column("key", String, primary_key=True),
+            Column("value", Text, nullable=False),
+            Column("updated_at", DateTime(timezone=True), nullable=False),
+            Column("source", String, nullable=False),
+        )
         self.grid_loans = Table(
             "grid_loans", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
@@ -1453,6 +1460,41 @@ class DBManager:
                 ).values(status="INTERRUPTED", finished_at=now, note="interrupted by a later STARTUP run")
             )
         return int(result.rowcount or 0)
+
+    def list_app_flag_overrides(self) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(self.app_flag_overrides).order_by(
+                self.app_flag_overrides.c.key)).mappings().all()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["value"] = json.loads(item["value"])
+            result.append(item)
+        return result
+
+    def set_app_flag_override(self, key: str, value: bool, *, previous: bool,
+                              origin: str) -> dict[str, Any]:
+        now = self._utc_now()
+        encoded = self._json(value)
+        event_details = {
+            "key": str(key), "previous": bool(previous), "new": bool(value),
+            "origin": "app", "previous_origin": str(origin), "at": now.isoformat(),
+        }
+        with self.engine.begin() as conn:
+            existing = conn.execute(select(self.app_flag_overrides.c.key).where(
+                self.app_flag_overrides.c.key == str(key))).first()
+            values = {"value": encoded, "updated_at": now, "source": "app"}
+            if existing:
+                conn.execute(self.app_flag_overrides.update().where(
+                    self.app_flag_overrides.c.key == str(key)).values(**values))
+            else:
+                conn.execute(self.app_flag_overrides.insert().values(key=str(key), **values))
+            conn.execute(self.grid_events.insert().values(
+                run_id=None, source="CLI", ts=now, grid_id=None, level_idx=None,
+                client_order_id=None, order_id=None, event_type="APP_SETTING_CHANGED",
+                reason=str(key), price=None, details=self._json(event_details),
+            ))
+        return {"key": str(key), "value": bool(value), "updated_at": now, "source": "app"}
 
     def add_grid_event(
         self, *, run_id: int | None, source: str, event_type: str, grid_id: int | None = None,

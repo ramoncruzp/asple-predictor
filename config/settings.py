@@ -82,3 +82,34 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+
+APP_FLAG_DEFINITIONS = {
+    "adjust_idle_shrink_enabled": {
+        "label": "Reducci\u00f3n de niveles ociosos",
+        "description": (
+            "Permite que los grids Smart que lo activen quiten niveles sin ciclos en 24 h. "
+            "Apagado por defecto: en simulaci\u00f3n XRP no mejor\u00f3 la ganancia. "
+            "Encenderlo aqu\u00ed solo habilita el bot\u00f3n por grid; no activa la regla en ning\u00fan grid."
+        ),
+        "default": False,
+        "requires_restart": False,
+    },
+}
+
+
+def apply_app_flag_overrides(settings: Settings, db) -> Settings:
+    """Apply only valid persisted app flags to the shared Settings instance."""
+    for row in db.list_app_flag_overrides():
+        key, value = row.get("key"), row.get("value")
+        if key in APP_FLAG_DEFINITIONS and type(value) is bool:
+            setattr(settings, key, value)
+    return settings
+
+
+def app_flag_origin(settings: Settings, key: str, overrides: dict[str, bool]) -> str:
+    if key in overrides:
+        return "app"
+    if key in getattr(settings, "model_fields_set", set()):
+        return ".env"
+    return "default"
