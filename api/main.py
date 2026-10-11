@@ -27,7 +27,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
                                   SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_SYMBOL, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings, alerts
 from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
@@ -41,6 +41,7 @@ from grid.monitor import GridMonitor
 from grid.scan_service import GridScanService
 from grid.auto_open import GridAutoOpen
 from grid.volatility_provider import VolatilityProvider
+from alerts.dispatcher import AlertDispatcher
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -130,11 +131,13 @@ async def lifespan(app: FastAPI):
     public_market_client = BinanceClient("", "")
     grid_scan_service = GridScanService(db, public_market_client, settings)
     grid_auto_open = GridAutoOpen(grid_scan_service, db, grid_engine, testnet_client, settings)
+    alert_dispatcher = AlertDispatcher(db, Settings)
     app.state.grid_scan_service = grid_scan_service
     app.state.public_market_client = public_market_client
     app.state.grid_engine, app.state.testnet_client = grid_engine, testnet_client
     app.state.vol_provider = grid_vol_provider
     app.state.grid_auto_open = grid_auto_open
+    app.state.alert_dispatcher = alert_dispatcher
     app.state.models, app.state.ensemble = {"model_a": model_a, **shadow_models}, ensemble
     app.state.model_load_report = {
         "model_a": {"available": True, "artifact": str(artifact),
@@ -159,6 +162,14 @@ async def lifespan(app: FastAPI):
     if grid_monitor is not None:
         grid_monitor.start()
     grid_auto_open.start()
+    alerts_token = str(getattr(settings, "telegram_bot_token", "") or "").strip()
+    alerts_chat_id = str(getattr(settings, "telegram_chat_id", "") or "").strip()
+    if settings.alerts_enabled and alerts_token and alerts_chat_id:
+        alert_dispatcher.start(settings.alerts_poll_seconds)
+    elif settings.alerts_enabled:
+        logging.getLogger(__name__).warning(
+            "Alert dispatcher disabled: faltan TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"
+        )
     try:
         yield
     finally:
@@ -169,6 +180,7 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_auto_open.stop()
+        alert_dispatcher.stop()
         if vol_loop is not None:
             vol_loop.stop()
         if vol_predictor is not None:
@@ -215,6 +227,7 @@ app.include_router(grid_control.router, prefix="/api/grids", tags=["grid-control
 app.include_router(grid_structure.router, prefix="/api/grids", tags=["grid-structure"])
 app.include_router(grid_account.router)
 app.include_router(app_settings.router, prefix="/api/settings", tags=["app-settings"])
+app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
 
 @app.get("/api/health")
 async def health(request: Request):

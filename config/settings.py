@@ -76,6 +76,19 @@ class Settings(BaseSettings):
     testnet_reset_min_unknown: int = Field(2, ge=1, validation_alias="TESTNET_RESET_MIN_UNKNOWN")
     dust_alert_usdt: float = Field(1.0, ge=0, validation_alias="DUST_ALERT_USDT")
     dust_alert_pct_capital: float = Field(1.0, ge=0, validation_alias="DUST_ALERT_PCT_CAPITAL")
+    alerts_enabled: bool = Field(False, validation_alias="ALERTS_ENABLED")
+    telegram_bot_token: str = Field("", validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field("", validation_alias="TELEGRAM_CHAT_ID")
+    alerts_poll_seconds: int = Field(60, gt=0, validation_alias="ALERTS_POLL_SECONDS")
+    alerts_stale_monitor_min: int = Field(30, gt=0, validation_alias="ALERTS_STALE_MONITOR_MIN")
+    alerts_stale_loop_min: int = Field(90, gt=0, validation_alias="ALERTS_STALE_LOOP_MIN")
+    alerts_probe_fails: int = Field(3, ge=1, validation_alias="ALERTS_PROBE_FAILS")
+    alerts_cooldown_min: int = Field(60, ge=0, validation_alias="ALERTS_COOLDOWN_MIN")
+    alerts_daily_cap: int = Field(30, ge=0, validation_alias="ALERTS_DAILY_CAP")
+    alerts_fills_enabled: bool = Field(True, validation_alias="ALERTS_FILLS_ENABLED")
+    alerts_fills_daily_cap: int = Field(200, ge=0, validation_alias="ALERTS_FILLS_DAILY_CAP")
+    alerts_digest_enabled: bool = Field(True, validation_alias="ALERTS_DIGEST_ENABLED")
+    alerts_digest_hour_local: int = Field(8, ge=0, le=23, validation_alias="ALERTS_DIGEST_HOUR_LOCAL")
 
     model_config = SettingsConfigDict(
         env_file=".env",

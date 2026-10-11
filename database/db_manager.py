@@ -266,6 +266,24 @@ class DBManager:
             Column("sigma_monitor_h", Float), Column("monitor_horizon_h", Float),
             Column("source", String),
         )
+        self.alert_log = Table(
+            "alert_log", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("ts", DateTime(timezone=True), nullable=False),
+            Column("alert_key", String, nullable=False),
+            Column("event_id", Integer, nullable=True),
+            Column("kind", String, nullable=False),
+            Column("sent", Integer, nullable=False),
+            Column("error", Text, nullable=True),
+        )
+        Index("ix_alert_log_ts", self.alert_log.c.ts)
+        Index("ix_alert_log_kind_ts", self.alert_log.c.kind, self.alert_log.c.ts)
+        self.alert_state = Table(
+            "alert_state", self.metadata,
+            Column("key", String, primary_key=True),
+            Column("value", Text, nullable=False),
+            Column("updated_at", DateTime(timezone=True), nullable=False),
+        )
         self.metadata.create_all(self.engine)
         self._migrate_direction_verification_columns()
         self._migrate_widen_columns()
@@ -1450,6 +1468,16 @@ class DBManager:
             row = conn.execute(statement).mappings().first()
         return dict(row) if row else None
 
+    def get_last_prediction_time(self) -> datetime | None:
+        with self.engine.connect() as conn:
+            value = conn.execute(select(func.max(self.predictions.c.predicted_at))).scalar()
+        return value
+
+    def get_last_vol_forecast_time(self) -> datetime | None:
+        with self.engine.connect() as conn:
+            value = conn.execute(select(func.max(self.vol_forecasts.c.made_at))).scalar()
+        return value
+
     def mark_stale_runs_interrupted(self, before_id: int) -> int:
         now = self._utc_now()
         with self.engine.begin() as conn:
@@ -1496,6 +1524,66 @@ class DBManager:
             ))
         return {"key": str(key), "value": bool(value), "updated_at": now, "source": "app"}
 
+    def get_alert_state(self, key: str) -> Any | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.alert_state.c.value).where(
+                self.alert_state.c.key == str(key))).first()
+        return None if row is None else json.loads(row[0])
+
+    def set_alert_state(self, key: str, value: Any) -> None:
+        now = self._utc_now()
+        encoded = self._json(value)
+        with self.engine.begin() as conn:
+            existing = conn.execute(select(self.alert_state.c.key).where(
+                self.alert_state.c.key == str(key))).first()
+            if existing:
+                conn.execute(self.alert_state.update().where(
+                    self.alert_state.c.key == str(key)).values(value=encoded, updated_at=now))
+            else:
+                conn.execute(self.alert_state.insert().values(
+                    key=str(key), value=encoded, updated_at=now))
+
+    def add_alert_log(
+        self, *, alert_key: str, kind: str, sent: bool, event_id: int | None = None,
+        error: str | None = None, ts: datetime | None = None,
+    ) -> dict:
+        now = ts or self._utc_now()
+        with self.engine.begin() as conn:
+            row_id = conn.execute(self.alert_log.insert().values(
+                ts=now, alert_key=str(alert_key), event_id=event_id, kind=str(kind),
+                sent=int(bool(sent)), error=error,
+            )).inserted_primary_key[0]
+        with self.engine.connect() as conn:
+            row = conn.execute(select(self.alert_log).where(
+                self.alert_log.c.id == row_id)).mappings().one()
+        result = dict(row)
+        result["sent"] = bool(result["sent"])
+        return result
+
+    def list_alert_log(self, *, kind: str | None = None, limit: int = 100) -> list[dict]:
+        statement = select(self.alert_log)
+        if kind is not None:
+            statement = statement.where(self.alert_log.c.kind == str(kind))
+        statement = statement.order_by(self.alert_log.c.ts.desc(), self.alert_log.c.id.desc()).limit(max(0, int(limit)))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["sent"] = bool(item["sent"])
+            result.append(item)
+        return result
+
+    def count_alert_log_since(self, kind: str, since: datetime) -> int:
+        since_naive = since.replace(tzinfo=None) if self.engine.dialect.name == "sqlite" else since
+        with self.engine.connect() as conn:
+            value = conn.execute(select(func.count()).select_from(self.alert_log).where(
+                self.alert_log.c.kind == str(kind),
+                self.alert_log.c.sent == 1,
+                self.alert_log.c.ts >= since_naive,
+            )).scalar()
+        return int(value or 0)
+
     def add_grid_event(
         self, *, run_id: int | None, source: str, event_type: str, grid_id: int | None = None,
         level_idx: int | None = None, client_order_id: str | None = None,
@@ -1529,6 +1617,31 @@ class DBManager:
         with self.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def list_grid_events_since(self, min_id: int, *, limit: int = 5000) -> list[dict]:
+        """Events with id > min_id, oldest first (for watermark-based polling)."""
+        statement = (select(self.grid_events)
+                     .where(self.grid_events.c.id > int(min_id))
+                     .order_by(self.grid_events.c.id.asc())
+                     .limit(max(0, int(limit))))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def get_max_grid_event_id(self) -> int:
+        with self.engine.connect() as conn:
+            value = conn.execute(select(func.max(self.grid_events.c.id))).scalar()
+        return int(value or 0)
+
+    def get_last_alert_sent_at(self, alert_key: str) -> datetime | None:
+        with self.engine.connect() as conn:
+            value = conn.execute(select(func.max(self.alert_log.c.ts)).where(
+                self.alert_log.c.alert_key == str(alert_key),
+                self.alert_log.c.sent == 1,
+            )).scalar()
+        if value is None:
+            return None
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
     def create_grid_loan(self, values: dict[str, Any]) -> dict:
         """Persist the write-ahead record before a loan changes exchange orders."""
