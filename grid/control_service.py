@@ -105,6 +105,12 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
         except Exception as exc:
             if not optional_price:
                 raise HTTPException(503, "No se pudo obtener precio fiable de Testnet.") from exc
+        if market is not None and _d(market.get("bid_price")) <= 0:
+            # A one-sided Testnet book (no bid) is not a usable sell price either;
+            # treat it the same as "price unavailable" rather than valuing at zero.
+            if not optional_price:
+                raise HTTPException(503, "No se pudo obtener precio fiable de Testnet (libro unilateral).")
+            market = None
     bid = _d(market.get("bid_price")) if market else Decimal(0)
     held = sum((_d(row.get("held_qty")) for row in levels), Decimal(0))
     unrealized = sum(((bid - _d(row.get("entry_price"))) * _d(row.get("held_qty"))

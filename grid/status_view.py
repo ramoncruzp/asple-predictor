@@ -70,6 +70,7 @@ EVENT_LABELS: dict[str, str] = {
     "GRID_OPEN_REJECTED": "Apertura de grid rechazada",
     "AUTO_OPEN": "Auto-open abrió un grid",
     "AUTO_OPEN_STARTED": "Pasada de auto-open iniciada",
+    "BOOK_ONE_SIDED": "Libro de órdenes unilateral",
     # Literal names from the Fase 17A brief that this codebase does not emit
     # verbatim today -- kept so the UI still shows something sensible if they
     # ever appear, see DISCREPANCIAS_FASE17A.md.
@@ -93,6 +94,7 @@ SEVERITY_BY_EVENT = {
     "MAX_DAYS_REACHED": "warning", "RUN_GAP": "warning",
     "VOL_UNAVAILABLE": "warning", "ADJUST_REJECTED": "warning",
     "GRID_OPEN_REJECTED": "warning", "TESTNET_RESET_DETECTED": "warning",
+    "BOOK_ONE_SIDED": "warning",
     "BUY_FILLED": "info", "SELL_FILLED": "success", "TARGET_REACHED": "success",
     "GRID_PAUSED": "info", "GRID_RESUMED": "info", "GRID_ADJUSTED": "info",
     "BUY_PARTIAL_SETTLED": "info", "TESTNET_RESET_RECOVERED": "info",

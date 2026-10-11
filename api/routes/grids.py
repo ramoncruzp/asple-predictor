@@ -26,6 +26,7 @@ from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
                             functional_cell_threshold, functional_cell_warning,
                             evaluate_levels, evaluate_preview_position, suggest_structure)
 from grid.guards import sell_level_conflicts, sell_level_conflict_message
+from grid.market_book import book_mid
 
 router = APIRouter()
 
@@ -170,18 +171,18 @@ def _preview_testnet_price(engine, symbol, low, high, public_price):
         ask = Decimal(str(book["ask_price"]))
     except Exception:
         return None, None, {"allowed": None, "reason": unavailable}
-    empty_sides = []
-    if bid <= 0:
-        empty_sides.append("compras")
-    if ask <= 0:
-        empty_sides.append("ventas")
-    if empty_sides:
-        side_text = " y ".join(empty_sides)
+    price = book_mid({"bid_price": bid, "ask_price": ask})
+    if price is None:
+        empty_sides = []
+        if bid <= 0:
+            empty_sides.append("compras")
+        if ask <= 0:
+            empty_sides.append("ventas")
+        side_text = " y ".join(empty_sides) if empty_sides else "un libro cruzado (ask < bid)"
         reason = (f"El libro de Testnet de {symbol} no tiene {side_text} en este momento "
                   f"(bid {bid} / ask {ask}); la apertura fallar\u00eda. "
                   "Prueba con una moneda m\u00e1s l\u00edquida o reintenta.")
         return None, False, {"allowed": False, "reason": reason}
-    price = (bid + ask) / Decimal(2)
     in_range = low < price < high
     if in_range:
         return price, True, {"allowed": True, "reason": None}
@@ -470,16 +471,15 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
         testnet_ask = Decimal(str(book["ask_price"]))
     except Exception as exc:
         _reject(db, 503, f"No se pudo leer el libro de Testnet antes de abrir ({type(exc).__name__}).", symbol, body)
-    empty_sides = []
-    if testnet_bid <= 0:
-        empty_sides.append("compras")
-    if testnet_ask <= 0:
-        empty_sides.append("ventas")
-    testnet_mid = ((testnet_bid + testnet_ask) / Decimal(2)
-                   if not empty_sides else None)
+    testnet_mid = book_mid({"bid_price": testnet_bid, "ask_price": testnet_ask})
     testnet_snapshot = {"bid": testnet_bid, "ask": testnet_ask, "mid": testnet_mid}
-    if empty_sides:
-        sides = " y ".join(empty_sides)
+    if testnet_mid is None:
+        empty_sides = []
+        if testnet_bid <= 0:
+            empty_sides.append("compras")
+        if testnet_ask <= 0:
+            empty_sides.append("ventas")
+        sides = " y ".join(empty_sides) if empty_sides else "un libro cruzado (ask < bid)"
         _reject(db, 422,
             f"Apertura bloqueada: el libro de Testnet de {symbol} no tiene {sides} "
             f"(bid {testnet_bid}, ask {testnet_ask}, mid no calculado); "

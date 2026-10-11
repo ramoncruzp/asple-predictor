@@ -18,8 +18,11 @@ from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_de
 from grid.volatility_provider import VolatilityProvider
 from data.exchange_filters import SymbolFilters
 from grid.adjust import plan_adjust_with_shrink
+from grid.market_book import book_is_two_sided, book_mid
 from grid.reconciliation import expected_inventory_by_asset
 from data.testnet_client import TestnetOrderError
+
+BOOK_ONE_SIDED_COOLDOWN_SECONDS = 60 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -119,14 +122,38 @@ class GridMonitor:
 
     def _market_mids(self, grids: list[dict]) -> dict[str, float | None]:
         mids: dict[str, float | None] = {}
+        now = _utc(self.clock())
         for symbol in sorted({str(grid["symbol"]) for grid in grids}):
             try:
                 book = self.exchange.get_book_ticker(symbol)
-                mids[symbol] = float((_d(book["bid_price"]) + _d(book["ask_price"])) / 2)
             except Exception:
                 self.logger.warning("grid snapshot mid unavailable for %s", symbol, exc_info=True)
                 mids[symbol] = None
+                continue
+            mid = book_mid(book)
+            if mid is None:
+                self._notify_book_one_sided(symbol, book, now)
+                mids[symbol] = None
+            else:
+                mids[symbol] = float(mid)
         return mids
+
+    def _notify_book_one_sided(self, symbol: str, book: dict, now: datetime) -> None:
+        """Emit BOOK_ONE_SIDED (+ warning log) at most once per symbol every 60 minutes."""
+        try:
+            recent = self.db.list_grid_events(event_type="BOOK_ONE_SIDED", limit=500)
+        except Exception:
+            recent = []
+        last_for_symbol = next(
+            (event for event in recent if (event.get("details") or {}).get("symbol") == symbol), None)
+        if last_for_symbol is not None and (
+                now - _utc(last_for_symbol["ts"])).total_seconds() < BOOK_ONE_SIDED_COOLDOWN_SECONDS:
+            return
+        bid, ask = book.get("bid_price"), book.get("ask_price")
+        self.logger.warning("book one-sided for %s: bid=%s ask=%s", symbol, bid, ask)
+        self._emit({"event_type": "BOOK_ONE_SIDED", "grid_id": None, "ts": now,
+                    "reason": "libro_unilateral", "price": None,
+                    "details": {"symbol": symbol, "bid": str(bid), "ask": str(ask)}})
 
     def _reconcile_registered_dust(self, grids: list[dict], mids: dict[str, float | None], now: datetime) -> None:
         open_grids = [grid for grid in grids if grid.get("status") in {"ACTIVE", "PAUSED", "CLOSING", "HOLDING"}]
@@ -548,56 +575,60 @@ class GridMonitor:
                                                             "equity_total_at_close": equity_at_skip}})
                             else:
                                 book = self.exchange.get_book_ticker(current["symbol"])
-                                bid = float(book["bid_price"])
-                                filters, _, _ = self.engine._market_context(current["symbol"])
-                                eval_cells = build_profit_cells(
-                                    levels,
-                                    lambda cid: self.exchange.get_my_trades(current["symbol"],
-                                        self.exchange.get_order(current["symbol"], client_order_id=cid)["order_id"]),
-                                    lambda trades: self.engine._fee_value_usdt(trades, current["symbol"]))
-                                held_basis = sum(float(row["entry_cost"]) + float(row["entry_fee_usdt"])
-                                                 for row in eval_cells)
-                                realized = sum(float(row.get("pnl") or 0) for row in levels)
-                                dust_in_cells = sum((_d(row.get("held_qty")) for row in levels
-                                                     if row.get("state") == "DONE"), Decimal(0))
-                                sweepable_dust_qty = max(Decimal(0),
-                                    _d(current.get("dust_qty")) - dust_in_cells)
-                                cash_now = (float(current["capital_total"]) + realized - held_basis
-                                            + float(target_params.get("dust_cash_proceeds", 0)))
-                                equity_now = cash_now + sum(float(row.get("held_qty") or 0) * bid * .999
-                                                            for row in levels)
-                                target_plan = evaluate_target(
-                                    target_params, current["capital_total"], cash_now, eval_cells,
-                                    bid, filters, DEFAULT_GRID_FEE_PCT, equity_now=equity_now,
-                                    dust={"dust_qty": sweepable_dust_qty})
-                                dust_threshold = target_params.get("dust_sweep_threshold_pct")
-                                if (dust_threshold is not None and not target_plan["reached"]
-                                        and decision.action != "CLOSE_REPOSITORY"):
-                                    dust_plan = plan_dust_sweep(sweepable_dust_qty, bid,
-                                                                filters, .1)
-                                    capital = float(current.get("capital_total") or 0)
-                                    if (capital > 0 and dust_plan["sweepable"]
-                                            and float(dust_plan["proceeds_net"]) / capital * 100
-                                            >= float(dust_threshold)):
-                                        self.engine.sweep_grid_dust(grid_id, bid, reason="threshold")
-                                target_plan["bid_used"] = bid
-                                target_plan["estimated_fees_usdt"] = sum(
-                                    float(row.get("held_qty") or 0) * bid * .001
-                                    for row in levels if float(row.get("held_qty") or 0) > 0)
-                                sell_indices = {int(row["level_idx"]) for row in target_plan["sell_cells"]}
-                                target_plan["repo_cells"] = [
-                                    {"level_idx": int(row["level_idx"]), "reason": "not_sold_by_target_plan"}
-                                    for row in levels if float(row.get("held_qty") or 0) > 0
-                                    and int(row["level_idx"]) not in sell_indices]
-                                target_plan["cash_total"] = target_plan["projected_cash"]
-                                target_plan["equity_total_at_close"] = target_plan["projected_cash"] + sum(
-                                    float(row.get("held_qty") or 0) * bid * .999
-                                    for row in levels if float(row.get("held_qty") or 0) > 0
-                                    and int(row["level_idx"]) not in sell_indices)
-                                metrics["target"] = {key: target_plan.get(key) for key in
-                                    ("reached", "basis", "cash_now", "projected_cash", "equity_now",
-                                     "target_usdt", "target_threshold", "reason", "cash_total",
-                                     "equity_total_at_close")}
+                                if not book_is_two_sided(book):
+                                    self._notify_book_one_sided(current["symbol"], book, _utc(now))
+                                    target_plan = None
+                                else:
+                                    bid = float(book["bid_price"])
+                                    filters, _, _ = self.engine._market_context(current["symbol"])
+                                    eval_cells = build_profit_cells(
+                                        levels,
+                                        lambda cid: self.exchange.get_my_trades(current["symbol"],
+                                            self.exchange.get_order(current["symbol"], client_order_id=cid)["order_id"]),
+                                        lambda trades: self.engine._fee_value_usdt(trades, current["symbol"]))
+                                    held_basis = sum(float(row["entry_cost"]) + float(row["entry_fee_usdt"])
+                                                     for row in eval_cells)
+                                    realized = sum(float(row.get("pnl") or 0) for row in levels)
+                                    dust_in_cells = sum((_d(row.get("held_qty")) for row in levels
+                                                         if row.get("state") == "DONE"), Decimal(0))
+                                    sweepable_dust_qty = max(Decimal(0),
+                                        _d(current.get("dust_qty")) - dust_in_cells)
+                                    cash_now = (float(current["capital_total"]) + realized - held_basis
+                                                + float(target_params.get("dust_cash_proceeds", 0)))
+                                    equity_now = cash_now + sum(float(row.get("held_qty") or 0) * bid * .999
+                                                                for row in levels)
+                                    target_plan = evaluate_target(
+                                        target_params, current["capital_total"], cash_now, eval_cells,
+                                        bid, filters, DEFAULT_GRID_FEE_PCT, equity_now=equity_now,
+                                        dust={"dust_qty": sweepable_dust_qty})
+                                    dust_threshold = target_params.get("dust_sweep_threshold_pct")
+                                    if (dust_threshold is not None and not target_plan["reached"]
+                                            and decision.action != "CLOSE_REPOSITORY"):
+                                        dust_plan = plan_dust_sweep(sweepable_dust_qty, bid,
+                                                                    filters, .1)
+                                        capital = float(current.get("capital_total") or 0)
+                                        if (capital > 0 and dust_plan["sweepable"]
+                                                and float(dust_plan["proceeds_net"]) / capital * 100
+                                                >= float(dust_threshold)):
+                                            self.engine.sweep_grid_dust(grid_id, bid, reason="threshold")
+                                    target_plan["bid_used"] = bid
+                                    target_plan["estimated_fees_usdt"] = sum(
+                                        float(row.get("held_qty") or 0) * bid * .001
+                                        for row in levels if float(row.get("held_qty") or 0) > 0)
+                                    sell_indices = {int(row["level_idx"]) for row in target_plan["sell_cells"]}
+                                    target_plan["repo_cells"] = [
+                                        {"level_idx": int(row["level_idx"]), "reason": "not_sold_by_target_plan"}
+                                        for row in levels if float(row.get("held_qty") or 0) > 0
+                                        and int(row["level_idx"]) not in sell_indices]
+                                    target_plan["cash_total"] = target_plan["projected_cash"]
+                                    target_plan["equity_total_at_close"] = target_plan["projected_cash"] + sum(
+                                        float(row.get("held_qty") or 0) * bid * .999
+                                        for row in levels if float(row.get("held_qty") or 0) > 0
+                                        and int(row["level_idx"]) not in sell_indices)
+                                    metrics["target"] = {key: target_plan.get(key) for key in
+                                        ("reached", "basis", "cash_now", "projected_cash", "equity_now",
+                                         "target_usdt", "target_threshold", "reason", "cash_total",
+                                         "equity_total_at_close")}
                         # Adjustment has precedence over PAUSE, but CLOSE remains
                         # the highest priority. Legacy grids without the new
                         # adjust_enabled key stay on the 15B-1 policy path.

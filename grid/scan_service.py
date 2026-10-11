@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from data.exchange_filters import SymbolFilters
 from config.settings import SCANNER_DEFAULTS
+from grid.market_book import book_is_two_sided
 from grid.scanner import score_symbol
 
 DATA_SOURCE = "Binance public spot market data (read-only)"
@@ -69,8 +70,6 @@ class GridScanService:
                              else raw.get_orderbook_ticker(symbol=symbol))
         bid = Decimal(str(book.get("bid_price", book.get("bidPrice"))))
         ask = Decimal(str(book.get("ask_price", book.get("askPrice"))))
-        if bid <= 0 or ask <= 0:
-            raise ValueError(f"invalid public bid/ask for {symbol}")
         history_days = int(self._setting("scanner_history_days", 30))
         k5 = self._request(lambda: self.client.get_historical_klines(symbol, "5m", history_days))
         check_deadline()
@@ -117,6 +116,15 @@ class GridScanService:
             try:
                 market, filters = self._market(symbol, float(capital), deadline)
                 scored = score_symbol(market, filters, cfg)
+                if not book_is_two_sided({"bid_price": market["bid"], "ask_price": market["ask"]}):
+                    # scanner.py's own "spread" gate already rejects this (mid=0), but
+                    # make the reason explicit and machine-readable (see REPORTE_FASE26.md).
+                    gate = {"name": "book_two_sided", "passed": False,
+                            "measured": {"bid": str(market["bid"]), "ask": str(market["ask"])},
+                            "threshold": "ambos lados > 0", "reason": "libro_unilateral"}
+                    scored = {**scored, "eligible": False,
+                              "hard_filters": [gate, *scored.get("hard_filters", [])],
+                              "reasons": ["libro_unilateral", *scored.get("reasons", [])]}
                 if with_sim and scored["eligible"]:
                     check = getattr(self.client, "get_historical_klines")
                     candles = self._request(lambda: check(symbol, "5m", 90))

@@ -25,6 +25,7 @@ from grid.policy import (DEFAULT_GRID_FEE_PCT, DEFAULT_SMART_PARAMS, PROFIT_CLOS
                          build_profit_cells, plan_dust_sweep, plan_profit_close, validate_params)
 from grid.levels import GridConfigError, compute_lines, plan_cells
 from grid.adjust import plan_adjust
+from grid.market_book import book_is_two_sided, book_mid
 from grid import loans as loan_policy
 from grid.guards import sell_level_conflicts, sell_level_conflict_message
 
@@ -325,7 +326,10 @@ class GridEngine:
                        / Decimal(100)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
         distributable_capital = capital_total - reserve
         filters, snapshot, avg_price = self._market_context(symbol)
-        self._event_price = float((snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2))
+        if not book_is_two_sided(snapshot):
+            raise GridConfigError(
+                f"libro unilateral en Testnet para {symbol}: sin precio de compra o de venta")
+        self._event_price = float(book_mid(snapshot))
         open_orders = self.exchange.get_open_orders(symbol)
         if filters.max_num_orders is not None and len(open_orders) >= filters.max_num_orders:
             raise GridConfigError("exchange MAX_NUM_ORDERS is already reached")
@@ -983,8 +987,9 @@ class GridEngine:
             return {"resumed": resumed, "repaid": repaid, "created": 0, "skipped": "no_valid_plan"}
         plan = {**plan, "lender_cycles_at_open": 0 if lender is None else int(lender.get("cycles_completed", 0)),
                 "borrower_cycles_at_open": int(borrower.get("cycles_completed", 0))}
+        _loan_mid = book_mid(_snapshot)
         result = self.lend_from_plan(int(grid_id), plan,
-            market={"mid": str((_d(_snapshot["bid_price"]) + _d(_snapshot["ask_price"])) / 2),
+            market={"mid": None if _loan_mid is None else str(_loan_mid),
                     "avg_price": str(avg_price)})
         return {"resumed": resumed, "repaid": repaid,
                 "created": int(bool(result.get("ok"))), "loan": result.get("loan")}
@@ -1448,7 +1453,9 @@ class GridEngine:
             self.transfer_loans(int(grid_id), "before_adjust")
             grid = self.db.get_grid(int(grid_id))
         filters, snapshot, avg_price = self._market_context(grid["symbol"])
-        mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
+        mid = book_mid(snapshot)
+        if mid is None:
+            return {"ok": False, "reason": "libro_unilateral"}
         target_n = int(grid["n_levels"]) if new_n is None else int(new_n)
         if (_d(grid["range_low"]) == _d(new_low) and _d(grid["range_high"]) == _d(new_high)
                 and int(grid["n_levels"]) == target_n):
@@ -1727,7 +1734,9 @@ class GridEngine:
         if grid.get("status") != "ACTIVE":
             return {"ok": False, "reason": "grid_not_active"}
         filters, snapshot, _avg = self._market_context(grid["symbol"])
-        mid = (snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2)
+        mid = book_mid(snapshot)
+        if mid is None:
+            return {"ok": False, "reason": "libro_unilateral"}
         cells = self.db.get_grid_levels(grid_id)
         loan_enabled = (grid.get("strategy") == "smart"
                         and (grid.get("params") or {}).get("loans_enabled") is True)
@@ -1772,7 +1781,8 @@ class GridEngine:
             return {"ok": False, "reason": "cell_not_eligible"}
         try:
             filters, _snapshot, avg_price = self._market_context(grid["symbol"])
-            self._event_price = float((_snapshot["bid_price"] + _snapshot["ask_price"]) / 2)
+            _mid = book_mid(_snapshot)
+            self._event_price = None if _mid is None else float(_mid)
             order_id = level.get("order_id")
             if order_id is None and level.get("client_order_id"):
                 found = self.exchange.find_order_by_client_id(grid["symbol"], level["client_order_id"])
@@ -1828,7 +1838,8 @@ class GridEngine:
             return summary
         symbol = grid["symbol"]
         filters, snapshot, avg_price = self._market_context(symbol)
-        self._event_price = float((snapshot["bid_price"] + snapshot["ask_price"]) / Decimal(2))
+        _mid = book_mid(snapshot)
+        self._event_price = None if _mid is None else float(_mid)
         bid = snapshot["bid_price"]
         deferred_this_pass: set[int] = set()
         pending_loan_levels = self._pending_loan_level_indices(int(grid_id))
@@ -2495,7 +2506,9 @@ class GridEngine:
         market_mid = None
         try:
             book = self.exchange.get_book_ticker(symbol)
-            market_mid = (_d(book["bid_price"]) + _d(book["ask_price"])) / 2
+            market_mid = book_mid(book)
+            if market_mid is None:
+                logger.warning("grid=%s repository movement price unavailable (one-sided book)", grid_id)
         except Exception:
             logger.warning("grid=%s repository movement price unavailable", grid_id, exc_info=True)
         for level in self.db.get_grid_levels(grid_id):
@@ -2624,6 +2637,9 @@ class GridEngine:
             try:
                 filters, snapshot, avg_price = self._market_context(grid["symbol"])
                 bid = _d(snapshot["bid_price"])
+                if bid <= 0:
+                    raise ValueError(
+                        f"libro unilateral en Testnet para {grid['symbol']}: sin precio de compra")
                 levels = self.db.get_grid_levels(int(grid_id))
                 cells = self._build_profit_cells(int(grid_id), grid["symbol"], levels)
                 held_basis = sum((_d(row["entry_cost"]) + _d(row["entry_fee_usdt"])

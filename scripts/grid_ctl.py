@@ -20,6 +20,7 @@ from grid.levels import compute_lines, plan_cells
 from grid.policy import DEFAULT_SMART_PARAMS, plan_dust_sweep, validate_params
 from grid.loan_cohorts import assign_loan_creation_defaults, create_grid_with_loan_cohort
 from grid.structure import functional_cell_threshold, functional_cell_warning
+from grid.market_book import book_is_two_sided, book_mid
 from data.exchange_filters import SymbolFilters
 from grid.scan_service import GridScanService
 from grid.volatility_provider import VolatilityProvider
@@ -216,7 +217,11 @@ def main(argv: list[str] | None = None) -> int:
             if grid is None:
                 raise ValueError(f"grid {args.grid} does not exist")
             filters = SymbolFilters.from_symbol_info(exchange.get_symbol_info(grid["symbol"]))
-            bid = exchange.get_book_ticker(grid["symbol"])["bid_price"]
+            book = exchange.get_book_ticker(grid["symbol"])
+            bid = book["bid_price"]
+            if Decimal(str(bid)) <= 0:
+                raise ValueError(
+                    f"libro unilateral en Testnet para {grid['symbol']}: sin precio de compra")
             if args.execute:
                 result = engine.sweep_grid_dust(args.grid, bid, reason="cli")
             else:
@@ -357,12 +362,21 @@ def main(argv: list[str] | None = None) -> int:
             avg = Decimal(str(exchange.get_avg_price(symbol)))
             snapshot = {"bid_price": Decimal(str(book["bid_price"])),
                         "ask_price": Decimal(str(book["ask_price"])), "avg_price": avg}
-            plans = plan_cells(lines, distributable, snapshot, filters, settings)
+            book_two_sided = book_is_two_sided(snapshot)
+            testnet_book_warning = None if book_two_sided else (
+                f"libro unilateral en Testnet para {symbol} (bid {snapshot['bid_price']}, "
+                f"ask {snapshot['ask_price']}); la apertura fallaría.")
+            if not args.dry_run and not book_two_sided:
+                raise ValueError(testnet_book_warning)
+            plans = ([] if not book_two_sided else
+                     plan_cells(lines, distributable, snapshot, filters, settings))
             if args.dry_run:
                 result = {
                     "dry_run": True, "symbol": symbol, "strategy": args.strategy,
                     "range": {"low": str(low), "high": str(high)},
                     "levels": [str(value) for value in lines],
+                    "testnet_book_mid": str(book_mid(snapshot)) if book_two_sided else None,
+                    "testnet_book_warning": testnet_book_warning,
                     "capital_per_cell": str(minimum_cell),
                     "functional_cell_warning": functional_cell_warning(args.capital, args.n, required_cell, args.strategy),
                     "reserve": str(reserve),

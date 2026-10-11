@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from api.routes.grids import _authorize
 from grid import status_view as sv
+from grid.market_book import book_mid
 
 # A single router with absolute paths (rather than two routers needing two
 # separate prefixes) so api/main.py only needs one app.include_router(...)
@@ -50,8 +51,10 @@ def _price_for_symbol(request: Request, symbol: str) -> tuple[float | None, date
             return cached[1], cached[2]
     try:
         book = client.get_book_ticker(symbol)
-        from decimal import Decimal
-        mid = float((Decimal(str(book["bid_price"])) + Decimal(str(book["ask_price"]))) / Decimal(2))
+        mid_decimal = book_mid(book)
+        if mid_decimal is None:
+            return None, None
+        mid = float(mid_decimal)
         as_of = datetime.now(timezone.utc)
         with cache_lock:
             cache[symbol] = (now_mono, mid, as_of)
