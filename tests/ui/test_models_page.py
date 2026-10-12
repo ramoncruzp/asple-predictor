@@ -577,6 +577,8 @@ def test_direction_uses_artifact_identity_and_hides_non_xrp_content(ui_page, liv
 
 
 def test_chart_left_edge_has_room_at_narrow_viewport(ui_page, live_server):
+    ui_page.route("**/vendor/lightweight-charts.standalone.production.js",
+                  lambda route: route.fulfill(status=200, content_type="application/javascript", body=""))
     ui_page.add_init_script("""window.LightweightCharts={createChart:(container,options)=>{window.__volChartOptions=options;return {addLineSeries:()=>({setData:()=>{}}),timeScale:()=>({fitContent:()=>{}}),remove:()=>{}}}}""")
     _page_with_empty_api(ui_page,live_server)
     ui_page.set_viewport_size({'width':360,'height':900})

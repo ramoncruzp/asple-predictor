@@ -133,12 +133,93 @@ function renderApiHealth() {
   setOffline(state.status === 'offline');
   chip.classList.toggle('online', state.status === 'online'); chip.classList.toggle('offline', state.status === 'offline'); chip.classList.toggle('slow', state.status === 'slow');
   text.textContent = apiHealthLabel(state);
+  const label = `API: ${apiHealthLabel(state)}`;
+  chip.classList.toggle('health-ok', state.status === 'online'); chip.classList.toggle('health-red', state.status === 'offline');
+  chip.classList.toggle('health-amber', state.status === 'slow'); chip.classList.toggle('health-unknown', state.status === 'checking');
+  chip.setAttribute('aria-label', label); chip.title = label;
   if (state.status === 'offline') $('#offline-banner').textContent = `API desconectada; \u00faltimo chequeo exitoso ${timeSinceSuccess(state.lastSuccessAt)}`;
 }
 async function checkApiStatus() {
   try { await api.status(); APP.apiHealthState = advanceApiHealth(APP.apiHealthState, true); }
   catch (_) { APP.apiHealthState = advanceApiHealth(APP.apiHealthState, false); }
   renderApiHealth();
+}
+const esc = escapeHtml;
+function setHealthIndicator(node, state, label) {
+  node.classList.remove('health-ok', 'health-amber', 'health-red', 'health-unknown');
+  node.classList.add(`health-${state}`);
+  node.setAttribute('aria-label', label); node.title = label;
+  node.innerHTML = `<i></i><span class="health-label">${esc(label)}</span>`;
+}
+function elapsedLabel(timestamp, now = Date.now()) {
+  const value = Date.parse(timestamp);
+  if (!Number.isFinite(value)) return null;
+  const seconds = Math.max(0, Math.floor((now - value) / 1000));
+  if (seconds < 60) return `hace ${seconds} s`;
+  if (seconds < 3600) return `hace ${Math.floor(seconds / 60)} min`;
+  const hours = Math.floor(seconds / 3600);
+  return seconds < 86400 ? `hace ${hours} h` : `hace ${Math.floor(hours / 24)} d`;
+}
+function renderMonitorHealth(payload, now = Date.now()) {
+  const node = $('#monitor-chip'), run = payload?.last_run;
+  const stamp = run?.finished_at || run?.started_at;
+  const elapsed = stamp ? elapsedLabel(stamp, now) : null;
+  if (!elapsed) { setHealthIndicator(node, 'unknown', 'Monitor: sin datos'); return; }
+  const status = String(run?.status || '').toUpperCase();
+  const configuredMinutes = Number(payload?.gap_minutes_configured);
+  const intervalSeconds = Number.isFinite(configuredMinutes) && configuredMinutes > 0 ? configuredMinutes * 60 : 900;
+  const ageSeconds = Math.max(0, Math.floor((now - Date.parse(stamp)) / 1000));
+  const failed = ['FAILED', 'FAILURE', 'ERROR', 'PARTIAL', 'INTERRUPTED'].includes(status);
+  const state = failed || ageSeconds > intervalSeconds * 4 ? 'red'
+    : ageSeconds >= intervalSeconds * 2 ? 'amber' : 'ok';
+  setHealthIndicator(node, state, `Monitor: ${elapsed}`);
+}
+function renderLatestAlert(payload, now = Date.now()) {
+  const node = $('#last-alert-indicator'), alert = payload?.last_sent;
+  if (!alert) { setHealthIndicator(node, 'unknown', 'Última alerta: sin alertas'); return; }
+  const elapsed = alert.ts ? elapsedLabel(alert.ts, now) : null;
+  const key = alert.alert_key ? ` · ${alert.alert_key}` : '';
+  const label = `Última alerta: ${elapsed || 'fecha desconocida'}${key}`;
+  setHealthIndicator(node, 'unknown', label);
+}
+async function refreshOperationalHealth() {
+  if (APP.operationalHealthInFlight) return;
+  APP.operationalHealthInFlight = true;
+  try {
+    try {
+      const monitor = await api.get('/api/monitor/status');
+      renderMonitorHealth(monitor);
+      $('#testnet-reset-indicator').classList.toggle('hidden', monitor?.testnet_reset_suspected !== true);
+    } catch (_) {
+      setHealthIndicator($('#monitor-chip'), 'unknown', 'Monitor: sin datos');
+      $('#testnet-reset-indicator').classList.add('hidden');
+    }
+    try { renderLatestAlert(await api.get('/api/alerts/status')); }
+    catch (_) { setHealthIndicator($('#last-alert-indicator'), 'unknown', 'Última alerta: sin datos'); }
+  } finally { APP.operationalHealthInFlight = false; }
+}
+function setupMobileMenu() {
+  const button = $('#mobile-menu-toggle'), menu = $('#mobile-route-menu');
+  if (!button || !menu) return;
+  const close = (restoreFocus = false) => {
+    menu.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-label', 'Abrir menú');
+    if (restoreFocus) button.focus();
+  };
+  button.addEventListener('click', () => {
+    const open = button.getAttribute('aria-expanded') !== 'true';
+    menu.classList.toggle('hidden', !open); button.setAttribute('aria-expanded', String(open));
+    button.setAttribute('aria-label', open ? 'Cerrar menú' : 'Abrir menú');
+  });
+  menu.addEventListener('click', event => { if (event.target.closest('a')) close(); });
+  document.addEventListener('pointerdown', event => {
+    if (button.getAttribute('aria-expanded') === 'true' && !menu.contains(event.target) && !button.contains(event.target)) close();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && button.getAttribute('aria-expanded') === 'true') close(true);
+  });
+}
+function updateMobileMenuRoute(base) {
+  document.querySelectorAll('[data-mobile-route]').forEach(link => link.classList.toggle('active', link.dataset.mobileRoute === base));
 }
 function panelLoadError(panel, error) {
   const reason = error?.name === 'AbortError' ? 'tiempo de espera agotado' : (error?.message || 'error no especificado');
@@ -302,8 +383,8 @@ function renderGridV2a(data) {
   $('#copy-grid').onclick=()=>{const text=`Grid ${data.symbol}\nPiso ${data.recommended_floor} · Techo ${data.recommended_ceiling}\nNiveles ${data.suggested_grids} · Capital por celda ${money(data.capital_per_grid,2)}\nGenerado ${formatDateTime(new Date())}`;navigator.clipboard.writeText(text);};
   $('#grid-create-from-advisor').onclick=()=>{sessionStorage.setItem('asple-advisor-open',JSON.stringify({symbol:data.symbol,capital:$('#grid-capital').value,strategy:'smart',range_low:data.recommended_floor,range_high:data.recommended_ceiling,n_levels:data.suggested_grids,spacing_pct:data.spacing_pct,margin_target_pct:data.margin_target_pct}));location.hash='#scanner';};
 }
-function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; if (base !== 'coins') stopCoinsPolling(); $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'models', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'models') window.loadModelsPage?.(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
-document.addEventListener('DOMContentLoaded', () => { restoreCache(); document.addEventListener('submit', event => { if (event.target?.id === 'grid-form') loadGrid(event); }, true); $('#grid-symbol').addEventListener('change', event => { APP.gridSymbol = event.target.value; }); $('#dashboard-symbol').addEventListener('change', loadDashboard); $('#dashboard-interval').addEventListener('change', loadDashboard); $('#refresh-dashboard').addEventListener('click', refreshDashboard); window.addEventListener('hashchange', route); route(); checkApiStatus(); setInterval(checkApiStatus, 30000); setInterval(() => { if ((location.hash || '#dashboard') === '#dashboard') loadDashboard(); }, 60000); });
+function route() { const name = (location.hash || '#dashboard').slice(1); const base = name.split('/')[0]; if (base !== 'coins') stopCoinsPolling(); $('#testnet-notice')?.classList.toggle('hidden', !['dashboard','scanner','grid','grids','cuenta'].includes(base)); ['dashboard', 'battle', 'models', 'grid', 'scanner', 'coins', 'grids', 'cuenta'].forEach(screen => { $(`#screen-${screen}`).classList.toggle('hidden', screen !== base); document.querySelector(`[data-route=\"${screen}\"]`).classList.toggle('active', screen === base); }); updateMobileMenuRoute(base); if (name === 'dashboard') loadDashboard(); if (name === 'battle') loadBattle(); if (name === 'models') window.loadModelsPage?.(); if (base === 'grid') loadGridSymbols(); if (name === 'coins') loadCoins(); if (base === 'grids') window.loadGridsScreen?.(name); if (base === 'scanner') window.loadScannerScreen?.(); if (name === 'cuenta') window.loadCuenta?.(); }
+document.addEventListener('DOMContentLoaded', () => { restoreCache(); setupMobileMenu(); document.addEventListener('submit', event => { if (event.target?.id === 'grid-form') loadGrid(event); }, true); $('#grid-symbol').addEventListener('change', event => { APP.gridSymbol = event.target.value; }); $('#dashboard-symbol').addEventListener('change', loadDashboard); $('#dashboard-interval').addEventListener('change', loadDashboard); $('#refresh-dashboard').addEventListener('click', refreshDashboard); window.addEventListener('hashchange', route); route(); checkApiStatus(); setInterval(checkApiStatus, 30000); setInterval(() => { if ((location.hash || '#dashboard') === '#dashboard') loadDashboard(); }, 60000); refreshOperationalHealth(); if (!APP.healthRefreshTimer) APP.healthRefreshTimer = setInterval(refreshOperationalHealth, 60000); });
 
 // V2b volatility UI: fetched alongside the existing dashboard and battle views.
 const loadDashboardV2bBase = loadDashboardV2a;

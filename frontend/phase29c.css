@@ -1,0 +1,35 @@
+.health-indicators{display:flex;align-items:center;gap:12px;min-width:0}
+.health-item{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;line-height:1.25;white-space:nowrap}
+.health-item>i{display:block;flex:0 0 8px;width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.health-item.health-ok>i{background:var(--green);box-shadow:0 0 7px var(--green)}
+.health-item.health-amber>i{background:#d29922;box-shadow:0 0 7px #d29922}
+.health-item.health-red>i{background:var(--red);box-shadow:0 0 7px var(--red)}
+.health-item.health-unknown>i{background:var(--muted)}
+.health-item.status-chip{font-size:12px}
+.health-item.status-chip i{flex-basis:7px;width:7px;height:7px}
+.health-item.status-chip.online i{background:var(--green);box-shadow:0 0 8px var(--green)}
+.health-item.status-chip.offline i{background:var(--red)}
+.health-item.status-chip.slow i{background:#d29922}
+.last-alert-indicator{max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.mobile-menu-toggle,.mobile-route-menu{display:none}
+@media(min-width:1101px){.topbar{gap:12px}.tabs{flex:0 1 auto;min-width:0;justify-content:space-between;gap:0}.tabs a{padding-inline:5px;font-size:12px;white-space:nowrap}.health-indicators{flex:1 1 370px;min-width:0;justify-content:flex-end;gap:8px}.last-alert-indicator{flex:0 1 190px;min-width:0;max-width:190px}.last-alert-indicator .health-label{min-width:0;overflow:hidden;text-overflow:ellipsis}}
+@media(max-width:1100px){.topbar{gap:14px;padding-inline:16px}.health-indicators{gap:8px}.last-alert-indicator{max-width:155px}.tabs{gap:0}.tabs a{padding-inline:8px;font-size:11px}}
+@media(max-width:600px){
+  .topbar{position:sticky;gap:10px;padding:0 14px;z-index:20}
+  .brand span:last-child{display:none}
+  .mobile-menu-toggle{display:inline-grid;place-items:center;width:44px;height:44px;flex:none;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:22px;cursor:pointer}
+  .mobile-menu-toggle:focus-visible,.mobile-route-menu a:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .tabs{display:none}
+  .mobile-route-menu{position:absolute;display:flex;flex-direction:column;gap:2px;left:10px;top:calc(100% + 6px);width:min(280px,calc(100vw - 20px));padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+  .mobile-route-menu.hidden{display:none}
+  .mobile-route-menu a{display:flex;align-items:center;min-height:44px;padding:8px 12px;border-radius:5px;color:var(--text);text-decoration:none}
+  .mobile-route-menu a:hover,.mobile-route-menu a.active{background:var(--surface2);color:var(--text)}
+  .mobile-route-menu a.active{box-shadow:inset 3px 0 var(--blue);font-weight:600}
+  .health-indicators{margin-left:auto;gap:12px}
+  .health-item{justify-content:center;width:20px;height:32px;overflow:visible}
+  .health-item>i{width:9px;height:9px;flex-basis:9px}
+  .health-item .health-label{display:none!important}
+  .health-item.status-chip{width:20px;height:32px;padding:0;border:0;background:transparent}
+  .health-item.status-chip i{width:9px;height:9px;flex-basis:9px}
+  .last-alert-indicator{max-width:none}
+}
