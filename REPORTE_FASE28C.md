@@ -34,4 +34,4 @@ Pruebas: [tests/test_orphan_orders_report.py](tests/test_orphan_orders_report.py
 
 `scripts/orphan_orders_report.py`, `tests/test_orphan_orders_report.py`, `tests/test_fase28b_mutations.py`, `REPORTE_FASE28C.md`.
 
-Commit: pendiente de suite y auditoría final.
+Commit de implementación de Fase 28c: `c679022`.
