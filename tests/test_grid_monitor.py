@@ -787,6 +787,7 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
         grid_monitor_interval=900, grid_monitor_gap_minutes=20,
         usdt_por_grid=100, max_grids_simultaneos=5,
         capital_max_por_nivel_pct=0.30, grid_min_step_pct=0.003,
+        alerts_enabled=False, telegram_bot_token="", telegram_chat_id="",
     )
     class DummyDB:
         def seed_coin_if_missing(self, *args):
@@ -797,6 +798,8 @@ def test_app_lifespan_starts_without_monitor_when_testnet_credentials_missing(tm
             return []
         def get_readiness(self, *args):
             return None
+        def list_app_flag_overrides(self):
+            return []
         def set_readiness(self, *args):
             return {}
         def has_active_training_job(self, *args):
@@ -854,12 +857,14 @@ def test_coin_onboarding_start_failure_does_not_prevent_lifespan_start(tmp_path,
         database_url="sqlite:///:memory:", log_level="ERROR", grid_monitor_enabled=False,
         grid_monitor_interval=900, grid_monitor_gap_minutes=20,
         usdt_por_grid=100, max_grids_simultaneos=5, capital_max_por_nivel_pct=0.30,
-        grid_min_step_pct=0.003,
+        grid_min_step_pct=0.003, alerts_enabled=False, telegram_bot_token="", telegram_chat_id="",
     )
 
     class DummyDB:
         def seed_coin_if_missing(self, *args):
             pass
+        def list_app_flag_overrides(self):
+            return []
 
     class DummyModel:
         def load(self, *args):

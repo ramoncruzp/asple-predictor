@@ -86,6 +86,19 @@ def test_format_digest_lists_grids_and_health_lines():
     assert "Sondeo Binance: OK" in message
 
 
+def test_format_digest_formats_local_times_and_signed_four_decimal_pnl():
+    rows = [
+        {"label": "X", "status": "ACTIVE", "pnl_today": Decimal("0"), "pnl_total": Decimal("1.23456")},
+        {"label": "Y", "status": "ACTIVE", "pnl_today": Decimal("-0.01234"), "pnl_total": Decimal("1e-7")},
+    ]
+    message = format_digest(
+        rows, monitor_last_run=None, last_prediction=None, last_vol=None, probe_ok=True,
+    )
+    assert "+0.0000 USDT hoy / +1.2346 acumulado" in message
+    assert "-0.0123 USDT hoy / +0.0000 acumulado" in message
+    assert "sin datos" in message
+
+
 def test_format_digest_handles_no_active_grids():
     message = format_digest([], monitor_last_run=None, last_prediction=None, last_vol=None, probe_ok=None)
     assert "sin grids activos" in message

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -43,6 +44,12 @@ def _is_manual_api(event: dict) -> bool:
 
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _local_timestamp(value: datetime | str) -> str:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return _as_utc(value).astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M (hora local)")
 
 
 def _day_start_utc(now: datetime) -> datetime:
@@ -355,8 +362,8 @@ class AlertDispatcher:
         threshold = int(getattr(cfg, "alerts_probe_fails", 3))
         if ok:
             self.db.set_alert_state("probe_fail_count", 0)
+            self.db.set_alert_state("probe_down", False)
             if was_down:
-                self.db.set_alert_state("probe_down", False)
                 self._send(sender, alert_key="probe_recovered", kind="operativa",
                             text=fmt.format_binance_recovered(), now=now)
             return
@@ -432,10 +439,10 @@ class AlertDispatcher:
         for grid in grids:
             levels = self.db.get_grid_levels(int(grid["id"]))
             cycles = sum(int(row.get("cycles_completed") or 0) for row in levels)
-            pnl_total = sum(float(row.get("pnl") or 0) for row in levels)
+            pnl_total = sum((Decimal(str(row.get("pnl") or 0)) for row in levels), Decimal("0"))
             sell_events = self.db.list_grid_events(grid_id=int(grid["id"]), event_type="SELL_FILLED", limit=5000)
-            pnl_today = sum(float((event.get("details") or {}).get("cycle_pnl") or 0)
-                            for event in sell_events if _as_utc(event["ts"]) >= day_start)
+            pnl_today = sum((Decimal(str((event.get("details") or {}).get("cycle_pnl") or 0))
+                             for event in sell_events if _as_utc(event["ts"]) >= day_start), Decimal("0"))
             open_orders = sum(1 for row in levels if row.get("state") in {"BUY_OPEN", "SELL_OPEN"})
             rows.append({"label": fmt.grid_label(grid["symbol"], grid["id"]), "status": grid["status"],
                          "cycles": cycles, "pnl_today": pnl_today, "pnl_total": pnl_total,
@@ -446,8 +453,9 @@ class AlertDispatcher:
         probe_down = self.db.get_alert_state("probe_down")
         return fmt.format_digest(
             rows,
-            monitor_last_run=None if not last_run else str(last_run.get("started_at")),
-            last_prediction=None if last_prediction is None else str(last_prediction),
-            last_vol=None if last_vol is None else str(last_vol),
+            monitor_last_run=None if not last_run or last_run.get("started_at") is None
+                else _local_timestamp(last_run["started_at"]),
+            last_prediction=None if last_prediction is None else _local_timestamp(last_prediction),
+            last_vol=None if last_vol is None else _local_timestamp(last_vol),
             probe_ok=None if probe_down is None else not probe_down,
         )

@@ -229,6 +229,7 @@ def test_advisor_uses_persisted_factor_and_adaptive_stress_trigger(monkeypatch):
     monkeypatch.setattr(volatility_route, "model_stats", lambda *a, **k: _stats_response(False))
     client = make_client()
     client.app.state.db = SimpleNamespace(
+        get_readiness=lambda symbol: None,
         get_widen_active_values=lambda *a: {"k_active": 1.5, "disagreement_pct_active": 40.0},
         get_latest_widen_factor=lambda *a: {"dispersion_n": 200, "stress_threshold": .15,
             "status": "acumulando", "k_stress_smoothed": 1.3, "n": 20,

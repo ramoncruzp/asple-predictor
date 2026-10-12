@@ -428,6 +428,33 @@ def test_startup_message_fires_once_per_process_but_not_forever_silenced():
     assert sender3.sent == ["⚠️ ASPLE iniciado."]
 
 
+def test_probe_state_is_explicitly_healthy_after_success_and_tracks_down_recovery():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    outcomes = iter([True, False, False, False, True])
+    disp, sender = _dispatcher(db, probe=lambda: next(outcomes))
+    now = datetime(2026, 10, 11, 22, 54, 30, tzinfo=timezone.utc)
+    disp._process_probe(sender, now)
+    assert db.get_alert_state("probe_down") is False
+    db.get_last_monitor_run = lambda: {"started_at": datetime(2026, 10, 11, 22, 54, 30)}
+    db.get_last_prediction_time = lambda: datetime(2026, 10, 11, 22, 54, 30)
+    db.get_last_vol_forecast_time = lambda: None
+    digest = disp._build_digest(now)
+    assert "Sondeo Binance: OK" in digest
+    assert digest.count("2026-10-11 18:54 (hora local)") == 2
+    assert "sin datos" in digest
+    disp._process_probe(sender, now)
+    disp._process_probe(sender, now)
+    assert db.get_alert_state("probe_down") is False
+    disp._process_probe(sender, now)
+    assert db.get_alert_state("probe_down") is True
+    assert "Sondeo Binance: inalcanzable" in disp._build_digest(now)
+    disp._process_probe(sender, now)
+    assert db.get_alert_state("probe_down") is False
+    assert "Sondeo Binance: OK" in disp._build_digest(now)
+    assert sum("inalcanzable" in message for message in sender.sent) == 1
+    assert len(sender.sent) == 2 and "Binance Testnet" in sender.sent[-1]
+
+
 # -- Fase 10b item 4: the digest's "today" must use the local day
 #    (America/Santo_Domingo, UTC-4), not the UTC calendar day ---------------
 

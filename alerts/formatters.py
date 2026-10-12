@@ -7,7 +7,7 @@ what Ramon asked for ("sin notacion cientifica").
 """
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from grid.status_view import EVENT_LABELS
@@ -28,6 +28,16 @@ def fmt(value: Any) -> str:
         return format(Decimal(str(value)), "f")
     except (InvalidOperation, TypeError, ValueError):
         return str(value)
+
+
+def fmt_pnl(value: Any) -> str:
+    """Render PnL with an explicit sign and exactly four decimal places."""
+    try:
+        amount = Decimal(str(value if value is not None else 0)).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        amount = Decimal("0.0000")
+    return f"{amount:+.4f}"
 
 
 def fmt_price(value: Any) -> str:
@@ -170,7 +180,7 @@ def format_digest(rows: list[dict], *, monitor_last_run: str | None, last_predic
     for row in rows:
         lines.append(
             f"- {row['label']} ({row['status']}): {row.get('cycles', 0)} ciclos, "
-            f"{fmt(row.get('pnl_today', 0))} USDT hoy / {fmt(row.get('pnl_total', 0))} acumulado, "
+            f"{fmt_pnl(row.get('pnl_today', 0))} USDT hoy / {fmt_pnl(row.get('pnl_total', 0))} acumulado, "
             f"{row.get('open_orders', 0)} órdenes abiertas"
         )
     if not rows:
