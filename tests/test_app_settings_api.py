@@ -41,13 +41,20 @@ def test_get_lists_allowlisted_flag_with_default_origin(tmp_path):
     _app_obj, _db, _settings, client = _app(tmp_path)
     response = client.get("/api/settings/flags")
     assert response.status_code == 200
-    row, = response.json()["flags"]
-    assert row == {
+    rows = {row["key"]: row for row in response.json()["flags"]}
+    assert rows["adjust_idle_shrink_enabled"] == {
         "key": "adjust_idle_shrink_enabled",
         "label": "Reducci\u00f3n de niveles ociosos",
         "description": "Permite que los grids Smart que lo activen quiten niveles sin ciclos en 24 h. Apagado por defecto: en simulaci\u00f3n XRP no mejor\u00f3 la ganancia. Encenderlo aqu\u00ed solo habilita el bot\u00f3n por grid; no activa la regla en ning\u00fan grid.",
         "current": False, "default": False, "origin": "default", "requires_restart": False,
     }
+    stoploss = rows["stoploss_enabled"]
+    assert stoploss["label"] == "Stop-loss por celda"
+    assert stoploss["current"] is True and stoploss["default"] is True
+    assert stoploss["origin"] == "default" and stoploss["requires_restart"] is False
+    assert "esa regla no se ejecuta" in stoploss["description"]
+    assert "la p\u00e9rdida queda sin realizar y puede crecer" in stoploss["description"]
+    assert "siguiente ciclo del monitor sin reiniciar" in stoploss["description"]
 
 
 def test_confirmed_enable_persists_mutates_live_settings_and_allows_grid_toggle(tmp_path):
@@ -140,3 +147,39 @@ def test_database_override_wins_after_restart_and_env_is_reported(tmp_path, monk
     env_row = TestClient(env_app, headers={"X-API-Token": "local-test"}, raise_server_exceptions=False).get("/api/settings/flags").json()["flags"][0]
     assert env_row["current"] is True and env_row["origin"] == ".env"
     assert restarted_settings.adjust_idle_shrink_enabled is True
+
+
+def test_stoploss_flag_can_be_disabled_without_confirm_and_survives_restart(tmp_path, monkeypatch):
+    monkeypatch.delenv("STOPLOSS_ENABLED", raising=False)
+    app, db, settings, client = _app(tmp_path)
+    listed = client.get("/api/settings/flags")
+    assert listed.status_code == 200
+    stoploss, = [row for row in listed.json()["flags"] if row["key"] == "stoploss_enabled"]
+    assert stoploss["current"] is True and stoploss["default"] is True
+    assert stoploss["origin"] == "default"
+
+    disabled = client.post("/api/settings/flags", json={
+        "key": "stoploss_enabled", "value": False, "dry_run": False,
+    })
+    assert disabled.status_code == 200, disabled.text
+    assert settings.stoploss_enabled is False
+    assert db.list_app_flag_overrides()[-1]["value"] is False
+
+    monkeypatch.setenv("STOPLOSS_ENABLED", "true")
+    db_url = app.state.db.engine.url.render_as_string(hide_password=False)
+    restarted_db = DBManager(db_url)
+    restarted_settings = Settings(_env_file=None, GRID_API_TOKEN="local-test")
+    assert restarted_settings.stoploss_enabled is True
+    apply_app_flag_overrides(restarted_settings, restarted_db)
+    assert restarted_settings.stoploss_enabled is False
+
+    unconfirmed_enable = client.post("/api/settings/flags", json={
+        "key": "stoploss_enabled", "value": True, "dry_run": False,
+    })
+    assert unconfirmed_enable.status_code == 422
+    assert settings.stoploss_enabled is False
+    confirmed_enable = client.post("/api/settings/flags", json={
+        "key": "stoploss_enabled", "value": True, "dry_run": False, "confirm": True,
+    })
+    assert confirmed_enable.status_code == 200, confirmed_enable.text
+    assert settings.stoploss_enabled is True

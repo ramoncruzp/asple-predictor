@@ -45,3 +45,34 @@ def test_global_settings_section_confirms_changes_and_explains_live_effect(ui_pa
     assert requests == [{"key": "adjust_idle_shrink_enabled", "value": True,
                          "dry_run": False, "confirm": True}]
     assert ui_page.locator("#global-settings-status").inner_text() == "Ajuste global actualizado."
+
+
+def test_stoploss_global_flag_appears_with_disable_button(ui_page, live_server):
+    description = (
+        "Con el interruptor encendido, una celda con posición se vende a mercado cuando el precio cae por debajo "
+        "de su precio de compra menos su stop_loss_pct (5 % por defecto). Apagado, esa regla no se ejecuta y las "
+        "posiciones esperan su venta normal (la pérdida queda sin realizar y puede crecer). No afecta a las demás "
+        "protecciones de la política. El cambio aplica en el siguiente ciclo del monitor sin reiniciar."
+    )
+
+    def api(route):
+        request = route.request
+        path = request.url.split(live_server.url, 1)[-1].split("?", 1)[0]
+        if path == "/api/settings/flags" and request.method == "GET":
+            route.fulfill(json={"flags": [{
+                "key": "stoploss_enabled", "label": "Stop-loss por celda", "description": description,
+                "current": True, "default": True, "origin": "default", "requires_restart": False,
+            }]})
+        elif path.startswith("/api/account/"):
+            route.fulfill(status=403, json={"detail": "auth required"})
+        else:
+            route.fulfill(json={})
+
+    ui_page.route("**/api/**", api)
+    ui_page.goto(f"{live_server.url}/#cuenta")
+    row = ui_page.locator('[data-flag-key="stoploss_enabled"]')
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("Stop-loss por celda")
+    expect(row).to_contain_text("la pérdida queda sin realizar y puede crecer")
+    expect(row).to_contain_text("siguiente ciclo del monitor sin reiniciar")
+    expect(row.get_by_role("button", name="Apagar")).to_be_visible()

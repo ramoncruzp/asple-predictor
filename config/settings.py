@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
     grid_policy_enabled: bool = Field(True, validation_alias="GRID_POLICY_ENABLED")
     adjust_idle_shrink_enabled: bool = Field(False, validation_alias="ADJUST_IDLE_SHRINK_ENABLED")
+    stoploss_enabled: bool = Field(True, validation_alias="STOPLOSS_ENABLED")
     scanner_min_volume_24h: float = Field(SCANNER_DEFAULTS["min_volume_24h"], gt=0, validation_alias="SCANNER_MIN_VOLUME_24H")
     scanner_max_spread_bps: float = Field(SCANNER_DEFAULTS["max_spread_bps"], gt=0, validation_alias="SCANNER_MAX_SPREAD_BPS")
     scanner_min_spacing_pct: float = Field(SCANNER_DEFAULTS["min_spacing_pct"], gt=0, validation_alias="SCANNER_MIN_SPACING_PCT")
@@ -106,6 +107,18 @@ APP_FLAG_DEFINITIONS = {
             "Encenderlo aqu\u00ed solo habilita el bot\u00f3n por grid; no activa la regla en ning\u00fan grid."
         ),
         "default": False,
+        "requires_restart": False,
+    },
+    "stoploss_enabled": {
+        "label": "Stop-loss por celda",
+        "description": (
+            "Con el interruptor encendido, una celda con posición se vende a mercado cuando el precio cae "
+            "por debajo de su precio de compra menos su stop_loss_pct (5 % por defecto). Apagado, esa regla "
+            "no se ejecuta y las posiciones esperan su venta normal (la pérdida queda sin realizar y puede "
+            "crecer). No afecta a las demás protecciones de la política. El cambio aplica en el siguiente "
+            "ciclo del monitor sin reiniciar."
+        ),
+        "default": True,
         "requires_restart": False,
     },
 }

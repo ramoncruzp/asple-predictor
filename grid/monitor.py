@@ -58,6 +58,7 @@ class GridMonitor:
         self._testnet_reset_grid_ids: set[int] = set()
         self._last_dust_reconciliation_at: datetime | None = None
         self._vol_fallback_notified: dict[int, str] = {}
+        self._stoploss_suspended_notified: set[tuple[int, int]] = set()
         self.ops_lock = threading.RLock()
 
     def _emit(self, event: dict) -> None:
@@ -484,25 +485,52 @@ class GridMonitor:
                     if policy_enabled and mid is not None:
                         levels = self.db.get_grid_levels(grid_id)
                         if current["status"] in {"ACTIVE", "PAUSED", "HOLDING"}:
-                            for cell in stoploss_candidates(levels, mid):
-                                try:
-                                    outcome = self.engine.stoploss_cell(
-                                        grid_id, int(cell["level_idx"]), "stop_loss_pct",
-                                        {"params": current.get("params"), "mid": mid,
-                                         "sigma_24h": None if view is None else view.sigma_24h,
-                                         "sigma_h": None, "z_low": None, "z_high": None,
-                                         "break_prob": None, "trapped_capital_pct": None,
-                                         "free_cells": sum(row["state"] in {"BUY_OPEN", "IDLE"} for row in levels),
-                                         "total_pnl_pct": None, "pause_hours": None},
-                                    )
-                                    if not outcome.get("ok"):
-                                        raise RuntimeError(outcome.get("reason") or outcome.get("status"))
-                                except Exception as exc:
-                                    failed += 1
-                                    self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
-                                                "reason": str(exc), "price": mid,
-                                                "details": {"action": "STOPLOSS", "level_idx": cell["level_idx"]}})
-                                    self.logger.warning("grid=%s stop-loss action failed", grid_id, exc_info=True)
+                            candidates = stoploss_candidates(levels, mid)
+                            stoploss_enabled = bool(getattr(self.settings, "stoploss_enabled", True))
+                            candidate_keys = {(grid_id, int(cell["level_idx"])) for cell in candidates}
+                            if stoploss_enabled:
+                                self._stoploss_suspended_notified = {
+                                    key for key in self._stoploss_suspended_notified if key[0] != grid_id
+                                }
+                                for cell in candidates:
+                                    try:
+                                        outcome = self.engine.stoploss_cell(
+                                            grid_id, int(cell["level_idx"]), "stop_loss_pct",
+                                            {"params": current.get("params"), "mid": mid,
+                                             "sigma_24h": None if view is None else view.sigma_24h,
+                                             "sigma_h": None, "z_low": None, "z_high": None,
+                                             "break_prob": None, "trapped_capital_pct": None,
+                                             "free_cells": sum(row["state"] in {"BUY_OPEN", "IDLE"} for row in levels),
+                                             "total_pnl_pct": None, "pause_hours": None},
+                                        )
+                                        if not outcome.get("ok"):
+                                            raise RuntimeError(outcome.get("reason") or outcome.get("status"))
+                                    except Exception as exc:
+                                        failed += 1
+                                        self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                                    "reason": str(exc), "price": mid,
+                                                    "details": {"action": "STOPLOSS", "level_idx": cell["level_idx"]}})
+                                        self.logger.warning("grid=%s stop-loss action failed", grid_id, exc_info=True)
+                            else:
+                                self._stoploss_suspended_notified = {
+                                    key for key in self._stoploss_suspended_notified
+                                    if key[0] != grid_id or key in candidate_keys
+                                }
+                                for cell in candidates:
+                                    key = (grid_id, int(cell["level_idx"]))
+                                    if key in self._stoploss_suspended_notified:
+                                        continue
+                                    self._emit({
+                                        "event_type": "STOPLOSS_SUSPENDED", "grid_id": grid_id,
+                                        "reason": "interruptor_apagado", "price": mid,
+                                        "details": {
+                                            "level_idx": int(cell["level_idx"]),
+                                            "entry_price": cell["entry_price"],
+                                            "stop_loss_pct": cell["stop_loss_pct"],
+                                            "mid": mid, "would_have_sold_at": mid,
+                                        },
+                                    })
+                                    self._stoploss_suspended_notified.add(key)
                             levels = self.db.get_grid_levels(grid_id)
 
                     # Retry triggered stop-losses before sync can classify their

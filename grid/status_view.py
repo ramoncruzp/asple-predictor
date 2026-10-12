@@ -50,6 +50,7 @@ EVENT_LABELS: dict[str, str] = {
     "ADJUST_SKIPPED_CELL": "Celda omitida al ajustar",
     "ADJUST_REJECTED": "Ajuste de rango rechazado",
     "CELL_STOPLOSS": "Stop-loss de celda ejecutado",
+    "STOPLOSS_SUSPENDED": "Stop-loss omitido (interruptor apagado)",
     "GRID_AUTO_CLOSE": "Cierre automático a repositorio iniciado",
     "GRID_CLOSE_STARTED": "Cierre del grid iniciado",
     "GRID_CLOSED": "Grid cerrado",
