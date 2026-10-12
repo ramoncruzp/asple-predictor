@@ -3,15 +3,17 @@ from __future__ import annotations
 import ast
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
 import pytest
 
 from scripts.orphan_orders_report import (
-    _safe_error_label, classify_open_order, classify_open_orders, parse_symbols,
+    _read_database, _safe_error_label, classify_open_order, classify_open_orders, parse_symbols,
 )
 
 
@@ -143,3 +145,100 @@ def test_script_imports_project_modules_from_another_cwd_without_pythonpath():
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_adjustment_client_id_resolves_owner_by_order_id():
+    grids, levels = _snapshot()
+    levels[(3, 2)][0]["order_id"] = 279464
+    levels[(3, 2)][0]["client_order_id"] = "old-cycle"
+    result = classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": "gA" + "a" * 30, "order_id": 279464},
+        grids, levels,
+    )
+    assert result["classification"] == "OK"
+    assert result["grid_id"] == 3
+
+
+def test_loan_client_id_is_distinct_from_legacy_pattern_and_resolves_loan_owner():
+    cid = "gL" + "60baa" + "a" * 25
+    assert len(cid) == 32
+    assert classify_open_order({"client_order_id": cid}, {}, {})["classification"] == "PROPIA_SIN_REGISTRO"
+    result = classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": cid, "order_id": 256913},
+        {2: {"status": "ACTIVE", "symbol": "GRAMUSDT"}}, {},
+        loans={cid: [{"grid_id": 2}]},
+    )
+    assert result["classification"] == "OK"
+    assert result["grid_id"] == 2
+
+
+def test_closed_loan_is_orphaned_and_adjustment_without_record_is_own_unregistered():
+    cid = "gL" + "b" * 30
+    grids = {2: {"status": "CLOSED", "symbol": "GRAMUSDT"}}
+    loan_result = classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": cid, "order_id": 256913},
+        grids, {}, loans={cid: [{"grid_id": 2}]},
+    )
+    own_result = classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": "gA" + "c" * 30}, grids, {},
+    )
+    assert loan_result["classification"] == "HUÉRFANA"
+    assert own_result["classification"] == "PROPIA_SIN_REGISTRO"
+
+
+def test_legacy_client_id_for_missing_grid_remains_orphaned_and_manual_is_unknown():
+    legacy = classify_open_order({"symbol": "GRAMUSDT", "client_order_id": "g6L0B0"}, {}, {})
+    manual = classify_open_order({"symbol": "GRAMUSDT", "client_order_id": "web_123"}, {}, {})
+    ambiguous = classify_open_order({"symbol": "GRAMUSDT", "client_order_id": "gL60baa" + "0" * 25}, {}, {})
+    assert legacy["classification"] == "HUÉRFANA"
+    assert manual["classification"] == "DESCONOCIDA"
+    assert ambiguous["classification"] == "PROPIA_SIN_REGISTRO"
+
+
+def test_read_database_loads_loan_cids_by_column_name_and_ignores_bad_details(tmp_path):
+    path = tmp_path / "loans.db"
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE grids (id INTEGER, symbol TEXT, status TEXT);
+        INSERT INTO grids VALUES (2, 'GRAMUSDT', 'ACTIVE');
+        CREATE TABLE grid_levels (
+            grid_id INTEGER, level_idx INTEGER, order_id INTEGER,
+            client_order_id TEXT, buy_client_order_id TEXT
+        );
+        INSERT INTO grid_levels VALUES (2, 0, 279464, 'gAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', NULL);
+        CREATE TABLE grid_loans (details TEXT, status TEXT, id INTEGER, grid_id INTEGER);
+        INSERT INTO grid_loans VALUES ('{broken', 'PENDING', 2, 2);
+        INSERT INTO grid_loans VALUES ('{}', 'PENDING', 3, 2);
+    """)
+    connection.execute(
+        "INSERT INTO grid_loans VALUES (?, 'PENDING', 1, 2)",
+        (json.dumps({"lender_replacement_cid": "gL" + "d" * 30,
+                     "borrower_replacement_cid": "gL" + "e" * 30}),),
+    )
+    connection.commit()
+    connection.close()
+
+    grids, levels, symbols, loans = _read_database(path)
+
+    assert grids[2]["status"] == "ACTIVE"
+    assert levels[(2, 0)][0]["order_id"] == 279464
+    assert symbols == ["GRAMUSDT"]
+    assert loans["gL" + "d" * 30] == [{"grid_id": 2, "status": "PENDING"}]
+    assert loans["gL" + "e" * 30] == [{"grid_id": 2, "status": "PENDING"}]
+
+
+def test_real_incident_ids_classify_from_fake_snapshot():
+    grids = {2: {"status": "ACTIVE", "symbol": "GRAMUSDT"}}
+    adjustment_ids = ["gA" + format(value, "030x") for value in range(279464, 279468)]
+    levels = {(2, idx): [{"order_id": order_id, "client_order_id": cid,
+                          "buy_client_order_id": None}]
+              for idx, (order_id, cid) in enumerate(zip(range(279464, 279468), adjustment_ids))}
+    loan_cid = "gL60baa" + "a" * 25
+    loans = {loan_cid: [{"grid_id": 2, "status": "PENDING"}]}
+    orders = [{"symbol": "GRAMUSDT", "order_id": order_id, "client_order_id": cid}
+              for order_id, cid in zip(range(279464, 279468), adjustment_ids)]
+    orders.append({"symbol": "GRAMUSDT", "order_id": 256913, "client_order_id": loan_cid})
+
+    assert [row["classification"] for row in classify_open_orders(orders, grids, levels, loans=loans)] == [
+        "OK", "OK", "OK", "OK", "OK",
+    ]

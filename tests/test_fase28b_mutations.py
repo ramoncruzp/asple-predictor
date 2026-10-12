@@ -173,3 +173,32 @@ def test_mutation_printing_api_exception_message_exposes_signed_details():
     label = mutant._safe_error_label(api_exception("signed URL private details"))
 
     assert "signed URL" in label
+
+
+def test_mutation_removing_order_id_owner_match_loses_adjustment_grid():
+    path = ROOT / "scripts" / "orphan_orders_report.py"
+    old = '(order_id is not None and row.get("order_id") is not None'
+    mutant = _load_mutation(path, old, '(False and row.get("order_id") is not None',
+                            "scripts._phase28c_order_id_mutation")
+    result = mutant.classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": "gA" + "a" * 30, "order_id": 279464},
+        {2: {"status": "ACTIVE", "symbol": "GRAMUSDT"}},
+        {(2, 0): [{"order_id": 279464, "client_order_id": "old-cid"}]},
+    )
+
+    assert result["classification"] == "PROPIA_SIN_REGISTRO"
+
+
+def test_mutation_removing_loan_cid_recognition_loses_registered_loan():
+    path = ROOT / "scripts" / "orphan_orders_report.py"
+    old = 'is_loan_id = _SYSTEM_LOAN_CLIENT_ID.fullmatch(client_id) is not None'
+    mutant = _load_mutation(path, old, "is_loan_id = False",
+                            "scripts._phase28c_loan_id_mutation")
+    cid = "gL" + "a" * 30
+    result = mutant.classify_open_order(
+        {"symbol": "GRAMUSDT", "client_order_id": cid, "order_id": 256913},
+        {2: {"status": "ACTIVE", "symbol": "GRAMUSDT"}}, {},
+        loans={cid: [{"grid_id": 2}]},
+    )
+
+    assert result["classification"] == "DESCONOCIDA"
