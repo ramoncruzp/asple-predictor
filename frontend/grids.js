@@ -175,14 +175,12 @@
     modal.querySelector('input,select,button')?.focus();
   }
 
-  const STATUS_LABELS = { ACTIVE: 'Activo', PAUSED: 'Pausado', OPENING: 'Abriendo', CLOSING: 'Cerrando',
-    HOLDING: 'Repositorio', CLOSED: 'Cerrado', FAILED: 'Fallido' };
   const STATUS_CLASSES = { ACTIVE: 'status-active', PAUSED: 'status-paused', HOLDING: 'status-holding',
     CLOSING: 'status-closing', OPENING: 'status-active', CLOSED: 'status-closed', FAILED: 'status-error' };
 
-  function statusLabel(status) { return STATUS_LABELS[status] || status; }
+  function statusLabel(status) { return window.ASPLEFormat?.statusLabel(status) ?? status; }
   function statusClass(status) { return STATUS_CLASSES[status] || ''; }
-  function tooltip(text) { return `<span class="tooltip-icon" title="${esc(text)}">?</span>`; }
+  function tooltip(text) { return window.ASPLEFormat?.tooltip?.(text) || `<span class="tooltip-icon" title="${esc(text)}">?</span>`; }
 
   function renderError(container, error) {
     if (error && error.status === 403) {
@@ -191,13 +189,13 @@
       container.querySelector('#grids-token-save').onclick = () => { window.gridApiToken = container.querySelector('#grids-api-token').value; window.loadGridsScreen?.((location.hash || '#grids').slice(1)); };
       return;
     }
-    container.innerHTML = `<div class="card grids-error">No se pudo cargar la informacion de grids: ${esc(error && error.message)}</div>`;
+    container.innerHTML = `<div class="card grids-error">No se pudo cargar la informaci\u00f3n de grids: ${esc(error && error.message)}</div>`;
   }
 
   function gridRowHtml(grid) {
     return `<a class="grid-row-card" href="#grids/${grid.id}">
       <div class="grid-row-top"><span class="grid-id">#${grid.id}</span><span class="grid-symbol">${esc(grid.symbol)}</span>
-      <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${statusLabel(grid.status)}</span></div>
+      <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${esc(statusLabel(grid.status))}</span></div>
       <div class="grid-row-metrics">
         <div><span>Neta realizada</span><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></div>
         <div><span>Total con inventario ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></div>
@@ -241,11 +239,7 @@
       <td>${esc(pair.pair_loans_status || '—')}</td><td>${esc(pair.pair_control_status || '—')}</td>
       <td>${pair.d_i == null ? '—' : `${Number(pair.d_i).toFixed(3)}%/día`}</td></tr>`).join('');
     const pairPanel = loanPairs
-      ? `<div class="card loan-pairs-panel"><h3>Préstamos — pares</h3>
-        <p>n=${loanPairs.n_pairs}; media ${pairMean}; ${pairCi}; ${pairState}; efecto mínimo detectable (80%): ${loanPairs.detectable_effect_80pct == null ? '—' : `${Number(loanPairs.detectable_effect_80pct).toFixed(3)}%/día`}; pares huérfanos: ${loanPairs.orphan_pairs}.</p>
-        <table class="data-table"><thead><tr><th>Símbolo</th><th>Par</th><th>Préstamos</th><th>Control</th><th>dᵢ</th></tr></thead>
-        <tbody>${pairRows || '<tr><td colspan="5">Sin pares registrados</td></tr>'}</tbody></table>
-        <p class="muted">${esc(loanPairs.note)}</p></div>`
+      ? `<div class="card loan-pairs-panel"><h3>Pr\u00e9stamos \u2014 pares</h3><p>n=${loanPairs.n_pairs}; media ${pairMean}; ${pairState}</p><details><summary>Ver detalle y metodolog\u00eda</summary><p>${pairCi}; efecto m\u00ednimo detectable (80%): ${loanPairs.detectable_effect_80pct == null ? '\u2014' : `${Number(loanPairs.detectable_effect_80pct).toFixed(3)}%/d\u00eda`}; pares hu\u00e9rfanos: ${loanPairs.orphan_pairs}.</p><table class="data-table"><thead><tr><th>S\u00edmbolo</th><th>Par</th><th>Pr\u00e9stamos</th><th>Control</th><th>d\u1d62</th></tr></thead><tbody>${pairRows || '<tr><td colspan="5">Sin pares registrados</td></tr>'}</tbody></table><p class="muted">${esc(loanPairs.note)}</p></details></div>`
       : `<div class="card loan-pairs-panel"><h3>Préstamos — pares</h3><p>${loanPairsResult?.error ? `No se pudo cargar: ${esc(loanPairsResult.error.message)}` : 'Cargando…'}</p></div>`;
     const levelPairRows = levelAdjust ? Object.entries(levelAdjust.verdicts || {}).map(([factor, result]) => {
       const pair = levelAdjust.pairs?.[factor] || {};
@@ -259,7 +253,7 @@
       const idleBlocked = grid.idle_blocked_reason ? `; ${grid.idle_blocked_reason}` : '';
       return `<tr><td>${grid.grid_id}</td><td>${esc(grid.symbol || '—')}</td>
         <td>${grid.adjustments?.MONITOR || 0} monitor; ${grid.adjustments?.CAPITAL_SHRINK || 0} con reducción; ${esc(blocked)}</td>
-        <td>${grid.idle_evaluations || 0}; aplicadas ${grid.idle_applied || 0}; ${esc(reasons + idleBlocked)}</td></tr>`;
+        <td>${grid.idle_evaluations || 0}; aplicadas ${grid.idle_applied || 0}; ${esc(reasons + idleBlocked)}</td><td>${grid.idle_blocked || 0}; ${esc(idleBlocked || 'sin bloqueos')}</td></tr>`;
     }).join('') : '';
     const levelPanel = `<div class="card level-adjust-panel"><h3>Vigilancia de niveles</h3>
       <p>Interruptor global: ${levelAdjust?.idle_shrink_enabled ? 'encendido' : 'apagado'}. ${esc(levelAdjust?.note || 'apagado por defecto; sin evidencia de mejora en simulación.')}</p>
@@ -278,7 +272,7 @@
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
-      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></div>
+      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3>${loanSummary ? `<div class="loan-cohort-grid">${['loans','loans_v2','control','manual','sin_grupo'].map(key => { const group = (loanSummary.groups || []).find(item => item.group === key); return group ? `<article><b>${esc(key)}</b><span>${group.grid_count} grids</span><span>P&amp;L ${fmtMoney(group.realized_pnl_usdt,2)} USDT</span><span>${group.cycles_completed} ciclos</span></article>` : ''; }).join('')}</div><p>${loanSummary.conclusive ? 'concluyente' : 'no concluyente: muestra insuficiente'}</p><details><summary>Ver detalle y metodología</summary><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></details>` : `<p>${loanSummaryText}</p>`}</div>
       ${pairPanel}
       ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
@@ -291,18 +285,18 @@
     if (row.marker === 'precio_actual') {
       return `<tr class="price-marker-row"><td colspan="7">Precio actual &rarr; ${row.price === null ? 'sin precio' : fmtMoney(row.price, 6)}</td></tr>`;
     }
-    return `<tr class="cell-row">
+    return `<tr class="cell-row ${String(row.state_label).toLowerCase() === 'error' ? 'cell-error-row' : ''}">
       <td>${row.level_idx}</td><td class="mono">${fmtMoney(row.buy_price, 6)}</td><td class="mono">${fmtMoney(row.sell_price, 6)}</td>
-      <td class="mono">${fmtMoney(row.capital_usdt, 2)}</td><td class="cell-state">${esc(row.state_label)}</td>
+      <td class="mono">${fmtMoney(row.capital_usdt, 2)}</td><td><span class="cell-state state-${esc(String(row.state_label).replace(/[^a-z]/gi, '').toLowerCase())}">${esc(row.state_label)}</span></td>
       <td class="${pnlClass(row.live_pnl_usdt)}">${row.live_pnl_usdt === null ? '—' : fmtMoney(row.live_pnl_usdt, 4)}</td>
       <td class="mono">${row.distance_to_fill_pct === null ? '—' : fmtPct(row.distance_to_fill_pct, 2)}</td></tr>`;
   }
 
   function buildEquitySvg(points) {
-    if (!points.length) return '<p class="muted">Sin datos a\u00fan</p>';
+    if (points.length < 2) return '<p class="muted">Sin datos suficientes</p>';
     const width = 600, height = 160, pad = 10;
     const values = points.flatMap((p) => [p.with_inventory_usdt, p.realized_usdt]).filter((v) => v !== null && v !== undefined);
-    if (!values.length) return '<p class="muted">Sin datos a\u00fan</p>';
+    if (values.length < 2) return '<p class="muted">Sin datos suficientes</p>';
     const min = Math.min(...values), max = Math.max(...values);
     const range = (max - min) || 1;
     const x = (i) => pad + (i / Math.max(1, points.length - 1)) * (width - 2 * pad);
@@ -319,9 +313,9 @@
     const summary = detail.summary;
     const cells = detail.cells;
     const recovery = summary.recovery_mode === true
-      ? '<div class="recovery-banner">El precio esta bajo todos los niveles de venta con posicion abierta: las '
-        + 'posiciones esperan su precio de venta. El sistema puede cerrar por perdida maxima, meta o plazo si '
-        + 'estan configurados.</div>'
+      ? '<div class="recovery-banner">El precio est\u00e1 bajo todos los niveles de venta con posici\u00f3n abierta: las '
+        + 'posiciones esperan su precio de venta. El sistema puede cerrar por p\u00e9rdida m\u00e1xima, meta o plazo si '
+        + 'est\u00e1n configurados.</div>'
       : '';
     const progressTarget = summary.progress.target
       ? `<div class="progress-block"><span>Meta (${esc(summary.progress.target.basis)})</span>
@@ -350,7 +344,7 @@
       <td class="mono">${fmtMoney(op.sell_qty, 4)}</td><td class="${pnlClass(op.net_pnl_usdt)}">${fmtMoney(op.net_pnl_usdt, 4)}</td>
       <td>${op.duration_hours === null ? '—' : op.duration_hours.toFixed(1) + ' h'}</td></tr>`).join('');
     const eventRows = (events.events || []).map((ev) => `<tr class="severity-${esc(ev.severity)}">
-      <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(ev.reason || '')}</td></tr>`).join('');
+      <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(({policy_adjust: 'Reajuste por pol\u00edtica'})[ev.reason] || ev.reason || '')}</td></tr>`).join('');
     let loanBlock = '';
     let loanDisableAction = '';
     let idleShrinkAction = '';
@@ -365,7 +359,7 @@
           } else if (loans.idle_shrink_global_enabled) {
             idleShrinkAction = '<button class="button secondary" data-grid-action="idle-shrink-on">Activar reducción de niveles ociosos</button>';
           } else {
-            idleShrinkAction = '<a class="button secondary" href="#cuenta">Interruptor global apagado: act\u00edvalo en Cuenta \u2192 Ajustes globales</a>';
+            idleShrinkAction = '<a class="grid-hint-link" href="#cuenta">Interruptor global apagado: act\u00edvalo en Cuenta \u2192 Ajustes globales</a>';
           }
         }
         const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'
@@ -386,14 +380,14 @@
       <a class="back-link" href="#grids">&larr; Volver a Grids</a>
       <div class="grid-detail-header card">
         <div class="grid-detail-identity"><span class="grid-id">#${summary.id}</span><h2>${esc(summary.symbol)}</h2>
-          <span class="status-badge ${statusClass(summary.status)}">${statusLabel(summary.status)}</span>
+          <span class="status-badge ${statusClass(summary.status)}">${esc(statusLabel(summary.status))}</span>
           ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
           ${summary.price_as_of ? `<small class="muted">al ${esc(window.ASPLEFormat?.formatDateTime(summary.price_as_of) ?? summary.price_as_of)}</small>` : '<small class="muted">sin precio actual</small>'}</div>
         <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="pause">Pausar</button>' : ''}
           ${summary.status === 'PAUSED' ? '<button class="button secondary" data-grid-action="resume">Reanudar</button>' : ''}
-          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="close">Cerrar</button>' : ''}
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button danger" data-grid-action="close">Cerrar</button>' : ''}
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
@@ -447,9 +441,9 @@
           <span>PNL vivo total: <b class="${pnlClass(cells.live_pnl_total_usdt)}">${fmtMoney(cells.live_pnl_total_usdt, 4)}</b></span></div>
       </div>
       <div class="card operations-block">
-        <h3>Ultimas operaciones</h3>
-        <table class="data-table" aria-label="Ultimas operaciones completadas">
-          <thead><tr><th>Fecha</th><th>Tipo</th><th>Nivel</th><th>Compra</th><th>Venta</th><th>Cantidad</th><th>Neto</th><th>Duracion</th></tr></thead>
+        <h3>\u00daltimas operaciones</h3>
+        <table class="data-table" aria-label="\u00daltimas operaciones completadas">
+          <thead><tr><th>Fecha</th><th>Tipo</th><th>Nivel</th><th>Compra</th><th>Venta</th><th>Cantidad</th><th>Neto</th><th>Duraci\u00f3n</th></tr></thead>
           <tbody>${opsRows || '<tr><td colspan="8">Sin operaciones aun</td></tr>'}</tbody>
         </table>
       </div>
@@ -460,9 +454,8 @@
           ? `<p class="muted">No atribuido al diario: ${fmtMoney(daily.unattributed_usdt, 2)} USDT${daily.unattributed_note ? ` (${esc(daily.unattributed_note)})` : ''}${daily.truncated ? ' · consulta truncada a los últimos 5000 eventos' : ''}</p>` : ''}
       </div>
       <div class="card equity-block">
-        <h3>Curva de equity</h3>
+        <h3>Curva de equity <span class="muted" title="${esc(equity.note || 'Realizado de resumen + no realizado de celdas')}" aria-label="C\u00e1lculo de equity">i</span></h3>
         ${buildEquitySvg(equity.points || [])}
-        <span class="muted" title="${esc(equity.note || 'Realizado de resumen (o de celdas si falta) + no realizado de celdas')}" aria-label="C\u00e1lculo de equity">i</span>
       </div>
       <div class="card events-block">
         <h3>Eventos del bot</h3>
@@ -486,6 +479,12 @@
           .catch(error => ({ ok: false, error })),
       ]);
       renderList(container, { ...grids, loanSummaryResult, loanPairsResult, levelAdjustResult });
+      const heading = document.getElementById('grids-heading');
+      if (heading && window.ASPLEFormat?.updateAgeLabel) {
+        let age = heading.parentElement.querySelector('.data-age');
+        if (!age) { age = document.createElement('small'); age.className = 'data-age muted'; heading.after(age); }
+        window.ASPLEFormat.updateAgeLabel(age, grids.as_of || grids.updated_at || grids.checked_at);
+      }
     } catch (error) {
       renderError(container, error);
     }

@@ -28,6 +28,8 @@ process.stdout.write(JSON.stringify({
   yearEnd:f.formatDateTime('2025-01-01T03:59:00Z'),
   invalid:f.formatDate('not-a-date'),
   usdt:f.formatUsdt(1234567.5),
+  negative:f.formatUsdt(-0.61), zero:f.formatUsdt(0), tinyNegative:f.formatUsdt(-0.004),
+  nullUsdt:f.formatUsdt(null), nanUsdt:f.formatUsdt(NaN),
   grouped:f.formatNumber(1234567.5,2)
 }));'''
     result = subprocess.run(
@@ -43,6 +45,11 @@ process.stdout.write(JSON.stringify({
         "yearEnd": "31/12/24 23:59",
         "invalid": chr(0x2014),
         "usdt": "$1,234,567.50",
+        "negative": "-$0.61",
+        "zero": "$0.00",
+        "tinyNegative": "$0.00",
+        "nullUsdt": chr(0x2014),
+        "nanUsdt": chr(0x2014),
         "grouped": "1,234,567.50",
     }
 

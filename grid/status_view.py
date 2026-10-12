@@ -85,6 +85,12 @@ EVENT_LABELS: dict[str, str] = {
     "DUST_RECONCILIATION": "Conciliación de polvo",
     "PROFIT_CLOSE": "Cierre inteligente por rentabilidad",
     "PROFIT_CLOSE_MARKET_SELL_FAILED": "Falló venta de celda rentable; inventario protegido",
+    "CELL_REPRICED": "Precio de celda actualizado",
+    "LEVEL_ERROR": "Error de nivel",
+    "ORDER_CANCELLED_EXTERNALLY": "Orden cancelada externamente",
+    "LOAN_TRANSFERRED": "Pr\u00e9stamo interno transferido",
+    "SELL_PLACED": "Orden de venta colocada",
+    "POLICY_ADJUST": "Reajuste de pol\u00edtica",
 }
 
 SEVERITY_BY_EVENT = {

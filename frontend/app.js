@@ -60,8 +60,19 @@ function formatNumber(value, digits = 2) {
   const number = Number(value);
   return value == null || !Number.isFinite(number) ? '—' : new Intl.NumberFormat('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(number);
 }
-function formatUsdt(value) { return value == null || !Number.isFinite(Number(value)) ? '—' : `$${formatNumber(value, 2)}`; }
-window.ASPLEFormat = { formatDate, formatDateTime, formatNumber, formatUsdt, tooltip: content => tooltip(content) };
+function formatUsdt(value) { if (value == null || !Number.isFinite(Number(value))) return '—'; const number = Number(value); if (Math.round(Math.abs(number) * 100) === 0) return '$0.00'; return `${number < 0 ? '-' : ''}$${formatNumber(Math.abs(number), 2)}`; }
+const STATUS_LABELS = { ACTIVE: 'Activo', PAUSED: 'Pausado', OPENING: 'Abriendo', CLOSING: 'Cerrando', HOLDING: 'Repositorio', CLOSED: 'Cerrado', FAILED: 'Fallido' };
+function statusLabel(status) { return STATUS_LABELS[status] || status; }
+function updateAgeLabel(node, timestamp) {
+  const source = timestamp ? Date.parse(timestamp) : NaN;
+  const base = Number.isFinite(source) ? source : Date.now();
+  const prefix = Number.isFinite(source) ? 'dato de hace' : 'cargado hace';
+  const update = () => { node.textContent = `${prefix} ${Math.max(0, Math.floor((Date.now() - base) / 60000))} min`; };
+  update();
+  if (node._ageTimer) clearInterval(node._ageTimer);
+  node._ageTimer = setInterval(update, 60000);
+}
+window.ASPLEFormat = { formatDate, formatDateTime, formatNumber, formatUsdt, statusLabel, updateAgeLabel, tooltip: content => tooltip(content) };
 const percent = (value, digits = 1) => value == null ? '\u2014' : Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(digits)}%` : '\u2014';
 const money = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `$${formatNumber(value, digits)}`;
 function formatIndicator(value) {
