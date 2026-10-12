@@ -211,7 +211,11 @@ class AlertDispatcher:
         if event_type == "DUST_RECONCILIATION" and event.get("reason") in {"baseline", "no_material_drift"}:
             return
         grid_id = event.get("grid_id")
-        alert_key = f"{event_type}:{grid_id if grid_id is not None else 'none'}"
+        if event_type == "DUST_RECONCILIATION":
+            asset = (event.get("details") or {}).get("asset")
+            alert_key = f"{event_type}:{asset or 'none'}"
+        else:
+            alert_key = f"{event_type}:{grid_id if grid_id is not None else 'none'}"
         cooldown = int(getattr(cfg, "alerts_cooldown_min", 60))
         if not self._cooldown_ok(alert_key, cooldown, now):
             return

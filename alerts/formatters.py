@@ -40,6 +40,36 @@ def fmt_pnl(value: Any) -> str:
     return f"{amount:+.4f}"
 
 
+def fmt_compact_number(value: Any) -> str | None:
+    """Format a finite decimal without scientific notation or trailing zeros."""
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite():
+            return None
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return format(amount.normalize(), "f")
+
+
+def _fmt_signed_compact_number(value: Any) -> str | None:
+    compact = fmt_compact_number(value)
+    if compact is None:
+        return None
+    amount = Decimal(compact)
+    return f"{'-' if amount < 0 else '+'}{format(abs(amount), 'f')}"
+
+
+def _fmt_usdt_2dp(value: Any) -> str | None:
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite():
+            return None
+        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return f"{amount:.2f}"
+
+
 def fmt_price(value: Any) -> str:
     """Like fmt(), but a missing price reads as 'precio no disponible'
     rather than the generic 'no disponible' -- this is what actually shows
@@ -135,6 +165,15 @@ def format_operational(event: dict, grid_label_text: str | None) -> str:
     event_type = str(event.get("event_type") or "")
     label = EVENT_LABELS.get(event_type, event_type)
     details = event.get("details") or {}
+    if event_type == "DUST_RECONCILIATION" and event.get("reason") == "drift":
+        asset = str(details.get("asset") or "").strip()
+        drift = _fmt_signed_compact_number(details.get("drift"))
+        drift_usdt = _fmt_usdt_2dp(details.get("drift_usdt"))
+        difference = _fmt_signed_compact_number(details.get("diff"))
+        if asset and drift is not None and drift_usdt is not None and difference is not None:
+            return (f"⚠️ Conciliación de polvo — {asset}\n"
+                    f"Deriva: {drift} {asset} (~{drift_usdt} USDT)\n"
+                    f"Diferencia total: {difference} {asset}")
     symbol = grid_label_text or details.get("symbol")
     header = f"⚠️ {label}"
     if symbol:

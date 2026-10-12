@@ -6,7 +6,7 @@ from decimal import Decimal
 from alerts.formatters import (
     fmt, format_buy_fill, format_sell_fill, format_fills_group,
     format_buy_fill_line, format_sell_fill_line, format_operational,
-    format_digest,
+    format_digest, fmt_compact_number,
 )
 
 
@@ -73,6 +73,34 @@ def test_format_operational_uses_status_view_labels_and_includes_reason():
     assert message == (
         "⚠️ Cierre automático a repositorio iniciado — XRPUSDT #3\n"
         "Motivo: out_of_range"
+    )
+
+
+def test_dust_drift_operational_alert_is_signed_and_human_readable():
+    event = {
+        "event_type": "DUST_RECONCILIATION", "reason": "drift",
+        "details": {"asset": "GRAM", "drift": "4.75000000",
+                    "drift_usdt": "6.685", "diff": "28.0600000"},
+    }
+
+    assert format_operational(event, None) == (
+        "⚠️ Conciliación de polvo — GRAM\n"
+        "Deriva: +4.75 GRAM (~6.69 USDT)\n"
+        "Diferencia total: +28.06 GRAM"
+    )
+
+
+def test_compact_number_helper_removes_trailing_zeros_and_handles_bad_values():
+    assert fmt_compact_number("8.00000000") == "8"
+    assert fmt_compact_number("0.000") == "0"
+    assert fmt_compact_number("not-a-number") is None
+
+
+def test_dust_drift_without_required_data_falls_back_without_error():
+    event = {"event_type": "DUST_RECONCILIATION", "reason": "drift", "details": {}}
+
+    assert format_operational(event, None) == (
+        "⚠️ Conciliación de polvo\nMotivo: drift"
     )
 
 

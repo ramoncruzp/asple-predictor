@@ -99,6 +99,52 @@ def test_dust_reconciliation_only_alerts_on_material_drift(reason, expect_alert)
     assert (len(sender.sent) == 1) is expect_alert
 
 
+def _queue_dust_events(db, assets):
+    for asset in assets:
+        db.add_grid_event(
+            run_id=None, source="MONITOR", event_type="DUST_RECONCILIATION",
+            grid_id=None, reason="drift", details={} if asset is None else {"asset": asset},
+        )
+
+
+def test_dust_cooldown_is_independent_for_different_assets():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    _queue_dust_events(db, ["GRAM", "XRP"])
+
+    disp.run_once()
+
+    assert len(sender.sent) == 2
+
+
+def test_dust_cooldown_suppresses_repeat_for_same_asset():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    _queue_dust_events(db, ["GRAM", "GRAM"])
+
+    disp.run_once()
+
+    assert len(sender.sent) == 1
+
+
+def test_dust_event_without_asset_does_not_fail():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    _queue_dust_events(db, [None])
+
+    result = disp.run_once()
+
+    assert result["status"] == "ok"
+    assert len(sender.sent) == 1
+    assert "Motivo: drift" in sender.sent[0]
+
+
 # -- (5) who: api events never alert -----------------------------------------
 
 def test_manual_api_events_do_not_alert():

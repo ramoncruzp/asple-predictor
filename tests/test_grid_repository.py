@@ -7,6 +7,46 @@ from tests.test_grid_engine import create, make_engine
 from tests.test_grid_monitor import monitor_settings
 
 
+def test_repository_close_stays_closing_for_live_buy_from_idle_level():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    orphan = exchange.place_order(
+        "XRPUSDT", "BUY", "0.1", "95", client_order_id=f"g{grid['id']}L3B0",
+    )
+
+    result = engine.close_grid(grid["id"], "repository")
+
+    assert result["status"] == "CLOSING"
+    assert str(orphan["order_id"]) in db.get_grid(grid["id"])["fail_reason"]
+    assert exchange.get_order("XRPUSDT", order_id=orphan["order_id"])["status"] == "NEW"
+
+
+def test_repository_verification_failure_keeps_grid_closing():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    exchange.get_open_orders = lambda _symbol=None: (_ for _ in ()).throw(RuntimeError("private detail"))
+
+    result = engine._close_repository(grid["id"])
+
+    assert result["status"] == "CLOSING"
+    assert "verification failed" in db.get_grid(grid["id"])["fail_reason"]
+    assert "private detail" not in db.get_grid(grid["id"])["fail_reason"]
+
+
+def test_repository_close_ignores_live_buy_owned_by_another_grid():
+    engine, _db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    first = create(engine)
+    second = engine.create_grid("XRPUSDT", 60, 140, 4, capital=1000)
+    assert first["id"] != second["id"]
+
+    result = engine.close_grid(first["id"], "repository")
+
+    assert result["status"] == "CLOSED"
+    second_orders = [order for order in exchange.get_open_orders("XRPUSDT")
+                     if order["client_order_id"].startswith(f"g{second['id']}L")]
+    assert second_orders
+
+
 def test_repository_keeps_sell_order_and_tracks_origin_age_and_unrealized_pnl():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     grid = create(engine)

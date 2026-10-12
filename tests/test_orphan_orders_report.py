@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import ast
+import argparse
 import hashlib
+import os
 from pathlib import Path
+import subprocess
+import sys
 
-from scripts.orphan_orders_report import classify_open_order, classify_open_orders
+import pytest
+
+from scripts.orphan_orders_report import (
+    _safe_error_label, classify_open_order, classify_open_orders, parse_symbols,
+)
 
 
 def _snapshot(status: str = "ACTIVE", symbol: str = "GRAMUSDT"):
@@ -76,7 +84,7 @@ def test_grid_closed_mutation_would_invert_classification_rule():
     mutated_bytes = mutated.encode("utf-8")
     mutated_sha = hashlib.sha256(mutated_bytes).hexdigest()
     assert mutated_sha != original_sha
-    namespace = {"__name__": "orphan_orders_report_mutation"}
+    namespace = {"__name__": "orphan_orders_report_mutation", "__file__": str(source_path)}
     exec(compile(mutated, str(source_path), "exec"), namespace)
     grids, levels = _snapshot("CLOSED")
     mutant_result = namespace["classify_open_order"](
@@ -98,3 +106,40 @@ def test_report_script_has_no_order_mutation_imports_or_calls():
             called = node.func.attr if isinstance(node.func, ast.Attribute) else (
                 node.func.id if isinstance(node.func, ast.Name) else "")
             assert called not in forbidden
+
+
+def test_parse_symbols_accepts_uppercase_pairs_and_deduplicates():
+    assert parse_symbols("ADAUSDT,BTCUSDT,ADAUSDT") == ["ADAUSDT", "BTCUSDT"]
+
+
+@pytest.mark.parametrize("value", ["adausdt", "", "  ", "ADAUSDT,,BTCUSDT", "ADA-USDT", "ADA/USDT"])
+def test_parse_symbols_rejects_lowercase_empty_and_malformed_values(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_symbols(value)
+
+
+def test_safe_error_label_reports_missing_module_and_numeric_api_code_only():
+    missing = ModuleNotFoundError("private detail", name="missing_pkg")
+    assert _safe_error_label(missing) == "ModuleNotFoundError (módulo faltante: missing_pkg)"
+
+    api_exception = type("BinanceAPIException", (Exception,), {"code": -2013})
+    error = api_exception("signed URL and private details")
+    label = _safe_error_label(error)
+    assert label == "BinanceAPIException (code=-2013)"
+    assert "signed" not in label and "private" not in label
+
+
+def test_script_imports_project_modules_from_another_cwd_without_pythonpath():
+    script = Path(__file__).parents[1] / "scripts" / "orphan_orders_report.py"
+    code = (
+        "import runpy,sys; "
+        "runpy.run_path(sys.argv[1], run_name='orphan_report_import_test'); "
+        "import config.settings; import data.testnet_client"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(script)], cwd=Path(__file__).parents[1] / "tests", env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

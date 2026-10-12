@@ -32,6 +32,44 @@ def test_close_grid_liquidate_sells_only_owned_held_quantity_and_is_idempotent()
     assert not exchange.get_open_orders("XRPUSDT")
 
 
+def test_liquidate_stays_closing_and_does_not_finish_level_with_pending_buy(monkeypatch):
+    engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    level = db.get_grid_levels(grid["id"])[0]
+    pending_id = int(level["order_id"])
+    monkeypatch.setattr(engine, "cancel_grid_orders", lambda *_a, **_kw: {
+        "status": "CLOSING", "canceled_order_ids": [], "cancel_errors": [],
+        "pending_order_ids": [pending_id], "remaining_inventory": [],
+    })
+
+    result = engine.close_grid(grid["id"], "liquidate")
+
+    current = db.get_grid_levels(grid["id"])[0]
+    assert result["status"] == "CLOSING"
+    assert result["pending_order_ids"] == [pending_id]
+    assert str(pending_id) in db.get_grid(grid["id"])["fail_reason"]
+    assert current["state"] != "DONE"
+
+
+def test_liquidate_cancel_error_remains_closing_without_pending_ids(monkeypatch):
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = create(engine)
+    original_cancel = exchange.cancel_order
+
+    def canceled_but_unknown(symbol, order_id):
+        result = original_cancel(symbol, order_id)
+        return {**result, "status": "UNKNOWN"}
+
+    monkeypatch.setattr(exchange, "cancel_order", canceled_but_unknown)
+
+    result = engine.close_grid(grid["id"], "liquidate")
+
+    assert result["status"] == "CLOSING"
+    assert not result["pending_order_ids"]
+    assert result["errors"]
+    assert db.get_grid(grid["id"])["status"] == "CLOSING"
+
+
 def test_close_grid_liquidate_sells_partial_buy_canceled_with_error_state():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     grid = create(engine)

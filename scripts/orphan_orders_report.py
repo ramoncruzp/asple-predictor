@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sqlite3
 import sys
@@ -9,8 +10,35 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+ROOT_STRING = str(ROOT)
+if ROOT_STRING in sys.path:
+    sys.path.remove(ROOT_STRING)
+sys.path.insert(0, ROOT_STRING)
 
 _SYSTEM_CLIENT_ID = re.compile(r"g(?P<grid>\d+)L(?P<level>\d+)(?P<side>[BS])(?P<cycle>\d+)")
+_SYMBOL = re.compile(r"[A-Z0-9]{6,20}")
+
+
+def parse_symbols(value: str) -> list[str]:
+    """Parse extra uppercase alphanumeric trading-pair symbols."""
+    parts = [part.strip() for part in str(value).split(",")]
+    if not parts or any(not part or _SYMBOL.fullmatch(part) is None for part in parts):
+        raise argparse.ArgumentTypeError(
+            "symbols must be comma-separated uppercase trading pairs (6-20 letters or digits).")
+    return list(dict.fromkeys(parts))
+
+
+def _safe_error_label(exc: Exception) -> str:
+    if isinstance(exc, ModuleNotFoundError):
+        missing = str(exc.name or "").strip()
+        return f"ModuleNotFoundError (módulo faltante: {missing})" if missing else "ModuleNotFoundError"
+    if type(exc).__name__ == "BinanceAPIException":
+        code = getattr(exc, "code", None)
+        if type(code) is int or (isinstance(code, str) and re.fullmatch(r"-?\d+", code)):
+            return f"BinanceAPIException (code={code})"
+        return "BinanceAPIException"
+    return type(exc).__name__
 
 
 def classify_open_order(
@@ -122,7 +150,13 @@ def _format(value: Any) -> str:
     return str(value if value is not None else "")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Read-only inventory of open Testnet orders.")
+    parser.add_argument(
+        "--symbols", type=parse_symbols, default=None,
+        help="add comma-separated uppercase trading pairs, e.g. ADAUSDT,BTCUSDT",
+    )
+    args = parser.parse_args(argv)
     try:
         from config.settings import Settings
         from data.testnet_client import TestnetClient
@@ -130,13 +164,14 @@ def main() -> int:
         settings = Settings()
         database_path = _readonly_database_path(settings.database_url)
         grids, levels, symbols = _read_database(database_path)
+        symbols = sorted(set(symbols).union(args.symbols or []))
         key = str(settings.testnet_api_key or "").strip()
         secret = str(settings.testnet_api_secret or "").strip()
         if not key or not secret or key.casefold().startswith("tu_") or secret.casefold().startswith("tu_"):
             raise ValueError("Credenciales de Testnet no configuradas.")
         exchange = TestnetClient(key, secret, production_api_key=settings.binance_api_key)
     except Exception as exc:
-        print(f"No se pudo preparar el reporte ({type(exc).__name__}).", file=sys.stderr)
+        print(f"No se pudo preparar el reporte ({_safe_error_label(exc)}).", file=sys.stderr)
         return 2
 
     rows: list[dict[str, Any]] = []
@@ -144,7 +179,7 @@ def main() -> int:
         try:
             orders = exchange.get_open_orders(symbol)
         except Exception as exc:
-            print(f"Consulta de órdenes no disponible para {symbol} ({type(exc).__name__}).", file=sys.stderr)
+            print(f"Consulta de órdenes no disponible para {symbol} ({_safe_error_label(exc)}).", file=sys.stderr)
             return 2
         rows.extend(classify_open_orders(orders, grids, levels, symbol))
 

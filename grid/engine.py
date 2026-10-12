@@ -2469,9 +2469,17 @@ class GridEngine:
         grid = self.db.get_grid(grid_id)
         symbol = grid["symbol"]
         errors: list[dict] = []
+        levels = self.db.get_grid_levels(grid_id)
+        owned_order_ids = {
+            int(level["order_id"]) for level in levels if level.get("order_id") is not None
+        }
+        level_by_order_id = {
+            int(level["order_id"]): level for level in levels if level.get("order_id") is not None
+        }
+        buy_client_id = re.compile(rf"g{int(grid_id)}L\d+B\d+")
         # Cancel only pending buys. A fill racing cancellation is synchronized
         # without rearming, which can create the corresponding live sell.
-        for level in self.db.get_grid_levels(grid_id):
+        for level in levels:
             if level["state"] != "BUY_OPEN":
                 continue
             order_id = level.get("order_id")
@@ -2495,8 +2503,41 @@ class GridEngine:
                     errors.append({"level_idx": level["level_idx"], "reason": f"buy cancel returned {status}"})
             except Exception as exc:
                 errors.append({"level_idx": level["level_idx"], "reason": str(exc)})
+        live_order_ids: set[int] = set()
+        verification_failed = False
+        try:
+            for order in self.exchange.get_open_orders(symbol):
+                order_id = order.get("order_id")
+                client_order_id = str(order.get("client_order_id") or "")
+                level = level_by_order_id.get(int(order_id)) if order_id is not None else None
+                belongs_to_grid = (
+                    (order_id is not None and int(order_id) in owned_order_ids)
+                    or buy_client_id.fullmatch(client_order_id) is not None
+                )
+                is_grid_buy = (
+                    str(order.get("side") or "").upper() == "BUY"
+                    or (level is not None and level.get("state") == "BUY_OPEN")
+                    or buy_client_id.fullmatch(client_order_id) is not None
+                )
+                if belongs_to_grid and is_grid_buy:
+                    if order_id is not None:
+                        live_order_ids.add(int(order_id))
+                    errors.append({
+                        "order_id": order_id,
+                        "client_order_id": client_order_id or None,
+                        "reason": "grid buy order remains open",
+                    })
+        except Exception as exc:
+            verification_failed = True
+            errors.append({
+                "reason": f"open order verification failed ({type(exc).__name__})",
+            })
         if errors:
             reason = "repository close aborted; buy cancellation failed"
+            if live_order_ids:
+                reason += "; live order ids: " + ",".join(map(str, sorted(live_order_ids)))
+            if verification_failed:
+                reason += "; open order verification failed"
             self.db.update_grid(grid_id, status="CLOSING", fail_reason=reason)
             return {"mode": "repository", "status": "CLOSING", "moved_cells": [],
                     "unmanaged_inventory": [], "errors": errors, "pnl_realized": 0.0}
@@ -2681,10 +2722,21 @@ class GridEngine:
         else:
             cancellation = self.cancel_grid_orders(grid_id, finalize=False)
             errors = list(cancellation["cancel_errors"])
+            pending_order_ids = {
+                int(order_id) for order_id in cancellation.get("pending_order_ids", [])
+                if order_id is not None
+            }
+            for order_id in sorted(pending_order_ids):
+                errors.append({
+                    "order_id": order_id,
+                    "reason": f"buy order remains open (order_id={order_id})",
+                })
             liquidated, dust = [], []
             filters, _, avg_price = self._market_context(grid["symbol"])
             for level in self.db.get_grid_levels(grid_id):
                 if _d(level.get("held_qty")) <= 0:
+                    if level.get("order_id") is not None and int(level["order_id"]) in pending_order_ids:
+                        continue
                     if level["state"] != "ERROR":
                         self.db.update_level(grid_id, level["level_idx"], state="DONE")
                     continue
@@ -2715,9 +2767,14 @@ class GridEngine:
                     logger.exception("grid=%s level=%s liquidation failed", grid_id, level["level_idx"])
             if not errors:
                 self.db.update_grid(grid_id, status="CLOSED", closed_at=datetime.now(timezone.utc).replace(tzinfo=None), fail_reason=None)
+            elif pending_order_ids:
+                reason = "liquidation incomplete; live order ids: " + ",".join(
+                    map(str, sorted(pending_order_ids)))
+                self.db.update_grid(grid_id, status="CLOSING", fail_reason=reason)
             result = {
                 "mode": mode, "status": self.db.get_grid(grid_id)["status"],
                 "canceled_order_ids": cancellation["canceled_order_ids"],
+                "pending_order_ids": sorted(pending_order_ids),
                 "liquidated_cells": liquidated, "dust_cells": dust,
                 "unmanaged_inventory": [row for row in self.db.get_grid_levels(grid_id) if _d(row.get("held_qty")) > 0 and row["state"] == "ERROR"],
                 "errors": errors,
