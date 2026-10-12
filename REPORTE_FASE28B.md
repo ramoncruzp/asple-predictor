@@ -38,4 +38,4 @@ Pruebas: [tests/test_orphan_orders_report.py](tests/test_orphan_orders_report.py
 
 `alerts/dispatcher.py`, `alerts/formatters.py`, `grid/engine.py`, `scripts/orphan_orders_report.py`, `tests/test_alert_dispatcher.py`, `tests/test_alert_formatters.py`, `tests/test_fase28b_mutations.py`, `tests/test_grid_close.py`, `tests/test_grid_repository.py`, `tests/test_orphan_orders_report.py`, `REPORTE_FASE28B.md`.
 
-Commit: pendiente de auditoría final y publicación autorizada.
+Commit de implementación de Fase 28b: `f781873` (incluye este reporte y los diez archivos de código y pruebas enumerados arriba).
