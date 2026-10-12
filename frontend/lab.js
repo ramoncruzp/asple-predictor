@@ -24,7 +24,7 @@
       const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
       let sold = 0, suspended = 0;
       for (const response of responses) for (const event of response.events || []) {
-        const ts = Date.parse(event.ts || '');
+        const ts = window.ASPLEFormat.parseApiTime(event.ts || '');
         if (!Number.isFinite(ts) || ts < cutoff) continue;
         if (event.type === 'CELL_STOPLOSS') sold++;
         if (event.type === 'STOPLOSS_SUSPENDED') suspended++;

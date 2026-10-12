@@ -88,7 +88,9 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     expect(host.locator('[data-flag-key="stoploss_enabled"]')).to_contain_text("Apagado")
     host.locator('[data-flag-key="stoploss_enabled"]').get_by_role("button", name="Encender").click()
     ui_page.get_by_role("button", name="Confirmar cambio").click()
-    expect(ui_page.locator("#lab-global-settings-status")).to_contain_text("Cambiado a las")
+    expect(ui_page.locator("#lab-global-settings-status")).to_have_text("Ajuste global actualizado.")
+    expect(host.locator(".global-flag-updated")).to_contain_text("Cambiado a las")
+    assert ui_page.locator("#lab-global-settings-content .global-flag-updated").count() == 1
     assert calls == [
         {"key": "stoploss_enabled", "value": False, "dry_run": True, "confirm": False},
         {"key": "stoploss_enabled", "value": False, "dry_run": False, "confirm": False},

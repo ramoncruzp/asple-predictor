@@ -49,8 +49,9 @@ def test_global_settings_section_confirms_changes_and_explains_live_effect(ui_pa
         {"key": "adjust_idle_shrink_enabled", "value": True, "dry_run": True, "confirm": False},
         {"key": "adjust_idle_shrink_enabled", "value": True, "dry_run": False, "confirm": True},
     ]
-    expect(panel).to_contain_text("Cambiado a las")
-    assert "hora local" in ui_page.locator("#global-settings-status").inner_text()
+    expect(ui_page.locator("#global-settings-status")).to_have_text("Ajuste global actualizado.")
+    expect(panel.locator(".global-flag-updated")).to_contain_text("Cambiado a las")
+    assert "hora local" in panel.locator(".global-flag-updated").inner_text()
 
 
 def test_stoploss_global_flag_appears_with_disable_button(ui_page, live_server):

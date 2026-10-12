@@ -9,16 +9,16 @@
   const title = name => ({ model_a: 'XGBoost', model_b: 'GRU (PyTorch)', model_c: 'Prophet+XGBoost', model_d: 'TFT', ensemble: 'Ensamble', vol: 'Volatilidad', HAR_range: 'HAR Range', HAR_asym: 'HAR Asim\u00E9trico' }[name] || name || 'No disponible');
 
   const trainingElapsedSeconds = (value, now = Date.now()) => {
-    const started = Date.parse(value || '');
+    const started = window.ASPLEFormat.parseApiTime(value || '');
     return Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : 0;
   };
   const formatTrainingDate = value => {
-    const parsed = new Date(value || '');
+    const parsed = new Date(window.ASPLEFormat.parseApiTime(value || ''));
     return Number.isNaN(parsed.getTime()) ? '\u2014'
       : new Intl.DateTimeFormat('es-DO', { dateStyle: 'short', timeStyle: 'short' }).format(parsed);
   };
   const trainingTimesDiffer = (artifact, loaded) => {
-    const artifactMs = Date.parse(artifact || ''), loadedMs = Date.parse(loaded || '');
+    const artifactMs = window.ASPLEFormat.parseApiTime(artifact || ''), loadedMs = window.ASPLEFormat.parseApiTime(loaded || '');
     return !Number.isFinite(loadedMs) || (Number.isFinite(artifactMs) && artifactMs - loadedMs > 2000);
   };
 
@@ -95,7 +95,7 @@
   }
   function filterHistoryWindow(rows, windowValue = $('models-vol-window')?.value || '30', now = Date.now()) {
     const cutoff = windowValue === 'all' ? 0 : now - Number(windowValue) * 86400000;
-    return (Array.isArray(rows) ? rows : []).filter(row => !row.forecast_at || new Date(row.forecast_at).getTime() >= cutoff);
+    return (Array.isArray(rows) ? rows : []).filter(row => !row.forecast_at || window.ASPLEFormat.parseApiTime(row.forecast_at) >= cutoff);
   }
   function renderVolHistory(rows, horizon = 4, mode = $('models-vol-series')?.value || 'champion') {
     const container = $('models-vol-history'), empty = $('models-vol-history-empty');
@@ -108,7 +108,7 @@
     // Reuses the Battle de Volatilidad chart implementation, now rendered in Modelos.
     APP.volHistoryChart = LightweightCharts.createChart(container, { height: 250, layout: { background: { color: 'transparent' }, textColor: '#8b949e' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } }, localization: { timeFormatter: time => chartTickLabel(time, true) }, timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 8, fixLeftEdge: true, tickMarkFormatter: time => chartTickLabel(time, true) }, rightPriceScale: { borderColor: '#303d43' } });
     const forecast = APP.volHistoryChart.addLineSeries({ color: '#2F81F7', lineWidth: 2, title: `Pron\u00F3stico \u03C3/h (\u03C3 ${horizon}h = \u03C3/h \u00D7 \u221A${horizon})`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } }), realized = APP.volHistoryChart.addLineSeries({ color: '#3FB950', lineWidth: 2, title: `Realizado ${horizon}h (%)`, priceFormat: { type: 'custom', formatter: value => `${value.toFixed(2)}%` } });
-    const points = key => items.filter(row => row.forecast_at && row[key] != null).map(row => ({ time: Math.floor(new Date(row.forecast_at).getTime() / 1000), value: Number(row[key]) })).filter(row => Number.isFinite(row.time) && Number.isFinite(row.value)).sort((a,b) => a.time-b.time);
+    const points = key => items.filter(row => row.forecast_at && row[key] != null).map(row => ({ time: Math.floor(window.ASPLEFormat.parseApiTime(row.forecast_at) / 1000), value: Number(row[key]) })).filter(row => Number.isFinite(row.time) && Number.isFinite(row.value)).sort((a,b) => a.time-b.time);
     forecast.setData(points('pred_vol_pct')); const actual = points('realized_vol_pct'); realized.setData(actual);
     if (!actual.length) { empty.textContent = 'Aún no hay resultados verificados'; empty.classList.remove('hidden'); } else empty.classList.add('hidden');
     APP.volHistoryChart.timeScale().fitContent();
@@ -168,7 +168,7 @@
     if (!Array.isArray(rows) || !rows.length) return '<p class="muted">Sin historial reciente de pron\u00F3sticos verificados.</p>';
     const date = value => {
       if (!value) return '\u2014';
-      const parsed = new Date(value);
+      const parsed = new Date(window.ASPLEFormat.parseApiTime(value));
       return Number.isNaN(parsed.getTime()) ? '\u2014' : new Intl.DateTimeFormat('es-DO', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(parsed);
     };
     return `<h4>Historial reciente · ${esc(title(selectedModel))}</h4><div class="table-card"><table class="data-table"><thead><tr><th>Fecha</th><th>Pron\u00F3stico (%)</th><th>Realizado (%)</th><th>Estado</th></tr></thead><tbody>${rows.slice(0, 12).map(row => `<tr><td>${esc(date(row.forecast_at))}</td><td>${n(row.pred_vol_pct, 2)}%</td><td>${row.realized_vol_pct == null ? '\u2014' : `${n(row.realized_vol_pct, 2)}%`}</td><td>${row.realized_vol_pct != null ? 'Verificado' : 'Pendiente'}</td></tr>`).join('')}</tbody></table></div>`;
@@ -212,7 +212,7 @@
     const unavailable = !notReady && (vol.unavailable || vol.no_models);
     const diskText = notReady ? 'sin modelos' : unavailable ? 'no disponible' : (disk || '\u2014');
     const loadedText = notReady ? 'sin modelos' : unavailable ? 'no disponible' : (loaded || (disk ? 'No cargado' : '\u2014'));
-    const diskMs = Date.parse(disk || ''), loadedMs = Date.parse(loaded || '');
+    const diskMs = window.ASPLEFormat.parseApiTime(disk || ''), loadedMs = window.ASPLEFormat.parseApiTime(loaded || '');
     const stale = !notReady && disk && (!Number.isFinite(loadedMs) || (Number.isFinite(diskMs) && Math.abs(diskMs - loadedMs) > 2000));
     const restart = stale ? '<small class="models-training-note">El artefacto en disco difiere de la versión cargada; reinicia el servidor para cargarlo.</small>' : '';
     const volDisabled = otherSymbol ? 'disabled title="El entrenamiento de esta moneda se gestiona desde Monedas."' : disabled;

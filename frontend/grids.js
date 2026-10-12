@@ -286,9 +286,11 @@
   const MISSING_ORDER_TOOLTIP = 'Este nivel espera pero no tiene orden en Binance; el bot deber\u00eda recolocarla';
 
   function errorAgeLabel(timestamp) {
-    const eventTime = Date.parse(timestamp || '');
+    const eventTime = window.ASPLEFormat.parseApiTime(timestamp || '');
     if (!Number.isFinite(eventTime)) return '';
-    const minutes = Math.max(0, Math.floor((Date.now() - eventTime) / 60000));
+    const ageSeconds = Math.floor((Date.now() - eventTime) / 1000);
+    if (ageSeconds < -60) return 'reloj desajustado';
+    const minutes = Math.max(0, Math.floor(ageSeconds / 60));
     if (minutes >= 1440) return `hace ${Math.floor(minutes / 1440)} d`;
     if (minutes >= 60) return `hace ${Math.floor(minutes / 60)} h`;
     return `hace ${minutes} min`;
@@ -297,7 +299,7 @@
   function latestLevelError(events, levelIdx) {
     return (events.events || [])
       .filter(event => event.type === 'LEVEL_ERROR' && Number(event.level_idx) === Number(levelIdx))
-      .sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts))[0] || null;
+      .sort((left, right) => window.ASPLEFormat.parseApiTime(right.ts) - window.ASPLEFormat.parseApiTime(left.ts))[0] || null;
   }
 
   function levelErrorText(events, row) {

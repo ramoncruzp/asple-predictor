@@ -46,8 +46,15 @@ const api = new ApiClient();
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? '-').replace(/[&<>\'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 const UI_TIME_ZONE = 'America/Santo_Domingo';
+function parseApiTime(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value !== 'string') return Date.parse(value);
+  const source = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}T.*$/i.test(source) && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(source)) return Date.parse(`${source}Z`);
+  return Date.parse(source);
+}
 function dateParts(value, withTime = false) {
-  const date = value instanceof Date ? value : new Date(value);
+  const date = value instanceof Date ? value : new Date(parseApiTime(value));
   if (!Number.isFinite(date.getTime())) return null;
   const options = withTime
     ? { timeZone: UI_TIME_ZONE, year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
@@ -64,15 +71,15 @@ function formatUsdt(value) { if (value == null || !Number.isFinite(Number(value)
 const STATUS_LABELS = { ACTIVE: 'Activo', PAUSED: 'Pausado', OPENING: 'Abriendo', CLOSING: 'Cerrando', HOLDING: 'Repositorio', CLOSED: 'Cerrado', FAILED: 'Fallido' };
 function statusLabel(status) { return STATUS_LABELS[status] || status; }
 function updateAgeLabel(node, timestamp) {
-  const source = timestamp ? Date.parse(timestamp) : NaN;
+  const source = timestamp ? parseApiTime(timestamp) : NaN;
   const base = Number.isFinite(source) ? source : Date.now();
   const prefix = Number.isFinite(source) ? 'dato de hace' : 'cargado hace';
-  const update = () => { node.textContent = `${prefix} ${Math.max(0, Math.floor((Date.now() - base) / 60000))} min`; };
+  const update = () => { const ageSeconds = Math.floor((Date.now() - base) / 1000); node.textContent = Number.isFinite(source) && ageSeconds < -60 ? 'reloj desajustado' : `${prefix} ${Math.max(0, Math.floor(ageSeconds / 60))} min`; };
   update();
   if (node._ageTimer) clearInterval(node._ageTimer);
   node._ageTimer = setInterval(update, 60000);
 }
-window.ASPLEFormat = { formatDate, formatDateTime, formatNumber, formatUsdt, statusLabel, updateAgeLabel, tooltip: content => tooltip(content) };
+window.ASPLEFormat = { parseApiTime, formatDate, formatDateTime, formatNumber, formatUsdt, statusLabel, updateAgeLabel, tooltip: content => tooltip(content) };
 const percent = (value, digits = 1) => value == null ? '\u2014' : Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(digits)}%` : '\u2014';
 const money = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `$${formatNumber(value, digits)}`;
 function formatIndicator(value) {
@@ -152,10 +159,11 @@ function setHealthIndicator(node, state, label) {
   node.innerHTML = `<i></i><span class="health-label">${esc(label)}</span>`;
 }
 function elapsedLabel(timestamp, now = Date.now()) {
-  const value = Date.parse(timestamp);
+  const value = parseApiTime(timestamp);
   if (!Number.isFinite(value)) return null;
-  const seconds = Math.max(0, Math.floor((now - value) / 1000));
-  if (seconds < 60) return `hace ${seconds} s`;
+  const seconds = Math.floor((now - value) / 1000);
+  if (seconds < -60) return 'reloj desajustado';
+  if (seconds < 60) return `hace ${Math.max(0, seconds)} s`;
   if (seconds < 3600) return `hace ${Math.floor(seconds / 60)} min`;
   const hours = Math.floor(seconds / 3600);
   return seconds < 86400 ? `hace ${hours} h` : `hace ${Math.floor(hours / 24)} d`;
@@ -168,9 +176,9 @@ function renderMonitorHealth(payload, now = Date.now()) {
   const status = String(run?.status || '').toUpperCase();
   const configuredMinutes = Number(payload?.gap_minutes_configured);
   const intervalSeconds = Number.isFinite(configuredMinutes) && configuredMinutes > 0 ? configuredMinutes * 60 : 900;
-  const ageSeconds = Math.max(0, Math.floor((now - Date.parse(stamp)) / 1000));
+  const ageSeconds = Math.floor((now - parseApiTime(stamp)) / 1000);
   const failed = ['FAILED', 'FAILURE', 'ERROR', 'PARTIAL', 'INTERRUPTED'].includes(status);
-  const state = failed || ageSeconds > intervalSeconds * 4 ? 'red'
+  const state = failed || ageSeconds < -60 || ageSeconds > intervalSeconds * 4 ? 'red'
     : ageSeconds >= intervalSeconds * 2 ? 'amber' : 'ok';
   setHealthIndicator(node, state, `Monitor: ${elapsed}`);
 }

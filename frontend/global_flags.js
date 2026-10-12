@@ -32,7 +32,7 @@
     }
   }
   function statusFor(containerId) { return document.getElementById(containerId === 'global-settings-content' ? 'global-settings-status' : 'lab-global-settings-status'); }
-  function timeLocal(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12:false}) : date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12:false}); }
+  function timeLocal(value) { const date = new Date(window.ASPLEFormat.parseApiTime(value)); return Number.isNaN(date.getTime()) ? new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12:false}) : date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12:false}); }
   document.addEventListener('click', async event => {
     const button = event.target.closest('[data-flag-change]');
     if (button && !busy) {
@@ -63,7 +63,7 @@
         const result = await post({key:pending.key, value:pending.value, dry_run:false, confirm:pending.value === true});
         if (result.updated_at) updatedAt.set(pending.key, timeLocal(result.updated_at));
         const containerId = pending.containerId; pending = null; dialog.close();
-        if (status) status.textContent = `Cambiado a las ${updatedAt.get(result.flag?.key || '') || timeLocal(result.updated_at)} (hora local).`;
+        if (status) status.textContent = 'Ajuste global actualizado.';
         await load(containerId);
       } catch (error) { if (status) status.textContent = error.message || 'No se pudo guardar el ajuste global.'; }
       finally { busy = false; confirmButton.disabled = false; }
