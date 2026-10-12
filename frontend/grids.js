@@ -281,15 +281,65 @@
     `;
   }
 
-  function cellRowHtml(row) {
+  const ERROR_REASON_LABELS = { policy_adjust: 'Reajuste por pol\u00edtica' };
+  const MISSING_LEVEL_ERROR = 'motivo no disponible (ver Eventos del bot)';
+  const MISSING_ORDER_TOOLTIP = 'Este nivel espera pero no tiene orden en Binance; el bot deber\u00eda recolocarla';
+
+  function errorAgeLabel(timestamp) {
+    const eventTime = Date.parse(timestamp || '');
+    if (!Number.isFinite(eventTime)) return '';
+    const minutes = Math.max(0, Math.floor((Date.now() - eventTime) / 60000));
+    if (minutes >= 1440) return `hace ${Math.floor(minutes / 1440)} d`;
+    if (minutes >= 60) return `hace ${Math.floor(minutes / 60)} h`;
+    return `hace ${minutes} min`;
+  }
+
+  function latestLevelError(events, levelIdx) {
+    return (events.events || [])
+      .filter(event => event.type === 'LEVEL_ERROR' && Number(event.level_idx) === Number(levelIdx))
+      .sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts))[0] || null;
+  }
+
+  function levelErrorText(events, row) {
+    const event = latestLevelError(events, row.level_idx);
+    if (!event) return MISSING_LEVEL_ERROR;
+    const rawReason = event.reason;
+    const reason = rawReason ? (ERROR_REASON_LABELS[rawReason] || rawReason) : MISSING_LEVEL_ERROR;
+    const age = errorAgeLabel(event.ts);
+    return age ? `${reason} \u00b7 ${age}` : reason;
+  }
+
+  function cellRowHtml(row, events) {
     if (row.marker === 'precio_actual') {
       return `<tr class="price-marker-row"><td colspan="7">Precio actual &rarr; ${row.price === null ? 'sin precio' : fmtMoney(row.price, 6)}</td></tr>`;
     }
-    return `<tr class="cell-row ${String(row.state_label).toLowerCase() === 'error' ? 'cell-error-row' : ''}">
+    const waiting = ['esperando compra', 'esperando venta'].includes(row.state_label);
+    const missingOrder = waiting && row.has_live_order !== true;
+    const orderLabel = row.has_live_order === true ? 'con orden' : 'sin orden';
+    const errorText = String(row.state_label).toLowerCase() === 'error' ? levelErrorText(events, row) : '';
+    return `<tr class="cell-row ${String(row.state_label).toLowerCase() === 'error' ? 'cell-error-row' : ''} ${missingOrder ? 'cell-no-order-warning' : ''}">
       <td>${row.level_idx}</td><td class="mono">${fmtMoney(row.buy_price, 6)}</td><td class="mono">${fmtMoney(row.sell_price, 6)}</td>
-      <td class="mono">${fmtMoney(row.capital_usdt, 2)}</td><td><span class="cell-state state-${esc(String(row.state_label).replace(/[^a-z]/gi, '').toLowerCase())}">${esc(row.state_label)}</span></td>
-      <td class="${pnlClass(row.live_pnl_usdt)}">${row.live_pnl_usdt === null ? '—' : fmtMoney(row.live_pnl_usdt, 4)}</td>
-      <td class="mono">${row.distance_to_fill_pct === null ? '—' : fmtPct(row.distance_to_fill_pct, 2)}</td></tr>`;
+      <td class="mono">${fmtMoney(row.capital_usdt, 2)}</td><td class="cell-state-cell"><span class="cell-state state-${esc(String(row.state_label).replace(/[^a-z]/gi, '').toLowerCase())}"${missingOrder ? ` title="${esc(MISSING_ORDER_TOOLTIP)}"` : ''}>${esc(row.state_label)}</span><small class="cell-order-status ${row.has_live_order === true ? 'has-live-order' : 'no-live-order'}" title="${row.has_live_order === true ? 'ID de orden guardado en estado abierto en la base de datos' : 'No hay ID de orden guardado en estado abierto en la base de datos'}">${orderLabel}</small>${errorText ? `<small class="cell-error-reason">${esc(errorText)}</small>` : ''}</td>
+      <td class="${pnlClass(row.live_pnl_usdt)}">${row.live_pnl_usdt === null ? '\u2014' : fmtMoney(row.live_pnl_usdt, 4)}</td>
+      <td class="mono">${row.distance_to_fill_pct === null ? '\u2014' : fmtPct(row.distance_to_fill_pct, 2)}</td></tr>`;
+  }
+
+  function copyExperimentSummary(summary, detail) {
+    const days = summary.progress?.max_days;
+    const text = [
+      `Grid #${summary.id} ${summary.symbol}`,
+      `Edad: ${days?.age_days == null ? '\u2014' : `${Number(days.age_days).toFixed(1)} d`}`,
+      `D\u00edas restantes: ${days?.days_remaining == null ? '\u2014' : `${Number(days.days_remaining).toFixed(1)} d`}`,
+      `Ciclos completados: ${summary.cycles_completed ?? '\u2014'}`,
+      `Neta realizada: ${fmtMoney(summary.net_realized_usdt, 2)} USDT`,
+      `Neta tras comisiones estimadas: ${fmtMoney(summary.net_after_estimated_fees_usdt, 2)} USDT`,
+      `Rango: ${fmtMoney(detail.range_low, 6)} - ${fmtMoney(detail.range_high, 6)}`,
+      `Niveles: ${detail.n_levels ?? '\u2014'}`,
+      `Capital: ${fmtMoney(summary.capital_total_usdt, 2)} USDT`,
+      `Precio actual: ${fmtMoney(summary.price, 6)}`,
+      `Generado: ${new Date().toLocaleString()}`,
+    ].join('\n');
+    try { return navigator.clipboard.writeText(text).catch(() => {}); } catch (_) { return undefined; }
   }
 
   function buildEquitySvg(points) {
@@ -376,6 +426,21 @@
       }
     }
 
+    const maxDays = summary.progress?.max_days;
+    const ageDays = maxDays?.age_days;
+    const remainingDays = maxDays?.days_remaining;
+    const allowedDays = maxDays?.max_days;
+    const progressWidth = ageDays != null && Number.isFinite(Number(ageDays))
+      && allowedDays != null && Number.isFinite(Number(allowedDays)) && Number(allowedDays) > 0
+      ? Math.min(100, Math.max(0, Number(ageDays) / Number(allowedDays) * 100)) : null;
+    const experimentProgress = progressWidth == null ? ''
+      : `<div class="progress" role="progressbar" aria-label="Plazo consumido" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressWidth.toFixed(1)}"><i style="width:${progressWidth.toFixed(1)}%"></i></div>`;
+    const experimentCard = `<section class="card experiment-card"><div class="experiment-heading"><h3>Experimento</h3><button type="button" class="button secondary experiment-copy">Copiar resumen</button></div>
+      <div class="experiment-days"><div><span>Edad</span><b>${ageDays == null ? '\u2014' : `${Number(ageDays).toFixed(1)} d`}</b></div><div><span>D\u00edas restantes</span><b>${remainingDays == null ? '\u2014' : `${Number(remainingDays).toFixed(1)} d`}</b></div>${experimentProgress}</div>
+      ${maxDays?.expired ? '<p class="experiment-expired">El plazo m\u00e1ximo ha vencido.</p>' : ''}
+      <div class="experiment-metrics"><div><span>Ciclos completados</span><b>${summary.cycles_completed == null ? '\u2014' : esc(summary.cycles_completed)}</b></div><div><span>Neta realizada</span><b>${fmtMoney(summary.net_realized_usdt, 2)} USDT</b></div><div><span>Neta tras comisiones estimadas</span><b>${fmtMoney(summary.net_after_estimated_fees_usdt, 2)} USDT</b></div><div><span>Rango (suelo / techo)</span><b>${fmtMoney(detail.range_low, 6)} / ${fmtMoney(detail.range_high, 6)}</b></div><div><span>Niveles</span><b>${detail.n_levels == null ? '\u2014' : esc(detail.n_levels)}</b></div><div><span>Capital</span><b>${fmtMoney(summary.capital_total_usdt, 2)} USDT</b></div><div><span>Precio actual</span><b>${fmtMoney(summary.price, 6)}</b></div></div>
+      <p class="muted experiment-fee-note">Testnet cobra 0 de comisi\u00f3n.</p></section>`;
+
     container.innerHTML = `
       <a class="back-link" href="#grids">&larr; Volver a Grids</a>
       <div class="grid-detail-header card">
@@ -395,6 +460,7 @@
           ${idleShrinkAction}
         </div>
       </div>
+      ${experimentCard}
       ${loanBlock}
       ${recovery}
       <div class="metric-cards">
@@ -433,9 +499,10 @@
       ${(progressTarget || progressDays) ? `<div class="progress-row">${progressTarget}${progressDays}</div>` : ''}
       <div class="card cells-block">
         <h3>Escalera de bots</h3>
+        <details class="cells-legend"><summary>\u00bfQu\u00e9 significan los estados?</summary><p><b>Esperando compra:</b> el nivel espera comprar al alcanzar su precio. <b>Esperando venta:</b> tiene posici\u00f3n y espera vender. <b>Error:</b> fall\u00f3 una operaci\u00f3n y el nivel no se recupera solo. <b>Pausado:</b> el grid est\u00e1 detenido; <b>pausado con posici\u00f3n:</b> conserva inventario. <b>Con/sin orden:</b> indica si la base registra un ID de orden para un estado abierto; no consulta Binance. <b>Distancia a fill:</b> (precio objetivo - precio actual) / precio actual \u00d7 100; positivo significa objetivo por encima del precio actual y negativo, por debajo.</p></details>
         <table class="data-table cells-table" aria-label="Escalera de celdas del grid, ordenada de mayor a menor precio">
           <thead><tr><th>Nivel</th><th>Compra</th><th>Venta</th><th>Capital</th><th>Estado</th><th>PNL vivo</th><th>Distancia a fill</th></tr></thead>
-          <tbody>${cells.rows.map(cellRowHtml).join('') || '<tr><td colspan="7">Sin celdas</td></tr>'}</tbody>
+          <tbody>${cells.rows.map(row => cellRowHtml(row, events)).join('') || '<tr><td colspan="7">Sin celdas</td></tr>'}</tbody>
         </table>
         <div class="cells-totals"><span>Esperado por ciclo, todas las celdas (USDT) ${tooltip('Suma te\u00f3rica de la ganancia de una vuelta de cada celda, despu\u00e9s de comisiones estimadas; no es una predicci\u00f3n.')}: <b>${fmtMoney(cells.expected_profit_per_cycle_usdt, 4)}</b></span>
           <span>PNL vivo total: <b class="${pnlClass(cells.live_pnl_total_usdt)}">${fmtMoney(cells.live_pnl_total_usdt, 4)}</b></span></div>
@@ -465,6 +532,9 @@
         </table>
       </div>
     `;
+    container.querySelector('.experiment-copy')?.addEventListener('click', () => {
+      copyExperimentSummary(summary, detail);
+    });
   }
 
   async function loadList(container) {

@@ -347,6 +347,7 @@ def cells_view(levels: list[dict], price: float | None, fee_pct: float = 0.1, *,
             "level_idx": int(row["level_idx"]), "buy_price": _f(_d(buy_price)) if buy_price is not None else None,
             "sell_price": _f(_d(sell_price)) if sell_price is not None else None,
             "capital_usdt": _f(capital), "state": state, "state_label": label,
+            "has_live_order": state in {"BUY_OPEN", "SELL_OPEN"} and row.get("order_id") is not None,
             "held_qty": _f(held_qty), "cycles_completed": int(row.get("cycles_completed") or 0),
             "live_pnl_usdt": live_pnl, "distance_to_fill_pct": distance_pct,
         })
