@@ -20,8 +20,11 @@ def test_global_settings_section_confirms_changes_and_explains_live_effect(ui_pa
         elif path == "/api/settings/flags" and request.method == "POST":
             body = request.post_data_json
             requests.append(body)
-            flag["current"] = body["value"]
-            route.fulfill(json={"dry_run": False, "changed": True})
+            if body["dry_run"]:
+                route.fulfill(json={"dry_run": True, "plan": {"previous": flag["current"], "value": body["value"], "requires_restart": False}})
+            else:
+                flag["current"] = body["value"]
+                route.fulfill(json={"dry_run": False, "changed": True, "updated_at": "2026-10-12T12:00:00+00:00"})
         elif path.startswith("/api/account/"):
             route.fulfill(status=403, json={"detail": "auth required"})
         else:
@@ -42,9 +45,12 @@ def test_global_settings_section_confirms_changes_and_explains_live_effect(ui_pa
     expect(dialog).to_contain_text("sin reiniciar")
     ui_page.get_by_role("button", name="Confirmar cambio").click()
     expect(panel).to_contain_text("Estado: Encendido")
-    assert requests == [{"key": "adjust_idle_shrink_enabled", "value": True,
-                         "dry_run": False, "confirm": True}]
-    assert ui_page.locator("#global-settings-status").inner_text() == "Ajuste global actualizado."
+    assert requests == [
+        {"key": "adjust_idle_shrink_enabled", "value": True, "dry_run": True, "confirm": False},
+        {"key": "adjust_idle_shrink_enabled", "value": True, "dry_run": False, "confirm": True},
+    ]
+    expect(panel).to_contain_text("Cambiado a las")
+    assert "hora local" in ui_page.locator("#global-settings-status").inner_text()
 
 
 def test_stoploss_global_flag_appears_with_disable_button(ui_page, live_server):
