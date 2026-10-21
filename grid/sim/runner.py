@@ -171,7 +171,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                      stop_loss_pct=float(c["stop_loss_pct"]) if c["stop_loss_pct"] is not None else None)
                                 for c in cells]
                 # Match GridMonitor ordering: stop-loss executes before sync/policy.
-                for candidate in stoploss_candidates(policy_cells, float(close)):
+                for candidate in (stoploss_candidates(policy_cells, float(close)) if stoploss_enabled else []):
                     c = cells[int(candidate["level_idx"])]
                     exchange.cancel(c["level_idx"])
                     pnl = exchange.market_sell(c, close)

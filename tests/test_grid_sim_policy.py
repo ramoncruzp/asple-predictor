@@ -44,3 +44,6 @@ def test_stop_loss_sells_at_monitor_close_and_records_fee():
                             params={"adjust_enabled": False}, fee_pct=.1)
     stops = [event for event in result["events"] if event["type"] == "STOP_LOSS"]
     assert stops and result["metrics"]["fees_usdt"] > 0
+    disabled = run_simulation(candles, strategy="smart", n=4, capital=1000, low=95, high=105,
+                              params={"adjust_enabled": False}, fee_pct=.1, stoploss_enabled=False)
+    assert not any(event["type"] == "STOP_LOSS" for event in disabled["events"])
