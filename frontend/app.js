@@ -371,7 +371,7 @@ function renderGridV2a(data) {
   const suggestedStrategy=data.suggested_strategy==='smart'?'smart':'simple';
   const suggestedReason=data.suggested_strategy_reason||'Simple se sugiere por defecto.';
   const simPercent=value=>value==null||!Number.isFinite(Number(value))?'\u2014':`${formatNumber(Number(value),2)}%`;
-  const strategyLabel=name=>name.toLowerCase()==='smart'?'<p class=\"advisor-trapped-cap\">Tope de inventario (30 % del capital). Motivo de pausa: trapped_capital_pct.</p>':'';
+  const strategyLabel=name=>name.toLowerCase()==='smart'?'<p class=\"advisor-trapped-cap\">Capital atrapado (\u2265 50 % del capital con m\u00e1s de 24 h)</p>':'';
   const simCard=(name,row)=>{
     if(row?.unavailable)return `<div><b>${name}</b>${strategyLabel(name)}<p>Simulaci\u00f3n no disponible para ${escapeHtml(data.symbol)}: ${escapeHtml(row.unavailable)}</p></div>`;
     let equity=null;

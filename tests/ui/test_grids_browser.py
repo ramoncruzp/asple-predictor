@@ -248,8 +248,9 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     cards = ui_page.locator(".advisor-simulation-grid > div")
     expect(ui_page.locator(".advisor-simulation-grid .badge")).to_have_count(1)
     expect(cards.nth(0 if advisor["suggested_strategy"] == "simple" else 1)).to_contain_text("Sugerida")
-    expect(cards.nth(1)).to_contain_text("Tope de inventario (30 % del capital)")
-    expect(cards.nth(0)).not_to_contain_text("Tope de inventario")
+    trapped_label = "Capital atrapado (\u2265 50 % del capital con m\u00e1s de 24 h)"
+    expect(cards.nth(1)).to_contain_text(trapped_label)
+    expect(cards.nth(0)).not_to_contain_text("Capital atrapado")
     expect(ui_page.locator(".advisor-risk")).to_contain_text("Pérdida no realizada estimada al piso")
     assert ui_page.locator("#grid-result .advisor-risk > p.scanner-warning:empty").count() == 0
     expect(ui_page.locator("#grid-result")).to_contain_text("Con este capital por celda el grid no podrá prestar ni añadir niveles; solo podrá reducirlos")
@@ -1294,6 +1295,15 @@ def test_detail_compound_modal_shows_current_values_and_confirms_update(live_ser
     assert calls[0]["dry_run"] is True and calls[0]["confirm"] is False
     assert calls[1]["dry_run"] is False and calls[1]["confirm"] is True
     assert calls[1]["compound_ratio"] == 0.25
+    assert_no_js_errors(ui_page)
+
+
+def test_inventory_age_label_is_shown_only_on_smart_grid_detail(live_server, ui_page):
+    trapped_label = "Capital atrapado (\u2265 50 % del capital con m\u00e1s de 24 h)"
+    ui_page.goto(f"{live_server.url}/#grids/{live_server.secondary_grid_id}")
+    expect(ui_page.locator(".experiment-card")).to_contain_text(trapped_label)
+    ui_page.goto(f"{live_server.url}/#grids/{live_server.grid_id}")
+    expect(ui_page.locator(".experiment-card")).not_to_contain_text("Capital atrapado")
     assert_no_js_errors(ui_page)
 
 

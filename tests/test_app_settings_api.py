@@ -66,7 +66,10 @@ def test_phase33_defaults_apply_without_database_overrides_and_descriptions_are_
     assert {key: getattr(settings, key) for key in expected} == expected
     assert db.list_app_flag_overrides() == []
     suffix = "Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí."
-    assert all(APP_FLAG_DEFINITIONS[key]["description"].endswith(suffix) for key in expected)
+    legacy_tagged = [key for key in expected if key != "smart_close_wait_enabled"]
+    assert all(APP_FLAG_DEFINITIONS[key]["description"].endswith(suffix) for key in legacy_tagged)
+    assert APP_FLAG_DEFINITIONS["smart_close_wait_enabled"]["description"].endswith(
+        "Valor por defecto revertido en la Fase 34b; se puede revertir aqu\u00ed.")
     db.set_app_flag_override("smart_adjust_enabled", True, previous=False, origin="default")
     restarted = Settings(_env_file=None, GRID_API_TOKEN="local-test")
     apply_app_flag_overrides(restarted, db)

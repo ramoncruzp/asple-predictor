@@ -55,9 +55,9 @@ def test_smart_grid_persists_new_defaults_but_keeps_explicit_saved_parameters():
     engine, db, _exchange = make_engine()
     fresh = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart")
     fresh_params = db.get_grid(fresh["id"])["params"]
-    assert fresh_params["trapped_cap_pct"] == 30
-    assert fresh_params["trapped_age_h"] == .25
-    assert fresh_params["max_loss_pct"] == 7
+    assert fresh_params["trapped_cap_pct"] == 50
+    assert fresh_params["trapped_age_h"] == 24
+    assert fresh_params["max_loss_pct"] == 10
     saved_engine, saved_db, _saved_exchange = make_engine()
     saved = saved_engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart",
         params={"trapped_cap_pct": 50, "trapped_age_h": 24, "max_loss_pct": 10})

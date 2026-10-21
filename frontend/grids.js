@@ -451,6 +451,7 @@
       <div class="experiment-days"><div><span>Edad</span><b>${ageDays == null ? '\u2014' : `${Number(ageDays).toFixed(1)} d`}</b></div><div><span>D\u00edas restantes</span><b>${remainingDays == null ? '\u2014' : `${Number(remainingDays).toFixed(1)} d`}</b></div>${experimentProgress}</div>
       ${maxDays?.expired ? '<p class="experiment-expired">El plazo m\u00e1ximo ha vencido.</p>' : ''}
       <div class="experiment-metrics"><div><span>Ciclos completados</span><b>${summary.cycles_completed == null ? '\u2014' : esc(summary.cycles_completed)}</b></div><div><span>Neta realizada</span><b>${fmtMoney(summary.net_realized_usdt, 2)} USDT</b></div><div><span>Neta tras comisiones estimadas</span><b>${fmtMoney(summary.net_after_estimated_fees_usdt, 2)} USDT</b></div><div><span>Rango (suelo / techo)</span><b>${fmtMoney(detail.range_low, 6)} / ${fmtMoney(detail.range_high, 6)}</b></div><div><span>Niveles</span><b>${detail.n_levels == null ? '\u2014' : esc(detail.n_levels)}</b></div><div><span>Capital</span><b>${fmtMoney(summary.capital_total_usdt, 2)} USDT</b></div><div><span>Precio actual</span><b>${fmtMoney(summary.price, 6)}</b></div></div>
+      ${summary.strategy === 'smart' ? '<p class="muted advisor-trapped-cap">Capital atrapado (\u2265 50 % del capital con m\u00e1s de 24 h)</p>' : ''}
       <p class="muted experiment-fee-note">Testnet cobra 0 de comisi\u00f3n.</p></section>`;
 
     container.innerHTML = `

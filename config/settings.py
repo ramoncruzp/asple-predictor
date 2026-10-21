@@ -131,7 +131,7 @@ APP_FLAG_DEFINITIONS = {
     },
     "smart_close_wait_enabled": {
         "label": "Fuera de rango: esperar en vez de cerrar",
-        "description": "Apagado = como hoy: si el precio sale del rango más de 5 %, el grid se cierra para siempre. Encendido = el grid se pausa, conserva su inventario con las ventas puestas y se reactiva cuando el precio vuelve al rango; no se cierra por tiempo de pausa. Solo la pérdida máxima del grid (7 %) lo cierra. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí.",
+        "description": "Apagado = como hoy: si el precio sale del rango más de 5 %, el grid se cierra para siempre. Encendido = el grid se pausa, conserva su inventario con las ventas puestas y se reactiva cuando el precio vuelve al rango; no se cierra por tiempo de pausa. Solo la pérdida máxima del grid (10 %) lo cierra. Valor por defecto revertido en la Fase 34b; se puede revertir aquí.",
         "default": True, "requires_restart": False,
     },
     "advisor_vol_spacing_enabled": {
