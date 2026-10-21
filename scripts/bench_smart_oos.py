@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from api.routes.grid_advisor import RISK_LEVELS, _centered_range, _level
+from data.exchange_filters import SymbolFilters
 from grid.sim.data import CandleData, ewma_sigma_24h, load_candles
 from grid.sim.runner import FILTERS, run_simulation
 from grid.structure import select_levels
@@ -102,6 +103,24 @@ def _sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def load_symbol_filters(path: Path, symbol: str) -> SymbolFilters:
+    """Read Binance symbol filters from either a symbolInfo or exchangeInfo JSON."""
+    expected_symbol = symbol.upper() if symbol.upper().endswith("USDT") else f"{symbol.upper()}USDT"
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("symbols"), list):
+        matches = [item for item in payload["symbols"]
+                   if str(item.get("symbol", "")).upper() == expected_symbol]
+        if len(matches) != 1:
+            raise ValueError(f"expected one {expected_symbol} symbol in {path}; found {len(matches)}")
+        payload = matches[0]
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid Binance symbol filters JSON: {path}")
+    actual_symbol = payload.get("symbol")
+    if actual_symbol and str(actual_symbol).upper() != expected_symbol:
+        raise ValueError(f"filter symbol {actual_symbol} does not match {expected_symbol}")
+    return SymbolFilters.from_symbol_info(payload)
+
+
 def _variant_run_options(variant: dict) -> dict:
     params = dict(variant.get("params") or {})
     params["loans_enabled"] = bool(variant.get("loans", params.get("loans_enabled", False)))
@@ -116,7 +135,11 @@ def _variant_run_options(variant: dict) -> dict:
 def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str,
                   capital: float, variants: list[dict], window_days: int = 30,
                   step_days: int = 7, history_days: int = 90, range_mode: str = "centered",
-                  fee_pct: float = .1, quick: bool = False, csv_hashes: dict | None = None) -> dict:
+                  fee_pct: float = .1, quick: bool = False, csv_hashes: dict | None = None,
+                  filters: SymbolFilters | None = None,
+                  filters_source: str | None = None) -> dict:
+    filters = FILTERS if filters is None else filters
+    filters_source = filters_source or "fallback: grid.sim.runner.FILTERS (no cached symbol filters)"
     bar = 300
     window_seconds, history_seconds, step_seconds = window_days * 86400, history_days * 86400, step_days * 86400
     start = int(candles_5m.timestamp[0]) + history_seconds
@@ -159,7 +182,7 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
         window_error = None
         for variant in variants:
             options = _variant_run_options(variant)
-            level_selection = select_levels(low, high, float(history.close[-1]), capital, FILTERS,
+            level_selection = select_levels(low, high, float(history.close[-1]), capital, filters,
                 fee_pct, .7, sigma, bool(variant.get("vol_spacing", False)),
                 float(variant.get("k", .9)))
             variant_n = int(variant.get("n_levels", level_selection["n_levels"]))
@@ -172,7 +195,7 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
                     adjust_enabled_global=options["adjust_enabled_global"],
                     close_wait_enabled=options["close_wait_enabled"],
                     stoploss_enabled=options["stoploss_enabled"],
-                    filters=FILTERS, include_details=False, csv_hash=(csv_hashes or {}).get("5m"))
+                    filters=filters, include_details=False, csv_hash=(csv_hashes or {}).get("5m"))
             except ValueError as exc:
                 window_error = f"infeasible_grid: {exc}"
                 break
@@ -189,6 +212,7 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
     return {"symbol": symbol, "capital": capital, "window_days": window_days,
             "step_days": step_days, "history_days": history_days, "range_mode": range_mode,
             "fee_pct": fee_pct, "quick": quick, "csv_hashes": csv_hashes or {},
+            "filters_source": filters_source,
             "variants": variants, "windows": rows,
             "summary": summarize(rows, variants, step_days)}
 
@@ -227,6 +251,7 @@ def write_report(result: dict, out: Path) -> None:
              f"Capital: {result['capital']} USDT; rango: {result['range_mode']}; "
              f"ventana: {result['window_days']} d; paso: {result['step_days']} d; "
              f"historial: {result['history_days']} d.", "",
+             f"Filtros: {result.get('filters_source', 'fuente no registrada')}.", "",
              f"Ventanas útiles: {result['summary']['usable_windows']}; omitidas: {result['summary']['skipped_windows']}.", "",
              "| Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |",
              "|---|---:|---:|---:|---:|---|---:|---:|---|---|"]
@@ -258,6 +283,8 @@ def main(argv=None) -> int:
     parser.add_argument("--fee-pct", type=float, default=.1)
     parser.add_argument("--variants", help="JSON list or path to JSON list")
     parser.add_argument("--reference")
+    parser.add_argument("--filters-json", type=Path,
+                        help="Binance symbolInfo/exchangeInfo JSON (defaults to data/cache/{symbol}_filters.json)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args(argv)
@@ -266,6 +293,13 @@ def main(argv=None) -> int:
     p1 = args.data_dir / f"{symbol.lower()}_1h.csv"
     if not p5.is_file() or not p1.is_file():
         parser.error(f"cached files required: {p5} and {p1}")
+    default_filters_path = args.data_dir / f"{symbol.lower()}_filters.json"
+    filters_path = args.filters_json or (default_filters_path if default_filters_path.is_file() else None)
+    if args.filters_json is not None and not args.filters_json.is_file():
+        parser.error(f"filters JSON does not exist: {args.filters_json}")
+    filters = FILTERS if filters_path is None else load_symbol_filters(filters_path, symbol)
+    filters_source = ("fallback: grid.sim.runner.FILTERS (no cached symbol filters)"
+                      if filters_path is None else str(filters_path))
     variants = json.loads(json.dumps(DEFAULT_VARIANTS))
     if args.variants:
         raw = Path(args.variants)
@@ -280,7 +314,7 @@ def main(argv=None) -> int:
     result = run_benchmark(candles5, candles1, symbol=symbol, capital=args.capital,
         variants=variants, window_days=args.window_days, step_days=args.step_days,
         history_days=args.history_days, range_mode=args.range_mode, fee_pct=args.fee_pct,
-        quick=args.quick, csv_hashes=hashes)
+        quick=args.quick, csv_hashes=hashes, filters=filters, filters_source=filters_source)
     write_report(result, args.out)
     print(args.out / "summary.md")
     return 0
