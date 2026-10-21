@@ -20,6 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from data.feature_engineer import FeatureEngineer
+from config.models_config import TARGET_DOWN_HORIZON_CANDLES
 from data.splits import chronological_split
 from models.base_model import BaseModel
 
@@ -233,3 +234,29 @@ class ModelA(BaseModel):
             "ultima_actualizacion": self.last_updated,
             "accuracy_acumulada": self.cumulative_accuracy,
         }
+
+
+class _DownFeatureEngineer(FeatureEngineer):
+    def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        result = super().compute_features(df)
+        future = result["close"].shift(-TARGET_DOWN_HORIZON_CANDLES) / result["close"] - 1
+        result["future_return"] = future
+        result["target"] = (future < 0).where(future.notna()).astype(float)
+        return result
+
+
+class ModelADown(ModelA):
+    """Independent down classifier reusing Model A's features and XGBoost setup."""
+
+    MODEL_NAME = "model_a_down"
+    MODEL_VERSION = "1.0-down"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.feature_engineer = _DownFeatureEngineer()
+        self.feature_names = self.feature_engineer.get_feature_names()
+
+    def predict_down(self, df: pd.DataFrame) -> dict:
+        result = super().predict(df)
+        result["p_down"] = result["probability_up"]
+        return result

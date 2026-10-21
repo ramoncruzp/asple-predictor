@@ -20,6 +20,7 @@ temp/
 tmp/
 lightning_logs/
 data/cache/
+data/derived/
 backups/
 
 # Restos de trabajo local

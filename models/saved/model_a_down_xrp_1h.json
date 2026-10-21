@@ -1,0 +1,75 @@
+{
+  "model_name": "model_a_down",
+  "symbol": "XRPUSDT",
+  "interval": "1h",
+  "target_down_horizon_candles": 4,
+  "target": "close[t+4]/close[t]-1 < 0",
+  "oos": {
+    "n": 4242,
+    "sign_accuracy": 0.504950495049505,
+    "sign_accuracy_ci95": [
+      0.49057048561999056,
+      0.5191006600660066
+    ],
+    "thresholds": {
+      "0.55": {
+        "precision": 0.510759493670886,
+        "precision_ci95": [
+          0.4857491260448864,
+          0.5352027115966829
+        ],
+        "coverage_pct": 37.24658180103725,
+        "n": 1580
+      },
+      "0.6": {
+        "precision": 0.5160984848484849,
+        "precision_ci95": [
+          0.48689929920554414,
+          0.5467188699275435
+        ],
+        "coverage_pct": 24.893917963224894,
+        "n": 1056
+      },
+      "0.65": {
+        "precision": 0.5007363770250368,
+        "precision_ci95": [
+          0.4625916536442231,
+          0.5394322877327054
+        ],
+        "coverage_pct": 16.006600660066006,
+        "n": 679
+      }
+    }
+  },
+  "final_fit": {
+    "accuracy": 0.5247600767754319,
+    "precision": 0.5252525252525253,
+    "recall": 0.6312594840667678,
+    "f1": 0.5733976567884218,
+    "roc_auc": 0.5302057578233603,
+    "positive_rate_test": 0.5059500959692899,
+    "baseline_accuracy": 0.5059500959692899,
+    "signal_coverage": 0.11516314779270634,
+    "signal_accuracy": 0.5366666666666666,
+    "n_train": 12189,
+    "n_val": 2612,
+    "n_test": 2605,
+    "trained_at": "2026-10-21T14:37:25.442896+00:00",
+    "best_iteration": 33,
+    "final_fit_rows": 17414,
+    "cumulative_accuracy_source": "signal_accuracy"
+  },
+  "bank_verdict": "sin diferencia demostrada",
+  "bank_theta_060": {
+    "mean_delta": 0.07903752590909137,
+    "ci95": [
+      -0.19266495307954534,
+      0.4658457778892058
+    ],
+    "wins": 12,
+    "windows": 88,
+    "block": 5,
+    "samples": 3000,
+    "seed": 3401
+  }
+}

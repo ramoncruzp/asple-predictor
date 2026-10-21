@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +30,103 @@ MODEL_MODULES = {
     "c": ("models.model_c_prophet", "ModelC"),
 }
 RUN_METADATA_FIELDS = ("n_candles", "first_candle", "last_candle", "days")
+
+
+def monthly_down_splits(prepared: pd.DataFrame):
+    """Yield each test month with only training labels settled before that month."""
+    month_keys = prepared["timestamp"].dt.tz_convert(None).dt.to_period("M")
+    months = sorted(month_keys.unique())
+    for month in months:
+        start = month.start_time.tz_localize("UTC")
+        train = prepared.loc[prepared["label_end"] < start]
+        test = prepared.loc[month_keys == month]
+        if len(train) >= 200 and len(test) and train.target.nunique() >= 2:
+            yield start, train, test
+
+
+def walk_forward_down(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Predict each month using only labels whose four-hour outcome predates it."""
+    from config.models_config import TARGET_DOWN_HORIZON_CANDLES
+    from models.model_a_xgboost import ModelADown
+    engineer = ModelADown().feature_engineer
+    prepared = engineer.prepare_for_model(frame)
+    prepared["timestamp"] = pd.to_datetime(prepared["timestamp"], utc=True)
+    prepared["label_end"] = prepared["timestamp"] + pd.Timedelta(hours=TARGET_DOWN_HORIZON_CANDLES)
+    outputs = []
+    for start, train, test in monthly_down_splits(prepared):
+        model = ModelADown()
+        x_train = train[model.feature_names].astype("float64")
+        scaler = StandardScaler().fit(x_train)
+        classifier = model._new_classifier(int((train.target == 0).sum()) /
+            max(1, int((train.target == 1).sum())))
+        classifier.fit(scaler.transform(x_train), train.target.astype("int8"), verbose=False)
+        p_down = classifier.predict_proba(scaler.transform(
+            test[model.feature_names].astype("float64")))[:, 1]
+        outputs.append(pd.DataFrame({"timestamp": test.timestamp.to_numpy(),
+                                     "p_down": p_down, "actual_down": test.target.to_numpy()}))
+    oos = pd.concat(outputs, ignore_index=True) if outputs else pd.DataFrame(
+        columns=["timestamp", "p_down", "actual_down"])
+    # Keep one observation per non-overlapping four-candle block, anchored at UTC hour 00.
+    if len(oos):
+        oos["timestamp"] = pd.to_datetime(oos.timestamp, utc=True)
+        oos = oos.sort_values("timestamp").drop_duplicates("timestamp")
+        oos = oos.loc[oos.timestamp.dt.hour.isin((0, 4, 8, 12, 16, 20))].reset_index(drop=True)
+    return prepared, oos
+
+
+def down_oos_metrics(oos: pd.DataFrame, *, samples: int = 2000, seed: int = 3601) -> dict:
+    if oos.empty:
+        return {"n": 0, "sign_accuracy": None, "thresholds": {}}
+    actual = oos.actual_down.to_numpy(dtype=int)
+    p = oos.p_down.to_numpy(dtype=float)
+    correct = ((p >= .5).astype(int) == actual).astype(float)
+    rng = np.random.default_rng(seed)
+    def sampled_indices():
+        block = 4
+        count = int(np.ceil(len(correct) / block))
+        starts = rng.integers(0, len(correct), size=count)
+        return np.concatenate([(start + np.arange(block)) % len(correct) for start in starts])[:len(correct)]
+    accuracy_draws = [correct[idx].mean() for idx in (sampled_indices() for _ in range(samples))]
+    result = {"n": len(oos), "sign_accuracy": float(correct.mean()),
+              "sign_accuracy_ci95": [float(v) for v in np.quantile(accuracy_draws, [.025, .975])],
+              "thresholds": {}}
+    for threshold in (.55, .60, .65):
+        selected = p >= threshold
+        vals = actual[selected]
+        draws = []
+        for _ in range(samples):
+            idx = sampled_indices()
+            mask = p[idx] >= threshold
+            draws.append(float(actual[idx][mask].mean()) if mask.any() else np.nan)
+        valid_draws = np.asarray(draws, dtype=float)
+        valid_draws = valid_draws[np.isfinite(valid_draws)]
+        result["thresholds"][str(threshold)] = {
+            "precision": float(vals.mean()) if len(vals) else None,
+            "precision_ci95": ([float(v) for v in np.quantile(valid_draws, [.025, .975])]
+                                if len(valid_draws) else None),
+            "coverage_pct": float(selected.mean() * 100), "n": int(selected.sum())}
+    return result
+
+
+def train_down_symbol(frame: pd.DataFrame, symbol: str, root: Path) -> dict:
+    from models.model_a_xgboost import ModelADown
+    _, oos = walk_forward_down(frame)
+    metrics = down_oos_metrics(oos)
+    base = symbol.lower().removesuffix("usdt")
+    derived = root / "data" / "derived"
+    derived.mkdir(parents=True, exist_ok=True)
+    oos[["timestamp", "p_down"]].to_csv(derived / f"model_a_down_{base}_oos.csv", index=False)
+    model = ModelADown()
+    final_metrics = model.train(frame)
+    saved = root / "models" / "saved"
+    saved.mkdir(parents=True, exist_ok=True)
+    model.save(str(saved / f"model_a_down_{base}_1h.joblib"))
+    payload = {"model_name": "model_a_down", "symbol": symbol, "interval": "1h",
+               "target_down_horizon_candles": 4, "target": "close[t+4]/close[t]-1 < 0",
+               "oos": metrics, "final_fit": final_metrics}
+    (saved / f"model_a_down_{base}_1h.json").write_text(
+        json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+    return payload
 
 
 def merge_training_metrics(existing, run_metadata, trained_models):
@@ -68,6 +167,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", default="a,b,c", help="Lista separada por comas: a,b,c")
     parser.add_argument("--save-candles", type=Path, help="Guarda las velas cerradas usadas en CSV")
     parser.add_argument("--candles", type=Path, help="Carga velas de un CSV en vez de Binance")
+    parser.add_argument("--down-walk-forward", action="store_true",
+                        help="Entrena el clasificador de caída usando walk-forward mensual; requiere --candles")
     parser.add_argument("--progress", action="store_true", help="Imprime eventos de progreso para el monitor de trabajos")
     parser.add_argument(
         "--force", action="store_true", help="Permite sobrescribir artefactos 4h existentes"
@@ -75,6 +176,11 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.days <= 0:
         parser.error("--days debe ser mayor que cero")
+    if getattr(args, "down_walk_forward", False):
+        if args.interval != "1h" or args.candles is None or args.symbol not in {"XRPUSDT", "PEPEUSDT", "ADAUSDT"}:
+            parser.error("--down-walk-forward requiere --candles, --interval 1h y símbolo XRPUSDT, PEPEUSDT o ADAUSDT")
+        args.models = []
+        return args
     selected = [name.strip().lower() for name in args.models.split(",") if name.strip()]
     if not selected or len(set(selected)) != len(selected) or set(selected) - MODEL_MODULES.keys():
         parser.error("--models debe contener uno o más valores únicos de a,b,c")
@@ -90,6 +196,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if getattr(args, "down_walk_forward", False):
+        frame = pd.read_csv(args.candles)
+        for column in ("timestamp", "close_time"):
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], utc=True)
+        result = train_down_symbol(frame, args.symbol, Path(__file__).resolve().parents[1])
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return 0
     def progress(value):
         if args.progress:
             print(f"PROGRESS:{value}", flush=True)

@@ -1,0 +1,75 @@
+{
+  "model_name": "model_a_down",
+  "symbol": "PEPEUSDT",
+  "interval": "1h",
+  "target_down_horizon_candles": 4,
+  "target": "close[t+4]/close[t]-1 < 0",
+  "oos": {
+    "n": 4135,
+    "sign_accuracy": 0.5110036275695284,
+    "sign_accuracy_ci95": [
+      0.4964933494558646,
+      0.5259975816203144
+    ],
+    "thresholds": {
+      "0.55": {
+        "precision": 0.49154834347532117,
+        "precision_ci95": [
+          0.4658281780637234,
+          0.5168022074167464
+        ],
+        "coverage_pct": 35.767835550181374,
+        "n": 1479
+      },
+      "0.6": {
+        "precision": 0.49354518371400197,
+        "precision_ci95": [
+          0.46253683025834924,
+          0.5238132440476191
+        ],
+        "coverage_pct": 24.353083434099155,
+        "n": 1007
+      },
+      "0.65": {
+        "precision": 0.5149700598802395,
+        "precision_ci95": [
+          0.48006076829218136,
+          0.553941952720938
+        ],
+        "coverage_pct": 16.15477629987908,
+        "n": 668
+      }
+    }
+  },
+  "final_fit": {
+    "accuracy": 0.5339731285988484,
+    "precision": 0.4383116883116883,
+    "recall": 0.11479591836734694,
+    "f1": 0.18194070080862534,
+    "roc_auc": 0.49555550001666165,
+    "positive_rate_test": 0.4514395393474088,
+    "baseline_accuracy": 0.5485604606525911,
+    "signal_coverage": 0.0,
+    "signal_accuracy": null,
+    "n_train": 12189,
+    "n_val": 2612,
+    "n_test": 2605,
+    "trained_at": "2026-10-21T14:37:47.196084+00:00",
+    "best_iteration": 0,
+    "final_fit_rows": 17414,
+    "cumulative_accuracy_source": "accuracy"
+  },
+  "bank_verdict": "sin diferencia demostrada",
+  "bank_theta_060": {
+    "mean_delta": 0.006470785953068644,
+    "ci95": [
+      -0.4236367623710051,
+      0.48888224000282793
+    ],
+    "wins": 9,
+    "windows": 88,
+    "block": 5,
+    "samples": 3000,
+    "seed": 3401
+  }
+}

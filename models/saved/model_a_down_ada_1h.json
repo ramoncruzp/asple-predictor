@@ -1,0 +1,75 @@
+{
+  "model_name": "model_a_down",
+  "symbol": "ADAUSDT",
+  "interval": "1h",
+  "target_down_horizon_candles": 4,
+  "target": "close[t+4]/close[t]-1 < 0",
+  "oos": {
+    "n": 4135,
+    "sign_accuracy": 0.4998790810157195,
+    "sign_accuracy_ci95": [
+      0.48391777509068923,
+      0.5151148730350665
+    ],
+    "thresholds": {
+      "0.55": {
+        "precision": 0.5129824561403509,
+        "precision_ci95": [
+          0.4863140194632258,
+          0.539327136560957
+        ],
+        "coverage_pct": 34.46191051995163,
+        "n": 1425
+      },
+      "0.6": {
+        "precision": 0.5209003215434084,
+        "precision_ci95": [
+          0.487620186758742,
+          0.5520555919945307
+        ],
+        "coverage_pct": 22.563482466747278,
+        "n": 933
+      },
+      "0.65": {
+        "precision": 0.5380530973451327,
+        "precision_ci95": [
+          0.49740795569811114,
+          0.5800418426177667
+        ],
+        "coverage_pct": 13.663845223700122,
+        "n": 565
+      }
+    }
+  },
+  "final_fit": {
+    "accuracy": 0.5063339731285988,
+    "precision": 0.5106382978723404,
+    "recall": 0.47560975609756095,
+    "f1": 0.4925019731649566,
+    "roc_auc": 0.49901881378152524,
+    "positive_rate_test": 0.5036468330134357,
+    "baseline_accuracy": 0.5036468330134357,
+    "signal_coverage": 0.0,
+    "signal_accuracy": null,
+    "n_train": 12189,
+    "n_val": 2612,
+    "n_test": 2605,
+    "trained_at": "2026-10-21T14:38:07.994957+00:00",
+    "best_iteration": 0,
+    "final_fit_rows": 17414,
+    "cumulative_accuracy_source": "accuracy"
+  },
+  "bank_verdict": "sin diferencia demostrada",
+  "bank_theta_060": {
+    "mean_delta": 0.178380255795454,
+    "ci95": [
+      -0.17374991938920523,
+      0.5572517449829542
+    ],
+    "wins": 15,
+    "windows": 88,
+    "block": 5,
+    "samples": 3000,
+    "seed": 3401
+  }
+}
