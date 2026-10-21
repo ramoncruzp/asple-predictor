@@ -7,6 +7,7 @@ from decimal import Decimal
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config.settings import Settings
+from config.settings import ADVISOR_VOL_SPACING_K
 from models.coin_onboarding import coin_is_ready
 from grid.loan_cohorts import create_grid_with_loan_cohort
 from grid.structure import functional_cell_threshold
@@ -91,6 +92,9 @@ class GridAutoOpen:
             self._coin_not_ready_notified.pop(symbol, None)
             strategy = str(cfg.scanner_auto_open_strategy).lower()
             params = {}
+            if strategy == "smart":
+                params["sigma_24h_open"] = row.get("sigma_24h_open")
+                params["vol_spacing_k"] = ADVISOR_VOL_SPACING_K
             if cfg.scanner_auto_open_target_pct is not None:
                 params["target_pct"] = cfg.scanner_auto_open_target_pct
             if cfg.scanner_auto_open_max_days is not None:

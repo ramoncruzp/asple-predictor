@@ -49,6 +49,8 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | str | None] = {
     "loan_cap_pct": 30.0,
     "loan_min_amount": 0.2,
     "out_of_range_mode": "close",
+    "sigma_24h_open": None,
+    "vol_spacing_k": 0.9,
 }
 DEFAULT_GRID_FEE_PCT = 0.1
 PROFIT_CLOSE_RETRY_MAX = 8

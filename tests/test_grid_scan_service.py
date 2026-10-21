@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from database.db_manager import DBManager
 from grid.scan_service import GridScanService
@@ -134,11 +135,14 @@ def test_scanner_simulation_receives_shared_switch_values(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "run_simulation", lambda *a, **kwargs:
                         (calls.append(kwargs) or {"metrics": {"cycles_completed": 0}}))
     service, _ = setup(tmp_path, smart_adjust_enabled=False, smart_close_wait_enabled=True,
-                       stoploss_enabled=False, advisor_vol_spacing_enabled=True)
+                       stoploss_enabled=False, advisor_vol_spacing_enabled=True,
+                       smart_respacing_enabled=True)
     result = service.scan(capital=1000, strategy="smart", with_sim=True)
     assert calls
     assert all(call["adjust_enabled_global"] is False and call["close_wait_enabled"] is True
                and call["stoploss_enabled"] is False for call in calls)
+    assert all(call["respacing_enabled"] is True for call in calls)
     row = result["results"][0]
     sigma24 = float(np.std(np.diff(np.log(candles("1h")["close"])), ddof=1) * np.sqrt(24))
+    assert row["sigma_24h_open"] == pytest.approx(sigma24)
     assert row["suggested_structure"]["spacing_pct"] >= .9 * sigma24 * 100 - 1e-9

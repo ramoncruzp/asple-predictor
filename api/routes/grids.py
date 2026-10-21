@@ -21,6 +21,7 @@ from grid.policy import validate_params
 from grid.loan_cohorts import assign_loan_creation_defaults as _assign_loan_creation_defaults
 from grid.loan_cohorts import create_grid_with_loan_cohort, create_loan_pair
 from grid.scan_service import EXECUTION_WARNING
+from config.settings import ADVISOR_VOL_SPACING_K
 from grid.structure import (evaluate_cell_margins, minimum_cell_for_dust_limit,
                             minimum_cell_threshold, minimum_cell_warning,
                             functional_cell_threshold, functional_cell_warning,
@@ -381,6 +382,9 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
                 symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
                 float(request.app.state.settings.scanner_timeout_seconds))
             sigma_open = _sigma_open(request, market)
+            if body.strategy == "smart":
+                params.setdefault("sigma_24h_open", sigma_open["value"])
+                params.setdefault("vol_spacing_k", ADVISOR_VOL_SPACING_K)
             sigma = sigma_open["value"]
             mid = _mid(market)
             structure = suggest_structure(sigma, body.capital, mid,
@@ -459,6 +463,9 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
             symbol, float(body.capital), request.app.state.grid_scan_service.clock() +
             float(request.app.state.settings.scanner_timeout_seconds))
         sigma_open = _sigma_open(request, market)
+        if body.strategy == "smart":
+            params.setdefault("sigma_24h_open", sigma_open["value"])
+            params.setdefault("vol_spacing_k", ADVISOR_VOL_SPACING_K)
         margin_guard = _margin_guard(request, body.range_low, body.range_high, body.n_levels,
                                      body.capital, _mid(market), filters)
     except Exception as exc:

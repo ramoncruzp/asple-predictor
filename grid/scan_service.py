@@ -118,14 +118,14 @@ class GridScanService:
             try:
                 market, filters = self._market(symbol, float(capital), deadline)
                 symbol_cfg = dict(cfg)
+                closes_1h = market["klines_1h"]["close"].astype(float).to_numpy()
+                sigma_24h_open = (float(np.std(np.diff(np.log(closes_1h)), ddof=1) * np.sqrt(24))
+                                  if len(closes_1h) > 2 and np.all(closes_1h > 0) else None)
                 if symbol_cfg["advisor_vol_spacing_enabled"]:
-                    closes_1h = market["klines_1h"]["close"].astype(float).to_numpy()
-                    sigma_24h = (float(np.std(np.diff(np.log(closes_1h)), ddof=1) * np.sqrt(24))
-                                 if len(closes_1h) > 2 and np.all(closes_1h > 0) else None)
-                    if sigma_24h is not None and np.isfinite(sigma_24h) and sigma_24h > 0:
+                    if sigma_24h_open is not None and np.isfinite(sigma_24h_open) and sigma_24h_open > 0:
                         symbol_cfg["min_spacing_pct"] = max(
                             float(symbol_cfg["min_spacing_pct"]),
-                            ADVISOR_VOL_SPACING_K * sigma_24h * 100.0)
+                            ADVISOR_VOL_SPACING_K * sigma_24h_open * 100.0)
                 scored = score_symbol(market, filters, symbol_cfg)
                 if not book_is_two_sided({"bid_price": market["bid"], "ask_price": market["ask"]}):
                     # scanner.py's own "spread" gate already rejects this (mid=0), but
@@ -156,9 +156,11 @@ class GridScanService:
                         high=scored["suggested_structure"]["range_high"], fee_pct=symbol_cfg["fee_pct"], filters=filters,
                         adjust_enabled_global=self._setting("smart_adjust_enabled", True),
                         stoploss_enabled=self._setting("stoploss_enabled", True),
-                        close_wait_enabled=self._setting("smart_close_wait_enabled", False))
+                        close_wait_enabled=self._setting("smart_close_wait_enabled", False),
+                        respacing_enabled=self._setting("smart_respacing_enabled", False))
                     scored["simulation_90d"] = {"label": "histórico, no predictivo", "metrics": simulated["metrics"]}
-                rows.append({**scored, "data_source": DATA_SOURCE, "warning": EXECUTION_WARNING})
+                rows.append({**scored, "sigma_24h_open": sigma_24h_open,
+                             "data_source": DATA_SOURCE, "warning": EXECUTION_WARNING})
             except Exception as exc:
                 rows.append({"symbol": symbol, "error": str(exc),
                              "data_source": DATA_SOURCE, "warning": EXECUTION_WARNING})
