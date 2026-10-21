@@ -39,6 +39,9 @@ DEFAULT_VARIANTS = [
     {"name": "smart_actual_compound", "strategy": "smart", "params": {},
      "adjust": False, "close_wait": True, "stoploss": False, "vol_spacing": True,
      "loans": False, "compound": True},
+    {"name": "smart_actual_respace", "strategy": "smart", "params": {},
+     "adjust": False, "close_wait": True, "stoploss": False, "vol_spacing": True,
+     "loans": False, "compound": False, "respacing": True},
 ]
 
 
@@ -195,6 +198,7 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
                     adjust_enabled_global=options["adjust_enabled_global"],
                     close_wait_enabled=options["close_wait_enabled"],
                     stoploss_enabled=options["stoploss_enabled"],
+                    respacing_enabled=bool(variant.get("respacing", False)),
                     filters=filters, include_details=False, csv_hash=(csv_hashes or {}).get("5m"))
             except ValueError as exc:
                 window_error = f"infeasible_grid: {exc}"

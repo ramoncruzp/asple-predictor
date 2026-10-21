@@ -124,3 +124,6 @@ def test_smart_actual_variant_matches_settings_switches_and_policy_defaults():
     assert variant["params"] == {}
     effective = validate_params(variant["params"], 10)
     assert {key: effective[key] for key in DEFAULT_SMART_PARAMS} == DEFAULT_SMART_PARAMS
+    respacing = next(row for row in DEFAULT_VARIANTS if row["name"] == "smart_actual_respace")
+    assert respacing["respacing"] is True
+    assert respacing["params"] == variant["params"]
