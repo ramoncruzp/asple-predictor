@@ -44,10 +44,10 @@ class Settings(BaseSettings):
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
     grid_policy_enabled: bool = Field(True, validation_alias="GRID_POLICY_ENABLED")
     adjust_idle_shrink_enabled: bool = Field(False, validation_alias="ADJUST_IDLE_SHRINK_ENABLED")
-    stoploss_enabled: bool = Field(True, validation_alias="STOPLOSS_ENABLED")
-    smart_adjust_enabled: bool = Field(True, validation_alias="SMART_ADJUST_ENABLED")
-    smart_close_wait_enabled: bool = Field(False, validation_alias="SMART_CLOSE_WAIT_ENABLED")
-    advisor_vol_spacing_enabled: bool = Field(False, validation_alias="ADVISOR_VOL_SPACING_ENABLED")
+    stoploss_enabled: bool = Field(False, validation_alias="STOPLOSS_ENABLED")
+    smart_adjust_enabled: bool = Field(False, validation_alias="SMART_ADJUST_ENABLED")
+    smart_close_wait_enabled: bool = Field(True, validation_alias="SMART_CLOSE_WAIT_ENABLED")
+    advisor_vol_spacing_enabled: bool = Field(True, validation_alias="ADVISOR_VOL_SPACING_ENABLED")
     scanner_min_volume_24h: float = Field(SCANNER_DEFAULTS["min_volume_24h"], gt=0, validation_alias="SCANNER_MIN_VOLUME_24H")
     scanner_max_spread_bps: float = Field(SCANNER_DEFAULTS["max_spread_bps"], gt=0, validation_alias="SCANNER_MAX_SPREAD_BPS")
     scanner_min_spacing_pct: float = Field(SCANNER_DEFAULTS["min_spacing_pct"], gt=0, validation_alias="SCANNER_MIN_SPACING_PCT")
@@ -119,25 +119,25 @@ APP_FLAG_DEFINITIONS = {
             "por debajo de su precio de compra menos su stop_loss_pct (5 % por defecto). Apagado, esa regla "
             "no se ejecuta y las posiciones esperan su venta normal (la pérdida queda sin realizar y puede "
             "crecer). No afecta a las demás protecciones de la política. El cambio aplica en el siguiente "
-            "ciclo del monitor sin reiniciar."
+            "ciclo del monitor sin reiniciar. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí."
         ),
-        "default": True,
+        "default": False,
         "requires_restart": False,
     },
     "smart_adjust_enabled": {
         "label": "ADJUST automático de Smart",
-        "description": "Encendido = como hoy: Smart recentra el rango cuando el precio se acerca al borde. Apagado = el rango no se mueve; las pausas y cierres siguen activos. En simulación XRP fuera de muestra, el ADJUST actual restó entre 1,0 y 1,3 USDT/mes por cada 100.",
-        "default": True, "requires_restart": False,
+        "description": "Encendido = como hoy: Smart recentra el rango cuando el precio se acerca al borde. Apagado = el rango no se mueve; las pausas y cierres siguen activos. En simulación XRP fuera de muestra, el ADJUST actual restó entre 1,0 y 1,3 USDT/mes por cada 100. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí.",
+        "default": False, "requires_restart": False,
     },
     "smart_close_wait_enabled": {
         "label": "Fuera de rango: esperar en vez de cerrar",
-        "description": "Apagado = como hoy: si el precio sale del rango más de 5 %, el grid se cierra para siempre. Encendido = el grid se pausa, conserva su inventario con las ventas puestas y se reactiva cuando el precio vuelve al rango; no se cierra por tiempo de pausa. Solo la pérdida máxima del grid (10 %) lo cierra.",
-        "default": False, "requires_restart": False,
+        "description": "Apagado = como hoy: si el precio sale del rango más de 5 %, el grid se cierra para siempre. Encendido = el grid se pausa, conserva su inventario con las ventas puestas y se reactiva cuando el precio vuelve al rango; no se cierra por tiempo de pausa. Solo la pérdida máxima del grid (7 %) lo cierra. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí.",
+        "default": True, "requires_restart": False,
     },
     "advisor_vol_spacing_enabled": {
         "label": "Espaciado por volatilidad",
-        "description": "Apagado = como hoy: el Advisor usa el máximo de niveles que deja 0,7 % de margen (celdas chicas, muchas comisiones). Encendido = separa los niveles según la volatilidad (≈0,9·σ de 24 h): menos niveles y más ganancia por ciclo. En simulación XRP fuera de muestra: +0,75 USDT/mes por cada 100 [IC +0,40; +1,09].",
-        "default": False, "requires_restart": False,
+        "description": "Apagado = como hoy: el Advisor usa el máximo de niveles que deja 0,7 % de margen (celdas chicas, muchas comisiones). Encendido = separa los niveles según la volatilidad (≈0,9·σ de 24 h): menos niveles y más ganancia por ciclo. En simulación XRP fuera de muestra: +0,75 USDT/mes por cada 100 [IC +0,40; +1,09]. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí.",
+        "default": True, "requires_restart": False,
     },
 }
 

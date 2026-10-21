@@ -17,8 +17,8 @@ def _cells():
 
 
 def test_new_global_flags_have_live_defaults_and_restart_metadata():
-    expected = {"smart_adjust_enabled": True, "smart_close_wait_enabled": False,
-                "advisor_vol_spacing_enabled": False}
+    expected = {"smart_adjust_enabled": False, "smart_close_wait_enabled": True,
+                "advisor_vol_spacing_enabled": True, "stoploss_enabled": False}
     for key, default in expected.items():
         assert APP_FLAG_DEFINITIONS[key]["default"] is default
         assert APP_FLAG_DEFINITIONS[key]["requires_restart"] is False

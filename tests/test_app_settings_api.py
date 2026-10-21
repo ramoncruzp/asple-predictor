@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from api.routes import grid_control
 from api.routes import app_settings
-from config.settings import Settings, apply_app_flag_overrides
+from config.settings import APP_FLAG_DEFINITIONS, Settings, apply_app_flag_overrides
 from database.db_manager import DBManager
 
 
@@ -52,11 +52,25 @@ def test_get_lists_allowlisted_flag_with_default_origin(tmp_path):
     }
     stoploss = rows["stoploss_enabled"]
     assert stoploss["label"] == "Stop-loss por celda"
-    assert stoploss["current"] is True and stoploss["default"] is True
+    assert stoploss["current"] is False and stoploss["default"] is False
     assert stoploss["origin"] == "default" and stoploss["requires_restart"] is False
     assert "esa regla no se ejecuta" in stoploss["description"]
     assert "la p\u00e9rdida queda sin realizar y puede crecer" in stoploss["description"]
     assert "siguiente ciclo del monitor sin reiniciar" in stoploss["description"]
+
+
+def test_phase33_defaults_apply_without_database_overrides_and_descriptions_are_tagged(tmp_path):
+    app, db, settings, _client = _app(tmp_path)
+    expected = {"advisor_vol_spacing_enabled": True, "smart_adjust_enabled": False,
+                "smart_close_wait_enabled": True, "stoploss_enabled": False}
+    assert {key: getattr(settings, key) for key in expected} == expected
+    assert db.list_app_flag_overrides() == []
+    suffix = "Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí."
+    assert all(APP_FLAG_DEFINITIONS[key]["description"].endswith(suffix) for key in expected)
+    db.set_app_flag_override("smart_adjust_enabled", True, previous=False, origin="default")
+    restarted = Settings(_env_file=None, GRID_API_TOKEN="local-test")
+    apply_app_flag_overrides(restarted, db)
+    assert restarted.smart_adjust_enabled is True
 
 
 def test_confirmed_enable_persists_mutates_live_settings_and_allows_grid_toggle(tmp_path):
@@ -157,7 +171,7 @@ def test_stoploss_flag_can_be_disabled_without_confirm_and_survives_restart(tmp_
     listed = client.get("/api/settings/flags")
     assert listed.status_code == 200
     stoploss, = [row for row in listed.json()["flags"] if row["key"] == "stoploss_enabled"]
-    assert stoploss["current"] is True and stoploss["default"] is True
+    assert stoploss["current"] is False and stoploss["default"] is False
     assert stoploss["origin"] == "default"
 
     disabled = client.post("/api/settings/flags", json={
