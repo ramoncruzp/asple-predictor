@@ -745,7 +745,7 @@ def evaluate_grid(
         close_reasons.append("out_of_range")
     waiting_out_of_range = "out_of_range_wait" in (pause_reasons or ())
     if (status == "PAUSED" and pause_hours is not None and pause_hours >= effective["pause_max_h"]
-            and not (effective["out_of_range_mode"] == "wait" and waiting_out_of_range)):
+            and effective["out_of_range_mode"] != "wait"):
         close_reasons.append("pause_max_h")
     if pnl <= -effective["max_loss_pct"]:
         close_reasons.append("max_loss_pct")
