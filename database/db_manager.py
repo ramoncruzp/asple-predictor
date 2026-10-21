@@ -456,10 +456,11 @@ class DBManager:
         with self.engine.begin() as conn:
             p = conn.execute(select(self.predictions).where(self.predictions.c.prediction_id == prediction_id)).mappings().one()
             change = (float(price_at_verification) - p["price_at_prediction"]) / p["price_at_prediction"] * 100
-            actual_label = int(change / 100 > TARGET_UP_THRESHOLD)
-            actual = "UP" if actual_label == 1 else "NOT_UP"
-            correct = (int(actual_label == 1) if p["signal"] == "ALCISTA" else
-                       int(actual_label == 0) if p["signal"] == "BAJISTA" else None)
+            is_down_model = p["model_name"] == "model_a_down"
+            actual_label = int(change < 0) if is_down_model else int(change / 100 > TARGET_UP_THRESHOLD)
+            actual = ("DOWN" if actual_label else "NOT_DOWN") if is_down_model else ("UP" if actual_label else "NOT_UP")
+            correct = (int(actual_label == 1) if p["signal"] == ("BAJISTA" if is_down_model else "ALCISTA") else
+                       int(actual_label == 0) if p["signal"] == ("ALCISTA" if is_down_model else "BAJISTA") else None)
             outcome = {"prediction_id": prediction_id, "verified_at": datetime.now(timezone.utc), "price_at_verification": float(price_at_verification),
                        "price_change_pct": change, "actual_direction": actual, "was_correct": correct,
                        "why_correct": self._json({"signal": p["signal"]}) if correct is not None and correct else None,
@@ -620,6 +621,10 @@ class DBManager:
                 item["was_correct"] = item.get("was_correct") if item["is_verified"] else None
                 rows.append(item)
             return rows
+
+    def get_latest_prediction(self, symbol: str, interval: str, model_name: str):
+        rows = self.get_predictions_with_outcomes(symbol, interval, model_name, limit=1)
+        return rows[0] if rows else None
 
     def get_prediction_signal_summary(self, symbol: str, interval: str, model_name: str) -> dict:
         p, o = self.predictions.c, self.outcomes.c

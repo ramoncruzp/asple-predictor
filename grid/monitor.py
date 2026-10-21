@@ -16,6 +16,8 @@ from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_de
                          idle_shrink_decision, plan_dust_sweep, profit_close_retry_delay,
                          respace_decision,
                          stoploss_candidates, PolicyDecision)
+from grid.policy import direction_gate
+from config.settings import DIRECTION_FILTER_THRESHOLD
 from grid.volatility_provider import VolatilityProvider
 from data.exchange_filters import SymbolFilters
 from grid.adjust import plan_adjust_with_shrink
@@ -78,6 +80,52 @@ class GridMonitor:
         saved = self.db.add_grid_event(**event_values)
         if saved:
             self._event_count += 1
+
+    def _direction_shadow(self, grid, now, mid, levels):
+        if grid.get("strategy") != "smart":
+            return None, False
+        symbol = str(grid["symbol"])
+        prediction = self.db.get_latest_prediction(symbol, "1h", "model_a_down")
+        p_down = None if prediction is None else prediction.get("probability_up")
+        predicted_at = None if prediction is None else prediction.get("predicted_at")
+        fresh = False
+        if predicted_at is not None:
+            try:
+                age_seconds = (_utc(now) - _utc(predicted_at)).total_seconds()
+                fresh = 0 <= age_seconds <= 2 * 3600
+            except (TypeError, ValueError):
+                fresh = False
+        previous = self.db.get_last_event(int(grid["id"]), "DIRECTION_SHADOW")
+        if previous is None or (_utc(now) - _utc(previous["ts"])).total_seconds() >= 3600:
+            blocked = direction_gate(p_down, DIRECTION_FILTER_THRESHOLD) if fresh else False
+            self._emit({"event_type": "DIRECTION_SHADOW", "grid_id": int(grid["id"]),
+                "reason": "evaluated" if fresh else ("missing_prediction" if prediction is None else "stale_prediction"),
+                "price": mid, "details": {"symbol": symbol, "p_down": p_down,
+                    "would_block": blocked, "buys_open": sum(row.get("state") == "BUY_OPEN" for row in levels),
+                    "mid": mid, "prediction_at": predicted_at, "fresh": fresh,
+                    "threshold": DIRECTION_FILTER_THRESHOLD}})
+        return p_down, fresh
+
+    def _cancel_direction_buys(self, grid, levels, mid):
+        for level in levels:
+            if level.get("state") != "BUY_OPEN" or level.get("order_id") is None:
+                continue
+            try:
+                result = self.exchange.cancel_order(grid["symbol"], int(level["order_id"]))
+                if float(result.get("executed_qty") or 0) > 0:
+                    self.engine._settle_canceled_buy_partial(grid, level, result,
+                        "direction_filter", place_sell=True)
+                elif str(result.get("status", "")).upper() == "CANCELED":
+                    self.db.update_level(int(grid["id"]), int(level["level_idx"]),
+                        state="IDLE", order_id=None, client_order_id=None, buy_client_order_id=None)
+                    self._emit({"event_type": "DIRECTION_BUY_CANCELED", "grid_id": int(grid["id"]),
+                        "level_idx": int(level["level_idx"]), "order_id": int(level["order_id"]),
+                        "reason": "bearish_forecast", "price": mid,
+                        "details": {"sells_preserved": True}})
+            except Exception as exc:
+                self._emit({"event_type": "DIRECTION_FILTER_FAILED", "grid_id": int(grid["id"]),
+                    "level_idx": int(level["level_idx"]), "reason": str(exc), "price": mid,
+                    "details": {"order_id": level.get("order_id")}})
 
     def _record_pause_shadow(self, grid, run_id, now, mid, sigma_4h, sigma_24h, actual_action):
         """Persist audit-only pause probabilities; failures never affect policy actions."""
@@ -459,6 +507,11 @@ class GridMonitor:
                 try:
                     current = dict(self.db.get_grid(grid_id) or grid)
                     stored_params = dict(current.get("params") or {})
+                    direction_levels = self.db.get_grid_levels(grid_id)
+                    direction_p_down, direction_fresh = self._direction_shadow(
+                        current, now, mid, direction_levels)
+                    direction_enabled = bool(getattr(
+                        self.settings, "smart_direction_filter_enabled", False))
                     monitor_h = stored_params.get("horizon_h", 24)
                     try:
                         monitor_h = float(monitor_h)
@@ -542,6 +595,10 @@ class GridMonitor:
                     # canceled limit sell as an external cancellation.
                     if status_before == "ACTIVE":
                         self.engine.sync_grid(grid_id)
+                        if (direction_enabled and direction_fresh
+                                and direction_gate(direction_p_down, DIRECTION_FILTER_THRESHOLD)):
+                            self._cancel_direction_buys(current,
+                                self.db.get_grid_levels(grid_id), mid)
                     elif status_before == "PAUSED":
                         self.engine.sync_paused(grid_id)
                     elif status_before == "HOLDING":

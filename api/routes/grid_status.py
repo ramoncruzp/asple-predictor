@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import threading
 import time
+import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -24,6 +26,67 @@ from grid.market_book import book_mid
 # separate prefixes) so api/main.py only needs one app.include_router(...)
 # line, per this phase's scope rule.
 router = APIRouter()
+
+
+@router.get("/api/direction/shadow/summary")
+def direction_shadow_summary(request: Request, symbol: str = Query("XRPUSDT")):
+    """Read-only model evidence for one asset; metrics are descriptive, not a live proof."""
+    symbol = str(symbol or "").strip().upper().replace("/", "")
+    if not symbol.endswith("USDT") or len(symbol) < 6:
+        raise HTTPException(422, "symbol debe ser un par USDT")
+    base = symbol[:-4].lower()
+    db = request.app.state.db
+    rows = db.get_predictions_with_outcomes(symbol, "1h", "model_a_down", days=365, limit=10000)
+    timed = [row for row in rows if row.get("verification_status") == "verified"
+             and row.get("verify_delay_h") is not None and float(row["verify_delay_h"]) <= 1.0
+             and row.get("was_correct") is not None]
+    timed.sort(key=lambda row: row.get("predicted_at"))
+    independent = timed[::4]
+    p_values = [float(row["probability_up"]) for row in independent]
+    actual = [1 if row.get("actual_direction") == "DOWN" else 0 for row in independent]
+    accuracy = (sum((p >= .5) == bool(y) for p, y in zip(p_values, actual)) / len(independent)
+                if independent else None)
+    precision = {str(theta): (sum(y for p, y in zip(p_values, actual) if p >= theta)
+                    / sum(p >= theta for p in p_values) if any(p >= theta for p in p_values) else None)
+                 for theta in (.55, .60, .65)}
+    events = db.list_grid_events(event_type="DIRECTION_SHADOW", limit=5000)
+    shadow_events = [e for e in events if (e.get("details") or {}).get("symbol") == symbol]
+    buy_fills = db.list_grid_events(event_type="BUY_FILLED", limit=10000)
+    sell_fills = db.list_grid_events(event_type="SELL_FILLED", limit=10000)
+    blocked_fills = set()
+    lost, cycled_gain = 0, 0
+    for event in shadow_events:
+        details = event.get("details") or {}
+        if not details.get("would_block"):
+            continue
+        t0 = event["ts"]
+        for fill in buy_fills:
+            if fill.get("grid_id") != event.get("grid_id") or fill.get("level_idx") is None:
+                continue
+            age = (fill["ts"] - t0).total_seconds()
+            key = (fill.get("grid_id"), fill.get("level_idx"), fill.get("ts"))
+            if not 0 <= age <= 4 * 3600 or key in blocked_fills:
+                continue
+            cycle = next((sale for sale in sell_fills if sale.get("grid_id") == key[0]
+                and sale.get("level_idx") == key[1] and sale["ts"] > fill["ts"]
+                and sale["ts"] <= fill["ts"] + timedelta(days=90)), None)
+            if cycle is not None:
+                pnl = float((cycle.get("details") or {}).get("cycle_pnl") or 0)
+                lost += pnl < 0
+                cycled_gain += pnl > 0
+                blocked_fills.add(key)
+    metrics_path = Path(__file__).resolve().parents[2] / "models" / "saved" / f"model_a_down_{base}_1h.json"
+    try:
+        artifact_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        artifact_metrics = None
+    return {"symbol": symbol, "model_name": "model_a_down", "threshold": .60,
+        "timely_accuracy": accuracy, "precision": precision, "independent_blocks": len(independent),
+        "timely_predictions": len(timed), "shadow_events": len(shadow_events),
+        "would_block_buy_fills_lost": int(lost), "would_block_buy_fills_cycled_gain": int(cycled_gain),
+        "oos": None if artifact_metrics is None else artifact_metrics.get("oos"),
+        "bank_verdict": None if artifact_metrics is None else artifact_metrics.get("bank_verdict"),
+        "label": "descriptivo; evidencia observacional sin causalidad"}
 
 REPOSITORY_AND_OPEN_STATUSES = sv.OPEN_STATUSES | {"HOLDING"}
 _PRICE_CACHE_TTL = 5.0

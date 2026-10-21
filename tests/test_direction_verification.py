@@ -56,6 +56,21 @@ def test_verification_within_one_hour_uses_current_price():
     db.engine.dispose()
 
 
+def test_down_model_verifies_strict_negative_four_hour_target():
+    db = DBManager("sqlite:///:memory:")
+    predicted = datetime.now(timezone.utc) - timedelta(hours=5)
+    prediction_id = db.save_prediction({
+        "prediction_id": "down-1", "symbol": "XRPUSDT", "interval": "1h",
+        "model_name": "model_a_down", "predicted_at": predicted,
+        "verify_at": predicted + timedelta(hours=4), "probability_up": .8,
+        "signal": "BAJISTA", "confidence": "high", "price_at_prediction": 100.0,
+    })
+    outcome = db.save_outcome(prediction_id, 99.9, verify_delay_h=1)
+    assert outcome["actual_direction"] == "DOWN"
+    assert outcome["was_correct"] == 1
+    db.engine.dispose()
+
+
 def test_five_hour_late_verification_interpolates_at_verify_at():
     db = DBManager("sqlite:///:memory:")
     verify_at = datetime.now(timezone.utc) - timedelta(hours=5)
