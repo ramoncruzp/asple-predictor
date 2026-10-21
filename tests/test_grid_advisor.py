@@ -296,6 +296,18 @@ def test_advisor_defaults_centered_and_keeps_structural_range_available():
     assert result["range_risk"]["horizons"]["72"]["touch_ceiling"] == pytest.approx(.30, abs=.02)
     assert result["simulations"]["sim_start"] is not None
     assert result["simulations"]["sim_days"] < 30
+    assert result["suggested_strategy"] in {"simple", "smart"}
+    assert result["suggested_strategy_reason"]
+    strategies = result["simulations"]["strategies"]
+    simple, smart = strategies.get("simple", {}), strategies.get("smart", {})
+    comparable = all(key in simple and key in smart for key in
+                     ("pnl_total_net_usdt", "max_drawdown_pct"))
+    if comparable:
+        expected = "smart" if (smart["pnl_total_net_usdt"] > simple["pnl_total_net_usdt"]
+            and smart["max_drawdown_pct"] <= simple["max_drawdown_pct"]) else "simple"
+        assert result["suggested_strategy"] == expected
+    else:
+        assert result["suggested_strategy"] == "simple"
     assert "Historia disponible para simular" in result["simulations"]["window_warning"]
     assert "90 pedidos" in result["simulations"]["window_warning"]
     structural = make_client().get("/api/grid/recommend", query={
@@ -304,6 +316,20 @@ def test_advisor_defaults_centered_and_keeps_structural_range_available():
     assert structural["recommended_floor"] == structural["range_structural"]["floor"]
     assert structural["recommended_ceiling"] == structural["range_structural"]["ceiling"]
     assert structural["range_preference_note"] is None
+
+
+@pytest.mark.parametrize(("smart_pnl", "smart_dd", "expected"),
+                         [(8, 1, "smart"), (8, 3, "simple"), (6, 1, "simple")])
+def test_advisor_suggests_smart_only_when_both_simulation_conditions_hold(
+        monkeypatch, smart_pnl, smart_dd, expected):
+    metrics = {
+        "simple": {"pnl_total_net_usdt": 7, "max_drawdown_pct": 2},
+        "smart": {"pnl_total_net_usdt": smart_pnl, "max_drawdown_pct": smart_dd},
+    }
+    monkeypatch.setattr(grid_advisor, "run_simulation",
+        lambda _candles, strategy, **_kwargs: {"metrics": metrics[strategy]})
+    result = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT"}).body
+    assert result["suggested_strategy"] == expected
 
 
 @pytest.mark.parametrize(

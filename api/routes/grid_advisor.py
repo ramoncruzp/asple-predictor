@@ -456,6 +456,21 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         except Exception as exc:
             simulations[strategy] = {**simulation_meta,
                                      "unavailable": f"{type(exc).__name__}: {exc}"}
+    simple, smart = simulations.get("simple", {}), simulations.get("smart", {})
+    suggested_strategy = "simple"
+    suggested_strategy_reason = "Se sugiere Simple por defecto; Smart no supera simultáneamente el P&L y el drawdown máximo de Simple en esta simulación."
+    try:
+        simple_pnl = float(simple["pnl_total_net_usdt"])
+        smart_pnl = float(smart["pnl_total_net_usdt"])
+        simple_dd = float(simple["max_drawdown_pct"])
+        smart_dd = float(smart["max_drawdown_pct"])
+        if all(isfinite(value) for value in (simple_pnl, smart_pnl, simple_dd, smart_dd)) and smart_pnl > simple_pnl and smart_dd <= simple_dd:
+            suggested_strategy = "smart"
+            suggested_strategy_reason = "Smart logra mayor P&L neto que Simple y su drawdown máximo no es mayor en esta simulación."
+        else:
+            suggested_strategy_reason = "Simple conserva la sugerencia: Smart no logra a la vez mayor P&L neto y drawdown máximo igual o menor en esta simulación."
+    except (KeyError, TypeError, ValueError):
+        suggested_strategy_reason = "Se sugiere Simple porque no hay métricas comparables disponibles para ambas simulaciones."
     range_risk = estimate_range_risk(current, floor, ceiling, sigma_24h,
         vol_source_effective=vol_source_effective,
         vol_source_requested=volatility["requested"])
@@ -514,6 +529,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
     if actual_range_mode == "centrado" and centered["limited_by_profile"]:
         range_mode_reason = "Rango centrado limitado por el perfil."
     return {"symbol": symbol, "capital": capital, "current_price": current, "recommended_floor": floor,
+        "suggested_strategy": suggested_strategy, "suggested_strategy_reason": suggested_strategy_reason,
         **({"unready_coin_warning": unready_coin_warning,
             "history_days": readiness.get("history_days")} if unready_coin else {}),
         "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids,

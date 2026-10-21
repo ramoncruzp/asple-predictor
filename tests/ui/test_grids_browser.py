@@ -193,6 +193,7 @@ def test_loan_pairs_panel_renders_conclusive_and_nonconclusive_without_verdict_c
 
 def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_page):
     advisor = {"symbol":"XRPUSDT","current_price":100,"recommended_floor":80.123456,"recommended_ceiling":120.987654,
+        "suggested_strategy":"simple","suggested_strategy_reason":"Simple suggestion reason.",
         "range_pct":40,"range_mode":"centrado","recommended_range":"centrado",
         "range_centered":{"floor":90,"ceiling":111,"touch_probability_each_side_72h":.3,"sigma_widened":True,"sigma_widen_factor":1.25},
         "range_structural":{"floor":80.123456,"ceiling":120.987654},
@@ -226,6 +227,13 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     with ui_page.expect_request(lambda request: "/api/grid/recommend" in request.url):
         ui_page.evaluate("loadGrid({preventDefault(){},target:document.querySelector('#grid-form')})")
     expect(ui_page.locator(".advisor-cascade")).to_contain_text("comisiones")
+    expect(ui_page.locator(".advisor-simulation")).to_contain_text("Sugerida")
+    expect(ui_page.locator(".advisor-suggestion-reason")).not_to_be_empty()
+    cards = ui_page.locator(".advisor-simulation-grid > div")
+    expect(ui_page.locator(".advisor-simulation-grid .badge")).to_have_count(1)
+    expect(cards.nth(0 if advisor["suggested_strategy"] == "simple" else 1)).to_contain_text("Sugerida")
+    expect(cards.nth(1)).to_contain_text("Tope de inventario (30 % del capital)")
+    expect(cards.nth(0)).not_to_contain_text("Tope de inventario")
     expect(ui_page.locator(".advisor-risk")).to_contain_text("Pérdida no realizada estimada al piso")
     assert ui_page.locator("#grid-result .advisor-risk > p.scanner-warning:empty").count() == 0
     expect(ui_page.locator("#grid-result")).to_contain_text("Con este capital por celda el grid no podrá prestar ni añadir niveles; solo podrá reducirlos")
@@ -271,15 +279,15 @@ def test_grid_advisor_explains_margin_risk_and_prefills_scanner(live_server, ui_
     expect(ui_page.locator("#sc-levels")).to_have_value("20")
     expect(ui_page.locator("#sc-margin-target")).to_have_value("0.7")
     expect(ui_page.locator("#sc-spacing")).to_have_value("2")
-    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
-    expect(ui_page.locator("#sc-create-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-strategy")).to_have_value("simple")
+    expect(ui_page.locator("#sc-create-strategy")).to_have_value("simple")
     ui_page.evaluate("sessionStorage.setItem('asple-advisor-open', JSON.stringify({symbol:'XRPUSDT'}))")
     ui_page.reload()
-    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
-    expect(ui_page.locator("#sc-create-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-strategy")).to_have_value("simple")
+    expect(ui_page.locator("#sc-create-strategy")).to_have_value("simple")
     ui_page.evaluate("sessionStorage.setItem('asple-advisor-open', JSON.stringify({symbol:'XRPUSDT',strategy:'simple'}))")
     ui_page.reload()
-    expect(ui_page.locator("#sc-strategy")).to_have_value("smart")
+    expect(ui_page.locator("#sc-strategy")).to_have_value("simple")
     expect(ui_page.locator("#sc-create-strategy")).to_have_value("simple")
     assert_no_js_errors(ui_page)
 
