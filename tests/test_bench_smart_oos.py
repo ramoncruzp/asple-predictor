@@ -3,8 +3,12 @@ from __future__ import annotations
 import numpy as np
 
 from grid.sim.data import CandleData
-from scripts.bench_smart_oos import (history_before_window, paired_block_bootstrap,
-                                     run_benchmark, summarize)
+from data.exchange_filters import SymbolFilters
+from grid.levels import compute_lines
+from config.settings import Settings
+from grid.policy import DEFAULT_SMART_PARAMS, validate_params
+from scripts.bench_smart_oos import (DEFAULT_VARIANTS, history_before_window, paired_block_bootstrap,
+                                     load_symbol_filters, run_benchmark, summarize)
 
 
 def _hourly(close):
@@ -64,3 +68,15 @@ def test_walk_forward_benchmark_runs_on_synthetic_hourly_and_five_minute_candles
     assert result["summary"]["usable_windows"] >= 3
     assert all("results" in row for row in result["windows"])
     assert all(row["start"] >= candles5.timestamp[0] + 2 * 86400 for row in result["windows"])
+
+
+def test_smart_actual_variant_matches_settings_switches_and_policy_defaults():
+    variant = next(row for row in DEFAULT_VARIANTS if row["name"] == "smart_actual")
+    settings = Settings.model_construct()
+    assert variant["adjust"] is settings.smart_adjust_enabled is False
+    assert variant["close_wait"] is settings.smart_close_wait_enabled is True
+    assert variant["stoploss"] is settings.stoploss_enabled is False
+    assert variant["vol_spacing"] is settings.advisor_vol_spacing_enabled is True
+    assert variant["params"] == {}
+    effective = validate_params(variant["params"], 10)
+    assert {key: effective[key] for key in DEFAULT_SMART_PARAMS} == DEFAULT_SMART_PARAMS
