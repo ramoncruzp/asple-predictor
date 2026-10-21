@@ -36,10 +36,10 @@ def test_defaults_and_parameter_validation_rules():
     assert DEFAULT_SMART_PARAMS == {
         "horizon_h": 4, "sigma_scale": 1.15,
         "pause_enter_prob": 0.10, "pause_exit_prob": 0.05,
-        "trapped_age_h": 24, "trapped_cap_pct": 50.0,
+        "trapped_age_h": 0.25, "trapped_cap_pct": 30.0,
         "trapped_exit_factor": 0.8, "min_free_cells": 2,
         "pause_max_h": 48, "close_out_of_range_pct": 5.0,
-        "max_loss_pct": 10.0, "stop_loss_pct": 5.0,
+        "max_loss_pct": 7.0, "stop_loss_pct": 5.0,
         "adjust_enabled": True, "adjust_trigger_z": 0.75,
         "adjust_shrink_n": True,
         "adjust_idle_shrink": False, "idle_every_h": 24.0,
@@ -124,6 +124,30 @@ def test_trapped_capital_counts_only_old_sell_inventory_and_reports_unknown_age(
     assert trapped_capital_pct(cells, NOW, params, 100) == pytest.approx(40.0)
     decision = evaluate_grid("ACTIVE", params, cells, 100, 90, 110, 100, None, None, NOW)
     assert decision.metrics["unknown_age"] == [2]
+
+
+def test_new_trapped_defaults_pause_at_thirty_percent_and_resume_below_twenty_four():
+    assert DEFAULT_SMART_PARAMS["trapped_age_h"] == 0.25
+    params = {**DEFAULT_SMART_PARAMS, "pause_enter_prob": None}
+    trapped = [cell("SELL_OPEN", entry_price=30, held_qty=1,
+                    bought_at=NOW - timedelta(minutes=20))] + [cell() for _ in range(3)]
+    paused = evaluate_grid("ACTIVE", params, trapped, 100, 90, 110, 100, None, None, NOW)
+    assert paused.action == "PAUSE" and "trapped_capital_pct" in paused.reasons
+    assert paused.metrics["trapped_capital_pct"] == pytest.approx(30)
+    resumed = evaluate_grid("PAUSED", params, [cell("SELL_OPEN", entry_price=23.9,
+        held_qty=1, bought_at=NOW - timedelta(minutes=20))] + [cell() for _ in range(3)],
+        100, 90, 110, 100, None, NOW, NOW, pause_reasons=("trapped_capital_pct",))
+    assert resumed.action == "RESUME"
+
+
+def test_wait_mode_uses_seven_percent_max_loss_and_never_pause_age_close():
+    params = {**DEFAULT_SMART_PARAMS, "out_of_range_mode": "wait", "pause_enter_prob": None}
+    paused = evaluate_grid("PAUSED", params, [cell() for _ in range(4)], 100, 90, 110, 100,
+        None, NOW - timedelta(hours=49), NOW, pause_reasons=("break_prob",))
+    assert paused.action == "NONE" and "pause_max_h" not in paused.reasons
+    loss = evaluate_grid("PAUSED", params, [cell("DONE", pnl=-7)], 100, 90, 110, 100,
+        None, NOW - timedelta(hours=1), NOW, pause_reasons=("break_prob",))
+    assert loss.action == "CLOSE_REPOSITORY" and "max_loss_pct" in loss.reasons
 
 
 def test_free_cells_counts_only_idle_and_buy_open():

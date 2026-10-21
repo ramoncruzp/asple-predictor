@@ -51,6 +51,21 @@ def test_smart_grid_requests_volatility_at_its_selected_horizon():
     assert provider.calls == [("XRPUSDT", 4)]
 
 
+def test_smart_grid_persists_new_defaults_but_keeps_explicit_saved_parameters():
+    engine, db, _exchange = make_engine()
+    fresh = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart")
+    fresh_params = db.get_grid(fresh["id"])["params"]
+    assert fresh_params["trapped_cap_pct"] == 30
+    assert fresh_params["trapped_age_h"] == .25
+    assert fresh_params["max_loss_pct"] == 7
+    saved_engine, saved_db, _saved_exchange = make_engine()
+    saved = saved_engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart",
+        params={"trapped_cap_pct": 50, "trapped_age_h": 24, "max_loss_pct": 10})
+    saved_params = saved_db.get_grid(saved["id"])["params"]
+    assert (saved_params["trapped_cap_pct"], saved_params["trapped_age_h"],
+            saved_params["max_loss_pct"]) == (50, 24, 10)
+
+
 def test_grid_capital_default_is_copied_and_simultaneous_limit_is_enforced():
     engine, db, exchange = make_engine()
     engine.settings.max_grids_simultaneos = 1
