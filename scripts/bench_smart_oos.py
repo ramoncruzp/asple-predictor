@@ -140,7 +140,7 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
                   step_days: int = 7, history_days: int = 90, range_mode: str = "centered",
                   fee_pct: float = .1, quick: bool = False, csv_hashes: dict | None = None,
                   filters: SymbolFilters | None = None,
-                  filters_source: str | None = None) -> dict:
+                  filters_source: str | None = None, direction_signal=None) -> dict:
     filters = FILTERS if filters is None else filters
     filters_source = filters_source or "fallback: grid.sim.runner.FILTERS (no cached symbol filters)"
     bar = 300
@@ -180,6 +180,11 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
         sigma_values = causal[first - warm_first:]
         window = CandleData(*(getattr(candles_5m, key)[first:last] for key in
                               ("timestamp", "open", "high", "low", "close")), gaps=0)
+        signal_values = None
+        if direction_signal is not None:
+            signal_ts, signal_p = direction_signal
+            prior = np.searchsorted(signal_ts, window.timestamp, side="left") - 1
+            signal_values = np.array([signal_p[j] if j >= 0 else np.nan for j in prior])
         result_variants = {}
         level_counts, level_rules = {}, {}
         window_error = None
@@ -199,7 +204,9 @@ def run_benchmark(candles_5m: CandleData, candles_1h: CandleData, *, symbol: str
                     close_wait_enabled=options["close_wait_enabled"],
                     stoploss_enabled=options["stoploss_enabled"],
                     respacing_enabled=bool(variant.get("respacing", False)),
-                    filters=filters, include_details=False, csv_hash=(csv_hashes or {}).get("5m"))
+                    filters=filters, include_details=False, csv_hash=(csv_hashes or {}).get("5m"),
+                    direction_signal=signal_values if "direction_threshold" in variant else None,
+                    direction_threshold=float(variant.get("direction_threshold", 0.60)))
             except ValueError as exc:
                 window_error = f"infeasible_grid: {exc}"
                 break
@@ -301,6 +308,7 @@ def main(argv=None) -> int:
                         help="Binance symbolInfo/exchangeInfo JSON (defaults to data/cache/{symbol}_filters.json)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--signal-csv", type=Path)
     args = parser.parse_args(argv)
     symbol = args.symbol.upper().replace("/", "")
     p5 = args.data_dir / f"{symbol.lower()}_5m.csv"
@@ -315,6 +323,21 @@ def main(argv=None) -> int:
     filters_source = ("fallback: grid.sim.runner.FILTERS (no cached symbol filters)"
                       if filters_path is None else str(filters_path))
     variants = json.loads(json.dumps(DEFAULT_VARIANTS))
+    direction_signal = None
+    if args.signal_csv is not None:
+        if not args.signal_csv.is_file():
+            parser.error(f"signal CSV does not exist: {args.signal_csv}")
+        signal_frame = pd.read_csv(args.signal_csv)
+        if not {"timestamp", "p_down"}.issubset(signal_frame.columns):
+            parser.error("signal CSV requires timestamp,p_down")
+        signal_frame["timestamp"] = (pd.to_datetime(signal_frame["timestamp"], utc=True).astype("int64") // 10**9)
+        signal_frame = signal_frame.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+        direction_signal = (signal_frame["timestamp"].to_numpy(dtype="int64"),
+                            signal_frame["p_down"].to_numpy(dtype="float64"))
+        variants.extend({"name": f"smart_actual_dir@{threshold:.2f}", "strategy": "smart",
+                         "params": {}, "adjust": False, "close_wait": True, "stoploss": False,
+                         "vol_spacing": True, "loans": False, "compound": False,
+                         "direction_threshold": threshold} for threshold in (.55, .60, .65))
     if args.variants:
         raw = Path(args.variants)
         variants = json.loads(raw.read_text(encoding="utf-8") if raw.is_file() else args.variants)
@@ -328,7 +351,8 @@ def main(argv=None) -> int:
     result = run_benchmark(candles5, candles1, symbol=symbol, capital=args.capital,
         variants=variants, window_days=args.window_days, step_days=args.step_days,
         history_days=args.history_days, range_mode=args.range_mode, fee_pct=args.fee_pct,
-        quick=args.quick, csv_hashes=hashes, filters=filters, filters_source=filters_source)
+        quick=args.quick, csv_hashes=hashes, filters=filters, filters_source=filters_source,
+        direction_signal=direction_signal)
     write_report(result, args.out)
     print(args.out / "summary.md")
     return 0

@@ -9,6 +9,17 @@ from math import erf, exp, isfinite, log, sqrt
 from typing import Any, Mapping
 
 
+def direction_gate(p_down: float | None, threshold: float) -> bool:
+    """Return whether a bearish forecast blocks new grid buys."""
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError("threshold debe estar entre 0 y 1")
+    try:
+        probability = float(p_down)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= probability <= 1.0 and probability >= threshold
+
+
 DEFAULT_SMART_PARAMS: dict[str, float | int | str | None] = {
     "horizon_h": 4,
     "sigma_scale": 1.15,

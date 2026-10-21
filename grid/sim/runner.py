@@ -14,7 +14,7 @@ from grid.adjust import plan_adjust_with_shrink
 from grid.levels import compute_lines, plan_cells
 from grid.policy import (PolicyDecision, adjust_decision, evaluate_grid, evaluate_target,
                          evaluate_max_days, idle_shrink_decision, respace_decision,
-                         stoploss_candidates, validate_params)
+                         stoploss_candidates, validate_params, direction_gate)
 from grid.sim.data import ewma_sigma_24h
 from grid.sim.exchange import SimExchange, SimInsufficientFunds
 from grid.sim.metrics import calculate_metrics
@@ -85,7 +85,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
                    fee_asset=None, include_details=False, trace_callback=None,
                    sigma_values=None, idle_shrink_enabled=False, adjust_enabled_global=True,
-                   stoploss_enabled=True, close_wait_enabled=False, respacing_enabled=False):
+                   stoploss_enabled=True, close_wait_enabled=False, respacing_enabled=False,
+                   direction_signal=None, direction_threshold=0.60):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -106,6 +107,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         raise ValueError("loans require the smart strategy")
     target_enabled = effective.get("target_pct") is not None or effective.get("target_usdt") is not None
     closes = candles.close
+    direction_values = direction_signal
+    if direction_values is not None and len(direction_values) != len(candles.timestamp):
+        raise ValueError("direction_signal debe alinearse con candles.timestamp")
     initial = float(closes[0])
     if width_pct is not None:
         half = float(width_pct) / 200.0
@@ -194,6 +198,17 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     for i, (ts, lo, hi, close) in enumerate(zip(candles.timestamp, candles.low, candles.high, closes)):
         resumed_this_pass = False
         sigma_used = float(sigma[i])
+        previous_p_down = (direction_values[i - 1] if direction_values is not None and i > 0 else None)
+        direction_blocked = bool(strategy == "smart" and i % resync_candles == 0 and
+                                 direction_gate(previous_p_down, direction_threshold))
+        if direction_blocked:
+            for c in cells:
+                order = exchange.orders.get(c["level_idx"])
+                if order is not None and order.side == "BUY":
+                    exchange.cancel(c["level_idx"], "BUY")
+                    c["state"] = "IDLE"
+                    events.append({"ts": int(ts), "type": "BUY_CANCELED",
+                                   "level_idx": c["level_idx"], "reason": "DIRECTION_GATE"})
         fills = exchange.process(i, lo, hi, close, cells)
         for idx, side, price, qty, fee, qty_net in fills:
             cell = cells[idx]
@@ -620,7 +635,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                     if c["state"] == "SELL_OPEN" and idx not in exchange.orders:
                         exchange.place(idx, "SELL", c["sell_price"], c["held_qty"], i + 1, i)
                     elif (c["state"] in {"IDLE", "BUY_OPEN"} and idx not in exchange.orders
-                          and status == "ACTIVE" and c["price"] < Decimal(str(close))):
+                          and status == "ACTIVE" and not direction_blocked
+                          and c["price"] < Decimal(str(close))):
                         c["state"] = "BUY_OPEN"
                         try:
                             exchange.place(idx, "BUY", c["price"], c["qty"], i + 1, i)
