@@ -34,9 +34,11 @@ def test_benchmark_summary_calculates_synthetic_known_pnl_and_tail():
     for index, (reference, candidate) in enumerate(((1.0, 2.0), (2.0, 1.0), (3.0, -1.0))):
         rows.append({"start_iso": f"window-{index}", "results": {
             "ref": {"metrics": {"pnl_total_net_usdt": reference, "max_drawdown_pct": 1,
-                                 "pause_pct": 5}},
+                                 "pause_pct": 5, "cycle_realized_net_usdt": reference - .2,
+                                 "cycles_completed": index + 2}},
             "candidate": {"metrics": {"pnl_total_net_usdt": candidate, "max_drawdown_pct": 2,
-                                       "pause_pct": 10}},
+                                       "pause_pct": 10, "cycle_realized_net_usdt": candidate - .4,
+                                       "cycles_completed": index + 3}},
         }})
     result = summarize(rows, variants, 7)
     assert result["variants"]["candidate"]["mean_pnl"] == (2 + 1 - 1) / 3
@@ -44,6 +46,8 @@ def test_benchmark_summary_calculates_synthetic_known_pnl_and_tail():
     assert result["variants"]["candidate"]["worst_pnl"] == -1
     assert result["variants"]["candidate"]["mean_drawdown_pct"] == 2
     assert result["variants"]["candidate"]["mean_live_time_pct"] == 90
+    assert result["variants"]["candidate"]["mean_cycle_realized_net_usdt"] == (1.6 + .6 - 1.4) / 3
+    assert result["variants"]["candidate"]["mean_cycles"] == 4
     assert result["variants"]["candidate"]["vs_reference"]["wins"] == 1
 
 

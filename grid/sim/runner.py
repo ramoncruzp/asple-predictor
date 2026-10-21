@@ -192,10 +192,13 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         sigma_used = float(sigma[i])
         fills = exchange.process(i, lo, hi, close, cells)
         for idx, side, price, qty, fee, qty_net in fills:
-            events.append({"ts": int(ts), "type": f"{side}_FILLED", "level_idx": idx,
-                           "price": str(price), "qty": str(qty), "qty_net": str(qty_net),
-                           "fee": str(fee)})
             cell = cells[idx]
+            fill_event = {"ts": int(ts), "type": f"{side}_FILLED", "level_idx": idx,
+                          "price": str(price), "qty": str(qty), "qty_net": str(qty_net),
+                          "fee": str(fee)}
+            if side == "SELL":
+                fill_event["cycle_pnl_net_usdt"] = str(cell.get("last_cycle_pnl", 0))
+            events.append(fill_event)
             if side == "SELL" and effective.get("compound_enabled") is True:
                 decision = compound_amount(cell.get("last_cycle_pnl", 0),
                     cell.get("capital_base", cell["capital"]), cell.get("capital_compound", 0),
@@ -710,6 +713,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    "dust_spacing_fraction_mean": float(dust_total / len(dust_costs) / spacing)
                        if dust_costs and spacing else 0.0,
                    "realized_net": float(metric["pnl_realized_net_usdt"]),
+                   "cycle_realized_net_usdt": sum(
+                       float(event["cycle_pnl_net_usdt"]) for event in events
+                       if event.get("type") == "SELL_FILLED"),
                    "cycles": int(metric["cycles_completed"])})
     intervention_types = {"PAUSE", "RESUME", "ADJUST", "ADJUST_REJECTED", "CLOSE_REPOSITORY", "STOP_LOSS"}
     metric["interventions_by_type"] = {

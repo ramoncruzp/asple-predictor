@@ -226,6 +226,8 @@ def summarize(windows: list[dict], variants: list[dict], step_days: int) -> dict
         values = [(row, row["results"][name]["metrics"]) for row in usable]
         pnl = np.asarray([m["pnl_total_net_usdt"] for _, m in values], dtype=float)
         dd = np.asarray([m["max_drawdown_pct"] for _, m in values], dtype=float)
+        cycle_realized = np.asarray([m.get("cycle_realized_net_usdt", 0.0) for _, m in values], dtype=float)
+        cycles = np.asarray([m.get("cycles_completed", 0) for _, m in values], dtype=float)
         worst_idx = int(np.argmin(pnl)) if len(pnl) else None
         item = {"windows": len(values), "mean_pnl": float(pnl.mean()) if len(pnl) else None,
                 "median_pnl": float(np.median(pnl)) if len(pnl) else None,
@@ -234,6 +236,8 @@ def summarize(windows: list[dict], variants: list[dict], step_days: int) -> dict
                 "worst_window": (values[worst_idx][0]["start_iso"] if worst_idx is not None else None),
                 "worst_pnl": float(pnl[worst_idx]) if worst_idx is not None else None,
                 "mean_drawdown_pct": float(dd.mean()) if len(dd) else None,
+                "mean_cycle_realized_net_usdt": float(cycle_realized.mean()) if len(cycle_realized) else None,
+                "mean_cycles": float(cycles.mean()) if len(cycles) else None,
                 "mean_live_time_pct": float(np.mean([100 - m["pause_pct"] for _, m in values])) if values else None}
         if ref and name != ref:
             paired = [(row["results"][name]["metrics"]["pnl_total_net_usdt"]
@@ -264,6 +268,12 @@ def write_report(result: dict, out: Path) -> None:
         lines.append(f"| {variant['name']} | {item['mean_pnl']} | {item['median_pnl']} | {item['pct_positive']}% | "
                      f"{item['p5_pnl']} | {item['worst_window']} ({item['worst_pnl']}) | "
                      f"{item['mean_drawdown_pct']}% | {item['mean_live_time_pct']}% | {delta} | {verdict} |")
+    lines += ["", "| Variante | Ganancia neta por ciclos completados (media USDT) | P&L total con inventario (media USDT) | Ciclos medios |",
+              "|---|---:|---:|---:|"]
+    for variant in result["variants"]:
+        item = result["summary"]["variants"][variant["name"]]
+        lines.append(f"| {variant['name']} | {item['mean_cycle_realized_net_usdt']:.6f} | "
+                     f"{item['mean_pnl']:.6f} | {item['mean_cycles']:.3f} |")
     lines += ["", "Los intervalos pareados usan bootstrap por bloques, 3000 réplicas y semilla fija.",
               "Los resultados son simulaciones históricas y no cambian flags de la aplicación.", ""]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")

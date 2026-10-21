@@ -24,6 +24,9 @@ def test_simulation_deterministic_and_has_financial_metrics():
     assert abs(metrics["pnl_total_net_usdt"] - (
         metrics["pnl_realized_gross_usdt"] + metrics["pnl_unrealized_usdt"] - metrics["fees_usdt"]
     )) < 1e-8
+    cycle_fills = [event for event in first["events"] if event["type"] == "SELL_FILLED"]
+    assert metrics["cycle_realized_net_usdt"] == sum(
+        float(event["cycle_pnl_net_usdt"]) for event in cycle_fills)
 
 
 def test_runner_infers_hourly_candles_for_sigma_and_rejects_unknown_spacing():
