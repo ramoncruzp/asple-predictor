@@ -13,6 +13,7 @@ from grid.policy import (
     idle_shrink_decision,
     norm_cdf,
     stoploss_candidates,
+    respace_decision,
     total_pnl_pct,
     trapped_capital_pct,
     validate_params,
@@ -55,6 +56,7 @@ def test_defaults_and_parameter_validation_rules():
         "loan_lender_max_pct": 50.0, "loan_cooldown_cycles": 2,
         "loan_min_margin": 1.1, "loan_cap_pct": 30.0,
         "loan_min_amount": 0.2,
+        "sigma_24h_open": None, "vol_spacing_k": 0.9,
         "out_of_range_mode": "close",
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
@@ -338,3 +340,26 @@ def test_break_pause_with_unavailable_volatility_holds_but_other_pause_can_resum
     assert break_paused.action == "NONE" and break_paused.reasons == ("vol_unavailable_hold",)
     assert capital_paused.action == "RESUME"
     assert available_again.action == "RESUME"
+
+
+def test_respace_thresholds_cooldown_omissions_and_keeps_range():
+    params = {**DEFAULT_SMART_PARAMS, "sigma_24h_open": .01, "vol_spacing_k": .9}
+    grid = {"strategy": "smart", "status": "ACTIVE", "params": params,
+            "n_levels": 10, "range_low": 90, "range_high": 110, "capital_total": 100}
+    cells = [cell("IDLE") for _ in range(10)]
+    decision = respace_decision(grid, cells, .02, NOW, None)
+    assert decision.action == "ADJUST"
+    assert decision.metrics["source"] == "RESPACE"
+    assert decision.metrics["n_levels"] == round(log(110 / 90) / (.9 * .02))
+    assert decision.metrics["range_low"] == 90 and decision.metrics["range_high"] == 110
+    assert respace_decision(grid, cells, .015, NOW, None).action == "NONE"
+    lower_vol = respace_decision(grid, cells, .006, NOW, None)
+    assert lower_vol.action == "ADJUST" and lower_vol.metrics["r"] == pytest.approx(.6)
+    assert respace_decision(grid, cells, .02, NOW, NOW - timedelta(hours=23)).metrics["reason"] == "cooldown"
+    assert respace_decision({**grid, "status": "PAUSED"}, cells, .02, NOW, None).metrics["reason"] == "not_active_smart"
+    assert respace_decision({**grid, "params": {**params, "sigma_24h_open": None}}, cells, .02,
+                            NOW, None).metrics["reason"] == "no_sigma_open"
+    assert respace_decision(grid, cells[:1], .02, NOW, None).metrics["reason"] == "free_cells"
+    trapped_cells = [cell("SELL_OPEN", held_qty=1, entry_price=100,
+                          bought_at=NOW - timedelta(hours=25))] + cells[1:]
+    assert respace_decision(grid, trapped_cells, .02, NOW, None).metrics["reason"] == "trapped_capital_pct"

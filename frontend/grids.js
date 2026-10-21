@@ -196,7 +196,7 @@
     const rows = flags?.flags || [];
     const value = key => rows.find(row => row.key === key)?.current;
     const onOff = v => v == null ? 'no disponible' : (v ? 'encendido' : 'apagado');
-    return `Interruptores globales actuales (aplican desde el pr\u00f3ximo ciclo del monitor): ADJUST ${onOff(value('smart_adjust_enabled'))}; esperar fuera de rango ${onOff(value('smart_close_wait_enabled'))}; stop-loss ${onOff(value('stoploss_enabled'))}. Espaciado por volatilidad ${onOff(value('advisor_vol_spacing_enabled'))} para nuevas recomendaciones.`;
+    return `Interruptores globales actuales (aplican desde el pr\u00f3ximo ciclo del monitor): ADJUST ${onOff(value('smart_adjust_enabled'))}; esperar fuera de rango ${onOff(value('smart_close_wait_enabled'))}; stop-loss ${onOff(value('stoploss_enabled'))}; re-espaciado Smart ${onOff(value('smart_respacing_enabled'))}. Espaciado por volatilidad ${onOff(value('advisor_vol_spacing_enabled'))} para nuevas recomendaciones.`;
   }
 
   function gridRowHtml(grid, switchLine) {

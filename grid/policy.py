@@ -499,6 +499,52 @@ def _adjust_free_cells(cells: list[dict]) -> int:
                and float(row.get("held_qty") or 0) <= 0 for row in cells)
 
 
+def respace_decision(grid: Mapping[str, Any], cells: list[dict], sigma_24h_now: float | None,
+                     now: datetime, last_respace_at: datetime | None) -> PolicyDecision:
+    """Change the spacing of free levels after a large 24h volatility shift."""
+    from grid.structure import MAX_LEVELS, MIN_LEVELS
+
+    raw = grid.get("params") or {}
+    sigma_open = raw.get("sigma_24h_open")
+    if sigma_open is None:
+        return PolicyDecision("NONE", (), {"reason": "no_sigma_open"})
+    try:
+        sigma_open = _number(sigma_open, "sigma_24h_open")
+        sigma_now = _number(sigma_24h_now, "sigma_24h_now", nullable=True)
+    except ValueError:
+        return PolicyDecision("NONE", (), {"reason": "no_sigma_open"})
+    if sigma_now is None or sigma_now <= 0 or sigma_open <= 0:
+        return PolicyDecision("NONE", (), {"reason": "sigma_unavailable"})
+    ratio = sigma_now / sigma_open
+    details = {"r": ratio, "sigma_open": sigma_open, "sigma_now": sigma_now}
+    if grid.get("strategy") != "smart" or grid.get("status") != "ACTIVE":
+        return PolicyDecision("NONE", (), {**details, "reason": "not_active_smart"})
+    if ratio <= 1.5 and ratio >= 0.67:
+        return PolicyDecision("NONE", (), {**details, "reason": "within_threshold"})
+    if last_respace_at is not None:
+        elapsed = _adjust_cooldown_elapsed(now, last_respace_at)
+        details["cooldown_elapsed_h"] = elapsed
+        if elapsed < 24:
+            return PolicyDecision("NONE", (), {**details, "reason": "cooldown"})
+    params = validate_params(raw, max(2, int(grid.get("n_levels", len(cells)))))
+    trapped, _unknown = _trapped_details(cells, now, params, float(grid.get("capital_total") or 0))
+    free = _adjust_free_cells(cells)
+    details.update({"trapped_capital_pct": trapped, "free_cells": free})
+    if trapped >= float(params["adjust_trapped_cap_pct"]):
+        return PolicyDecision("NONE", (), {**details, "reason": "trapped_capital_pct"})
+    if free < int(params["min_free_cells"]):
+        return PolicyDecision("NONE", (), {**details, "reason": "free_cells"})
+    low, high = float(grid["range_low"]), float(grid["range_high"])
+    k = float(params.get("vol_spacing_k", 0.9))
+    n_new = max(MIN_LEVELS, min(MAX_LEVELS, int(round(log(high / low) / (k * sigma_now)))))
+    n_current = int(grid.get("n_levels", len(cells)))
+    details.update({"range_low": low, "range_high": high, "n_levels": n_new,
+                    "n_from": n_current, "source": "RESPACE"})
+    if n_new == n_current:
+        return PolicyDecision("NONE", (), {**details, "reason": "same_n_levels"})
+    return PolicyDecision("ADJUST", (), details)
+
+
 def idle_shrink_decision(
     grid: Mapping[str, Any], cells: list[dict], mid: float, now: datetime,
     last_adjust_at: datetime | None, previous_snapshot: Mapping[str, Any] | None,

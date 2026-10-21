@@ -43,7 +43,10 @@ def test_get_lists_allowlisted_flag_with_default_origin(tmp_path):
     assert response.status_code == 200
     rows = {row["key"]: row for row in response.json()["flags"]}
     assert {"adjust_idle_shrink_enabled", "stoploss_enabled", "smart_adjust_enabled",
-            "smart_close_wait_enabled", "advisor_vol_spacing_enabled"} == set(rows)
+            "smart_close_wait_enabled", "advisor_vol_spacing_enabled",
+            "smart_respacing_enabled"} == set(rows)
+    assert rows["smart_respacing_enabled"]["current"] is False
+    assert "se eval\u00faa con el banco OOS" in rows["smart_respacing_enabled"]["description"]
     assert rows["adjust_idle_shrink_enabled"] == {
         "key": "adjust_idle_shrink_enabled",
         "label": "Reducci\u00f3n de niveles ociosos",

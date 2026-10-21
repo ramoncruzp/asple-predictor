@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     smart_adjust_enabled: bool = Field(False, validation_alias="SMART_ADJUST_ENABLED")
     smart_close_wait_enabled: bool = Field(True, validation_alias="SMART_CLOSE_WAIT_ENABLED")
     advisor_vol_spacing_enabled: bool = Field(True, validation_alias="ADVISOR_VOL_SPACING_ENABLED")
+    smart_respacing_enabled: bool = Field(False, validation_alias="SMART_RESPACING_ENABLED")
     scanner_min_volume_24h: float = Field(SCANNER_DEFAULTS["min_volume_24h"], gt=0, validation_alias="SCANNER_MIN_VOLUME_24H")
     scanner_max_spread_bps: float = Field(SCANNER_DEFAULTS["max_spread_bps"], gt=0, validation_alias="SCANNER_MAX_SPREAD_BPS")
     scanner_min_spacing_pct: float = Field(SCANNER_DEFAULTS["min_spacing_pct"], gt=0, validation_alias="SCANNER_MIN_SPACING_PCT")
@@ -138,6 +139,11 @@ APP_FLAG_DEFINITIONS = {
         "label": "Espaciado por volatilidad",
         "description": "Apagado = como hoy: el Advisor usa el máximo de niveles que deja 0,7 % de margen (celdas chicas, muchas comisiones). Encendido = separa los niveles según la volatilidad (≈0,9·σ de 24 h): menos niveles y más ganancia por ciclo. En simulación XRP fuera de muestra: +0,75 USDT/mes por cada 100 [IC +0,40; +1,09]. Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí.",
         "default": True, "requires_restart": False,
+    },
+    "smart_respacing_enabled": {
+        "label": "Re-espaciado dinámico de Smart",
+        "description": "Hipótesis sin evidencia todavía; se evalúa con el banco OOS",
+        "default": False, "requires_restart": False,
     },
 }
 
