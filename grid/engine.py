@@ -1046,6 +1046,7 @@ class GridEngine:
             "BUY_FILLED", grid_id, idx, client_order_id=level.get("client_order_id"),
             order_id=order["order_id"], details={
                 "executed_qty": str(gross_qty), "held_qty": str(held_qty),
+                "cummulative_quote_qty": str(order.get("cummulative_quote_qty", gross_quote)),
                 "fee_usdt": str(fee_usdt), "base_fee": str(base_fee),
             },
         )
@@ -1271,6 +1272,8 @@ class GridEngine:
             order_id=sell_order["order_id"], details={
                 "cycle_pnl": str(cycle_pnl), "cycles_completed": new_cycle,
                 "executed_qty": str(sell_order.get("executed_qty", 0)),
+                "cummulative_quote_qty": str(sell_order.get("cummulative_quote_qty", 0)),
+                "fee_usdt": str(sell_fee),
             },
         )
         updated = next(row for row in self.db.get_grid_levels(grid_id) if row["level_idx"] == idx)
@@ -1767,6 +1770,9 @@ class GridEngine:
         return {"ok": True, "grid_id": int(grid_id), "status": "PAUSED", "sync": summary}
 
     def resume_grid(self, grid_id: int, reason: str, details: dict) -> dict:
+        if self.db.is_meta_surplus_grid(grid_id):
+            return {"ok": False, "grid_id": int(grid_id), "status": "PAUSED",
+                    "reason": "meta_surplus_wait"}
         if not self.db.transition_grid_status(grid_id, {"PAUSED"}, "ACTIVE"):
             return {"ok": False, "grid_id": int(grid_id), "status": (self.db.get_grid(grid_id) or {}).get("status")}
         self._policy_event("GRID_RESUMED", grid_id, reason=reason, details=details or {})
@@ -2135,7 +2141,7 @@ class GridEngine:
             summary["states"][level["state"]] = summary["states"].get(level["state"], 0) + 1
         return summary
 
-    def cancel_grid_orders(self, grid_id: int, *, finalize: bool = True) -> dict[str, Any]:
+    def cancel_grid_orders(self, grid_id: int, *, finalize: bool = True, buy_only: bool = False) -> dict[str, Any]:
         grid = self.db.get_grid(grid_id)
         if grid is None:
             raise ValueError(f"grid {grid_id} does not exist")
@@ -2145,6 +2151,8 @@ class GridEngine:
         # Resolve write-ahead intents before cancellation; an accepted order can
         # exist at the exchange even when its order_id was not persisted locally.
         for level in levels:
+            if buy_only and level.get("state") != "BUY_OPEN":
+                continue
             if level.get("order_id") is None and level.get("client_order_id"):
                 try:
                     found = self.exchange.find_order_by_client_id(symbol, level["client_order_id"])
@@ -2185,6 +2193,8 @@ class GridEngine:
             return not cid or not registered or str(cid) in registered
 
         for level in levels:
+            if buy_only and level.get("state") != "BUY_OPEN":
+                continue
             order_id = level.get("order_id")
             if order_id is None:
                 continue
@@ -2465,7 +2475,7 @@ class GridEngine:
             return {"ok": False, "reason": "cell_not_done_or_has_inventory"}
         return self._persist_done_to_reserve(int(grid_id), int(level_idx), reason)
 
-    def _close_repository(self, grid_id: int) -> dict:
+    def _close_repository(self, grid_id: int, *, meta_id: int | None = None) -> dict:
         grid = self.db.get_grid(grid_id)
         symbol = grid["symbol"]
         errors: list[dict] = []
@@ -2621,6 +2631,8 @@ class GridEngine:
                         "moved_at": now.isoformat(),
                         "market_mid": None if market_mid is None else str(market_mid),
                     }
+                    if meta_id is not None:
+                        detail.update({"origin": "META", "meta_id": int(meta_id)})
                     target_close = (grid.get("params") or {}).get("target_close_plan") or {}
                     if target_close:
                         detail.update({"cash_total": target_close.get("cash_total"),
@@ -2634,6 +2646,17 @@ class GridEngine:
                     moved_cells.append({"origin_level_idx": level["level_idx"], "level_idx": new_idx,
                                         "client_order_id": level.get("client_order_id"),
                                         "order_id": level.get("order_id"), "held_qty": level["held_qty"]})
+                if meta_id is not None:
+                    link = conn.execute(select(self.db.meta_piece_links).where(
+                        self.db.meta_piece_links.c.meta_id == int(meta_id),
+                        self.db.meta_piece_links.c.grid_id == int(grid_id),
+                        self.db.meta_piece_links.c.released_at.is_(None))).mappings().first()
+                    if link is not None:
+                        conn.execute(self.db.meta_piece_links.update().where(
+                            self.db.meta_piece_links.c.id == link["id"]).values(
+                                repository_grid_id=repository_id,
+                                repository_level_map=self.db._json({str(row["origin_level_idx"]): row["level_idx"]
+                                                                  for row in moved_cells})))
                 repo_levels = conn.execute(select(self.db.grid_levels).where(
                     self.db.grid_levels.c.grid_id == repository_id,
                 )).mappings().all()
@@ -2651,7 +2674,8 @@ class GridEngine:
                 "moved_cells": moved_cells, "unmanaged_inventory": unmanaged, "errors": [],
                 "pnl_realized": sum(float(row.get("pnl", 0)) for row in movable)}
 
-    def close_grid(self, grid_id: int, mode: str, *, close_reason: str = "grid_close") -> dict:
+    def close_grid(self, grid_id: int, mode: str, *, close_reason: str = "grid_close",
+                   meta_id: int | None = None) -> dict:
         mode = str(mode).lower()
         if mode not in {"cancel", "liquidate", "repository", "profit_repository"}:
             raise ValueError("mode must be cancel, liquidate, repository, or profit_repository")
@@ -2718,7 +2742,7 @@ class GridEngine:
                 "errors": canceled["cancel_errors"], "pnl_realized": 0.0,
             }
         elif mode == "repository":
-            result = self._close_repository(grid_id)
+            result = self._close_repository(grid_id, meta_id=meta_id)
         else:
             cancellation = self.cancel_grid_orders(grid_id, finalize=False)
             errors = list(cancellation["cancel_errors"])

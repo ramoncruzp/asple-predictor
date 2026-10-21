@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from grid.monitor import GridMonitor
+from grid.meta import MetaCore
 from tests.test_grid_engine import make_engine
 from tests.test_grid_monitor import monitor_settings
 
@@ -66,6 +67,45 @@ def test_pause_for_non_volatility_reason_can_resume_without_volatility():
     monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=vol)
     monitor.run_once()
     assert db.get_grid(grid["id"])["status"] == "ACTIVE"
+
+
+def test_fulfilled_meta_surplus_grid_stays_paused_through_resume_cycle_and_restart():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _smart_grid(engine)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=10, target_input_type="usdt", target_input_value=10,
+            profile="Prudente", status="ACTIVE", environment="testnet", created_at=now,
+            started_at=now, config_snapshot="{}",
+        )).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(
+            meta_id=meta_id, status="ACTIVE", started_at=now,
+            realized_extra_usdt=0,
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(
+            meta_id=meta_id, run_id=run_id, grid_id=grid["id"], piece_type="grid",
+            origin_grid_id=grid["id"], created_at=now,
+        ))
+    meta = MetaCore(db, exchange, engine=engine)
+    meta._target_met(meta.get_goal(meta_id))
+    assert meta.get_goal(meta_id)["status"] == "SURPLUS_WAIT"
+    assert db.get_grid(grid["id"])["status"] == "PAUSED"
+    db.add_grid_event(run_id=None, source="MONITOR", grid_id=grid["id"], event_type="GRID_PAUSED",
+                      reason="break_prob", details={"reasons": ["break_prob"]})
+    assert not [o for o in exchange.get_open_orders("XRPUSDT") if o["side"] == "BUY"]
+
+    # Low volatility ordinarily clears hysteresis and resumes this paused Smart grid.
+    first_monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol(0.001))
+    first_monitor.run_once()
+    assert db.get_grid(grid["id"])["status"] == "PAUSED"
+    assert not [o for o in exchange.get_open_orders("XRPUSDT") if o["side"] == "BUY"]
+    assert db.get_last_event(grid["id"], "GRID_RESUMED") is None
+
+    # A fresh monitor instance must honor the persisted meta ownership too.
+    GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol(0.001)).run_once()
+    assert db.get_grid(grid["id"])["status"] == "PAUSED"
+    assert not [o for o in exchange.get_open_orders("XRPUSDT") if o["side"] == "BUY"]
 
 
 def test_smart_out_of_range_auto_close_goes_to_repository_and_simple_is_untouched():

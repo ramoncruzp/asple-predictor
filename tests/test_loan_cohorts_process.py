@@ -128,7 +128,10 @@ def test_two_processes_initialize_empty_lock_without_cohort_overlap(tmp_path):
     with sqlite3.connect(database) as conn:
         conn.execute("CREATE TABLE grids(status TEXT, strategy TEXT, params TEXT)")
     import grid.loan_cohorts as cohorts
-    lock_path = tmp_path / "empty-race.lock"
+    # El proceso hijo no puede abrir locks dentro del subdirectorio tmp_path
+    # en algunos entornos Windows; usa la ruta temporal compartida del propio
+    # mecanismo de lock, identificada por esta BD de prueba.
+    lock_path = cohorts._lock_file_path(_SQLiteDB(database))
     lock_path.write_bytes(b"")
     ctx = multiprocessing.get_context("spawn")
     barrier, results = ctx.Barrier(2), ctx.Queue()

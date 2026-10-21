@@ -284,12 +284,47 @@ class DBManager:
             Column("value", Text, nullable=False),
             Column("updated_at", DateTime(timezone=True), nullable=False),
         )
+        self.meta_goals = Table("meta_goals", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("capital_initial", Float, nullable=False), Column("target_usdt", Float, nullable=False),
+            Column("target_input_type", String, nullable=False), Column("target_input_value", Float, nullable=False),
+            Column("profile", String, nullable=False), Column("status", String, nullable=False),
+            Column("environment", String, nullable=False), Column("created_at", DateTime, nullable=False),
+            Column("started_at", DateTime), Column("finished_at", DateTime), Column("config_snapshot", Text),
+            Column("close_mode", String), Column("close_result", String))
+        self.meta_runs = Table("meta_runs", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
+            Column("status", String, nullable=False), Column("started_at", DateTime, nullable=False),
+            Column("finished_at", DateTime), Column("worst_result_pct", Float),
+            Column("close_slippage_usdt", Float), Column("realized_extra_usdt", Float, nullable=False, default=0.0))
+        self.meta_piece_links = Table("meta_piece_links", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
+            Column("run_id", Integer, ForeignKey("meta_runs.id"), nullable=True),
+            Column("grid_id", Integer, ForeignKey("grids.id"), nullable=False),
+            Column("piece_type", String, nullable=False, default="grid"),
+            Column("origin_grid_id", Integer), Column("origin_level_idx", Integer),
+            Column("repository_grid_id", Integer), Column("repository_level_map", Text),
+            Column("created_at", DateTime, nullable=False), Column("released_at", DateTime),
+            UniqueConstraint("grid_id", "piece_type", name="uq_meta_piece_grid_type"))
+        self.meta_ledger = Table("meta_ledger", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
+            Column("run_id", Integer, ForeignKey("meta_runs.id")), Column("ts", DateTime, nullable=False),
+            Column("event_type", String, nullable=False), Column("reason", String),
+            Column("grid_id", Integer), Column("level_idx", Integer), Column("details", Text))
+        self.meta_profile_settings = Table("meta_profile_settings", self.metadata,
+            Column("profile", String, primary_key=True), Column("settings", Text, nullable=False),
+            Column("updated_at", DateTime, nullable=False))
         self.metadata.create_all(self.engine)
         self._migrate_direction_verification_columns()
         self._migrate_widen_columns()
         self._migrate_vol_forecast_columns()
         self._seed_widen_defaults()
         self._migrate_grid_columns()
+        self._migrate_meta_columns()
+        self._seed_meta_profile_settings()
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_verify_at ON predictions(verify_at)"))
@@ -301,6 +336,43 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
+
+    def _seed_meta_profile_settings(self) -> None:
+        """Seed editable Meta profile defaults without replacing operator values."""
+        from grid.meta import DEFAULT_PROFILES
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            for profile, values in DEFAULT_PROFILES.items():
+                present = conn.execute(select(self.meta_profile_settings.c.profile).where(
+                    self.meta_profile_settings.c.profile == profile)).first()
+                if present is None:
+                    conn.execute(self.meta_profile_settings.insert().values(
+                        profile=profile, settings=json.dumps(values, sort_keys=True), updated_at=now))
+            present = conn.execute(select(self.meta_profile_settings.c.profile).where(
+                self.meta_profile_settings.c.profile == "GLOBAL")).first()
+            if present is None:
+                conn.execute(self.meta_profile_settings.insert().values(
+                    profile="GLOBAL", settings=json.dumps({"max_active": 1}), updated_at=now))
+
+    def _migrate_meta_columns(self) -> None:
+        """Add repository lineage fields for pre-existing Meta core databases."""
+        additions = {"repository_grid_id": "INTEGER", "repository_level_map": "TEXT"}
+        goal_additions = {"close_mode": "TEXT", "close_result": "TEXT"}
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name == "sqlite":
+                present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('meta_piece_links')")}
+                for name, sql_type in additions.items():
+                    if name not in present:
+                        conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN {name} {sql_type}")
+                goal_present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('meta_goals')")}
+                for name, sql_type in goal_additions.items():
+                    if name not in goal_present:
+                        conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN {name} {sql_type}")
+            elif self.engine.dialect.name == "postgresql":
+                for name, sql_type in additions.items():
+                    conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+                for name, sql_type in goal_additions.items():
+                    conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN IF NOT EXISTS {name} {sql_type}")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""
@@ -1411,6 +1483,20 @@ class DBManager:
                 pass
         return result
 
+    def is_meta_surplus_grid(self, grid_id: int) -> bool:
+        """Return whether this grid is still owned by a fulfilled meta's surplus wait."""
+        statement = select(self.meta_piece_links.c.id).select_from(
+            self.meta_piece_links.join(
+                self.meta_goals, self.meta_piece_links.c.meta_id == self.meta_goals.c.id
+            )
+        ).where(
+            self.meta_piece_links.c.grid_id == int(grid_id),
+            self.meta_piece_links.c.released_at.is_(None),
+            self.meta_goals.c.status == "SURPLUS_WAIT",
+        ).limit(1)
+        with self.engine.connect() as conn:
+            return conn.execute(statement).first() is not None
+
     def get_grid_levels(self, grid_id: int) -> list[dict]:
         statement = select(self.grid_levels).where(
             self.grid_levels.c.grid_id == grid_id
@@ -1657,6 +1743,13 @@ class DBManager:
                      .where(self.grid_events.c.id > int(min_id))
                      .order_by(self.grid_events.c.id.asc())
                      .limit(max(0, int(limit))))
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def list_meta_ledger_since(self, min_id: int, *, limit: int = 5000) -> list[dict]:
+        statement = select(self.meta_ledger).where(self.meta_ledger.c.id > int(min_id)).order_by(
+            self.meta_ledger.c.id).limit(max(0, int(limit)))
         with self.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]

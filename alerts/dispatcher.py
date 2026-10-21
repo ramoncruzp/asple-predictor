@@ -160,10 +160,54 @@ class AlertDispatcher:
         self._ensure_watermark()
         self._process_startup(sender, cfg, now)
         self._process_events(sender, cfg, now, counters)
+        counters["metas"] = self._process_meta_events(sender, cfg, now)
         self._process_probe(sender, now)
         self._process_stale(sender, cfg, now)
         self._process_digest(sender, cfg, now)
         return {"status": "ok", **counters}
+
+    def _process_meta_events(self, sender, cfg, now) -> int:
+        """Entrega los eventos de Meta usando el mismo límite y registro Telegram."""
+        list_events = getattr(self.db, "list_meta_ledger_since", None)
+        if not callable(list_events):
+            return 0
+        last_id = int(self.db.get_alert_state("meta_last_event_id") or 0)
+        events = list_events(last_id, limit=5000)
+        max_seen = last_id
+        sent = 0
+        titles = {
+            "META_CREATED": "Meta creada", "META_STARTED": "Meta iniciada",
+            "META_PIECE_LINKED": "Pieza ligada", "META_LOSS_WARNING": "Aviso: pérdida cerca del límite",
+            "META_UNKNOWN": "Valor DESCONOCIDO: libro sin compradores o datos no conciliables",
+            "META_CORTADA_POR_PERDIDA": "Meta cortada por pérdida máxima",
+            "META_VENCIDA": "Meta vencida", "META_CUMPLIDA": "Meta cumplida",
+            "META_CANCELLED": "Meta cancelada", "META_CLOSE_PENDING": "Cierre Meta pendiente",
+        }
+        for event in events:
+            event_id = int(event["id"])
+            max_seen = max(max_seen, event_id)
+            event_type = str(event.get("event_type") or "")
+            if event_type not in titles:
+                continue
+            meta_id = int(event["meta_id"])
+            alert_key = f"{event_type}:{meta_id}"
+            cooldown = 30 if event_type == "META_UNKNOWN" else int(getattr(cfg, "alerts_cooldown_min", 60))
+            if not self._cooldown_ok(alert_key, cooldown, now):
+                continue
+            if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
+                continue
+            details = event.get("details") or {}
+            text = f"{titles[event_type]} · Meta #{meta_id}"
+            reason = event.get("reason") or details.get("error")
+            if reason:
+                text += f"\nMotivo: {reason}"
+            for key in ("result_pct", "threshold_pct", "target_usdt", "mode", "surplus_wait"):
+                if key in details:
+                    text += f"\n{key}: {details[key]}"
+            sent += int(self._send(sender, alert_key=alert_key, kind="operativa", text=text,
+                                   event_id=event_id, now=now))
+        self.db.set_alert_state("meta_last_event_id", max_seen)
+        return sent
 
     def _ensure_watermark(self) -> None:
         if self.db.get_alert_state("last_event_id") is None:

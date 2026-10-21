@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # GRID_MIN_NET_MARGIN_PCT remains a deprecated environment alias for compatibility.
     grid_min_margin_after_fees_pct: float = Field(0.7, ge=0, validation_alias=AliasChoices("GRID_MIN_MARGIN_AFTER_FEES_PCT", "GRID_MIN_NET_MARGIN_PCT"))
     grid_monitor_interval: int = Field(900, validation_alias="GRID_MONITOR_INTERVAL")
+    meta_mode_enabled: bool = Field(False, validation_alias="META_MODE_ENABLED")
+    meta_max_active: int = Field(1, validation_alias="META_MAX_ACTIVE", ge=1, le=10)
     grid_monitor_gap_minutes: int = Field(20, validation_alias="GRID_MONITOR_GAP_MINUTES")
     grid_monitor_enabled: bool = Field(True, validation_alias="GRID_MONITOR_ENABLED")
     grid_policy_enabled: bool = Field(True, validation_alias="GRID_POLICY_ENABLED")
@@ -149,6 +151,11 @@ APP_FLAG_DEFINITIONS = {
     "smart_direction_filter_enabled": {
         "label": "Filtro direccional de compras Smart",
         "description": "Interrumpe compras nuevas de Smart cuando el modelo estima ca\u00edda a 4 h (umbral 60 %). Conserva ventas. Sin evidencia OOS o econ\u00f3mica suficiente; apagado por defecto.",
+        "default": False, "requires_restart": False,
+    },
+    "meta_mode_enabled": {
+        "label": "Modo Meta",
+        "description": "Permite crear e iniciar metas en Testnet. Apagado por defecto.",
         "default": False, "requires_restart": False,
     },
 }

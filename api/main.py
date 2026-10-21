@@ -27,7 +27,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
                                   SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_SYMBOL, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings, alerts
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings, alerts, metas
 from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
@@ -42,6 +42,7 @@ from grid.scan_service import GridScanService
 from grid.auto_open import GridAutoOpen
 from grid.volatility_provider import VolatilityProvider
 from alerts.dispatcher import AlertDispatcher
+from grid.meta import MetaCore
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -132,12 +133,15 @@ async def lifespan(app: FastAPI):
     grid_scan_service = GridScanService(db, public_market_client, settings)
     grid_auto_open = GridAutoOpen(grid_scan_service, db, grid_engine, testnet_client, settings)
     alert_dispatcher = AlertDispatcher(db, Settings)
+    meta_core = MetaCore(db, testnet_client, grid_engine, settings=settings,
+                         monitor=grid_monitor)
     app.state.grid_scan_service = grid_scan_service
     app.state.public_market_client = public_market_client
     app.state.grid_engine, app.state.testnet_client = grid_engine, testnet_client
     app.state.vol_provider = grid_vol_provider
     app.state.grid_auto_open = grid_auto_open
     app.state.alert_dispatcher = alert_dispatcher
+    app.state.meta_core = meta_core
     app.state.models, app.state.ensemble = {"model_a": model_a, **shadow_models}, ensemble
     app.state.model_load_report = {
         "model_a": {"available": True, "artifact": str(artifact),
@@ -161,6 +165,8 @@ async def lifespan(app: FastAPI):
     backup_loop.start()
     if grid_monitor is not None:
         grid_monitor.start()
+    if bool(getattr(settings, "meta_mode_enabled", False)) and testnet_client is not None:
+        meta_core.start()
     grid_auto_open.start()
     alerts_token = str(getattr(settings, "telegram_bot_token", "") or "").strip()
     alerts_chat_id = str(getattr(settings, "telegram_chat_id", "") or "").strip()
@@ -179,6 +185,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception("No se pudo detener el servicio de preparación de monedas")
         if grid_monitor is not None:
             grid_monitor.stop()
+        meta_core.stop()
         grid_auto_open.stop()
         alert_dispatcher.stop()
         if vol_loop is not None:
@@ -228,6 +235,7 @@ app.include_router(grid_structure.router, prefix="/api/grids", tags=["grid-struc
 app.include_router(grid_account.router)
 app.include_router(app_settings.router, prefix="/api/settings", tags=["app-settings"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
+app.include_router(metas.router, prefix="/api/metas", tags=["metas"])
 
 @app.get("/api/health")
 async def health(request: Request):

@@ -917,16 +917,22 @@ class GridMonitor:
                                             "details": {"action": "ADJUST", **decision.metrics}})
                                 self.logger.warning("grid=%s adjust action failed", grid_id, exc_info=True)
                         elif decision.action == "RESUME":
-                            try:
-                                result = self.engine.resume_grid(grid_id, "hysteresis_cleared", details)
-                                if not result.get("ok"):
-                                    raise RuntimeError("grid could not transition to ACTIVE")
-                            except Exception as exc:
-                                failed += 1
-                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
-                                            "reason": str(exc), "price": mid,
-                                            "details": {"action": "RESUME", **details}})
-                                self.logger.warning("grid=%s resume action failed", grid_id, exc_info=True)
+                            if self.db.is_meta_surplus_grid(grid_id):
+                                self.logger.info(
+                                    "grid=%s remains paused while its fulfilled meta sells surplus",
+                                    grid_id,
+                                )
+                            else:
+                                try:
+                                    result = self.engine.resume_grid(grid_id, "hysteresis_cleared", details)
+                                    if not result.get("ok"):
+                                        raise RuntimeError("grid could not transition to ACTIVE")
+                                except Exception as exc:
+                                    failed += 1
+                                    self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                                "reason": str(exc), "price": mid,
+                                                "details": {"action": "RESUME", **details}})
+                                    self.logger.warning("grid=%s resume action failed", grid_id, exc_info=True)
                         elif decision.action == "CLOSE_REPOSITORY":
                             self._emit({"event_type": "GRID_AUTO_CLOSE", "grid_id": grid_id,
                                         "reason": ",".join(decision.reasons), "price": mid,
