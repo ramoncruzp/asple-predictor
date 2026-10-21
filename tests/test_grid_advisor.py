@@ -11,6 +11,7 @@ from config.models_config import VOL_CHAMPIONS
 from grid.sim.runner import FILTERS
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
 from grid.sim.data import ewma_sigma_24h
+from grid import structure as grid_structure
 from tests.test_grid_status_api import LocalClient
 
 
@@ -131,7 +132,7 @@ def test_ada_100_usdt_advisor_target_uses_gross_margin_and_keeps_dust_informatio
             "edge_gross_pct": gross, "net_edge_pct": gross - .46,
             "cell_ok": True, "spacing_ok": gross - .46 >= min_spacing_pct}
 
-    monkeypatch.setattr(grid_advisor, "evaluate_levels", evaluated)
+    monkeypatch.setattr(grid_structure, "evaluate_levels", evaluated)
     result = make_client().get("/api/grid/recommend", query={"symbol": "ADAUSDT",
         "capital": 100, "risk": "low", "days": 90, "margin_target_pct": .7}).body
 

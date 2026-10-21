@@ -8,7 +8,7 @@ exchange filters to produce an explainable, Decimal-safe range/level suggestion.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from math import exp, floor, isfinite, sqrt
+from math import exp, floor, isfinite, log, sqrt
 from typing import Any
 
 from data.exchange_filters import SymbolFilters
@@ -137,6 +137,53 @@ def evaluate_levels(
         "spacing_ok": spacing_pct >= required_spacing,
         "cell_ok": cell_usdt >= min_cell_d,
     }
+
+
+def select_levels(floor_price, ceiling_price, current, capital, filters: SymbolFilters,
+                 fee_pct: float, margin_target_pct: float, sigma_24h: float,
+                 vol_spacing: bool, k: float) -> dict:
+    """Select Advisor grid levels using its margin and volatility rules.
+
+    This is the pure, shared implementation used by the live Advisor and the
+    offline benchmark.  It preserves the Advisor's fallback to margin spacing
+    when a volatility-derived count is infeasible.
+    """
+    floor_d, ceiling_d, current_d, capital_d = map(_dec,
+        (floor_price, ceiling_price, current, capital))
+    if floor_d <= 0 or ceiling_d <= floor_d or current_d <= 0 or capital_d <= 0:
+        raise ValueError("invalid range, current price or capital")
+    if fee_pct < 0 or margin_target_pct < 0 or k <= 0:
+        raise ValueError("fee, margin and volatility spacing must be non-negative")
+    range_pct = ((float(ceiling_price) - float(floor_price)) / float(current) * 100.0)
+    min_cell = functional_cell_threshold(filters, "smart")
+    if vol_spacing and sigma_24h and float(sigma_24h) > 0:
+        raw_vol_levels = int(round(log(float(ceiling_d) / float(floor_d))
+                                   / (float(k) * float(sigma_24h))))
+        n_vol = max(MIN_LEVELS, min(MAX_LEVELS, raw_vol_levels))
+    else:
+        n_vol = None
+    selected, grids, rule = None, MIN_LEVELS, "margen"
+    counts = range(n_vol, MIN_LEVELS - 1, -1) if n_vol is not None else range(MAX_LEVELS, MIN_LEVELS - 1, -1)
+    for count in counts:
+        candidate = evaluate_levels(count, range_pct, capital_d, current_d, filters,
+                                    fee_pct, 0.0, min_cell)
+        if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
+            selected, grids = candidate, count
+            if n_vol is not None:
+                rule = "volatilidad"
+            break
+    if selected is None and n_vol is not None:
+        for count in range(MAX_LEVELS, MIN_LEVELS - 1, -1):
+            candidate = evaluate_levels(count, range_pct, capital_d, current_d, filters,
+                                        fee_pct, 0.0, min_cell)
+            if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
+                selected, grids = candidate, count
+                break
+    if selected is None:
+        selected = evaluate_levels(grids, range_pct, capital_d, current_d, filters,
+                                   fee_pct, 0.0, min_cell)
+    return {"n_levels": grids, "n_vol": n_vol, "levels_rule": rule,
+            "evaluation": selected, "range_pct": range_pct}
 
 
 def suggest_structure(

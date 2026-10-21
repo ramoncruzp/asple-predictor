@@ -13,7 +13,7 @@ import pytest
 from data.exchange_filters import SymbolFilters
 from grid.sim.runner import FILTERS
 from grid.sim.structure_study import _max_fixed_bootstrap, _structure_distribution
-from grid.structure import suggest_structure
+from grid.structure import select_levels, suggest_structure
 
 
 def test_feasible_structure_respects_min_spacing_and_fee_floor():
@@ -144,6 +144,21 @@ def test_structure_selection_uses_gross_floor_independent_of_net_dust():
     assert result["n_levels"] == 18
     assert result["edge_gross_pct"] >= .7
     assert result["net_edge_pct_per_cycle"] < .7
+
+
+@pytest.mark.parametrize(("capital", "sigma", "vol", "margin", "expected_rule", "expected_n"), [
+    (1000, .03, False, .7, "margen", 22),
+    (1000, .03, True, .7, "volatilidad", 7),
+    (20, .03, True, .7, "margen", 4),  # infeasible volatility count falls back to margin
+    (500, .08, True, .7, "volatilidad", 4),
+    (1000, .02, False, .2, "margen", 50),
+])
+def test_select_levels_matches_advisor_rules(capital, sigma, vol, margin, expected_rule, expected_n):
+    selected = select_levels(90, 110, 100, capital, FILTERS, .1, margin,
+                             sigma, vol, .9)
+    assert selected["n_levels"] == expected_n
+    assert selected["evaluation"]["n"] == selected["n_levels"]
+    assert selected["levels_rule"] == expected_rule
 
 
 def test_margin_after_fees_below_minimum_is_infeasible():

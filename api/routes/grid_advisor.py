@@ -14,7 +14,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
                                   VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
 from config.settings import ADVISOR_VOL_SPACING_K
-from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
+from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels, select_levels,
                             minimum_cell_threshold, minimum_cell_warning,
                             functional_cell_threshold, functional_cell_warning)
 from grid.sim.data import CandleData, ewma_sigma_24h
@@ -332,35 +332,16 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
             _market, filters = service._market(symbol, capital, service.clock() + float(request.app.state.settings.scanner_timeout_seconds))
         except Exception:
             filters = SIM_FILTERS
-    min_cell = functional_cell_threshold(filters, "smart")
     settings = request.app.state.settings
     vol_spacing_enabled = bool(getattr(settings, "advisor_vol_spacing_enabled", False))
-    n_vol = (max(MIN_LEVELS, min(MAX_LEVELS,
-        int(round(log(ceiling / floor) / (ADVISOR_VOL_SPACING_K * sigma_24h)))))
-        if vol_spacing_enabled and sigma_24h > 0 and floor > 0 and ceiling > floor else None)
-    evaluation = None
-    grids = MIN_LEVELS
-    levels_rule = "margen"
-    candidate_counts = (range(n_vol, MIN_LEVELS - 1, -1) if n_vol is not None
-                        else range(MAX_LEVELS, MIN_LEVELS - 1, -1))
-    for count in candidate_counts:
-        candidate = evaluate_levels(count, range_pct, Decimal(str(capital)), Decimal(str(current)),
-                                    filters, fee_pct, 0.0, min_cell)
-        if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
-            evaluation, grids = candidate, count
-            if n_vol is not None:
-                levels_rule = "volatilidad"
-            break
-    if evaluation is None and n_vol is not None:
-        for count in range(MAX_LEVELS, MIN_LEVELS - 1, -1):
-            candidate = evaluate_levels(count, range_pct, Decimal(str(capital)), Decimal(str(current)),
-                                        filters, fee_pct, 0.0, min_cell)
-            if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
-                evaluation, grids = candidate, count
-                break
-    if evaluation is None:
-        evaluation = evaluate_levels(grids, range_pct, Decimal(str(capital)), Decimal(str(current)),
-                                     filters, fee_pct, 0.0, min_cell)
+    min_cell = functional_cell_threshold(filters, "smart")
+    level_selection = select_levels(floor, ceiling, current, capital, filters, fee_pct,
+                                    margin_target_pct, sigma_24h, vol_spacing_enabled,
+                                    ADVISOR_VOL_SPACING_K)
+    n_vol = level_selection["n_vol"]
+    evaluation = level_selection["evaluation"]
+    grids = level_selection["n_levels"]
+    levels_rule = level_selection["levels_rule"]
     prices = np.linspace(floor, ceiling, grids + 1)
     buy_prices = prices[:-1]
     below = buy_prices < current
