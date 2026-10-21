@@ -317,7 +317,7 @@ def test_naive_job_timestamps_are_utc_and_elapsed_is_local_timezone_safe(tmp_pat
     row = service._row({"started_at": started})
     assert row["started_at"].endswith("+00:00")
     env = dict(os.environ, TZ="America/Santo_Domingo", STARTED_AT=row["started_at"])
-    harness = r"""const fs=require('fs'),vm=require('vm');global.window={APP:{}};global.document={addEventListener(){},getElementById(){return null}};vm.runInThisContext(fs.readFileSync('frontend/models.js','utf8'));const now=Date.parse('2026-10-06T12:01:30Z');process.stdout.write(String(window.ModelsPageTest.trainingElapsedSeconds(process.env.STARTED_AT,now)));"""
+    harness = r"""const fs=require('fs'),vm=require('vm');global.window={APP:{},ASPLEFormat:{parseApiTime:value=>Date.parse(value)}};global.document={addEventListener(){},getElementById(){return null}};vm.runInThisContext(fs.readFileSync('frontend/models.js','utf8'));const now=Date.parse('2026-10-06T12:01:30Z');process.stdout.write(String(window.ModelsPageTest.trainingElapsedSeconds(process.env.STARTED_AT,now)));"""
     result = subprocess.run([node, "-e", harness], cwd=Path(__file__).resolve().parents[1], env=env,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
