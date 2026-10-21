@@ -85,6 +85,29 @@ def test_recommendation_uses_editable_margin_and_named_risk_limits():
     assert low["range_position_warning"] == "El precio está cerca del techo: casi todo el capital quedaría en compras"
     assert low["simulations"]["label"] == "histórico, no promesa de resultado"
     assert set(low["simulations"]["strategies"]) == {"simple", "smart"}
+    assert low["simulation_switches"] == {"adjust": True, "close_wait": False,
+        "stoploss": True, "vol_spacing": False}
+
+
+def test_vol_spacing_advisor_uses_resolved_sigma24_and_preserves_default_output():
+    client = make_client()
+    query = {"symbol": "ADAUSDT", "capital": 1000, "risk": "medium", "days": 30,
+             "range_mode": "centrado"}
+    baseline = client.get("/api/grid/recommend", query=query).body
+    assert baseline["levels_rule"] == "margen"
+    client.app.state.settings.advisor_vol_spacing_enabled = True
+    spaced = client.get("/api/grid/recommend", query=query).body
+    expected = max(4, min(60, round(np.log(
+        spaced["recommended_ceiling"] / spaced["recommended_floor"])
+        / (.9 * spaced["range_risk"]["sigma_24h"]))))
+    assert spaced["n_vol"] == expected
+    assert spaced["levels_rule"] == "volatilidad"
+    assert spaced["suggested_grids"] <= expected
+    assert spaced["simulation_switches"]["vol_spacing"] is True
+    client.app.state.settings.advisor_vol_spacing_enabled = False
+    again = client.get("/api/grid/recommend", query=query).body
+    assert again["suggested_grids"] == baseline["suggested_grids"]
+    assert again["spacing_pct"] == baseline["spacing_pct"]
 
 
 def test_centered_moderate_pause_risk_uses_smart_four_hour_horizon():
@@ -443,6 +466,8 @@ def test_advisor_simulation_uses_recommended_levels_and_requested_grid_capital(m
     assert {call["n"] for call in captured} == {response["suggested_grids"]}
     assert response["capital"] == 100
     assert all(call["capital"] == response["capital"] for call in captured)
+    assert all(call["adjust_enabled_global"] is True and call["stoploss_enabled"] is True
+               and call["close_wait_enabled"] is False for call in captured)
     assert response["capital_per_grid"] == pytest.approx(100 / response["suggested_grids"])
 
 

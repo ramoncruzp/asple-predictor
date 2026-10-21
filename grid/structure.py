@@ -151,6 +151,7 @@ def suggest_structure(
     min_spacing_pct: float = 0.8,
     min_cell_usdt: Decimal | str | float | None = None,
     min_margin_after_fees_pct: float = 0.7,
+    vol_spacing_enabled: bool = False,
 ) -> dict:
     """Propose a centered range/level structure from a forecast sigma_24h.
 
@@ -190,6 +191,9 @@ def suggest_structure(
             "feasible": False,
         }
 
+    if vol_spacing_enabled:
+        from config.settings import ADVISOR_VOL_SPACING_K
+        min_spacing_pct = max(min_spacing_pct, ADVISOR_VOL_SPACING_K * float(sigma_24h) * 100.0)
     sigma_h = float(sigma_24h) * sqrt(horizon_h / 24.0)
     half_width_log = k_width * sigma_h
     reasons.append(

@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from decimal import Decimal
-from math import asinh, ceil, isfinite, sqrt
+from math import asinh, ceil, isfinite, log, sqrt
 from statistics import NormalDist
 from fastapi import APIRouter, HTTPException, Query, Request
 from models.coin_onboarding import coin_is_ready
@@ -13,6 +13,7 @@ import pandas as pd
 from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, VOL_CHAMPIONS,
                                   VOL_SOURCE, VOL_SYMBOL, VOL_WIDEN_DISAGREEMENT_PCT,
                                   VOL_WIDEN_K_ACTIVE, WIDEN_DISAGREEMENT_MIN, vol_champions)
+from config.settings import ADVISOR_VOL_SPACING_K
 from grid.structure import (MAX_LEVELS, MIN_LEVELS, evaluate_levels,
                             minimum_cell_threshold, minimum_cell_warning,
                             functional_cell_threshold, functional_cell_warning)
@@ -332,14 +333,31 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         except Exception:
             filters = SIM_FILTERS
     min_cell = functional_cell_threshold(filters, "smart")
+    settings = request.app.state.settings
+    vol_spacing_enabled = bool(getattr(settings, "advisor_vol_spacing_enabled", False))
+    n_vol = (max(MIN_LEVELS, min(MAX_LEVELS,
+        int(round(log(ceiling / floor) / (ADVISOR_VOL_SPACING_K * sigma_24h)))))
+        if vol_spacing_enabled and sigma_24h > 0 and floor > 0 and ceiling > floor else None)
     evaluation = None
     grids = MIN_LEVELS
-    for count in range(MAX_LEVELS, MIN_LEVELS - 1, -1):
+    levels_rule = "margen"
+    candidate_counts = (range(n_vol, MIN_LEVELS - 1, -1) if n_vol is not None
+                        else range(MAX_LEVELS, MIN_LEVELS - 1, -1))
+    for count in candidate_counts:
         candidate = evaluate_levels(count, range_pct, Decimal(str(capital)), Decimal(str(current)),
                                     filters, fee_pct, 0.0, min_cell)
         if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
             evaluation, grids = candidate, count
+            if n_vol is not None:
+                levels_rule = "volatilidad"
             break
+    if evaluation is None and n_vol is not None:
+        for count in range(MAX_LEVELS, MIN_LEVELS - 1, -1):
+            candidate = evaluate_levels(count, range_pct, Decimal(str(capital)), Decimal(str(current)),
+                                        filters, fee_pct, 0.0, min_cell)
+            if candidate["cell_ok"] and candidate["edge_gross_pct"] >= margin_target_pct:
+                evaluation, grids = candidate, count
+                break
     if evaluation is None:
         evaluation = evaluate_levels(grids, range_pct, Decimal(str(capital)), Decimal(str(current)),
                                      filters, fee_pct, 0.0, min_cell)
@@ -430,7 +448,10 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         try:
             result = run_simulation(simulation_candles, strategy=strategy, n=grids, capital=capital,
                 low=floor, high=ceiling, fee_pct=fee_pct, filters=filters,
-                resync_candles=resync_candles, sigma_values=simulation_sigma_values)
+                resync_candles=resync_candles, sigma_values=simulation_sigma_values,
+                adjust_enabled_global=bool(getattr(settings, "smart_adjust_enabled", True)),
+                stoploss_enabled=bool(getattr(settings, "stoploss_enabled", True)),
+                close_wait_enabled=bool(getattr(settings, "smart_close_wait_enabled", False)))
             simulations[strategy] = {**simulation_meta, **result["metrics"]}
         except Exception as exc:
             simulations[strategy] = {**simulation_meta,
@@ -496,6 +517,7 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
         **({"unready_coin_warning": unready_coin_warning,
             "history_days": readiness.get("history_days")} if unready_coin else {}),
         "recommended_ceiling": ceiling, "range_pct": range_pct, "suggested_grids": grids,
+        "levels_rule": levels_rule, "vol_spacing_k": ADVISOR_VOL_SPACING_K, "n_vol": n_vol,
         "capital_per_grid": capital / grids, "spacing_pct": evaluation["spacing_pct"],
         "margin_target_pct": margin_target_pct, "fee_pct": fee_pct,
         "edge_gross_pct": evaluation["edge_gross_pct"],
@@ -524,6 +546,10 @@ def recommend(request: Request, symbol: str = ACTIVE_SYMBOL, capital: float = Qu
             "window_warning": simulation_meta["window_warning"],
             "resolution": simulation_resolution, "resync_minutes": resync_minutes,
             "strategies": simulations},
+        "simulation_switches": {"adjust": bool(getattr(settings, "smart_adjust_enabled", True)),
+            "close_wait": bool(getattr(settings, "smart_close_wait_enabled", False)),
+            "stoploss": bool(getattr(settings, "stoploss_enabled", True)),
+            "vol_spacing": vol_spacing_enabled},
         "sigma_surfaces": sigma_surfaces,
         "range_risk": {"sigma_24h": sigma_24h, "source": sigma_source,
             "horizons": range_risk,

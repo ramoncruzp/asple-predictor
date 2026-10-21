@@ -6,10 +6,11 @@ import time
 from datetime import datetime, timezone
 
 import pandas as pd
+import numpy as np
 from decimal import Decimal
 
 from data.exchange_filters import SymbolFilters
-from config.settings import SCANNER_DEFAULTS
+from config.settings import ADVISOR_VOL_SPACING_K, SCANNER_DEFAULTS
 from grid.market_book import book_is_two_sided
 from grid.scanner import score_symbol
 
@@ -94,6 +95,7 @@ class GridScanService:
                "min_margin_after_fees_pct": self._setting("grid_min_margin_after_fees_pct", .7),
                "fee_pct": self._setting("scanner_fee_pct", .1),
                "min_cell_floor_usdt": self._setting("scanner_min_cell_floor_usdt", 5.5),
+               "advisor_vol_spacing_enabled": self._setting("advisor_vol_spacing_enabled", False),
                "history_days": self._setting("scanner_history_days", 30),
                "weights": {"cost_headroom": self._setting("scanner_weight_cost_headroom", .35),
                    "liquidity": self._setting("scanner_weight_liquidity", .2),
@@ -115,7 +117,16 @@ class GridScanService:
                 continue
             try:
                 market, filters = self._market(symbol, float(capital), deadline)
-                scored = score_symbol(market, filters, cfg)
+                symbol_cfg = dict(cfg)
+                if symbol_cfg["advisor_vol_spacing_enabled"]:
+                    closes_1h = market["klines_1h"]["close"].astype(float).to_numpy()
+                    sigma_24h = (float(np.std(np.diff(np.log(closes_1h)), ddof=1) * np.sqrt(24))
+                                 if len(closes_1h) > 2 and np.all(closes_1h > 0) else None)
+                    if sigma_24h is not None and np.isfinite(sigma_24h) and sigma_24h > 0:
+                        symbol_cfg["min_spacing_pct"] = max(
+                            float(symbol_cfg["min_spacing_pct"]),
+                            ADVISOR_VOL_SPACING_K * sigma_24h * 100.0)
+                scored = score_symbol(market, filters, symbol_cfg)
                 if not book_is_two_sided({"bid_price": market["bid"], "ask_price": market["ask"]}):
                     # scanner.py's own "spread" gate already rejects this (mid=0), but
                     # make the reason explicit and machine-readable (see REPORTE_FASE26.md).
@@ -142,7 +153,10 @@ class GridScanService:
                     from grid.sim.runner import run_simulation
                     simulated = run_simulation(candles, strategy=strategy, n=scored["suggested_structure"]["n_levels"],
                         capital=capital, low=scored["suggested_structure"]["range_low"],
-                        high=scored["suggested_structure"]["range_high"], fee_pct=cfg["fee_pct"], filters=filters)
+                        high=scored["suggested_structure"]["range_high"], fee_pct=symbol_cfg["fee_pct"], filters=filters,
+                        adjust_enabled_global=self._setting("smart_adjust_enabled", True),
+                        stoploss_enabled=self._setting("stoploss_enabled", True),
+                        close_wait_enabled=self._setting("smart_close_wait_enabled", False))
                     scored["simulation_90d"] = {"label": "histórico, no predictivo", "metrics": simulated["metrics"]}
                 rows.append({**scored, "data_source": DATA_SOURCE, "warning": EXECUTION_WARNING})
             except Exception as exc:

@@ -126,3 +126,19 @@ def test_with_sim_is_labeled_historical_not_predictive(tmp_path):
     assert "simulation_90d" in row, row
     assert row["simulation_90d"]["label"] == "histórico, no predictivo"
     assert row["data_source"].startswith("Binance public")
+
+
+def test_scanner_simulation_receives_shared_switch_values(tmp_path, monkeypatch):
+    import grid.sim.runner as runner
+    calls = []
+    monkeypatch.setattr(runner, "run_simulation", lambda *a, **kwargs:
+                        (calls.append(kwargs) or {"metrics": {"cycles_completed": 0}}))
+    service, _ = setup(tmp_path, smart_adjust_enabled=False, smart_close_wait_enabled=True,
+                       stoploss_enabled=False, advisor_vol_spacing_enabled=True)
+    result = service.scan(capital=1000, strategy="smart", with_sim=True)
+    assert calls
+    assert all(call["adjust_enabled_global"] is False and call["close_wait_enabled"] is True
+               and call["stoploss_enabled"] is False for call in calls)
+    row = result["results"][0]
+    sigma24 = float(np.std(np.diff(np.log(candles("1h")["close"])), ddof=1) * np.sqrt(24))
+    assert row["suggested_structure"]["spacing_pct"] >= .9 * sigma24 * 100 - 1e-9
