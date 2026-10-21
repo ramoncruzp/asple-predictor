@@ -211,7 +211,9 @@ def test_smart_adjust_preserves_existing_live_sell_order():
     candles = candles_for(close, lows=lows, highs=highs)
     params = {"pause_enter_prob": None, "pause_exit_prob": None,
               "stop_loss_pct": 50, "adjust_trigger_z": .75,
-              "adjust_cooldown_h": 0, "adjust_n": 8}
+              "adjust_cooldown_h": 0, "adjust_n": 8,
+              "trapped_cap_pct": 50.0, "trapped_age_h": 24,
+              "max_loss_pct": 10.0}
     sigma = np.full(len(close), .001)
     sigma[0] = 0
     sigma[6] = .2
@@ -267,7 +269,9 @@ def test_smart_pause_resume_hysteresis_keeps_sells_and_does_not_rebuy():
     highs[2] = 96.1
     candles = candles_for(close, lows, highs)
     params = {"pause_enter_prob": .1, "pause_exit_prob": .05,
-              "adjust_enabled": False, "stop_loss_pct": 50}
+              "adjust_enabled": False, "stop_loss_pct": 50,
+              "trapped_cap_pct": 50.0, "trapped_age_h": 24,
+              "max_loss_pct": 10.0}
     real, sim, trace = smart_pair(candles, params=params, sigma_scale=10.0, halflife_h=.005)
     divergence = first_divergence(real["snapshots"], trace)
     assert divergence is None, f"first divergence={divergence}"
