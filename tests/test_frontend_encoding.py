@@ -10,7 +10,7 @@ CORRUPT = re.compile("[A-Za-z]" + chr(92) + "?[a-z]")
 WHITELIST = ("signal?escapeHtml", "edge_gross_pct==null?null",
              "fee==null?null", "textContent=error?errorText",
              "spacing_pct==null||fee==null?null", "spacing?number",
-             "lastPreview?lastPreview")
+             "lastPreview?lastPreview", "summary?symbol=")
 
 def _assert_frontend_sources_clean(paths, root):
     for path in paths:
