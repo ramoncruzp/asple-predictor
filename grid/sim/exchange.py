@@ -106,7 +106,8 @@ class SimExchange:
                 self.realized += pnl
                 cell.update(state="IDLE", held_qty=Decimal(0), entry_price=None, entry_cost=Decimal(0),
                             entry_fee_usdt=Decimal(0), bought_at=None,
-                            cycles_completed=cell["cycles_completed"] + 1, pnl=cell["pnl"] + pnl)
+                            cycles_completed=cell["cycles_completed"] + 1, pnl=cell["pnl"] + pnl,
+                            last_cycle_pnl=pnl)
                 self.cancel(idx)
                 fills.append((idx, "SELL", order.price, gross, fee, gross))
         return fills

@@ -17,6 +17,8 @@ from grid.policy import (PolicyDecision, adjust_decision, evaluate_grid, evaluat
 from grid.sim.data import ewma_sigma_24h
 from grid.sim.exchange import SimExchange, SimInsufficientFunds
 from grid.sim.metrics import calculate_metrics
+from grid.compound import compound_amount
+from grid.loans import plan_loan, plan_repayment, select_borrower, select_lender
 
 
 FILTERS = SymbolFilters(Decimal("0.0001"), Decimal("0.0001"), Decimal("100000"),
@@ -90,16 +92,17 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                      if params else None)
     if n < 4 or capital <= 0 or resync_candles < 1 or fee_pct < 0:
         raise ValueError("n >= 4, capital > 0, resync-candles >= 1 and fee-pct >= 0 required")
-    if policy_params and any(policy_params.get(key) is True for key in ("compound_enabled", "loans_enabled")):
-        raise ValueError("compound/loans are available in 15B-4b")
     if strategy == "smart":
         effective = validate_params(policy_params, n)
         effective["out_of_range_mode"] = "wait" if close_wait_enabled else "close"
     elif policy_params and any(key in policy_params for key in
-                               ("target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct")):
+        ("target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct",
+         "compound_enabled", "compound_ratio", "compound_max_growth_pct")):
         effective = validate_params(policy_params, n)
     else:
         effective = {}
+    if strategy == "simple" and policy_params and policy_params.get("loans_enabled") is True:
+        raise ValueError("loans require the smart strategy")
     target_enabled = effective.get("target_pct") is not None or effective.get("target_usdt") is not None
     closes = candles.close
     initial = float(closes[0])
@@ -114,14 +117,17 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     if fee_asset not in {None, "XRP", "USDT"}:
         raise ValueError("fee_asset must be XRP, USDT or None")
     lines = compute_lines(str(low), str(high), n, filters)
-    cells_plan = plan_cells(lines, str(capital),
+    reserve = (Decimal(str(capital)) * Decimal(str(effective.get("reserve_pct", 0))) / 100
+               if strategy == "smart" and effective.get("loans_enabled") else Decimal(0))
+    cells_plan = plan_cells(lines, str(Decimal(str(capital)) - reserve),
                             {"bid_price": str(initial * (1 - 1e-8)), "ask_price": str(initial * (1 + 1e-8)),
                              "avg_price": str(initial)}, filters,
                             {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
     cells = [{"level_idx": p.level_idx, "price": p.buy_price, "sell_price": p.sell_price,
               "capital": p.capital, "qty": p.qty, "state": "IDLE", "entry_price": None,
               "entry_cost": Decimal(0), "held_qty": Decimal(0), "bought_at": None, "cycles_completed": 0,
-              "pnl": Decimal(0), "stop_loss_pct": Decimal(str(effective.get("stop_loss_pct", 5))) if strategy == "smart" else None}
+              "pnl": Decimal(0), "capital_base": p.capital, "capital_compound": Decimal(0),
+              "capital_loan": Decimal(0), "stop_loss_pct": Decimal(str(effective.get("stop_loss_pct", 5))) if strategy == "smart" else None}
              for p in cells_plan]
     for row, plan in zip(cells, cells_plan):
         row["state"] = plan.initial_state
@@ -146,6 +152,34 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     adjust_rejected_events = 0
     status, paused_since, pause_reasons = "ACTIVE", None, None
     last_adjust_at = None
+    open_loans = []
+    next_loan_id = 1
+    grid_created_at = datetime.fromtimestamp(int(candles.timestamp[0]), timezone.utc)
+
+    def transfer_open_loans(ts_value, reason):
+        nonlocal reserve
+        for loan in open_loans:
+            if loan["status"] != "OPEN":
+                continue
+            amount = loan["amount"]
+            borrower = cells[int(loan["borrower_idx"])]
+            lender_idx = loan.get("lender_idx")
+            lender = None if lender_idx is None else cells[int(lender_idx)]
+            if lender is None:
+                reserve += amount
+                borrower["capital"] -= amount
+                borrower["capital_loan"] -= amount
+                borrower["qty"] = filters.round_qty_down(borrower["capital"] / borrower["price"])
+            else:
+                borrower["capital_base"] += amount
+                lender["capital_base"] -= amount
+                borrower["capital_loan"] -= amount
+                lender["capital_loan"] += amount
+            loan["status"] = "TRANSFERRED"
+            events.append({"ts": int(ts_value), "type": "LOAN_TRANSFERRED",
+                "level_idx": borrower["level_idx"], "reason": reason,
+                "details": {"loan_id": loan["loan_id"], "amount": str(amount),
+                            "borrower_idx": borrower["level_idx"], "lender_idx": lender_idx}})
     active_low, active_high = float(lines[0]), float(lines[-1])
     paused = 0
     in_range_candles = 0
@@ -161,6 +195,17 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
             events.append({"ts": int(ts), "type": f"{side}_FILLED", "level_idx": idx,
                            "price": str(price), "qty": str(qty), "qty_net": str(qty_net),
                            "fee": str(fee)})
+            cell = cells[idx]
+            if side == "SELL" and effective.get("compound_enabled") is True:
+                decision = compound_amount(cell.get("last_cycle_pnl", 0),
+                    cell.get("capital_base", cell["capital"]), cell.get("capital_compound", 0),
+                    effective, capital)
+                if decision.amount > 0:
+                    cell["capital_compound"] += decision.amount
+                    cell["capital"] += decision.amount
+                    cell["qty"] = filters.round_qty_down(cell["capital"] / cell["price"])
+                    events.append({"ts": int(ts), "type": "COMPOUND_APPLIED", "level_idx": idx,
+                                   "amount": str(decision.amount), "reason": decision.reason})
         if i % resync_candles == 0 or (strategy == "simple" and effective.get("max_days") is not None):
             if strategy == "smart" and status in {"ACTIVE", "PAUSED"}:
                 policy_cells = [dict(c, held_qty=float(c["held_qty"]),
@@ -257,6 +302,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                 if action not in {"NONE", "ADJUST"}:
                     events.append({"ts": int(ts), "type": action, "reason": list(decision.reasons),
                                    "metrics": decision.metrics})
+                if action in {"ADJUST", "CLOSE_REPOSITORY", "MAX_DAYS", "TARGET"}:
+                    transfer_open_loans(ts, "before_adjust" if action == "ADJUST" else "before_close")
                 if action == "PAUSE":
                     status, paused_since, pause_reasons = "PAUSED", datetime.fromtimestamp(int(ts), timezone.utc), decision.reasons
                     for c in cells:
@@ -372,6 +419,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                               "entry_cost": Decimal(0),
                                               "held_qty": Decimal(0), "bought_at": None,
                                               "cycles_completed": 0, "pnl": Decimal(0),
+                                              "capital_base": Decimal(0),
+                                              "capital_compound": Decimal(0),
+                                              "capital_loan": Decimal(0),
                                               "stop_loss_pct": Decimal(str(effective.get("stop_loss_pct", 5)))})
                             c = cells[idx]
                             c.update(price=Decimal(item["price"]), sell_price=Decimal(item["sell_price"]),
@@ -464,6 +514,83 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                             "dust_pending": str(exchange.dust_qty),
                             "unrealized_pnl": str(sum((c["held_qty"] * Decimal(str(close))
                                 - c["entry_cost"] for c in held), Decimal(0)))}})
+            if (strategy == "smart" and effective.get("loans_enabled") is True
+                    and status == "ACTIVE"):
+                now = datetime.fromtimestamp(int(ts), timezone.utc)
+                by_idx = {int(cell["level_idx"]): cell for cell in cells}
+                # Settle triggered repayments before considering a new loan, matching the monitor order.
+                for loan in open_loans:
+                    if loan["status"] != "OPEN":
+                        continue
+                    borrower = by_idx.get(int(loan["borrower_idx"]))
+                    lender = None if loan.get("lender_idx") is None else by_idx.get(int(loan["lender_idx"]))
+                    repayment = plan_repayment(loan, lender, borrower) if borrower is not None else None
+                    if repayment is None:
+                        continue
+                    amount = repayment["amount"]
+                    remaining = borrower["capital"] - amount
+                    minimum = max(filters.min_notional * Decimal(str(effective["loan_min_margin"])),
+                                   filters.min_qty * borrower["price"])
+                    if remaining < minimum:
+                        continue
+                    for changed in (borrower, lender):
+                        if changed is None or changed["state"] not in {"BUY_OPEN", "IDLE"}:
+                            continue
+                        exchange.cancel(changed["level_idx"], "BUY")
+                        changed["state"] = "IDLE"
+                    borrower.update(capital=remaining,
+                        capital_loan=borrower["capital_loan"] - amount,
+                        qty=filters.round_qty_down(remaining / borrower["price"]))
+                    if lender is None:
+                        reserve += amount
+                    else:
+                        lender.update(capital=lender["capital"] + amount,
+                            capital_loan=lender["capital_loan"] + amount,
+                            qty=filters.round_qty_down((lender["capital"] + amount) / lender["price"]))
+                    loan["status"] = "REPAID"
+                    events.append({"ts": int(ts), "type": "LOAN_REPAID", "level_idx": borrower["level_idx"],
+                                   "details": {"amount": str(amount), "borrower_idx": borrower["level_idx"],
+                                               "lender_idx": loan.get("lender_idx")}})
+                loan_policy_events = [{**event, "event_type": event.get("type"),
+                    "ts": datetime.fromtimestamp(int(event["ts"]), timezone.utc)}
+                    for event in events if isinstance(event.get("ts"), (int, float))]
+                borrower = select_borrower(cells, loan_policy_events, open_loans, now, effective)
+                if borrower is not None:
+                    lender = select_lender(cells, loan_policy_events, open_loans,
+                        borrower_idx=int(borrower["level_idx"]), now=now, params=effective,
+                        grid_created_at=grid_created_at, last_adjust_at=last_adjust_at)
+                    loan_plan = plan_loan(borrower, lender, reserve=reserve,
+                        capital_total=capital, params=effective,
+                        min_notional=filters.min_notional,
+                        min_qty=filters.min_qty, step_size=filters.step_size)
+                    if loan_plan is not None:
+                        amount = loan_plan["amount"]
+                        for changed in (borrower, lender):
+                            if changed is None or changed["state"] not in {"BUY_OPEN", "IDLE"}:
+                                continue
+                            exchange.cancel(changed["level_idx"], "BUY")
+                            changed["state"] = "IDLE"
+                        reserve -= loan_plan["reserve_part"]
+                        borrower.update(capital=borrower["capital"] + amount,
+                            capital_loan=borrower["capital_loan"] + amount,
+                            qty=filters.round_qty_down((borrower["capital"] + amount) / borrower["price"]))
+                        if lender is not None and loan_plan["lender_part"] > 0:
+                            lender.update(capital=lender["capital"] - loan_plan["lender_part"],
+                                capital_loan=lender["capital_loan"] - loan_plan["lender_part"],
+                                qty=filters.round_qty_down((lender["capital"] - loan_plan["lender_part"])
+                                                           / lender["price"]))
+                        loan = {**loan_plan, "status": "OPEN", "created_at": now,
+                            "borrower_cycles_at_open": int(borrower["cycles_completed"]),
+                            "lender_cycles_at_open": 0 if lender is None else int(lender["cycles_completed"]),
+                            "loan_id": next_loan_id}
+                        next_loan_id += 1
+                        open_loans.append(loan)
+                        events.append({"ts": int(ts), "type": "LOAN_CREATED", "level_idx": borrower["level_idx"],
+                            "details": {"loan_id": loan["loan_id"], "amount": str(amount),
+                                "reserve_part": str(loan_plan["reserve_part"]),
+                                "lender_part": str(loan_plan["lender_part"]),
+                                "borrower_idx": loan_plan["borrower_idx"],
+                                "lender_idx": loan_plan["lender_idx"]}})
             if status in {"ACTIVE", "PAUSED"} and not resumed_this_pass:
                 for c in cells:
                     idx = c["level_idx"]
@@ -623,6 +750,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
             "fees_usdt": str(exchange.fees),
             "cells": [{key: (str(cell[key]) if isinstance(cell.get(key), Decimal) else cell.get(key))
                        for key in ("level_idx", "state", "held_qty", "cycles_completed", "pnl",
+                                   "capital_base", "capital_compound", "capital_loan",
                                    "entry_price", "entry_cost", "capital", "qty", "price", "sell_price")}
                       for cell in cells],
         }
