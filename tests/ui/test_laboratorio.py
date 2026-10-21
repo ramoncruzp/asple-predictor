@@ -7,10 +7,16 @@ from playwright.sync_api import expect
 def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
     calls = []
     flags = [
+        {"key": "adjust_idle_shrink_enabled", "label": "Reducción de niveles ociosos", "description": "Regla de prueba.",
+         "current": False, "default": False, "origin": "default", "requires_restart": False},
         {"key": "stoploss_enabled", "label": "Stop-loss por celda", "description": "Regla de prueba desde la API.",
          "current": True, "default": False, "origin": "app", "requires_restart": False},
-        {"key": "future_rule", "label": "Regla futura", "description": "Aparece sin cambios de UI.",
-         "current": False, "default": False, "origin": "default", "requires_restart": True},
+        {"key": "smart_adjust_enabled", "label": "ADJUST automático de Smart", "description": "Regla de prueba.",
+         "current": True, "default": True, "origin": "default", "requires_restart": False},
+        {"key": "smart_close_wait_enabled", "label": "Fuera de rango: esperar en vez de cerrar", "description": "Regla de prueba.",
+         "current": False, "default": False, "origin": "default", "requires_restart": False},
+        {"key": "advisor_vol_spacing_enabled", "label": "Espaciado por volatilidad", "description": "Regla de prueba.",
+         "current": False, "default": False, "origin": "default", "requires_restart": False},
     ]
     now = datetime.now(timezone.utc).isoformat()
 
@@ -57,6 +63,7 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     ui_page.goto(f"{live_server.url}/#cuenta")
     expect(ui_page.locator("#global-settings")).to_be_visible()
     expect(ui_page.locator('#global-settings-content [data-flag-key="stoploss_enabled"]')).to_be_visible()
+    expect(ui_page.locator("#global-settings-content [data-flag-key]")).to_have_count(5)
     ui_page.screenshot(path=str(shots / "desktop-before-cuenta.png"), full_page=False)
     ui_page.goto(f"{live_server.url}/#lab")
     expect(ui_page.locator("#lab-method")).to_be_visible()
@@ -67,6 +74,7 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     ui_page.goto(f"{live_server.url}/#cuenta")
     expect(ui_page.locator("#global-settings")).to_be_visible()
     expect(ui_page.locator('#global-settings-content [data-flag-key="stoploss_enabled"]')).to_be_visible()
+    expect(ui_page.locator("#global-settings-content [data-flag-key]")).to_have_count(5)
     ui_page.screenshot(path=str(shots / "mobile-before-cuenta.png"), full_page=False)
     ui_page.goto(f"{live_server.url}/#lab")
     expect(ui_page.locator('#lab-global-settings-content [data-flag-key="stoploss_enabled"]')).to_be_visible()
@@ -76,17 +84,22 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     expect(ui_page.locator('[data-route="lab"]')).to_have_class("active")
     host = ui_page.locator("#lab-global-settings-content")
     expect(host.locator('[data-flag-key="stoploss_enabled"]')).to_contain_text("distinto del valor por defecto")
-    expect(host.locator('[data-flag-key="future_rule"]')).to_contain_text("Regla futura")
-    expect(host.locator('[data-flag-key="future_rule"] .lab-default-badge')).to_have_count(0)
+    expect(host.locator('[data-flag-key]')).to_have_count(5)
+    for key in ("adjust_idle_shrink_enabled", "smart_adjust_enabled",
+                "smart_close_wait_enabled", "advisor_vol_spacing_enabled"):
+        card = host.locator(f'[data-flag-key="{key}"]')
+        expect(card).to_be_visible()
+        expect(card.get_by_role("button")).to_have_count(1)
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("CELL_STOPLOSS (vend\u00f3): 1")
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("STOPLOSS_SUSPENDED (se habr\u00eda vendido): 1")
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("Neto de CELL_STOPLOSS: sin datos")
 
-    host.get_by_role("button", name="Apagar").click()
+    stoploss_card = host.locator('[data-flag-key="stoploss_enabled"]')
+    stoploss_card.get_by_role("button", name="Apagar").click()
     expect(ui_page.locator("#global-flag-dialog")).to_be_visible()
     ui_page.get_by_role("button", name="Confirmar cambio").click()
     expect(host.locator('[data-flag-key="stoploss_enabled"]')).to_contain_text("Apagado")
-    host.locator('[data-flag-key="stoploss_enabled"]').get_by_role("button", name="Encender").click()
+    stoploss_card.get_by_role("button", name="Encender").click()
     ui_page.get_by_role("button", name="Confirmar cambio").click()
     expect(ui_page.locator("#lab-global-settings-status")).to_have_text("Ajuste global actualizado.")
     expect(host.locator(".global-flag-updated")).to_contain_text("Cambiado a las")
@@ -103,11 +116,12 @@ def test_lab_422_keeps_page_usable(ui_page, live_server):
     _mock_lab_api(ui_page, live_server, fail_apply=True)
     ui_page.goto(f"{live_server.url}/#lab")
     host = ui_page.locator("#lab-global-settings-content")
-    host.get_by_role("button", name="Apagar").click()
+    host.locator('[data-flag-key="stoploss_enabled"]').get_by_role("button", name="Apagar").click()
     ui_page.get_by_role("button", name="Confirmar cambio").click()
     expect(ui_page.locator("#lab-global-settings-status")).to_have_text("Cambio rechazado por la API.")
-    expect(host.locator('[data-flag-key="future_rule"]')).to_be_visible()
-    expect(host.get_by_role("button", name="Apagar")).to_be_enabled()
+    expect(host.locator('[data-flag-key="smart_close_wait_enabled"]')).to_be_visible()
+    expect(host.locator('[data-flag-key="stoploss_enabled"]').get_by_role(
+        "button", name="Apagar")).to_be_enabled()
 
 
 def test_lab_stats_degrade_when_events_unavailable(ui_page, live_server):

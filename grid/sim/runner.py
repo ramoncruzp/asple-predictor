@@ -81,7 +81,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    width_pct=None, fee_pct=.1, resync_candles=3, params=None,
                    halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
                    fee_asset=None, include_details=False, trace_callback=None,
-                   sigma_values=None, idle_shrink_enabled=False):
+                   sigma_values=None, idle_shrink_enabled=False, adjust_enabled_global=True,
+                   stoploss_enabled=True, close_wait_enabled=False):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -208,7 +209,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                 if max_days_result["expired"] and action not in {"CLOSE_REPOSITORY", "TARGET"}:
                     action = "MAX_DAYS"
                     decision = PolicyDecision("MAX_DAYS", (), {**decision.metrics, "max_days": max_days_result})
-                if action not in {"CLOSE_REPOSITORY", "TARGET"}:
+                if adjust_enabled_global and action not in {"CLOSE_REPOSITORY", "TARGET"}:
                     adjust_decision_result = adjust_decision(
                         {"strategy": "smart", "status": status, "params": effective, "n_levels": n,
                          "range_low": active_low, "range_high": active_high, "capital_total": capital},

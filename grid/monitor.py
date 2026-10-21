@@ -59,6 +59,7 @@ class GridMonitor:
         self._last_dust_reconciliation_at: datetime | None = None
         self._vol_fallback_notified: dict[int, str] = {}
         self._stoploss_suspended_notified: set[tuple[int, int]] = set()
+        self._adjust_suspended_notified: set[int] = set()
         self.ops_lock = threading.RLock()
 
     def _emit(self, event: dict) -> None:
@@ -660,12 +661,22 @@ class GridMonitor:
                         # Adjustment has precedence over PAUSE, but CLOSE remains
                         # the highest priority. Legacy grids without the new
                         # adjust_enabled key stay on the 15B-1 policy path.
-                        adjust = adjust_decision(
-                            current, levels, mid, sigma, now,
-                            (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
-                        )
+                        adjust_enabled = bool(getattr(self.settings, "smart_adjust_enabled", True))
+                        if adjust_enabled:
+                            self._adjust_suspended_notified.discard(grid_id)
+                            adjust = adjust_decision(
+                                current, levels, mid, sigma, now,
+                                (self.db.get_last_event(grid_id, "GRID_ADJUSTED") or {}).get("ts"),
+                            )
+                        else:
+                            adjust = PolicyDecision("NONE", (), {"global_switch_off": True})
+                            if grid_id not in self._adjust_suspended_notified:
+                                self._emit({"event_type": "ADJUST_SUSPENDED", "grid_id": grid_id,
+                                    "reason": "global_switch_off", "price": mid,
+                                    "details": {"reason": "global_switch_off"}})
+                                self._adjust_suspended_notified.add(grid_id)
                         params = current.get("params") or {}
-                        if (adjust.action == "NONE" and decision.action not in
+                        if (adjust_enabled and adjust.action == "NONE" and decision.action not in
                                 {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}
                                 and params.get("adjust_idle_shrink") is True
                                 and getattr(self.settings, "adjust_idle_shrink_enabled", False)):
