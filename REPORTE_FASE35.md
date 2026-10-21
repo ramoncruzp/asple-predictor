@@ -1,30 +1,30 @@
-# Fase 35 ? re-espaciado din?mico por volatilidad
+# Fase 35 — re-espaciado dinámico por volatilidad
 
-## B1 ? sigma de apertura
+## B1 — sigma de apertura
 
-- `api/routes/grids.py:386-387,467-468`: al preparar apertura Smart guarda `sigma_24h_open` y `vol_spacing_k` en par?metros. El sigma procede de la volatilidad de 24 h del mercado calculada por el endpoint de apertura.
+- `api/routes/grids.py:386-387,467-468`: al preparar apertura Smart guarda `sigma_24h_open` y `vol_spacing_k` en parámetros. El sigma procede de la volatilidad de 24 h del mercado calculada por el endpoint de apertura.
 - `grid/scan_service.py:122-129,161-162`: el Scanner calcula y expone sigma 24 h para cada moneda. `grid/auto_open.py:95-97` lo conserva al crear un grid Smart.
 - `grid/policy.py:52-53`: grids anteriores sin sigma de apertura retienen `None` y no se re-espacian (`no_sigma_open`).
 
-## B2 ? regla pura y bandera
+## B2 — regla pura y bandera
 
-- `config/settings.py:51,143-147`: `smart_respacing_enabled`, default `False`, descripci?n: ?Hip?tesis sin evidencia todav?a; se eval?a con el banco OOS?. El panel Laboratorio la muestra a partir del cat?logo de flags; `frontend/grids.js:199` refleja su estado.
-- `grid/policy.py:502-547`: `respace_decision` usa sigma 24 h; activa con `r > 1.5` o `r < 0.67`, cooldown de 24 h desde el ?ltimo ajuste, capital atrapado bajo el l?mite, al menos `min_free_cells` y grid Smart ACTIVE. El rango se mantiene; calcula `n_levels` con `round(ln(high/low)/(k*sigma_now))`, acotado por `MIN_LEVELS`/`MAX_LEVELS`. Sin cambio de n no emite ajuste.
+- `config/settings.py:51,143-147`: `smart_respacing_enabled`, default `False`, descripción: «Hipótesis sin evidencia todavía; se evalúa con el banco OOS». El panel Laboratorio la muestra a partir del catálogo de flags; `frontend/grids.js:199` refleja su estado.
+- `grid/policy.py:502-547`: `respace_decision` usa sigma 24 h; activa con `r > 1.5` o `r < 0.67`, cooldown de 24 h desde el último ajuste, capital atrapado bajo el límite, al menos `min_free_cells` y grid Smart ACTIVE. El rango se mantiene; calcula `n_levels` con `round(ln(high/low)/(k*sigma_now))`, acotado por `MIN_LEVELS`/`MAX_LEVELS`. Sin cambio de n no emite ajuste.
 - La prueba pura cubre umbrales alto/bajo, cooldown, estado no activo, sigma de apertura ausente, falta de celdas libres, capital atrapado y rango fijo: `tests/test_grid_policy.py:345-365`.
-- Mutaci?n del argumento del monitor (`sigma_24h_now` ? `sigma` de horizonte configurado): **rojo**, 1 fallo en `test_monitor_respaces_with_24h_sigma_even_when_adjust_is_disabled`. SHA antes/restaurado `998912bd3914bcf61871912a79988981183874f54f2f8e169b315f6300d2d78a`; mutado `941c0a91063288a27c90b85a30cf3d50c7a38368dd28fd7aa2ae76830205cb82`. Restauraci?n byte id?ntica.
+- Mutación del argumento del monitor (`sigma_24h_now` — `sigma` de horizonte configurado): **rojo**, 1 fallo en `test_monitor_respaces_with_24h_sigma_even_when_adjust_is_disabled`. SHA antes/restaurado `998912bd3914bcf61871912a79988981183874f54f2f8e169b315f6300d2d78a`; mutado `941c0a91063288a27c90b85a30cf3d50c7a38368dd28fd7aa2ae76830205cb82`. Restauración byte idéntica.
 
-## B3 ? monitor y simulador
+## B3 — monitor y simulador
 
-- `grid/monitor.py:682-708,854-857`: eval?a despu?s del ADJUST normal, incluso con el interruptor ADJUST apagado, omite un ciclo en que ADJUST ya ocurri?, consulta expresamente provider `24`, limita `RESPACE_EVAL` a una vez cada 6 h por motivo y persiste el sigma tras un ajuste exitoso.
+- `grid/monitor.py:682-708,854-857`: evalúa después del ADJUST normal, incluso con el interruptor ADJUST apagado, omite un ciclo en que ADJUST ya ocurrió, consulta expresamente provider `24`, limita `RESPACE_EVAL` a una vez cada 6 h por motivo y persiste el sigma tras un ajuste exitoso.
 - El ajuste va por `plan_adjust_with_shrink` y `engine.adjust_grid`; se manda el rango actual junto con `source=RESPACE`, manteniendo las ventas de celdas con inventario mediante el plan compartido.
-- `grid/sim/runner.py:88,150-152,309-322,428-430`: reproduce la regla con sigma 24 h de la simulaci?n, inicializa `sigma_24h_open` desde el primer valor disponible y sigue `respacing_enabled`. `grid/scan_service.py:145-157` lo conecta al flag en la simulaci?n del Scanner.
-- Pruebas de integraci?n: `tests/test_grid_monitor.py:979-1014`, `tests/test_grid_sim_runner.py:32-46`, `tests/test_grid_scan_service.py:130-151`.
+- `grid/sim/runner.py:88,150-152,309-322,428-430`: reproduce la regla con sigma 24 h de la simulación, inicializa `sigma_24h_open` desde el primer valor disponible y sigue `respacing_enabled`. `grid/scan_service.py:145-157` lo conecta al flag en la simulación del Scanner.
+- Pruebas de integración: `tests/test_grid_monitor.py:979-1014`, `tests/test_grid_sim_runner.py:32-46`, `tests/test_grid_scan_service.py:130-151`.
 
-## B4 ? banco OOS
+## B4 — banco OOS
 
-Se compar? `smart_actual_respace` con `smart_actual` como referencia en XRP, PEPE y ADA, rango centrado, capital 100 y 1000, 30 d?as por ventana, paso 7 d?as, historial 90 d?as, 88 ventanas ?tiles y 0 omitidas por corrida. Salidas bajo `%TEMP%\fase35-b4-{xrp,pepe,ada}-{100,1000}`. Las tablas muestran tambi?n `simple_vol` y `smart_hoy` para contexto. Delta e IC95 son pareados contra `smart_actual`.
+Se comparó `smart_actual_respace` con `smart_actual` como referencia en XRP, PEPE y ADA, rango centrado, capital 100 y 1000, 30 días por ventana, paso 7 días, historial 90 días, 88 ventanas útiles y 0 omitidas por corrida. Salidas bajo `%TEMP%\fase35-b4-{xrp,pepe,ada}-{100,1000}`. Las tablas muestran también `simple_vol` y `smart_hoy` para contexto. Delta e IC95 son pareados contra `smart_actual`.
 
-### XRP ? capital 100 USDT
+### XRP — capital 100 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -44,7 +44,7 @@ Ciclos realizados netos frente al P&L total con inventario:
 | smart_actual | 3.189324 | 0.359676 | 4.943 |
 | smart_actual_respace | 3.157994 | 0.344787 | 5.205 |
 
-### XRP ? capital 1000 USDT
+### XRP — capital 1000 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -64,7 +64,7 @@ Ciclos realizados netos frente al P&L total con inventario:
 | smart_actual | 40.154694 | 4.234326 | 4.920 |
 | smart_actual_respace | 40.461440 | 4.143532 | 5.193 |
 
-### PEPE ? capital 100 USDT
+### PEPE — capital 100 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -84,7 +84,7 @@ Ciclos realizados netos frente al P&L total con inventario:
 | smart_actual | 5.645552 | -1.228072 | 4.852 |
 | smart_actual_respace | 5.645552 | -1.228072 | 4.852 |
 
-### PEPE ? capital 1000 USDT
+### PEPE — capital 1000 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -104,7 +104,7 @@ Ciclos realizados netos frente al P&L total con inventario:
 | smart_actual | 56.455672 | -12.280717 | 4.852 |
 | smart_actual_respace | 56.455672 | -12.280717 | 4.852 |
 
-### ADA ? capital 100 USDT
+### ADA — capital 100 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -124,7 +124,7 @@ Ciclos realizados netos frente al P&L total con inventario:
 | smart_actual | 4.290565 | -1.276405 | 4.580 |
 | smart_actual_respace | 4.320399 | -1.273075 | 5.057 |
 
-### ADA ? capital 1000 USDT
+### ADA — capital 1000 USDT
 
 | Variante | Media USDT | Mediana | Positivas | p5 | Peor ventana | DD medio | Tiempo activo | Delta ref. (IC95%, wins) | Veredicto |
 |---|---:|---:|---:|---:|---|---:|---:|---|---|
@@ -146,10 +146,10 @@ Ciclos realizados netos frente al P&L total con inventario:
 
 ## Veredicto
 
-No hay mejora estad?stica demostrada de `smart_actual_respace` frente a `smart_actual` en ninguna moneda ni capital; todos los IC95 del delta contienen cero. PEPE es id?ntico en ambas variantes en las ventanas observadas. La hip?tesis queda **apagada por defecto**. No se propone activarla.
+No hay mejora estadística demostrada de `smart_actual_respace` frente a `smart_actual` en ninguna moneda ni capital; todos los IC95 del delta contienen cero. PEPE es idéntico en ambas variantes en las ventanas observadas. La hipótesis queda **apagada por defecto**. No se propone activarla.
 
 ## Pruebas enfocadas
 
-L?nea base al inicio de Parte B: 12 archivos, **211 passed, 13 warnings**. Pase final enfocado: `tests/test_app_settings_api.py`, `tests/test_bench_smart_oos.py`, `tests/test_fase32_switches.py`, `tests/test_grid_adjust_shrink.py`, `tests/test_grid_advisor.py`, `tests/test_grid_monitor.py`, `tests/test_grid_policy.py`, `tests/test_grid_scan_service.py`, `tests/test_grid_sim_runner.py`, `tests/ui/test_frontend_format.py`, `tests/ui/test_grids_browser.py` y `tests/ui/test_laboratorio.py`: **214 passed, 13 warnings**. Verificaci?n adicional de aperturas: `tests/test_grid_auto_open.py` y `tests/test_grids_api.py`, **51 passed**. Total final en los 14 archivos: **265 passed, 13 warnings**. Sin Testnet ni acceso de red en Parte B.
+Línea base al inicio de Parte B: 12 archivos, **211 passed, 13 warnings**. Pase final enfocado: `tests/test_app_settings_api.py`, `tests/test_bench_smart_oos.py`, `tests/test_fase32_switches.py`, `tests/test_grid_adjust_shrink.py`, `tests/test_grid_advisor.py`, `tests/test_grid_monitor.py`, `tests/test_grid_policy.py`, `tests/test_grid_scan_service.py`, `tests/test_grid_sim_runner.py`, `tests/ui/test_frontend_format.py`, `tests/ui/test_grids_browser.py` y `tests/ui/test_laboratorio.py`: **214 passed, 13 warnings**. Verificación adicional de aperturas: `tests/test_grid_auto_open.py` y `tests/test_grids_api.py`, **51 passed**. Total final en los 14 archivos: **265 passed, 13 warnings**. Sin Testnet ni acceso de red en Parte B.
 
 Commits selectivos en orden B1, B2, B3 y B4. Sin push.
