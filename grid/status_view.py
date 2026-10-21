@@ -493,6 +493,27 @@ def daily_profit_view(events: list[dict], *, tz_name: str = "America/Santo_Domin
             "truncated": bool(truncated)}
 
 
+def monthly_profit_view(daily_rows: list[dict]) -> list[dict]:
+    """Aggregate local-calendar daily realized PnL rows by their YYYY-MM date."""
+    by_month: dict[str, dict[str, Any]] = {}
+    for row in daily_rows:
+        month = str(row["date"])[:7]
+        bucket = by_month.setdefault(month, {
+            "net_pnl_usdt": Decimal(0), "cycles": Decimal(0),
+            "stoploss": Decimal(0), "liquidations": Decimal(0), "days_with_data": 0,
+        })
+        bucket["net_pnl_usdt"] += _d(row.get("net_pnl_usdt"))
+        bucket["cycles"] += _d(row.get("cycles"))
+        bucket["stoploss"] += _d(row.get("stoploss"))
+        bucket["liquidations"] += _d(row.get("liquidations"))
+        bucket["days_with_data"] += 1
+    return [{"month": month, "net_pnl_usdt": _f(bucket["net_pnl_usdt"]),
+             "cycles": _f(bucket["cycles"]), "stoploss": _f(bucket["stoploss"]),
+             "liquidations": _f(bucket["liquidations"]),
+             "days_with_data": bucket["days_with_data"]}
+            for month, bucket in sorted(by_month.items())]
+
+
 def equity_curve_view(snapshots: list[dict], *, points: int = 200) -> dict:
     """Equity-with-inventory curve: capital + realized-to-date + mark-to-market, one point per run.
 

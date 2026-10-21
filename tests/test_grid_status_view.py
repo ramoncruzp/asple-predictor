@@ -301,6 +301,27 @@ def test_daily_profit_includes_cycle_stoploss_and_liquidation_pnl_and_reconciles
     assert daily["truncated"] is True
 
 
+def test_monthly_profit_groups_local_days_and_sums_each_pnl_source():
+    events = [
+        {"event_type": "SELL_FILLED", "ts": datetime(2026, 2, 1, 2, tzinfo=timezone.utc),
+         "details": {"cycle_pnl": "1.10"}},
+        {"event_type": "CELL_STOPLOSS", "ts": datetime(2026, 2, 1, 2, 30, tzinfo=timezone.utc),
+         "details": {"realized_pnl": "-0.20"}},
+        {"event_type": "CELL_LIQUIDATED", "ts": datetime(2026, 2, 1, 3, tzinfo=timezone.utc),
+         "details": {"cycle_pnl": "-0.15"}},
+        {"event_type": "SELL_FILLED", "ts": datetime(2026, 2, 1, 5, tzinfo=timezone.utc),
+         "details": {"cycle_pnl": "2.00"}},
+    ]
+    daily = sv.daily_profit_view(events)["daily"]
+    monthly = sv.monthly_profit_view(daily)
+    assert monthly == [
+        {"month": "2026-01", "net_pnl_usdt": 0.75, "cycles": 1.1,
+         "stoploss": -0.2, "liquidations": -0.15, "days_with_data": 1},
+        {"month": "2026-02", "net_pnl_usdt": 2.0, "cycles": 2.0,
+         "stoploss": 0.0, "liquidations": 0.0, "days_with_data": 1},
+    ]
+
+
 def test_equity_curve_uses_summary_realized_once_falls_back_and_keeps_runs_distinct():
     snapshots = [
         {"run_id": 10, "ts": NOW - timedelta(hours=2), "level_idx": 0,

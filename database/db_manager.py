@@ -1623,6 +1623,34 @@ class DBManager:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
 
+    def list_grid_pnl_events(self, grid_ids: list[int] | None = None) -> list[dict]:
+        """Return all realized-PnL events, oldest first, optionally for selected grids."""
+        statement = select(self.grid_events).where(self.grid_events.c.event_type.in_(
+            ("SELL_FILLED", "CELL_STOPLOSS", "CELL_LIQUIDATED")))
+        if grid_ids is not None:
+            if not grid_ids:
+                return []
+            statement = statement.where(self.grid_events.c.grid_id.in_(
+                [int(grid_id) for grid_id in grid_ids]))
+        statement = statement.order_by(self.grid_events.c.ts.asc(), self.grid_events.c.id.asc())
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
+    def list_grid_pnl_events(self, grid_ids: list[int] | None = None) -> list[dict]:
+        """Return all realized-PnL events, oldest first, optionally for selected grids."""
+        statement = select(self.grid_events).where(self.grid_events.c.event_type.in_(
+            ("SELL_FILLED", "CELL_STOPLOSS", "CELL_LIQUIDATED")))
+        if grid_ids is not None:
+            if not grid_ids:
+                return []
+            statement = statement.where(self.grid_events.c.grid_id.in_(
+                [int(grid_id) for grid_id in grid_ids]))
+        statement = statement.order_by(self.grid_events.c.ts.asc(), self.grid_events.c.id.asc())
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+        return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
+
     def list_grid_events_since(self, min_id: int, *, limit: int = 5000) -> list[dict]:
         """Events with id > min_id, oldest first (for watermark-based polling)."""
         statement = (select(self.grid_events)

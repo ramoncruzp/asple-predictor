@@ -228,14 +228,59 @@ def test_daily_event_stream_is_loaded_once_per_grid(tmp_path):
         "n_levels":4,"capital_total":100,"status":"ACTIVE","strategy":"smart"},
         [{"level_idx":0,"price":90,"sell_price":91,"capital":100,"state":"IDLE","held_qty":0}])
     db.add_grid_event(run_id=None, source="CLI", grid_id=grid["id"], event_type="SELL_FILLED",
-                      price=91, details={"net_pnl_usdt":1.25})
+                      price=91, details={"cycle_pnl":1.25})
     calls = []
-    original = db.list_grid_events
+    original = db.list_grid_pnl_events
     def counted(*args, **kwargs):
-        calls.append(kwargs.get("grid_id"))
+        calls.append(kwargs.get("grid_ids"))
         return original(*args, **kwargs)
-    db.list_grid_events = counted
+    db.list_grid_pnl_events = counted
     result = client.get("/api/account/summary")
     assert result.status_code == 200
-    assert calls == [grid["id"]]
+    assert calls == [[grid["id"]]]
+    assert result.body["gains"]["daily"]["all"][0]["net_pnl_usdt"] == 1.25
+    assert result.body["gains"]["monthly"][0]["net_pnl_usdt"] == 1.25
     assert result.body["gains"]["daily"]["7d"] == result.body["gains"]["daily"]["30d"]
+
+
+def test_account_pnl_history_ignores_more_than_5000_non_pnl_events_and_uses_local_calendar(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from sqlalchemy import insert
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 6, 15, 12, tzinfo=timezone.utc)
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(grid_account, "datetime", FrozenDateTime)
+    client, db = make_client(tmp_path, AccountClient())
+    grid = db.create_grid_with_levels({"symbol":"XRPUSDT","range_low":90,"range_high":110,
+        "n_levels":4,"capital_total":100,"status":"ACTIVE","strategy":"smart"},
+        [{"level_idx":0,"price":90,"sell_price":91,"capital":100,"state":"IDLE","held_qty":0}])
+    grid_id = grid["id"]
+    for ts, pnl in ((datetime(2026, 6, 9, 4, tzinfo=timezone.utc), "1.25"),
+                    (datetime(2026, 6, 9, 3, tzinfo=timezone.utc), "2.00"),
+                    (datetime(2026, 5, 17, 4, tzinfo=timezone.utc), "3.00"),
+                    (datetime(2026, 5, 17, 3, tzinfo=timezone.utc), "4.00")):
+        db.add_grid_event(run_id=None, source="CLI", grid_id=grid_id, event_type="SELL_FILLED",
+                          details={"cycle_pnl": pnl}, ts=ts)
+    noise = [{"run_id": None, "source": "CLI", "ts": datetime(2026, 7, 1, tzinfo=timezone.utc),
+              "grid_id": grid_id, "event_type": "HEARTBEAT", "details": "{}"}
+             for _ in range(5001)]
+    with db.engine.begin() as conn:
+        conn.execute(insert(db.grid_events), noise)
+
+    result = client.get("/api/account/summary")
+    assert result.status_code == 200
+    gains = result.body["gains"]
+    assert len(gains["daily"]["all"]) == 4
+    assert [row["date"] for row in gains["daily"]["7d"]] == ["2026-06-09"]
+    assert [row["date"] for row in gains["daily"]["30d"]] == [
+        "2026-05-17", "2026-06-08", "2026-06-09"]
+    assert gains["monthly"] == [
+        {"month": "2026-05", "net_pnl_usdt": 7.0, "cycles": 7.0, "stoploss": 0.0,
+         "liquidations": 0.0, "days_with_data": 2},
+        {"month": "2026-06", "net_pnl_usdt": 3.25, "cycles": 3.25, "stoploss": 0.0,
+         "liquidations": 0.0, "days_with_data": 2},
+    ]

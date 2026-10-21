@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from api.routes.grids import _authorize
-from grid.status_view import daily_profit_view, grid_summary
+from grid.status_view import daily_profit_view, grid_summary, monthly_profit_view
 from grid.reconciliation import expected_inventory_by_asset
 
 router = APIRouter(prefix="/api/account", tags=["grid-account"])
@@ -240,20 +240,19 @@ def summary(request: Request):
         row["capital_share_basis"] = "abiertos+repositorio"
         row["capital_share_pct"] = (float(Decimal(str(row["capital_usdt"])) / capital * 100)
                                      if capital and row in share_rows else None)
-    # Aggregate daily rows from each grid's own event stream; identities stay grid-scoped.
-    daily_by_window = {}
-    events_all = [event for grid in grids
-                  for event in db.list_grid_events(grid_id=int(grid["id"]), limit=5000)]
+    # Load the complete realized-PnL stream in one query; daily_profit_view assigns
+    # each timestamp to its Santo Domingo calendar date.
+    events_all = db.list_grid_pnl_events(grid_ids=[int(grid["id"]) for grid in grids])
+    daily_all = daily_profit_view(events_all, net_realized_usdt=None,
+                                  reconcile_available=False)["daily"]
+    from zoneinfo import ZoneInfo
+    local_today = now.astimezone(ZoneInfo("America/Santo_Domingo")).date()
+    daily_by_window = {"all": daily_all}
     for days in (7, 30):
-        cutoff = now - timedelta(days=days)
-        in_window = []
-        for event in events_all:
-            event_ts = event.get("ts")
-            if event_ts is not None:
-                event_ts = event_ts.replace(tzinfo=timezone.utc) if event_ts.tzinfo is None else event_ts.astimezone(timezone.utc)
-                if event_ts >= cutoff: in_window.append(event)
-        daily_by_window[f"{days}d"] = daily_profit_view(in_window, net_realized_usdt=None,
-                                                        reconcile_available=False)["daily"]
+        first_day = local_today - timedelta(days=days - 1)
+        daily_by_window[f"{days}d"] = [row for row in daily_all
+                                      if first_day.isoformat() <= row["date"] <= local_today.isoformat()]
+    monthly = monthly_profit_view(daily_all)
     account_balance = None
     if balances is not None:
         assets, unvalued, equity = [], [], Decimal(0)
@@ -295,7 +294,7 @@ def summary(request: Request):
                       "unrealized_usdt": float(sum((Decimal(str(x["inventory"]["unrealized_pnl_usdt"] or 0)) for x in summaries), Decimal(0))),
                       "total_with_inventory_usdt": float(sum((Decimal(str(x["total_with_inventory_usdt"] or 0)) for x in summaries), Decimal(0))),
                       "label": "realizada junto al total con inventario", "operations": sum(x["cycles_completed"] for x in summaries),
-                      "daily": daily_by_window},
+                      "daily": daily_by_window, "monthly": monthly},
             "grids": {"open": [x for x in per_grid if x["status"] not in {"HOLDING", "CLOSED", "ERROR"}],
                       "repository": [x for x in per_grid if x["status"] == "HOLDING"],
                       "closed": [x for x in per_grid if x["status"] in {"CLOSED", "ERROR"}]},
