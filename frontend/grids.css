@@ -28,6 +28,15 @@
 .grid-row-metrics b{font:600 14px var(--mono)}
 .pnl-positive{color:var(--green)}
 .pnl-negative{color:var(--red)}
+.pnl-neutral{color:var(--muted)}
+.repo-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;color:var(--text)}
+.repo-note{margin:0 0 10px}
+.repo-coin-list{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.repo-coin-row{display:grid;grid-template-columns:minmax(130px,1.2fr) repeat(4,minmax(90px,1fr));align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;color:var(--text);text-decoration:none}
+.repo-coin-row:hover{border-color:var(--blue)}
+.repo-coin-row small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase}
+.repo-coin-row b{font:600 13px var(--mono)}
+@media (max-width:700px){.repo-coin-row{grid-template-columns:1fr 1fr}.repo-coin-name{grid-column:1 / -1}}
 .back-link{color:var(--blue);text-decoration:none;font-size:12px}
 .grid-detail-header{display:flex;flex-wrap:wrap;align-items:center;gap:18px;padding:18px}
 .grid-detail-identity{display:flex;align-items:center;gap:10px}
@@ -66,6 +75,7 @@
 .daily-bar{width:6px;border-radius:2px 2px 0 0}
 .daily-bar.pnl-positive{background:var(--green)}
 .daily-bar.pnl-negative{background:var(--red)}
+.daily-bar.pnl-neutral{background:var(--muted)}
 .equity-svg{width:100%;height:160px}
 .equity-line-realized{fill:none;stroke:var(--muted);stroke-width:2;stroke-dasharray:4 3}
 .equity-line-inventory{fill:none;stroke:var(--blue);stroke-width:2}

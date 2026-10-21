@@ -5,8 +5,10 @@
 
   function fmtMoney(value, digits = 2) {
     if (value === null || value === undefined) return '—';
-    const num = Number(value);
+    let num = Number(value);
     if (!Number.isFinite(num)) return '—';
+    // Evita mostrar "-0.00": un valor que redondea a cero se muestra como cero.
+    if (Math.abs(num) < 0.5 * 10 ** -digits) num = 0;
     return window.ASPLEFormat?.formatNumber(num, digits) ?? num.toFixed(digits);
   }
   function fmtPct(value, digits = 2) {
@@ -15,7 +17,11 @@
   }
   function pnlClass(value) {
     if (value === null || value === undefined) return '';
-    return Number(value) >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '';
+    // Lo que redondea a 0.00 no es ganancia ni pérdida: color neutro.
+    if (Math.abs(num) < 0.005) return 'pnl-neutral';
+    return num > 0 ? 'pnl-positive' : 'pnl-negative';
   }
   function esc(value) {
     return String(value ?? '—').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
@@ -212,6 +218,35 @@
       </div></a>`;
   }
 
+  // Repositorio unificado: una sola tarjeta multimoneda. Por dentro sigue
+  // habiendo un grid HOLDING por moneda; aquí solo se agrupan para mostrarlos.
+  function repositoryCardHtml(rows) {
+    const total = (key) => {
+      if (rows.some((g) => g[key] === null || g[key] === undefined || !Number.isFinite(Number(g[key])))) return null;
+      return rows.reduce((acc, g) => acc + Number(g[key]), 0);
+    };
+    const net = total('net_realized_usdt');
+    const withInv = total('total_with_inventory_usdt');
+    const coinRows = rows.map((grid) => `<a class="repo-coin-row" href="#grids/${grid.id}">
+        <span class="repo-coin-name"><span class="grid-id">#${grid.id}</span> <span class="grid-symbol">${esc(grid.symbol)}</span></span>
+        <span><small>Neta realizada</small><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></span>
+        <span><small>Total con inventario</small><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></span>
+        <span><small>Desplegado</small><b>${fmtPct(grid.capital_deployed_pct, 1)}</b></span>
+        <span><small>Precio</small><b class="mono">${grid.price === null ? 'sin precio' : fmtMoney(grid.price, 6)}</b></span>
+      </a>`).join('');
+    return `<div class="repo-card">
+      <div class="grid-row-top"><span class="grid-symbol">Repositorio</span><span class="grid-strategy">multimoneda · ${rows.length} ${rows.length === 1 ? 'moneda' : 'monedas'}</span>
+      <span class="status-badge status-holding">${esc(statusLabel('HOLDING'))}</span></div>
+      <p class="muted repo-note">Bots que esperan vender. Al vender se desactivan y no vuelven a comprar.</p>
+      <div class="grid-row-metrics">
+        <div><span>Neta realizada (total)</span><b class="${pnlClass(net)}">${fmtMoney(net, 2)}</b></div>
+        <div><span>Total con inventario (total) ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(withInv)}">${fmtMoney(withInv, 2)}</b></div>
+        <div><span>Monedas</span><b>${rows.length}</b></div>
+      </div>
+      <div class="repo-coin-list">${coinRows}</div>
+    </div>`;
+  }
+
   function renderList(container, data) {
     const grids = data.grids || [];
     const totals = data.totals || {};
@@ -286,7 +321,7 @@
       ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(grid => gridRowHtml(grid, switchLine)).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
-      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(grid => gridRowHtml(grid)).join('')}</div>` : ''}
+      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repositoryCardHtml(repoRows)}</div>` : ''}
     `;
   }
 
