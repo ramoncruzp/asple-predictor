@@ -44,7 +44,8 @@ def test_get_lists_allowlisted_flag_with_default_origin(tmp_path):
     rows = {row["key"]: row for row in response.json()["flags"]}
     assert {"adjust_idle_shrink_enabled", "stoploss_enabled", "smart_adjust_enabled",
             "smart_close_wait_enabled", "advisor_vol_spacing_enabled",
-            "smart_respacing_enabled"} == set(rows)
+            "smart_respacing_enabled", "smart_direction_filter_enabled"} == set(rows)
+    assert rows["smart_direction_filter_enabled"]["current"] is False
     assert rows["smart_respacing_enabled"]["current"] is False
     assert "se eval\u00faa con el banco OOS" in rows["smart_respacing_enabled"]["description"]
     assert rows["adjust_idle_shrink_enabled"] == {
@@ -69,7 +70,7 @@ def test_phase33_defaults_apply_without_database_overrides_and_descriptions_are_
     assert {key: getattr(settings, key) for key in expected} == expected
     assert db.list_app_flag_overrides() == []
     suffix = "Valor por defecto cambiado en la Fase 33 por evidencia de simulación fuera de muestra (XRP, 87 ventanas); se puede revertir aquí."
-    legacy_tagged = [key for key in expected if key != "smart_close_wait_enabled"]
+    legacy_tagged = ["advisor_vol_spacing_enabled", "smart_adjust_enabled", "stoploss_enabled"]
     assert all(APP_FLAG_DEFINITIONS[key]["description"].endswith(suffix) for key in legacy_tagged)
     assert APP_FLAG_DEFINITIONS["smart_close_wait_enabled"]["description"].endswith(
         "Valor por defecto revertido en la Fase 34b; se puede revertir aqu\u00ed.")

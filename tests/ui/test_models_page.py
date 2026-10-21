@@ -512,6 +512,8 @@ def _models_symbol_page(ui_page, live_server, readiness_state='lista', symbols=N
             calls['history'].append(symbol)
             route.fulfill(json=[{'forecast_at':'2026-10-07T10:00:00Z','pred_vol_pct':3.1,'realized_vol_pct':3.0}],headers={'X-Vol-Selection':available[1].get('selection','provisional') if symbol=='ADAUSDT' else available[0].get('selection','consensus')})
         elif path=='/api/predictions/volatility-coverage': route.fulfill(json={'n':40,'coverage_1sigma':.68,'coverage_2sigma':.95})
+        elif path=='/api/direction/shadow/summary':
+            route.fulfill(json={'symbol':symbol,'oos':{'n':100,'thresholds':{'0.6':{'precision':.52,'precision_ci95':[.49,.55]}}},'bank_verdict':'sin diferencia demostrada','timely_accuracy':.51,'independent_blocks':40,'label':'descriptivo'})
         elif path=='/api/models/status': route.fulfill(json={'models':[{'model_name':'model_a','available':True,'validation_status':'champion','display_name':'XGBoost','symbol':'XRPUSDT','interval':'1h'}]})
         elif path=='/api/models/shadow-status': route.fulfill(json={})
         elif path.endswith('/train/status'): route.fulfill(json={'job':None})
@@ -544,8 +546,11 @@ def test_unready_ada_gets_one_notice_and_no_volatility_requests(ui_page, live_se
     text=ui_page.locator('#screen-models').inner_text()
     assert text.count('ADAUSDT aún no tiene modelos de volatilidad')==1
     assert calls['stats'].count('ADAUSDT')==0
-    expect(ui_page.locator('#models-direction-content')).to_contain_text('Los modelos de dirección solo existen para XRPUSDT.')
-    expect(ui_page.locator('#models-direction-content')).not_to_contain_text('ADAUSDT 1h')
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('Modelo separado')
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('Temporalidad activa: ADAUSDT 1h')
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('XRPUSDT')
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('PEPEUSDT')
+    expect(ui_page.locator('#models-direction-content')).to_contain_text('ADAUSDT')
     vol_train=ui_page.locator('#models-training-models button[data-model="vol"]')
     expect(vol_train).to_be_disabled()
     expect(ui_page.locator('#models-training-models')).to_contain_text('El entrenamiento de esta moneda se gestiona desde Monedas.')
@@ -562,7 +567,7 @@ def test_consensus_persistence_note_and_xrp_history_selection_header(ui_page, li
     expect(ui_page.locator('#models-vol-summary')).to_contain_text('En evaluación')
 
 
-def test_direction_uses_artifact_identity_and_hides_non_xrp_content(ui_page, live_server):
+def test_direction_uses_artifact_identity_and_renders_selected_coin(ui_page, live_server):
     _models_symbol_page(ui_page,live_server,readiness_state='lista')
     rendered=ui_page.evaluate("""() => ({
       row:window.ModelsPageTest.renderDirectionRow('model_a',{display_name:'XGBoost',available:true,symbol:'XRPUSDT',interval:'1h'}, {}, {}, null, {symbol:'ADAUSDT',interval:'1h'}),
@@ -571,8 +576,8 @@ def test_direction_uses_artifact_identity_and_hides_non_xrp_content(ui_page, liv
     })""")
     assert 'XRPUSDT 1h' in rendered['row']
     assert 'ADAUSDT 1h' not in rendered['row']
-    assert 'Los modelos de dirección solo existen para XRPUSDT.' in rendered['ada']
-    assert 'XGBoost' not in rendered['ada']
+    assert 'Modelo separado' in rendered['ada']
+    assert 'XGBoost' in rendered['ada']
     assert 'XGBoost' in rendered['xrp']
 
 

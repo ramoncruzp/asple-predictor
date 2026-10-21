@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     smart_close_wait_enabled: bool = Field(True, validation_alias="SMART_CLOSE_WAIT_ENABLED")
     advisor_vol_spacing_enabled: bool = Field(True, validation_alias="ADVISOR_VOL_SPACING_ENABLED")
     smart_respacing_enabled: bool = Field(False, validation_alias="SMART_RESPACING_ENABLED")
+    smart_direction_filter_enabled: bool = Field(False, validation_alias="SMART_DIRECTION_FILTER_ENABLED")
     scanner_min_volume_24h: float = Field(SCANNER_DEFAULTS["min_volume_24h"], gt=0, validation_alias="SCANNER_MIN_VOLUME_24H")
     scanner_max_spread_bps: float = Field(SCANNER_DEFAULTS["max_spread_bps"], gt=0, validation_alias="SCANNER_MAX_SPREAD_BPS")
     scanner_min_spacing_pct: float = Field(SCANNER_DEFAULTS["min_spacing_pct"], gt=0, validation_alias="SCANNER_MIN_SPACING_PCT")
@@ -145,9 +146,15 @@ APP_FLAG_DEFINITIONS = {
         "description": "Hipótesis sin evidencia todavía; se evalúa con el banco OOS",
         "default": False, "requires_restart": False,
     },
+    "smart_direction_filter_enabled": {
+        "label": "Filtro direccional de compras Smart",
+        "description": "Interrumpe compras nuevas de Smart cuando el modelo estima ca\u00edda a 4 h (umbral 60 %). Conserva ventas. Sin evidencia OOS o econ\u00f3mica suficiente; apagado por defecto.",
+        "default": False, "requires_restart": False,
+    },
 }
 
 ADVISOR_VOL_SPACING_K = 0.9
+DIRECTION_FILTER_THRESHOLD = 0.60
 
 
 def apply_app_flag_overrides(settings: Settings, db) -> Settings:

@@ -318,12 +318,19 @@
     }
   }
 
-  function renderDirection(status, context, shadow) {
-    if ((context?.symbol || 'XRPUSDT') !== 'XRPUSDT') return '<p class="models-direction-only-xrp">Los modelos de direcci\u00F3n solo existen para XRPUSDT.</p>';
+  function renderDirection(status, context, shadow, directionSummary) {
     const names = ['model_a', 'model_b', 'model_c', 'model_d', 'ensemble'];
     const models = Object.fromEntries((status?.models || []).map(model => [model.model_name, model]));
     const rows = names.map(name => renderDirectionRow(name, models[name], context?.models?.[name], shadow, status?.winner_by_accuracy, context)).join('');
-    return `<p class="muted models-direction-metric-note">BAJISTA acierta si el precio no sube m\u00E1s de 0,5 %.</p><p class="muted">Temporalidad activa: ${esc(context?.symbol || 'no disponible')} ${esc(context?.interval || 'no disponible')}. La selecci\u00F3n de moneda/horizonte de volatilidad no modifica estos datos.</p><div class="table-card"><table class="data-table models-direction-table"><thead><tr><th>Modelo</th><th>Estado</th><th>Predicciones / verificadas / pendientes</th><th>ALCISTA: aciertos / fallos / pendientes</th><th>NEUTRAL</th><th>Precisi\u00F3n ALCISTA</th><th>Tasa base UP</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const summaries = Array.isArray(directionSummary) ? directionSummary : [directionSummary].filter(Boolean);
+    const directionCards = summaries.map(item => {
+      const oos = item?.oos || {}, th = oos.thresholds?.['0.6'] || {};
+      const ciLow = th.precision_ci95?.[0], bank = item?.bank_verdict;
+      const ready = Number(th.precision) >= .60 && Number(ciLow) > .55 && bank === 'mejora';
+      const verdict = ready ? 'Listo para probar' : 'Sin evidencia';
+      return `<article class="models-presentation direction-evidence"><span class="models-presentation-label">${esc(item?.symbol || 'Moneda')} · caída a 4 h</span><strong>${verdict}</strong><small>OOS θ=0,60: ${th.precision == null ? 'Sin evidencia' : `${(Number(th.precision) * 100).toFixed(1)}%`}; bloques=${Number(oos.n || 0)}; banco=${esc(bank || 'sin evidencia')}</small><small>En vivo: ${item?.timely_accuracy == null ? 'Sin evidencia' : `${(Number(item.timely_accuracy) * 100).toFixed(1)}%`} · ${Number(item?.independent_blocks || 0)} bloques independientes · ${esc(item?.label || 'descriptivo')}</small></article>`;
+    }).join('');
+    return `<div class="models-summary-grid">${directionCards}</div><p class="muted models-direction-metric-note">BAJISTA acierta si el precio no sube más de 0,5 %.</p><p class="muted models-direction-metric-note">Modelo separado: p_down estima que close[t+4] &lt; close[t]. El filtro solo puede detener compras nuevas; las ventas siguen.</p><p class="muted">Temporalidad activa: ${esc(context?.symbol || 'no disponible')} ${esc(context?.interval || 'no disponible')}.</p><div class="table-card"><table class="data-table models-direction-table"><thead><tr><th>Modelo</th><th>Estado</th><th>Predicciones / verificadas / pendientes</th><th>ALCISTA: aciertos / fallos / pendientes</th><th>NEUTRAL</th><th>Precisi\u00F3n ALCISTA</th><th>Tasa base UP</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   async function loadContext(requestedSymbol) {
@@ -472,11 +479,12 @@
       $('models-direction-content').innerHTML = msg('Registro de monedas: error de red. Los otros bloques siguen disponibles.', 'error');
     }
     const request = Date.now(); state.context = context;
-    const direction = Promise.allSettled([api.modelsStatus(), api.shadowStatus()]).then(([sr, sh]) => {
-      const errors = [context.registryError ? 'Registro de monedas: error de red.' : '', sr.status === 'rejected' ? 'Estado de modelos: error de red.' : '', sh.status === 'rejected' ? 'Estado sombra: error de red.' : ''].filter(Boolean);
+    const direction = Promise.allSettled([api.modelsStatus(), api.shadowStatus(), Promise.allSettled(['XRPUSDT','PEPEUSDT','ADAUSDT'].map(symbol => api.get('/api/direction/shadow/summary', {symbol})))]).then(([sr, sh, dr]) => {
+      const directionData = dr.status === 'fulfilled' ? dr.value.filter(item => item.status === 'fulfilled').map(item => item.value) : [];
+      const errors = [context.registryError ? 'Registro de monedas: error de red.' : '', sr.status === 'rejected' ? 'Estado de modelos: error de red.' : '', sh.status === 'rejected' ? 'Estado sombra: error de red.' : '', !directionData.length ? 'Evidencia direccional: no disponible.' : ''].filter(Boolean);
       state.trainingModels = sr.status === 'fulfilled' ? sr.value : {};
       $('models-training-models').innerHTML = renderTrainingModels(state.trainingModels);
-      $('models-direction-content').innerHTML = `${errors.map(text => msg(text, 'error')).join('')}${renderDirection(sr.status === 'fulfilled' ? sr.value : {}, context, sh.status === 'fulfilled' ? sh.value : {})}`;
+      $('models-direction-content').innerHTML = `${errors.map(text => msg(text, 'error')).join('')}${renderDirection(sr.status === 'fulfilled' ? sr.value : {}, context, sh.status === 'fulfilled' ? sh.value : {}, directionData)}`;
       refreshTraining();
     });
     await Promise.all([loadVolatility(), direction]);

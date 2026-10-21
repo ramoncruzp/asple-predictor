@@ -10,12 +10,22 @@
     if (!response.ok) { const error = new Error(payload.detail || `HTTP ${response.status}`); error.status = response.status; throw error; }
     return payload;
   }
-  function render(flags, host) {
+  async function directionEvidence() {
+    return Promise.all(['XRPUSDT', 'PEPEUSDT', 'ADAUSDT'].map(async symbol => {
+      try {
+        const response = await fetch((window.API_BASE || location.origin) + `/api/direction/shadow/summary?symbol=${symbol}`);
+        const item = await response.json(), threshold = item.oos?.thresholds?.['0.6'] || {};
+        return {symbol, verdict: Number(threshold.precision) >= .60 && Number(threshold.precision_ci95?.[0]) > .55 && item.bank_verdict === 'mejora' ? 'Listo para probar' : 'Sin evidencia'};
+      } catch (_) { return {symbol, verdict:'Sin evidencia'}; }
+    }));
+  }
+  function render(flags, host, evidence = []) {
     if (!host) return;
     host.innerHTML = (flags || []).map(flag => {
       const changed = Boolean(flag.current) !== Boolean(flag.default);
       const when = updatedAt.get(flag.key);
-      return `<article class="global-flag-row" data-flag-key="${esc(flag.key)}"><div class="global-flag-copy"><h3>${esc(flag.label)}</h3><p>${esc(flag.description)}</p><small class="muted">Estado: <b>${flag.current ? 'Encendido' : 'Apagado'}</b> · Origen: ${esc(flag.origin)} · Valor por defecto: ${flag.default ? 'Encendido' : 'Apagado'} · ${flag.requires_restart ? 'Requiere reiniciar' : 'Efecto en vivo'}</small>${changed ? '<span class="lab-default-badge">distinto del valor por defecto</span>' : ''}${when ? `<small class="global-flag-updated">Cambiado a las ${esc(when)} (hora local)</small>` : ''}</div><button class="button secondary" type="button" data-flag-change="${esc(flag.key)}" data-flag-value="${flag.current ? 'false' : 'true'}">${flag.current ? 'Apagar' : 'Encender'}</button></article>`;
+      const direction = flag.key === 'smart_direction_filter_enabled' ? `<small class="global-flag-updated">${evidence.map(item => `${esc(item.symbol)}: ${esc(item.verdict)}`).join(' · ')}</small>` : '';
+      return `<article class="global-flag-row" data-flag-key="${esc(flag.key)}"><div class="global-flag-copy"><h3>${esc(flag.label)}</h3><p>${esc(flag.description)}</p><small class="muted">Estado: <b>${flag.current ? 'Encendido' : 'Apagado'}</b> · Origen: ${esc(flag.origin)} · Valor por defecto: ${flag.default ? 'Encendido' : 'Apagado'} · ${flag.requires_restart ? 'Requiere reiniciar' : 'Efecto en vivo'}</small>${direction}${changed ? '<span class="lab-default-badge">distinto del valor por defecto</span>' : ''}${when ? `<small class="global-flag-updated">Cambiado a las ${esc(when)} (hora local)</small>` : ''}</div><button class="button secondary" type="button" data-flag-change="${esc(flag.key)}" data-flag-value="${flag.current ? 'false' : 'true'}">${flag.current ? 'Apagar' : 'Encender'}</button></article>`;
     }).join('') || '<p class="muted">No hay interruptores editables.</p>';
   }
   async function load(containerId) {
@@ -26,7 +36,7 @@
       const response = await fetch((window.API_BASE || location.origin) + '/api/settings/flags', { headers });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-      render(payload.flags, host);
+      render(payload.flags, host, await directionEvidence());
     } catch (error) {
       host.innerHTML = `<p class="cuenta-error">No se pudieron cargar los ajustes globales: ${esc(error.message)}</p>`;
     }
@@ -48,7 +58,11 @@
         const preview = await post({key, value, dry_run:true, confirm:false});
         const plan = preview.plan || {};
         pending = {key, value, containerId};
-        document.getElementById('global-flag-dialog-message').textContent = `${value ? 'Encender' : 'Apagar'} el interruptor ${label}. Plan: ${plan.previous ? 'Encendido' : 'Apagado'} ${String.fromCharCode(0x2192)} ${value ? 'Encendido' : 'Apagado'}. El cambio se guardar${String.fromCharCode(0x00e1)} y aplicar${String.fromCharCode(0x00e1)} ${plan.requires_restart ? 'tras reiniciar' : 'sin reiniciar'}.`;
+        const evidence = key === 'smart_direction_filter_enabled' && value ? await directionEvidence() : [];
+        const evidenceText = evidence.length ? ` Evidencia: ${evidence.map(item => `${item.symbol}: ${item.verdict}`).join('; ')}.` : '';
+        const message = document.getElementById('global-flag-dialog-message');
+        message.style.color = evidence.some(item => item.verdict === 'Sin evidencia') ? '#f85149' : '';
+        message.textContent = `${value ? 'Encender' : 'Apagar'} el interruptor ${label}. Plan: ${plan.previous ? 'Encendido' : 'Apagado'} ${String.fromCharCode(0x2192)} ${value ? 'Encendido' : 'Apagado'}. El cambio se guardar${String.fromCharCode(0x00e1)} y aplicar${String.fromCharCode(0x00e1)} ${plan.requires_restart ? 'tras reiniciar' : 'sin reiniciar'}.${evidenceText}`;
         document.getElementById('global-flag-dialog').showModal();
       } catch (error) { if (status) status.textContent = error.message || 'No se pudo preparar el cambio.'; }
       finally { busy = false; button.disabled = false; }
