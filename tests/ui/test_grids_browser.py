@@ -66,6 +66,22 @@ def test_empty_grids_state_links_to_creation_screens(live_server, ui_page):
     assert_no_js_errors(ui_page)
 
 
+def test_open_grids_show_current_global_switches_and_monitor_timing(live_server, ui_page):
+    ui_page.route("**/api/settings/flags", lambda route: route.fulfill(json={"flags": [
+        {"key": "smart_adjust_enabled", "current": False},
+        {"key": "smart_close_wait_enabled", "current": True},
+        {"key": "stoploss_enabled", "current": False},
+        {"key": "advisor_vol_spacing_enabled", "current": True},
+    ]}))
+    ui_page.goto(f"{live_server.url}/#grids")
+    switches = ui_page.locator(".grid-global-switches").first
+    expect(switches).to_contain_text("ADJUST apagado")
+    expect(switches).to_contain_text("esperar fuera de rango encendido")
+    expect(switches).to_contain_text("stop-loss apagado")
+    expect(switches).to_contain_text("próximo ciclo del monitor")
+    assert_no_js_errors(ui_page)
+
+
 def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live_server, ui_page):
     grid_id = live_server.secondary_grid_id
     live_server.db.update_grid(grid_id, status="ACTIVE")

@@ -192,10 +192,18 @@
     container.innerHTML = `<div class="card grids-error">No se pudo cargar la informaci\u00f3n de grids: ${esc(error && error.message)}</div>`;
   }
 
-  function gridRowHtml(grid) {
+  function globalSwitchesLine(flags) {
+    const rows = flags?.flags || [];
+    const value = key => rows.find(row => row.key === key)?.current;
+    const onOff = v => v == null ? 'no disponible' : (v ? 'encendido' : 'apagado');
+    return `Interruptores globales actuales (aplican desde el pr\u00f3ximo ciclo del monitor): ADJUST ${onOff(value('smart_adjust_enabled'))}; esperar fuera de rango ${onOff(value('smart_close_wait_enabled'))}; stop-loss ${onOff(value('stoploss_enabled'))}. Espaciado por volatilidad ${onOff(value('advisor_vol_spacing_enabled'))} para nuevas recomendaciones.`;
+  }
+
+  function gridRowHtml(grid, switchLine) {
     return `<a class="grid-row-card" href="#grids/${grid.id}">
       <div class="grid-row-top"><span class="grid-id">#${grid.id}</span><span class="grid-symbol">${esc(grid.symbol)}</span>
       <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${esc(statusLabel(grid.status))}</span></div>
+      ${['ACTIVE','PAUSED'].includes(grid.status) ? `<p class="muted grid-global-switches">${esc(switchLine)}</p>` : ''}
       <div class="grid-row-metrics">
         <div><span>Neta realizada</span><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></div>
         <div><span>Total con inventario ${window.ASPLEFormat?.tooltip?.('ganancia realizada + valor no realizado del inventario') || ''}</span><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></div>
@@ -262,6 +270,7 @@
         : `<p>${levelAdjustResult?.error ? `No se pudo cargar: ${esc(levelAdjustResult.error.message)}` : 'Cargando…'}</p>`}</div>`;
     const warning = data.same_symbol_warning ? `<div class="grids-warning">${esc(data.same_symbol_warning)}</div>` : '';
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
+    const switchLine = globalSwitchesLine(data.globalFlags);
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
     container.innerHTML = `
       ${warning}
@@ -276,8 +285,8 @@
       ${pairPanel}
       ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
-      <div class="grids-list">${openRows.map(gridRowHtml).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
-      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(gridRowHtml).join('')}</div>` : ''}
+      <div class="grids-list">${openRows.map(grid => gridRowHtml(grid, switchLine)).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
+      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repoRows.map(grid => gridRowHtml(grid)).join('')}</div>` : ''}
     `;
   }
 
@@ -361,7 +370,8 @@
     <div class="equity-legend"><span><i class="equity-dot-realized"></i>Realizado</span><span><i class="equity-dot-inventory"></i>Con inventario</span></div>`;
   }
 
-  function renderDetail(container, detail, operations, events, daily, equity, loanResult) {
+  function renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags) {
+    const switchLine = globalSwitchesLine(globalFlags);
     const summary = detail.summary;
     const cells = detail.cells;
     const recovery = summary.recovery_mode === true
@@ -462,6 +472,7 @@
           ${idleShrinkAction}
         </div>
       </div>
+      ${['ACTIVE','PAUSED'].includes(summary.status) ? `<p class="card muted grid-global-switches">${esc(switchLine)}</p>` : ''}
       ${experimentCard}
       ${loanBlock}
       ${recovery}
@@ -541,8 +552,8 @@
 
   async function loadList(container) {
     try {
-      const [grids, loanSummaryResult, loanPairsResult, levelAdjustResult] = await Promise.all([
-        apiGet('/api/grids'),
+      const [grids, loanSummaryResult, loanPairsResult, levelAdjustResult, globalFlags] = await Promise.all([
+        apiGet('/api/grids').then(async data => ({...data, globalFlags: await apiGet('/api/settings/flags').catch(() => null)})),
         apiGet('/api/grids/loans/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
         apiGet('/api/grids/loans/pairs/summary').then(data => ({ ok: true, data }))
@@ -564,7 +575,7 @@
 
   async function loadDetail(container, gridId) {
     try {
-      const [detail, operations, events, daily, equity, loanResult] = await Promise.all([
+      const [detail, operations, events, daily, equity, loanResult, globalFlags] = await Promise.all([
         apiGet(`/api/grids/${gridId}`),
         apiGet(`/api/grids/${gridId}/operations`),
         apiGet(`/api/grids/${gridId}/events`),
@@ -572,8 +583,9 @@
         apiGet(`/api/grids/${gridId}/equity`),
         apiGet(`/api/grids/${gridId}/loans`).then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
+        apiGet('/api/settings/flags').catch(() => null),
       ]);
-      renderDetail(container, detail, operations, events, daily, equity, loanResult);
+      renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags);
     } catch (error) {
       if (error && error.status === 404) {
         container.innerHTML = '<div class="card grids-error">Ese grid no existe.</div>';
