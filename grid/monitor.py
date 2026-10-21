@@ -465,6 +465,9 @@ class GridMonitor:
                         monitor_h = 24
                     policy_params = dict(stored_params)
                     policy_params.setdefault("horizon_h", 24)
+                    policy_params["out_of_range_mode"] = (
+                        "wait" if bool(getattr(self.settings, "smart_close_wait_enabled", False))
+                        else "close")
                     current["params"] = policy_params
                     provider_h = int(monitor_h) if monitor_h in {1, 2, 4, 24} else 24
                     view = None

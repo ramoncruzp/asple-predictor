@@ -55,6 +55,7 @@ def test_defaults_and_parameter_validation_rules():
         "loan_lender_max_pct": 50.0, "loan_cooldown_cycles": 2,
         "loan_min_margin": 1.1, "loan_cap_pct": 30.0,
         "loan_min_amount": 0.2,
+        "out_of_range_mode": "close",
     }
     assert validate_params(None, 4) == DEFAULT_SMART_PARAMS
     assert validate_params({"loans_group": "loans_v2"}, 4)["loans_group"] == "loans_v2"

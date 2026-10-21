@@ -94,6 +94,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         raise ValueError("compound/loans are available in 15B-4b")
     if strategy == "smart":
         effective = validate_params(policy_params, n)
+        effective["out_of_range_mode"] = "wait" if close_wait_enabled else "close"
     elif policy_params and any(key in policy_params for key in
                                ("target_pct", "target_usdt", "target_basis", "max_days", "dust_sweep_threshold_pct")):
         effective = validate_params(policy_params, n)

@@ -9,7 +9,7 @@ from math import erf, exp, isfinite, log, sqrt
 from typing import Any, Mapping
 
 
-DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
+DEFAULT_SMART_PARAMS: dict[str, float | int | str | None] = {
     "horizon_h": 4,
     "sigma_scale": 1.15,
     "pause_enter_prob": 0.10,
@@ -48,6 +48,7 @@ DEFAULT_SMART_PARAMS: dict[str, float | int | None] = {
     "loan_min_margin": 1.1,
     "loan_cap_pct": 30.0,
     "loan_min_amount": 0.2,
+    "out_of_range_mode": "close",
 }
 DEFAULT_GRID_FEE_PCT = 0.1
 PROFIT_CLOSE_RETRY_MAX = 8
@@ -130,6 +131,8 @@ def validate_params(params: Mapping[str, Any] | None, n_levels: int) -> dict[str
     result.update(supplied)
     if "loans_group" in supplied and supplied["loans_group"] not in {"loans", "loans_v2", "control", "manual"}:
         raise ValueError("loans_group must be loans, loans_v2, control, or manual")
+    if result["out_of_range_mode"] not in {"close", "wait"}:
+        raise ValueError("out_of_range_mode must be close or wait")
     if "dust_sweep_threshold_pct" in supplied:
         result["dust_sweep_threshold_pct"] = _number(
             supplied["dust_sweep_threshold_pct"], "dust_sweep_threshold_pct", nullable=True)
@@ -454,7 +457,8 @@ def adjust_decision(
     edge_z = min(log(mid / low), log(high / mid)) / sigma_h if low < mid < high else float("inf")
     close_buffer = params["close_out_of_range_pct"] / 100.0
     within_close = low * (1 - close_buffer) <= mid <= high * (1 + close_buffer)
-    triggered = edge_z < params["adjust_trigger_z"] or (not low < mid < high and within_close)
+    triggered = edge_z < params["adjust_trigger_z"] or (
+        params["out_of_range_mode"] != "wait" and not low < mid < high and within_close)
     details = {"mid": mid, "edge_z": edge_z, "sigma_h": sigma_h,
                "trigger_z": params["adjust_trigger_z"], "triggered": triggered}
     if not triggered:
@@ -739,10 +743,16 @@ def evaluate_grid(
     buffer = effective["close_out_of_range_pct"] / 100.0
     if mid < low * (1.0 - buffer) or mid > high * (1.0 + buffer):
         close_reasons.append("out_of_range")
-    if status == "PAUSED" and pause_hours is not None and pause_hours >= effective["pause_max_h"]:
+    waiting_out_of_range = "out_of_range_wait" in (pause_reasons or ())
+    if (status == "PAUSED" and pause_hours is not None and pause_hours >= effective["pause_max_h"]
+            and not (effective["out_of_range_mode"] == "wait" and waiting_out_of_range)):
         close_reasons.append("pause_max_h")
     if pnl <= -effective["max_loss_pct"]:
         close_reasons.append("max_loss_pct")
+    if effective["out_of_range_mode"] == "wait" and "out_of_range" in close_reasons \
+            and "max_loss_pct" not in close_reasons:
+        action = "PAUSE" if status == "ACTIVE" else "NONE"
+        return PolicyDecision(action, ("out_of_range_wait",), metrics)
     if close_reasons:
         return PolicyDecision("CLOSE_REPOSITORY", tuple(close_reasons), metrics)
 
@@ -760,6 +770,8 @@ def evaluate_grid(
         return PolicyDecision("NONE", (), metrics)
 
     resume_reasons = []
+    if waiting_out_of_range and not low < mid < high:
+        return PolicyDecision("NONE", ("out_of_range_wait",), metrics)
     if sigma_24h is None and pause_reasons is not None and "break_prob" in pause_reasons:
         return PolicyDecision("NONE", ("vol_unavailable_hold",), metrics)
     exit_prob = effective["pause_exit_prob"]
