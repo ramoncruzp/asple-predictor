@@ -974,3 +974,41 @@ def test_monitor_adjust_and_pause_keep_their_decisions_after_removed_noop(
         assert db.get_grid(grid["id"])["range_high"] == 115
     else:
         assert db.get_grid(grid["id"])["status"] == "PAUSED"
+
+
+def test_monitor_respaces_with_24h_sigma_even_when_adjust_is_disabled(monkeypatch):
+    import grid.monitor as monitor_module
+    from grid.policy import PolicyDecision
+
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    settings = monitor_settings()
+    settings.smart_adjust_enabled = False
+    settings.smart_respacing_enabled = True
+    grid = engine.create_grid("XRPUSDT", 90, 110, 10, strategy="smart",
+        params={"adjust_enabled": False, "sigma_24h_open": .01, "vol_spacing_k": .9})
+    provider = SimpleNamespace(get=lambda _symbol, horizon_h=24:
+        SimpleNamespace(sigma_24h=.02 if horizon_h == 4 else .04, source="model", fallback=False))
+    monkeypatch.setattr(monitor_module, "evaluate_grid",
+        lambda *a, **k: PolicyDecision("NONE", (), {"sigma_24h": a[7]}))
+    monkeypatch.setattr(monitor_module, "adjust_decision",
+        lambda *a, **k: PolicyDecision("NONE", (), {}))
+    monkeypatch.setattr(engine, "preview_adjust", lambda *_a, **_k: {"ok": True})
+    calls = []
+    def record_adjust(grid_id, low, high, n_levels, *, reason, details):
+        calls.append((low, high, n_levels, details))
+        db.add_grid_event(run_id=None, source="MONITOR", event_type="GRID_ADJUSTED",
+            grid_id=grid_id, reason=reason, details={**details,
+                "new": {"low": low, "high": high, "n": n_levels}})
+        return {"ok": True, "changed": True}
+    monkeypatch.setattr(engine, "adjust_grid", record_adjust)
+    now = datetime.now(timezone.utc)
+    result = GridMonitor(db, exchange, engine, settings, clock=lambda: now,
+        vol_provider=provider).run_once()
+    assert result["status"] == "OK"
+    assert len(calls) == 1
+    low, high, n_levels, details = calls[0]
+    assert (low, high) == (90, 110)
+    assert n_levels != 10
+    assert details["source"] == "RESPACE" and details["sigma_now"] == pytest.approx(.04)
+    assert db.get_grid(grid["id"])["params"]["sigma_24h_open"] == pytest.approx(.04)
+    assert db.list_grid_events(grid_id=grid["id"], event_type="RESPACE_EVAL", limit=5)

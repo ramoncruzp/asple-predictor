@@ -13,7 +13,8 @@ from data.exchange_filters import SymbolFilters
 from grid.adjust import plan_adjust_with_shrink
 from grid.levels import compute_lines, plan_cells
 from grid.policy import (PolicyDecision, adjust_decision, evaluate_grid, evaluate_target,
-                         evaluate_max_days, idle_shrink_decision, stoploss_candidates, validate_params)
+                         evaluate_max_days, idle_shrink_decision, respace_decision,
+                         stoploss_candidates, validate_params)
 from grid.sim.data import ewma_sigma_24h
 from grid.sim.exchange import SimExchange, SimInsufficientFunds
 from grid.sim.metrics import calculate_metrics
@@ -84,7 +85,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    halflife_h=72, sigma_scale=1.0, csv_hash=None, filters=None,
                    fee_asset=None, include_details=False, trace_callback=None,
                    sigma_values=None, idle_shrink_enabled=False, adjust_enabled_global=True,
-                   stoploss_enabled=True, close_wait_enabled=False):
+                   stoploss_enabled=True, close_wait_enabled=False, respacing_enabled=False):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -146,6 +147,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         if len(sigma_values) != len(closes):
             raise ValueError("sigma_values must have one item per candle")
         sigma = np.asarray([np.nan if value is None else float(value) for value in sigma_values], dtype=float)
+    if strategy == "smart" and effective.get("sigma_24h_open") is None:
+        effective["sigma_24h_open"] = next(
+            (float(value) for value in sigma if np.isfinite(value) and value > 0), None)
     equity, events, trapped_values = [], [], []
     recent_adjust_blocked = []
     adjust_attempts_blocked = 0
@@ -302,6 +306,20 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                             recent_adjust_blocked.append(blocked_event)
                             recent_adjust_blocked = recent_adjust_blocked[-100:]
                             adjust_rejected_events += 1
+                if (strategy == "smart" and respacing_enabled and action not in
+                        {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS", "ADJUST"}):
+                    respace = respace_decision(
+                        {"strategy": strategy, "status": status, "params": effective,
+                         "n_levels": n, "range_low": active_low, "range_high": active_high,
+                         "capital_total": capital}, policy_cells, sigma_now, now, last_adjust_at)
+                    reason = respace.metrics.get("reason") or "triggered"
+                    previous = [event for event in events if event.get("type") == "RESPACE_EVAL"
+                                and event.get("reason") == reason]
+                    if not previous or int(ts) - int(previous[-1]["ts"]) >= 6 * 3600:
+                        events.append({"ts": int(ts), "type": "RESPACE_EVAL", "reason": reason,
+                                       "details": dict(respace.metrics)})
+                    if respace.action == "ADJUST":
+                        action, decision = "ADJUST", respace
                 if action not in {"NONE", "ADJUST"}:
                     events.append({"ts": int(ts), "type": action, "reason": list(decision.reasons),
                                    "metrics": decision.metrics})
@@ -406,6 +424,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                    "details": {**adjust.details, "decision": decision.metrics}})
                     if adjust.ok:
                         last_adjust_at = now
+                        if decision.metrics.get("source") == "RESPACE":
+                            effective["sigma_24h_open"] = decision.metrics["sigma_now"]
                         for c in cells:
                             exchange.cancel(c["level_idx"], "BUY")
                         for idx in adjust.retire_level_idxs:

@@ -29,6 +29,22 @@ def test_simulation_deterministic_and_has_financial_metrics():
         float(event["cycle_pnl_net_usdt"]) for event in cycle_fills)
 
 
+def test_smart_runner_respaces_from_sigma24_with_fixed_range():
+    candles = _candles()
+    sigmas = np.array([.02] + [.04] * (len(candles.close) - 1))
+    result = run_simulation(candles, strategy="smart", n=10, capital=1000,
+        low=90, high=110, fee_pct=0, sigma_values=sigmas,
+        params={"adjust_enabled": False, "pause_enter_prob": None,
+                "pause_exit_prob": None, "stop_loss_pct": 50},
+        close_wait_enabled=True, respacing_enabled=True, include_details=True)
+    respaced = [event for event in result["events"] if event["type"] == "ADJUST"
+                and event.get("details", {}).get("decision", {}).get("source") == "RESPACE"]
+    assert respaced
+    assert respaced[0]["details"]["decision"]["sigma_now"] == .04
+    assert respaced[0]["details"]["decision"]["range_low"] == 90
+    assert respaced[0]["details"]["decision"]["range_high"] == 110
+
+
 def test_runner_infers_hourly_candles_for_sigma_and_rejects_unknown_spacing():
     import pytest
     rng = np.random.default_rng(206)

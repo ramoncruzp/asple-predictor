@@ -14,6 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import (DEFAULT_GRID_FEE_PCT, PROFIT_CLOSE_RETRY_MAX, adjust_decision,
                          break_prob, build_profit_cells, evaluate_grid, evaluate_target, evaluate_max_days,
                          idle_shrink_decision, plan_dust_sweep, profit_close_retry_delay,
+                         respace_decision,
                          stoploss_candidates, PolicyDecision)
 from grid.volatility_provider import VolatilityProvider
 from data.exchange_filters import SymbolFilters
@@ -678,6 +679,34 @@ class GridMonitor:
                                     "reason": "global_switch_off", "price": mid,
                                     "details": {"reason": "global_switch_off"}})
                                 self._adjust_suspended_notified.add(grid_id)
+                        if (getattr(self.settings, "smart_respacing_enabled", False)
+                                and adjust.action != "ADJUST"
+                                and decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}):
+                            try:
+                                key_24h = (current["symbol"], 24)
+                                if key_24h not in vol_cache:
+                                    vol_cache[key_24h] = self.vol_provider.get(current["symbol"], 24)
+                                view_24h_now = vol_cache[key_24h]
+                                sigma_24h_now = None if view_24h_now is None else float(view_24h_now.sigma_24h)
+                            except Exception:
+                                sigma_24h_now = None
+                            last_adjust_event = self.db.get_last_event(grid_id, "GRID_ADJUSTED")
+                            respace = respace_decision(current, levels, sigma_24h_now, now,
+                                None if last_adjust_event is None else last_adjust_event.get("ts"))
+                            reason = respace.metrics.get("reason") or "triggered"
+                            recent_eval = self.db.list_grid_events(
+                                grid_id=grid_id, event_type="RESPACE_EVAL", limit=100)
+                            logged = any(
+                                (event.get("reason") == reason or
+                                 (event.get("details") or {}).get("reason") == reason)
+                                and (_utc(now) - _utc(event["ts"])).total_seconds() < 6 * 3600
+                                for event in recent_eval)
+                            if not logged:
+                                self._emit({"event_type": "RESPACE_EVAL", "grid_id": grid_id,
+                                    "reason": reason, "price": mid, "ts": now,
+                                    "details": {**respace.metrics, "reason": reason}})
+                            if respace.action == "ADJUST":
+                                adjust = respace
                         params = current.get("params") or {}
                         if (adjust_enabled and adjust.action == "NONE" and decision.action not in
                                 {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}
@@ -819,6 +848,11 @@ class GridMonitor:
                                 if not result.get("ok"):
                                     raise RuntimeError(result.get("reason") or "adjust rejected")
                                 adjusted_this_pass = bool(result.get("changed"))
+                                if adjusted_this_pass and decision.metrics.get("source") == "RESPACE":
+                                    refreshed = self.db.get_grid(grid_id) or current
+                                    refreshed_params = dict(refreshed.get("params") or {})
+                                    refreshed_params["sigma_24h_open"] = decision.metrics["sigma_now"]
+                                    self.db.update_grid(grid_id, params=self.db._json(refreshed_params))
                             except Exception as exc:
                                 failed += 1
                                 self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
