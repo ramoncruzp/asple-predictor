@@ -51,6 +51,62 @@ def test_smart_grid_requests_volatility_at_its_selected_horizon():
     assert provider.calls == [("XRPUSDT", 4)]
 
 
+def test_single_level_meta_bot_sells_once_and_stays_done_after_restart():
+    engine, db, exchange = make_engine()
+    from datetime import datetime
+    import json
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet",
+            created_at=datetime(2026, 1, 1), config_snapshot=json.dumps({"min_margin_pct": .3})))\
+            .inserted_primary_key[0]
+    grid = engine.create_grid("XRPUSDT", 99, 101, 1, capital=100, strategy="simple",
+                              meta_id=meta_id, meta_piece_type="individual_bot_grid")
+    buy = exchange.get_open_orders("XRPUSDT")[0]
+    exchange.fill(buy["order_id"])
+    engine.sync_grid(grid["id"])
+    sell_level = db.get_grid_levels(grid["id"])[0]
+    assert sell_level["state"] == "SELL_OPEN"
+    sell = exchange.get_order("XRPUSDT", order_id=sell_level["order_id"])
+    exchange.fill(sell["order_id"])
+    engine.sync_grid(grid["id"])
+    assert db.get_grid_levels(grid["id"])[0]["state"] == "DONE"
+    before = len(exchange.create_calls)
+    restarted = GridEngine(db, exchange, engine.settings)
+    restarted.sync_grid(grid["id"])
+    assert db.get_grid_levels(grid["id"])[0]["state"] == "DONE"
+    assert len(exchange.create_calls) == before
+
+
+def test_normal_grid_still_requires_four_levels():
+    engine, _db, _exchange = make_engine()
+    with pytest.raises(GridConfigError, match="at least 4"):
+        engine.create_grid("XRPUSDT", 99, 101, 1, capital=100)
+
+
+@pytest.mark.parametrize(("profile", "loan_cap"), [("PRUDENTE", 30), ("RAPIDO", 50)])
+def test_meta_smart_grid_persists_profile_loan_cap(profile, loan_cap):
+    from datetime import datetime
+    import json
+    engine, db, _exchange = make_engine()
+    engine.vol_provider = SimpleNamespace(get=lambda *_args: SimpleNamespace(sigma_24h=.02))
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile=profile, status="ACTIVE", environment="testnet",
+            created_at=datetime(2026, 1, 1), config_snapshot=json.dumps({"loan_cap_pct": loan_cap})))\
+            .inserted_primary_key[0]
+    from grid.meta import smart_grid_params_for_goal
+    params = smart_grid_params_for_goal({"target_usdt": 10,
+        "config_snapshot": {"loan_cap_pct": loan_cap}})
+    grid = engine.create_grid("XRPUSDT", 90, 110, 4, capital=100, strategy="smart",
+                              params=params, meta_id=meta_id)
+    stored = db.get_grid(grid["id"])["params"]
+    assert stored["loans_enabled"] is True
+    assert stored["loan_cap_pct"] == stored["loan_topup_pct"] == stored["loan_lender_max_pct"] == loan_cap
+
+
 def test_smart_grid_persists_new_defaults_but_keeps_explicit_saved_parameters():
     engine, db, _exchange = make_engine()
     fresh = engine.create_grid("XRPUSDT", 90, 110, 5, strategy="smart")

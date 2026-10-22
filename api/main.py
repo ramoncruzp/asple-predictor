@@ -43,6 +43,7 @@ from grid.auto_open import GridAutoOpen
 from grid.volatility_provider import VolatilityProvider
 from alerts.dispatcher import AlertDispatcher
 from grid.meta import MetaCore
+from grid.meta_operator import MetaOperator
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -135,6 +136,16 @@ async def lifespan(app: FastAPI):
     alert_dispatcher = AlertDispatcher(db, Settings)
     meta_core = MetaCore(db, testnet_client, grid_engine, settings=settings,
                          monitor=grid_monitor)
+    def meta_advisor(symbol, capital, margin_target_pct, days):
+        """Llama al servicio Python del Advisor sin solicitud HTTP interna."""
+        scope = {"type": "http", "method": "GET", "path": "/api/grid/recommend",
+                 "query_string": b"", "headers": [], "app": app,
+                 "scheme": "http", "server": ("localhost", 80), "client": ("127.0.0.1", 0)}
+        return grid_advisor.recommend(Request(scope), symbol=symbol, capital=capital,
+            risk="high", days=days, margin_target_pct=margin_target_pct, range_mode="centrado")
+
+    meta_operator = MetaOperator(meta_core, db, grid_scan_service, grid_engine, settings,
+                                 advisor=meta_advisor)
     app.state.grid_scan_service = grid_scan_service
     app.state.public_market_client = public_market_client
     app.state.grid_engine, app.state.testnet_client = grid_engine, testnet_client
@@ -142,6 +153,7 @@ async def lifespan(app: FastAPI):
     app.state.grid_auto_open = grid_auto_open
     app.state.alert_dispatcher = alert_dispatcher
     app.state.meta_core = meta_core
+    app.state.meta_operator = meta_operator
     app.state.models, app.state.ensemble = {"model_a": model_a, **shadow_models}, ensemble
     app.state.model_load_report = {
         "model_a": {"available": True, "artifact": str(artifact),
@@ -167,6 +179,7 @@ async def lifespan(app: FastAPI):
         grid_monitor.start()
     if bool(getattr(settings, "meta_mode_enabled", False)) and testnet_client is not None:
         meta_core.start()
+        meta_operator.start()
     grid_auto_open.start()
     alerts_token = str(getattr(settings, "telegram_bot_token", "") or "").strip()
     alerts_chat_id = str(getattr(settings, "telegram_chat_id", "") or "").strip()
@@ -186,6 +199,7 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         meta_core.stop()
+        meta_operator.stop()
         grid_auto_open.stop()
         alert_dispatcher.stop()
         if vol_loop is not None:

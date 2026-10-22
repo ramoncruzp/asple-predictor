@@ -182,6 +182,9 @@ class AlertDispatcher:
             "META_CORTADA_POR_PERDIDA": "Meta cortada por pérdida máxima",
             "META_VENCIDA": "Meta vencida", "META_CUMPLIDA": "Meta cumplida",
             "META_CANCELLED": "Meta cancelada", "META_CLOSE_PENDING": "Cierre Meta pendiente",
+            "META_OPERATOR_OPEN": "Pieza abierta por el operador",
+            "META_OPERATOR_WITHDRAW": "Pieza retirada por el operador",
+            "META_OPERATOR_CLOSE": "Pieza cerrada por el operador",
         }
         for event in events:
             event_id = int(event["id"])

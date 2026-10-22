@@ -13,9 +13,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 FEE = Decimal("0.001")
 DEFAULT_PROFILES = {
     "PRUDENTE": {"capital_per_coin_pct": 40, "max_grids": 2, "max_bots": 4,
-                 "max_loss_pct": 8, "warning_loss_pct": 6, "max_days": 45, "loan_cap_pct": 30},
+                 "max_loss_pct": 8, "warning_loss_pct": 6, "max_days": 45, "loan_cap_pct": 30,
+                 "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.7,
+                 "plan_price_drift_pct": 1.0, "signal_logit_cap": 1.0,
+                 "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
+                 "direction": 0.25, "scanner": 0.25, "advisor": 0.25}},
     "RAPIDO": {"capital_per_coin_pct": 70, "max_grids": 4, "max_bots": 8,
-               "max_loss_pct": 18, "warning_loss_pct": 13.5, "max_days": 20, "loan_cap_pct": 50},
+               "max_loss_pct": 18, "warning_loss_pct": 13.5, "max_days": 20, "loan_cap_pct": 50,
+               "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.3,
+               "plan_price_drift_pct": 1.0, "signal_logit_cap": 1.0,
+               "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
+               "direction": 0.25, "scanner": 0.25, "advisor": 0.25}},
 }
 
 
@@ -26,6 +34,18 @@ def _d(value: Any) -> Decimal:
 def attributable_cash(capital_initial, delivered, returned, commissions) -> Decimal:
     """Efectivo lógico atribuible: capital − entregas + devoluciones − comisiones."""
     return _d(capital_initial) - _d(delivered) + _d(returned) - _d(commissions)
+
+
+def smart_grid_params_for_goal(goal: dict, *, target_usdt: float | None = None) -> dict:
+    """Parámetros de crédito propios del perfil Meta para un grid Smart."""
+    config = goal.get("config_snapshot") or {}
+    loan_cap = float(config.get("loan_cap_pct", 0))
+    params = {"target_usdt": float(goal["target_usdt"] if target_usdt is None else target_usdt), "target_basis": "cash",
+              "loans_enabled": loan_cap > 0}
+    if loan_cap > 0:
+        params.update({"loan_cap_pct": loan_cap, "loan_topup_pct": loan_cap,
+                       "loan_lender_max_pct": loan_cap, "reserve_pct": 0.0})
+    return params
 
 
 class MetaCore:
@@ -47,13 +67,20 @@ class MetaCore:
         with self.db.engine.connect() as conn:
             rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
         values = {r["profile"]: json.loads(r["settings"]) for r in rows}
-        return {**DEFAULT_PROFILES, **values}
+        merged = {}
+        for profile, defaults in DEFAULT_PROFILES.items():
+            stored = values.get(profile, {})
+            merged[profile] = {**defaults, **stored}
+            if isinstance(defaults.get("signal_weights"), dict):
+                merged[profile]["signal_weights"] = {**defaults["signal_weights"],
+                    **(stored.get("signal_weights") or {})}
+        return {**merged, **{k: v for k, v in values.items() if k not in DEFAULT_PROFILES}}
 
     def config(self):
         from sqlalchemy import select
         with self.db.engine.connect() as conn:
             rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
-        profiles = {r["profile"]: json.loads(r["settings"]) for r in rows}
+        profiles = self._profile_settings()
         return {"enabled": bool(getattr(self.settings, "meta_mode_enabled", False)),
                 "max_active": int(profiles.get("GLOBAL", {}).get("max_active", 1)),
                 "profiles": {k: v for k, v in profiles.items() if k in DEFAULT_PROFILES}}
@@ -85,8 +112,20 @@ class MetaCore:
         if set(values) - allowed:
             raise ValueError("Parámetros no permitidos.")
         merged = {**DEFAULT_PROFILES[profile], **values}
-        if any(Decimal(str(v)) <= 0 for v in merged.values()):
+        if "signal_weights" in values:
+            if not isinstance(values["signal_weights"], dict):
+                raise ValueError("signal_weights debe ser un objeto de pesos.")
+            merged["signal_weights"] = {**DEFAULT_PROFILES[profile]["signal_weights"],
+                                         **values["signal_weights"]}
+        scalar_values = [v for k, v in merged.items() if k != "signal_weights"]
+        scalar_values.extend((merged.get("signal_weights") or {}).values())
+        if any(Decimal(str(v)) < 0 for v in scalar_values):
             raise ValueError("Los parámetros deben ser positivos.")
+        weights = merged.get("signal_weights")
+        if not isinstance(weights, dict) or set(weights) - {"volatility", "break_prob", "direction", "scanner", "advisor"}:
+            raise ValueError("signal_weights debe contener solo señales Meta conocidas.")
+        if not 0 < float(merged["sigma_q33"]) < float(merged["sigma_q67"]) < 1:
+            raise ValueError("sigma_q33 y sigma_q67 deben ser cuantiles crecientes entre 0 y 1.")
         with self.db.engine.begin() as conn:
             found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
                 self.db.meta_profile_settings.c.profile == profile)).first()
@@ -229,7 +268,9 @@ class MetaCore:
         if not levels:
             raise ValueError("El grid no contiene niveles ligables.")
         cfg = goal.get("config_snapshot") or {}
-        linked = self._owned_grids(meta_id)
+        linked = [row for row in self._owned_grids(meta_id)
+                  if (self.db.get_grid(int(row["grid_id"])) or {}).get("status")
+                  in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}]
         bot_piece = piece_type == "individual_bot_grid"
         if bot_piece and len(levels) != 1:
             raise ValueError("Una pieza bot individual debe ser un grid de un solo nivel.")

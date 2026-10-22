@@ -60,6 +60,19 @@ class MaxActive(BaseModel):
     value: int = Field(ge=1, le=10)
 
 
+class StartPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plan_id: str = Field(min_length=16, max_length=64)
+
+
+def _operator(request: Request):
+    _authorize(request)
+    operator = getattr(request.app.state, "meta_operator", None)
+    if operator is None:
+        raise HTTPException(503, "Operador Modo Meta no disponible.")
+    return operator
+
+
 @router.get("/config")
 def get_config(request: Request):
     return _core(request).config()
@@ -91,15 +104,42 @@ def get_goal(request: Request, meta_id: int):
     return _call(_core(request).get_goal, meta_id)
 
 
+@router.post("/{meta_id}/analysis")
+def analyze_goal(request: Request, meta_id: int):
+    return _call(_operator(request).analyze, meta_id)
+
+
+@router.get("/{meta_id}/analysis/{job_id}")
+def analysis_status(request: Request, meta_id: int, job_id: str):
+    result = _call(_operator(request).job, job_id)
+    if int(result.get("meta_id", -1)) != int(meta_id):
+        raise HTTPException(404, "Análisis no encontrado.")
+    return result
+
+
 @router.post("/{meta_id}/start")
-def start_goal(request: Request, meta_id: int):
+def start_goal(request: Request, meta_id: int, body: StartPlan):
     core = _core(request)
     try:
         core._enabled_testnet()
         core.start()
     except Exception as exc:
         raise HTTPException(503, f"No se pudo iniciar vigilancia Meta: {exc}") from exc
-    return _call(core.start_goal, meta_id)
+    from api.routes.grids import OpenRequest, _open_grid
+    def open_piece(piece):
+        goal = core.get_goal(meta_id)
+        if piece["strategy"] == "smart":
+            from grid.meta import smart_grid_params_for_goal
+            params = smart_grid_params_for_goal(goal, target_usdt=piece.get("target_usdt"))
+        else:
+            params = None
+        return _open_grid(request, OpenRequest(
+            symbol=piece["symbol"], strategy=piece["strategy"], capital=piece["capital_usdt"],
+            range_low=piece["floor"], range_high=piece["ceiling"], n_levels=piece["n_levels"],
+            params=params,
+            dry_run=False, confirm=True,
+        ), meta_id=meta_id)
+    return _call(_operator(request).start_plan, meta_id, body.plan_id, open_piece)
 
 
 @router.post("/{meta_id}/pieces")

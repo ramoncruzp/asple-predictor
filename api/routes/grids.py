@@ -309,7 +309,7 @@ def _persist_pair_metadata(db, result: dict, pair_metadata: dict):
 
 
 def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | None = None,
-               pair_created_callback=None):
+               pair_created_callback=None, meta_id: int | None = None):
     _authorize(request)
     symbol = body.symbol.strip().upper().replace("/", "")
     if not symbol.endswith("USDT") or len(symbol) <= 4:
@@ -504,7 +504,8 @@ def _open_grid(request: Request, body: OpenRequest, *, pair_metadata: dict | Non
                 db, body.strategy, params, control_every_n,
                 lambda assigned: engine.create_grid(
                     symbol, body.range_low, body.range_high, body.n_levels,
-                    capital=body.capital, strategy=body.strategy, params=assigned or None),
+                    capital=body.capital, strategy=body.strategy, params=assigned or None,
+                    **({"meta_id": meta_id} if meta_id is not None else {})),
                 explicit_params=raw_params,
             )
         else:

@@ -274,3 +274,7 @@ def test_close_liquidation_does_not_increment_completed_cycles():
     assert liquidation["cycles_completed"] == 0
     assert cell["pnl"] == pytest.approx(float(liquidation["cycle_pnl"]))
     assert event["details"]["cycle_pnl"] == liquidation["cycle_pnl"]
+    assert float(event["details"]["buy_fee_usdt"]) >= 0
+    assert float(event["details"]["sell_fee_usdt"]) >= 0
+    assert float(event["details"]["buy_quote_gross_usdt"]) > 0
+    assert float(event["details"]["sell_quote_gross_usdt"]) > 0

@@ -23,7 +23,7 @@ from data.testnet_client import TestnetOrderError
 from grid.compound import compound_amount
 from grid.policy import (DEFAULT_GRID_FEE_PCT, DEFAULT_SMART_PARAMS, PROFIT_CLOSE_RETRY_MAX,
                          build_profit_cells, plan_dust_sweep, plan_profit_close, validate_params)
-from grid.levels import GridConfigError, compute_lines, plan_cells
+from grid.levels import CellPlan, GridConfigError, compute_lines, plan_cells
 from grid.adjust import plan_adjust
 from grid.market_book import book_is_two_sided, book_mid
 from grid import loans as loan_policy
@@ -268,11 +268,23 @@ class GridEngine:
         params: dict | None = None,
         stop_loss_pct: Decimal | str | float | None = None,
         calibration_id: int | None = None,
+        *, meta_id: int | None = None, meta_piece_type: str | None = None,
     ) -> dict:
         symbol = str(symbol).replace("/", "").upper()
         if not self._active_coin(symbol):
             raise GridConfigError(f"{symbol} must be an active registered coin")
         strategy = str(strategy).lower()
+        individual_meta_bot = meta_piece_type == "individual_bot_grid" and meta_id is not None
+        if meta_piece_type is not None and not individual_meta_bot:
+            raise GridConfigError("Meta piece type requires a valid meta_id")
+        if individual_meta_bot:
+            with self.db.engine.connect() as conn:
+                goal = conn.execute(select(self.db.meta_goals).where(
+                    self.db.meta_goals.c.id == int(meta_id))).mappings().first()
+            if goal is None or goal["status"] != "ACTIVE" or goal["environment"] != "testnet":
+                raise GridConfigError("individual_bot_grid requiere una meta activa en Testnet")
+            if int(n_levels) != 1 or strategy != "simple":
+                raise GridConfigError("individual_bot_grid requiere strategy=simple y un nivel")
         if strategy not in {"simple", "smart"}:
             raise GridConfigError("strategy must be simple or smart")
         effective_params = None
@@ -334,7 +346,35 @@ class GridEngine:
         if filters.max_num_orders is not None and len(open_orders) >= filters.max_num_orders:
             raise GridConfigError("exchange MAX_NUM_ORDERS is already reached")
         lines = compute_lines(range_low, range_high, n_levels, filters)
-        plans = plan_cells(lines, distributable_capital, snapshot, filters, self.settings)
+        if individual_meta_bot:
+            low, high = lines[0], lines[1]
+            mid = book_mid(snapshot)
+            if mid is None or not low < mid < high:
+                raise GridConfigError("el precio debe quedar dentro del rango del bot individual")
+            if (high - low) / low < _d(_get(self.settings, "grid_min_step_pct", .003)):
+                raise GridConfigError("margen del bot por debajo de GRID_MIN_STEP_PCT")
+            profile_cfg = goal.get("config_snapshot") or {}
+            if isinstance(profile_cfg, str):
+                profile_cfg = json.loads(profile_cfg)
+            net_margin_pct = (high / low - Decimal(1)) * Decimal(100) - Decimal("0.20")
+            if net_margin_pct < _d(profile_cfg.get("min_margin_pct", .3)):
+                raise GridConfigError("margen neto del bot inferior al mínimo del perfil Meta")
+            qty = filters.round_qty_down(distributable_capital / low)
+            if qty < filters.min_qty or qty * low < filters.min_notional:
+                raise GridConfigError("compra individual bajo cantidad o notional mínimo")
+            sell_qty = filters.round_qty_down(qty * Decimal("0.999"))
+            if sell_qty < filters.min_qty or sell_qty * high < filters.min_notional:
+                raise GridConfigError("venta individual neta bajo cantidad o notional mínimo")
+            try:
+                filters.validate_order("BUY", low, qty, mid)
+            except FilterViolation:
+                initial_state = "IDLE"
+            else:
+                initial_state = "BUY_OPEN"
+            plans = [CellPlan(0, low, high, distributable_capital, qty, initial_state)]
+            effective_params = {"meta_piece_type": "individual_bot_grid", "meta_id": int(meta_id)}
+        else:
+            plans = plan_cells(lines, distributable_capital, snapshot, filters, self.settings)
         existing_levels = []
         for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"):
             for existing_grid in self.db.list_grids_by_status({status}):
@@ -1353,8 +1393,11 @@ class GridEngine:
         self.db.set_level_fields(int(grid["id"]), idx, **updates)
 
     def sync_grid(self, grid_id: int) -> dict[str, Any]:
+        grid = self.db.get_grid(int(grid_id))
+        meta_bot = bool(grid and self.db.is_meta_individual_bot_grid(int(grid_id)))
         return self._sync_grid(
-            grid_id, rearm=True, allowed_statuses={"ACTIVE"}, post_sell_state="IDLE",
+            grid_id, rearm=not meta_bot, allowed_statuses={"ACTIVE"},
+            post_sell_state="DONE" if meta_bot else "IDLE",
         )
 
     def sync_closing(self, grid_id: int) -> dict[str, Any]:
@@ -2431,6 +2474,9 @@ class GridEngine:
             "price": str(_d(market_order["cummulative_quote_qty"]) / _d(market_order["executed_qty"])),
             "cash_proceeds_net": str(_d(market_order["cummulative_quote_qty"]) - sell_fee),
             "realized_pnl": str(cycle_pnl),
+            "buy_fee_usdt": str(buy_fee), "sell_fee_usdt": str(sell_fee),
+            "buy_quote_gross_usdt": str(_d(buy_order["cummulative_quote_qty"])),
+            "sell_quote_gross_usdt": str(_d(market_order["cummulative_quote_qty"])),
         }
         if emit_event:
             self._close_event(

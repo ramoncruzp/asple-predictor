@@ -297,7 +297,8 @@ class DBManager:
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
             Column("status", String, nullable=False), Column("started_at", DateTime, nullable=False),
             Column("finished_at", DateTime), Column("worst_result_pct", Float),
-            Column("close_slippage_usdt", Float), Column("realized_extra_usdt", Float, nullable=False, default=0.0))
+            Column("close_slippage_usdt", Float), Column("realized_extra_usdt", Float, nullable=False, default=0.0),
+            Column("control_plan_json", Text))
         self.meta_piece_links = Table("meta_piece_links", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
@@ -368,11 +369,15 @@ class DBManager:
                 for name, sql_type in goal_additions.items():
                     if name not in goal_present:
                         conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN {name} {sql_type}")
+                run_present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('meta_runs')")}
+                if "control_plan_json" not in run_present:
+                    conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN control_plan_json TEXT")
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN IF NOT EXISTS {name} {sql_type}")
                 for name, sql_type in goal_additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+                conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_plan_json TEXT")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""
@@ -1964,6 +1969,27 @@ class DBManager:
         statement = statement.order_by(self.grid_snapshots.c.ts.desc(), self.grid_snapshots.c.id.desc()).limit(max(0, int(limit)))
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(statement).mappings().all()]
+
+    def is_meta_individual_bot_grid(self, grid_id: int) -> bool:
+        """Reconoce bots Meta por vínculo persistido o marca de creación atómica."""
+        with self.engine.connect() as conn:
+            linked = conn.execute(select(self.meta_piece_links.c.id).where(
+                self.meta_piece_links.c.grid_id == int(grid_id),
+                self.meta_piece_links.c.piece_type == "individual_bot_grid",
+                self.meta_piece_links.c.released_at.is_(None))).first()
+        if linked:
+            return True
+        grid = self.get_grid(int(grid_id))
+        if not grid or not grid.get("params"):
+            return False
+        params = grid["params"] if isinstance(grid["params"], dict) else json.loads(grid["params"])
+        if params.get("meta_piece_type") != "individual_bot_grid":
+            return False
+        with self.engine.connect() as conn:
+            goal = conn.execute(select(self.meta_goals.c.id).where(
+                self.meta_goals.c.id == int(params.get("meta_id", -1)),
+                self.meta_goals.c.environment == "testnet")).first()
+        return goal is not None
 
     def list_grids_by_status(self, statuses: set[str] | list[str] | tuple[str, ...]) -> list[dict]:
         normalized = sorted({str(status).upper() for status in statuses})

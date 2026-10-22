@@ -1,7 +1,7 @@
 # Fase 40 (propuesta) — Modo Meta: operador automático por objetivo
 
 **Proyecto:** ASPLE Predictor · **Autor de la idea:** Ramón Cruz · **Fecha:** 2026-10-21
-**Estado:** especificación aprobada en conversación, decisiones D1–D5 cerradas (2026-10-21). La especificación describe el módulo final; su construcción se divide en 40a (núcleo), 40b (operador) y 40c (pantalla).
+**Estado:** (corregido 2026-10-21: el perfil solo fija límites; el objetivo de ambos es la rapidez) especificación aprobada en conversación, decisiones D1–D5 cerradas (2026-10-21). La especificación describe el módulo final; su construcción se divide en 40a (núcleo), 40b (operador) y 40c (pantalla).
 **Ámbito:** solo Binance Spot **Testnet**. Nada de dinero real.
 
 ---
@@ -28,15 +28,15 @@ Es un **experimento**: lo que se quiere saber es si el operador llega a la meta 
 
 ## 2. Dos perfiles seleccionables
 
-Ramón elige el perfil al crear la meta. Los números son **punto de partida**, no están probados; se ajustan con los resultados de las corridas. Deben ser editables (tabla de overrides / Laboratorio).
+Ramón elige el perfil al crear la meta. **El objetivo es el mismo en los dos perfiles: llegar a la meta lo más rápido posible.** El perfil no cambia el objetivo ni impone un tipo de pieza; solo fija los **límites de riesgo** dentro de los cuales la app decide sola moneda(s), tipo de pieza (Smart, Simple o bot individual), número de piezas, capital, rango y margen. Los números son **punto de partida**, no están probados; se ajustan con los resultados de las corridas. Deben ser editables (tabla de overrides / Laboratorio).
 
 | Parámetro | **Prudente** | **Rápido** |
 |---|---|---|
 | Monedas elegibles | Volatilidad media, con estadísticas de modelo completas | También las más volátiles (siempre pasando Scanner y filtro de libro) |
 | Capital máximo por moneda | 40 % del capital de la meta | 70 % del capital de la meta |
 | Piezas simultáneas | Hasta 2 grids o 4 bots individuales | Hasta 4 grids u 8 bots individuales |
-| Tipo de grid preferido | Smart | El que estime más rápido (Smart o Simple) |
-| Margen por venta | El de siempre (0,7 % tras comisiones) o más | Puede bajarlo, respetando el paso mínimo existente (~0,30 %) |
+| Tipo de pieza | La app decide (mismo criterio en ambos: el más rápido hacia la meta) | La app decide (mismo criterio en ambos: el más rápido hacia la meta) |
+| Margen mínimo por venta (la app decide por encima) | 0,7 % tras comisiones | 0,30 % tras comisiones, sin bajar del paso mínimo existente |
 | **Pérdida máxima total** | **−8 %** | **−18 %** |
 | Aviso previo (75 % del límite) | −6 % | −13,5 % |
 | Plazo máximo | 45 días | 20 días |
@@ -150,6 +150,7 @@ Con la meta en marcha:
 - Interruptor propio del Modo Meta, **apagado por defecto**. La apertura automática general de grids sigue apagada; este modo solo abre piezas **dentro de una meta** creada por Ramón.
 - Solo Testnet. Bloqueo explícito si la configuración apunta a real.
 - **No** cambiar los defaults globales Smart/Simple, ni umbrales `pause_*` / `adjust_trigger_z`, ni stop-loss por moneda/σ, ni GRU/TFT/umbral 0,60, ni nada más de la lista de no autorizado del contexto. Si el operador necesita algo de eso, se pide autorización escrita.
+- **Autorización escrita de Ramón (2026-10-21), solo para el operador del Modo Meta:** el operador usa **toda la capa de inteligencia, de forma continua**, para decidir qué abrir, retirar o cerrar: pronósticos de volatilidad de todos los modelos (campeón y consenso), `break_prob` y señales de la política Smart, modelos de dirección y filtro direccional, Scanner y Advisor. Puede usar σ de modelos y señales de dirección **dentro del estimador propio de la meta**. Esto **no** cambia el comportamiento global: los grids normales, la política Smart, el Advisor de grids normales y sus defaults siguen igual. El operador puede cerrar piezas con pérdida aceptable (ganancia esperada de la alternativa > pérdida realizada + comisiones) para mover el capital; el freno es la pérdida máxima del perfil.
 - Reusar piezas existentes (Scanner, Advisor, motor de grids, cierre verificado, préstamos, alertas). Si los **bots individuales** (compra a X / vende a Y) no existen como pieza, crearlos como tipo nuevo, mínimo y con sus pruebas.
 
 ---
@@ -181,3 +182,17 @@ Con la meta en marcha:
 - **D3.** Meta en **USDT y en %**, ambas.
 - **D4.** Préstamos en perfil Rápido: tope **50 %**.
 - **D5.** Se construye el **módulo completo de una vez**: definir meta → elegir perfil → el sistema presenta estadísticas y el plan con el que propone comenzar → Ramón pulsa **Iniciar** → operación autónoma. Incluye botón **Cancelar operación** con *Vender todo* o *Mover al repositorio*.
+
+---
+
+## 13. Fase 40d — Aprendizaje continuo del operador (aprobada 2026-10-21, después de 40b y 40c)
+
+El operador se controla a sí mismo: revisa el mercado, guarda cada decisión, mide qué pasó después y ajusta cuánto confía en cada señal. Es el "feedback loop" original del proyecto (Fase 18 del plan inicial), que nunca se construyó, aplicado al Modo Meta.
+
+- **Medir:** por cada señal (cada modelo de volatilidad, consenso, dirección, filtro direccional, break_prob, score del Scanner, Advisor) y por moneda, comparar lo que dijo con lo que pasó, en ventanas **no solapadas**. Guardar el acierto con su muestra efectiva.
+- **Pesar:** el peso de cada señal en el estimador de la meta se recalcula con su acierto reciente. Puede volverse **negativo** cuando una señal falla de forma consistente (leerla al revés).
+- **Frenos:** el peso no cambia hasta tener muestra mínima y una prueba estadística que descarte el azar (corregida por comparar muchas señales a la vez); cambia de forma gradual, con tope por revisión; los datos viejos pesan menos.
+- **Ojo con "fallar":** que una señal de dirección falle no siempre significa que pasó lo contrario (puede quedar plano). Solo se invierte lo que se mide como opuesto. En Spot no se puede vender en corto: una señal de bajada solo sirve para no comprar o para vender inventario.
+- **Sombra primero:** durante un periodo, el sistema calcula la decisión con los pesos aprendidos pero actúa con los actuales. Se activa solo cuando la versión aprendida muestre que habría llegado antes a las metas (comparación con las corridas registradas).
+- **Visible:** una vista con el acierto y el peso actual de cada señal, y su historial.
+- Base ya disponible: la bitácora de 40a/40b y la decisión en sombra "solo Scanner + Advisor" de 40b.
