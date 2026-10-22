@@ -197,3 +197,4 @@ El operador se controla a sí mismo: revisa el mercado, guarda cada decisión, m
 - **Sombra primero:** durante un periodo, el sistema calcula la decisión con los pesos aprendidos pero actúa con los actuales. Se activa solo cuando la versión aprendida muestre que habría llegado antes a las metas (comparación con las corridas registradas).
 - **Visible:** una vista con el acierto y el peso actual de cada señal, y su historial.
 - Base ya disponible: la bitácora de 40a/40b y la decisión en sombra "solo Scanner + Advisor" de 40b.
+- La señal de toque compra→venta de 40b-5 ya se registra por ventana y alternativa, con peso 0, para que 40d pueda medirla.

@@ -322,6 +322,20 @@ class DBManager:
             Column("cache_key", String(64), primary_key=True), Column("cache_kind", String(32), nullable=False),
             Column("analysis_day", String(10), nullable=False), Column("value_json", Text, nullable=False),
             Column("created_at", DateTime, nullable=False))
+        self.meta_signal_observations = Table("meta_signal_observations", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
+            Column("decision_id", String(64), nullable=False),
+            Column("alternative_id", String(96), nullable=False),
+            Column("symbol", String(32), nullable=False),
+            Column("piece_type", String(32), nullable=False),
+            Column("cell_index", Integer, nullable=False),
+            Column("window_start", String(10), nullable=False),
+            Column("horizon", String(16), nullable=False),
+            Column("buy_relative", Float, nullable=False),
+            Column("sell_relative", Float, nullable=False),
+            Column("stats_json", Text, nullable=False),
+            Column("created_at", DateTime, nullable=False))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
@@ -346,6 +360,7 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_signal_observations_decision ON meta_signal_observations(decision_id, alternative_id, horizon)"))
 
     def _seed_meta_profile_settings(self) -> None:
         """Seed editable Meta profile defaults without replacing operator values."""

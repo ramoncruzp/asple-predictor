@@ -84,7 +84,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40a | Núcleo: datos, valoración, vigilancia, límites, cierres, Cancelar, API | Hecha, en main (`a5e6d1e`) y desplegada en S1 |
 | 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 (hecha, `9a49a2b`: el monitor ya no se bloquea; caché diario; desempate) |
 | 40b-4 | A: valoración ejecutable por profundidad del libro. B: límite de pérdida en el replay, precálculo nocturno, medidor con caché, bot individual | Hecha y commiteada: A `e31ba8c`; B en esta entrega; suite completa offline verde |
-| 40b-5 | Señal "toque compra→venta" en sombra (peso 0), idea portada de ASPLE Trade `touch_event_analyzer.py` sin su puntaje | Pendiente; debe ir antes de 40d |
+| 40b-5 | Señal "toque compra→venta" en sombra (peso 0), estadísticas de `touch_event_analyzer.py` sin su puntaje | Hecha en este cambio; siguiente fase 40c |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Pendiente |
 
@@ -107,7 +107,7 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 
 - Prueba manual de 40a en Testnet (meta de 100 USDT, ligar un grid, valoración, Cancelar con cada opción).
 - Revisar en S1 los tiempos del medidor, ejecutar el análisis con `--con-cache` y medir cuántas ventanas históricas de XRP compran/venden con el plan nuevo.
-- Señales en la estimación (propuesto 2026-10-22, vale cuando Ramón envíe el prompt 40b-2): entran sumadas en el logit de la probabilidad histórica; peso por defecto 0,25 por señal y ajuste total máximo ±1,0 en logit, hasta que 40d aprenda los pesos. El plan muestra la probabilidad histórica y la ajustada por separado.
+- Las señales aprobadas en 40b-2 entran en el logit de la probabilidad histórica con peso por defecto 0,25 y ajuste total máximo ±1,0; la probabilidad histórica y la ajustada se muestran por separado. La señal toque compra→venta queda fuera de ese ajuste, con peso 0, hasta que 40d la evalúe.
 - Ventanas del replay = plazo del perfil (45 / 20 días).
 - Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido).
 
@@ -128,7 +128,7 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 - **Qué usa cada cosa:** pérdida máxima → valor ejecutable (KNOWN o PARCIAL), confirmado 2 minutos seguidos; aviso 75 % → valor ejecutable sin confirmación; meta cumplida → solo USDT realizado; pantalla → los dos valores (mejor bid y ejecutable).
 - **DESCONOCIDO deja la meta sin protección de pérdida:** si dura > 10 min, alerta fuerte por Telegram y repite cada 30 min. Sin cierre automático.
 - **Alertas sin ruido:** solo al cambiar de estado; PARCIAL solo si dura > 30 min y falta > 25 % del inventario, máximo una cada 6 h.
-- **Señal toque compra→venta (40b-5):** solo estadísticas (toques, % que llegó a venta en un horizonte, velas hasta vender, excursión adversa), corrigiendo toques repetidos, censura al final y reescalado de rango; peso 0 en sombra hasta que 40d la mida.
+- **Señal toque compra→venta (40b-5):** ya se registra en sombra (peso 0) por celda y ventana: toques, tasa de venta por horizonte, velas hasta vender, excursión adversa y censura; corrige toques repetidos y reescala X/Y. 40d medirá su utilidad.
 - **Reglas de los prompts:** commit al final de cada fase sin push; pruebas de lo tocado durante el trabajo y suite completa antes del commit final; carpeta temporal nueva bajo $env:TEMP.
 
 ## 14. Fase 40b-4 (2026-10-22)

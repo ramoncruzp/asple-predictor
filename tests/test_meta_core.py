@@ -7,6 +7,7 @@ import pytest
 
 from database.db_manager import DBManager
 from grid.meta import MetaCore, attributable_cash, executable_value
+from grid.meta_operator import MetaOperator
 from alerts.dispatcher import AlertDispatcher
 
 
@@ -36,6 +37,29 @@ def _core(tmp_path, *, exchange=None, enabled=True, alert=None):
     core = MetaCore(db, exchange, settings=settings, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc), alert=alert)
     exchange.clock = lambda: core.clock()
     return db, core
+
+
+def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    operator = MetaOperator(core, db, None, None, core.settings)
+    stats = {"touches": 2, "sold_within_horizon": 1, "sell_rate": .5,
+             "normalized_value": 0, "censored_touches": 1}
+    operator._persist_touch_observations(goal["id"], "decision-40b5", [{
+        "alternative_id": "decision-40b5:0",
+        "pieces": [{"symbol": "XRPUSDT", "piece_type": "individual_bot_grid"}],
+        "_touch_observations": [{"cell_index": 0, "window_start": "2026-01-01",
+            "horizon": "24h", "buy_relative": .99, "sell_relative": 1.01, "stats": stats}],
+    }])
+    with db.engine.connect() as conn:
+        row = conn.execute(select(db.meta_signal_observations)).mappings().one()
+    assert row["meta_id"] == goal["id"]
+    assert row["decision_id"] == "decision-40b5"
+    assert row["alternative_id"] == "decision-40b5:0"
+    assert row["piece_type"] == "individual_bot_grid"
+    assert row["buy_relative"] == pytest.approx(.99)
 
 
 def test_attributable_cash_fixed_numbers():

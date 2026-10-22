@@ -95,3 +95,18 @@ La suite final está verde: 1.456 passed, 1 skipped, 18 deselected, 55 warnings.
 - El precálculo no garantiza terminar un día antes de las 08:00 siguiente; la ejecución y el cache parcial permiten que el análisis complete los misses a demanda. El tiempo real y el ahorro deben medirse en S1.
 
 Suite completa tras 40b-4B: 1.462 passed, 1 skipped, 18 deselected, 55 warnings, 299,58 s; la evidencia del bot XRP de S1 continúa pendiente porque la corrida anterior no guardó actividad por ventana.
+
+## 40b-5 — señal toque compra→venta
+
+### Cerrado
+
+- Se implementaron las estadísticas puras solicitadas con deduplicación, censura, separación de velas para compra/venta y excursión adversa. X/Y se reescalan con el inicio de cada ventana del replay.
+- La señal se calcula por celda y horizonte, se agrega ponderada por toques, se conserva con peso cero y se enlaza tanto a la bitácora como a `meta_signal_observations`. Se persiste también en `meta_analysis_cache` y forma parte del precálculo porque este ejecuta el mismo análisis.
+- Se registran tiempos separados en `timings_s.touch_signal`. Las pruebas enfocadas y la suite offline completa están verdes.
+
+### Sigue abierto
+
+- Falta medir con el medidor en S1 cuánto suma `touch_signal` al tiempo de replay frío y caliente. No se usaron datos reales ni Testnet en esta implementación; por tanto, el límite aproximado de 5 % no se declara certificado.
+- La señal permanece fuera de toda probabilidad y decisión (peso cero); aprender/calibrar su utilidad corresponde a 40d.
+
+Suite completa: 1.473 passed, 1 skipped, 18 deselected, 55 warnings, 305,22 s. Próxima fase: 40c.

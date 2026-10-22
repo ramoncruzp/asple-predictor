@@ -207,3 +207,26 @@ La valoración parcial es una estimación: el remanente usa el último bid absor
 La corrida enfocada de `tests/test_meta_operator.py`, `tests/test_meta_core.py` y `tests/test_testnet_client.py` dio **74 passed, 1 deselected, 3 warnings, 2,96 s**. Tras endurecer el redondeo del margen X/Y y separar el evento de corte del objetivo, `tests/test_meta_operator.py` dio **35 passed, 3 warnings, 2,26 s**. Cubren corte de grid al mínimo intravela con fees realizados, corte del bot, actividad por ventana, comparación X/Y, switch/lock del precálculo y lectura persistente sin escritura. `scripts/medir_analisis_meta.py --help` confirma `--con-cache`; no se ejecutó el análisis real.
 
 Suite completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp="$env:TEMP\asple_40b4b_20261022_final3"` — **1.462 passed, 1 skipped, 18 deselected, 55 warnings, 299,58 s** (exit code 0). Playwright no reportó hosts externos; no se usó red, Testnet, `.env` ni BD real. No hubo push ni despliegue.
+
+## 40b-5 — señal toque compra→venta en sombra
+
+### Implementado
+
+- `grid/sim/touch_stats.py:14` implementa `touch_stats` puro con NumPy: detecta compra con `low <= X`, venta en una vela posterior con `high >= Y`, demora de venta y excursión adversa. Una venta en la misma vela no se infiere porque OHLC no informa el orden intravela.
+- Los toques consecutivos se agrupan hasta una venta o hasta que `high` se aleje de X al menos la mitad de X→Y. Se descartan del denominador los toques sin horizonte completo y se informa `censored_touches`. Sin toques elegibles, `sell_rate` queda `None`.
+- `grid/meta_operator.py:784` reutiliza las velas 5m de 180 días, la lista de ventanas del replay y el mismo reescalado de X/Y al `open` histórico. Calcula 4 h, 24 h y el plazo del perfil (20/45 días). Los grids usan las líneas reales de `compute_lines` y agregan las celdas ponderando por toques; el bot individual evalúa su único par X/Y.
+- Cada alternativa expone `touch_signal` con las estadísticas por horizonte y por celda, además del valor normalizado `2 × sell_rate − 1`. Lleva `weight: 0` y no se agrega a `signals_used`, el logit, el desempate ni el ranking. `tests/test_touch_stats.py:117` compara probabilidad, señales y orden con y sin el dato.
+- `database/db_manager.py:325` crea `meta_signal_observations` al inicializar el esquema. Guarda por meta, `decision_id`, alternativa, moneda, tipo, celda, fecha de ventana, X/Y relativos, horizonte y estadísticas; el índice está en `database/db_manager.py:363`. El mismo `decision_id` y el resumen de señales se escriben en `META_PLAN_EVALUATED`; el evento de decisión de revisión referencia las alternativas en `grid/meta_operator.py:1044`.
+- El resultado se guarda en `meta_analysis_cache` como `touch_signal`; por ello el análisis normal y `precompute_daily` usan el mismo cache. `timings_s.touch_signal` y sus aciertos se separan en `grid/meta_operator.py:542`; el medidor existente imprime el diccionario completo en `scripts/medir_analisis_meta.py:99-105`.
+- La referencia `C:\APPS\ASPLE\src\signal_quality\touch_event_analyzer.py` se usó solo para la idea. No se portaron el filtro ni sus pesos/puntaje.
+
+### Pruebas y resultado
+
+- Pruebas nuevas en `tests/test_touch_stats.py:13-138`: venta posterior y demora; fallo y excursión; deduplicación; rearme tras alejamiento y venta; censura; tasa indefinida; misma vela; agregado ponderado; reescalado +50 %; cache; y ausencia de efecto en probabilidad/ranking.
+- `tests/test_meta_core.py:42` verifica persistencia de la observación con sus IDs de meta, decisión y alternativa.
+- Corrida enfocada: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests/test_touch_stats.py tests/test_meta_operator.py tests/test_meta_core.py -m "not live" -q --basetemp="$env:TEMP\asple_40b5_focused_final_20261022"` — **64 passed, 3 warnings, 3,17 s**.
+- Suite completa antes del commit: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp="$env:TEMP\asple_40b5_full_20261022"` — **1.473 passed, 1 skipped, 18 deselected, 55 warnings, 305,22 s**, exit code 0. Playwright no registró hosts externos; sin Testnet, red, `.env` ni BD real.
+
+### Límite de medición
+
+El análisis expone la duración real del paso `touch_signal` para que el medidor de S1 la compare con `replays`. Esta fase no ejecutó el análisis con mercado real ni en S1; por ello el aumento relativo respecto al replay y el objetivo aproximado de 5 % todavía no están certificados. El cache diario reduce el coste de alternativas repetidas y del precálculo, pero no sustituye esa medición.

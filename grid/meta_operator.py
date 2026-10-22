@@ -15,7 +15,10 @@ from datetime import timedelta, datetime, timezone
 import numpy as np
 
 from grid.sim.sweep import build_windows, _slice
+from grid.sim.touch_stats import aggregate_touch_stats, touch_stats
 from grid.sim.runner import run_simulation
+from grid.sim.runner import FILTERS
+from grid.levels import compute_lines
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import break_prob, DEFAULT_SMART_PARAMS
 
@@ -339,7 +342,9 @@ class MetaOperator:
 
     def _build_plan(self, goal, *, record=True):
         timing_started = time.perf_counter()
+        decision_id = uuid.uuid4().hex
         self._analysis_timing = {"advisor_s": 0.0, "replay_s": 0.0,
+                                 "touch_signal_s": 0.0, "touch_signal_cache_hits": 0,
                                  "advisor_cache_hits": 0, "replay_cache_hits": 0,
                                  "advisor_process_cache_hits": 0, "advisor_persistent_cache_hits": 0,
                                  "replay_process_cache_hits": 0, "replay_persistent_cache_hits": 0}
@@ -509,6 +514,8 @@ class MetaOperator:
             except Exception as exc:
                 control_plan["warning"] = f"Advisor de control no disponible: {exc}"
         control_seconds = time.perf_counter() - control_started
+        for index, item in enumerate(alternatives):
+            item["alternative_id"] = f"{decision_id}:{index}"
         selected_public = []
         for item in alternatives:
             if len(item.get("pieces", [])) == 1 or len(selected_public) < 30:
@@ -517,9 +524,11 @@ class MetaOperator:
         for item in advisor_comparisons:
             unique_comparisons.setdefault((item.get("symbol"), item.get("margin_target_pct")), item)
         advisor_comparisons = list(unique_comparisons.values())
-        public_alternatives = [{key: value for key, value in item.items() if key != "window_results"}
+        public_alternatives = [{key: value for key, value in item.items()
+                                if key not in {"window_results", "_touch_observations"}}
                                for item in selected_public]
-        plan = {"profile": profile, "candidates": prepared, "sigma_bands": {"q33": q33, "q67": q67},
+        plan = {"profile": profile, "decision_id": decision_id,
+                "candidates": prepared, "sigma_bands": {"q33": q33, "q67": q67},
                 "alternatives": public_alternatives, "combinations_evaluated": evaluated_combinations,
                 "pieces": pieces, "estimated_time": best["estimate"],
                 "advisor_comparisons": advisor_comparisons,
@@ -530,10 +539,13 @@ class MetaOperator:
                     "advisor_persistent_cache_hits": self._analysis_timing.get("advisor_persistent_cache_hits", 0),
                     "replays": round(self._analysis_timing["replay_s"], 3),
                     "replay_cache_hits": self._analysis_timing["replay_cache_hits"],
+                    "touch_signal": round(self._analysis_timing["touch_signal_s"], 3),
+                    "touch_signal_cache_hits": self._analysis_timing["touch_signal_cache_hits"],
                     "replay_process_cache_hits": self._analysis_timing.get("replay_process_cache_hits", 0),
                     "replay_persistent_cache_hits": self._analysis_timing.get("replay_persistent_cache_hits", 0),
                     "portfolio_selection": round(max(0.0, time.perf_counter() - portfolio_started - control_seconds
-                        - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]), 3),
+                        - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]
+                        - self._analysis_timing["touch_signal_s"]), 3),
                     "control_advisor": round(control_seconds, 3)},
                 "warnings": (["El replay no modela los pr?stamos de grids Smart; la estimaci?n no incluye capital prestado."]
                     if any(piece["strategy"] == "smart" for piece in pieces) else []),
@@ -555,13 +567,40 @@ class MetaOperator:
                 "control_plan": control_plan,
                 "probability_under_25_pct": best["estimate"]["low_likelihood"]}
         if record:
-            self._ledger(goal["id"], "META_PLAN_EVALUATED", {"alternatives": public_alternatives,
+            self._ledger(goal["id"], "META_PLAN_EVALUATED", {"decision_id": decision_id,
+                          "alternatives": public_alternatives,
                           "advisor_comparisons": advisor_comparisons,
                           "combinations_evaluated": evaluated_combinations,
                           "shadow_decision": plan["shadow_decision"],
-                          "selected": {key: value for key, value in best.items() if key != "window_results"},
+                          "selected": {key: value for key, value in best.items()
+                                       if key not in {"window_results", "_touch_observations"}},
                           "sigma_bands": plan["sigma_bands"]})
+            self._persist_touch_observations(int(goal["id"]), decision_id, alternatives)
         return plan
+
+    def _persist_touch_observations(self, meta_id, decision_id, alternatives):
+        table = getattr(self.db, "meta_signal_observations", None)
+        if table is None:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        values = []
+        for alternative in alternatives:
+            piece = (alternative.get("pieces") or [{}])[0]
+            alt_id = alternative.get("alternative_id")
+            for observation in alternative.get("_touch_observations", []):
+                values.append({"meta_id": int(meta_id), "decision_id": str(decision_id),
+                    "alternative_id": str(alt_id), "symbol": str(piece.get("symbol") or ""),
+                    "piece_type": str(piece.get("piece_type") or "grid"),
+                    "cell_index": int(observation["cell_index"]),
+                    "window_start": str(observation["window_start"]),
+                    "horizon": str(observation["horizon"]),
+                    "buy_relative": float(observation["buy_relative"]),
+                    "sell_relative": float(observation["sell_relative"]),
+                    "stats_json": json.dumps(observation["stats"], sort_keys=True),
+                    "created_at": now})
+        if values:
+            with self.db.engine.begin() as conn:
+                conn.execute(table.insert(), values)
 
     def _model_snapshot(self, symbol):
         readiness = self.db.get_readiness(symbol) or {}
@@ -642,9 +681,11 @@ class MetaOperator:
         else:
             self._analysis_timing["replay_cache_hits"] += 1
             self._analysis_timing["replay_process_cache_hits"] = self._analysis_timing.get("replay_process_cache_hits", 0) + 1
+        replay_windows = None
         if cached is None:
             replay_started = time.perf_counter()
             windows = build_windows(candles, window_days, 7)
+            replay_windows = windows
             rows, window_results = [], []
             # El rango del plan está en precios de HOY. En cada ventana histórica se
             # reescala al precio de inicio de esa ventana (mismo ancho relativo), para
@@ -704,6 +745,20 @@ class MetaOperator:
             self._cache[key] = cached
             self._persistent_cache_set("replay", key, cached)
             self._analysis_timing["replay_s"] += time.perf_counter() - replay_started
+        try:
+            signal_ref = (float(book.get("bid_price")) + float(book.get("ask_price"))) / 2
+        except (TypeError, ValueError):
+            signal_ref = 0.0
+        if strategy != "individual_bot" and not (float(low) < signal_ref < float(high)):
+            signal_ref = math.sqrt(float(low) * float(high))
+        if signal_ref <= 0:
+            signal_ref = math.sqrt(float(low) * float(high))
+        touch_started = time.perf_counter()
+        touch_signal, touch_observations = self._touch_signal_for(
+            symbol, strategy, n, float(low), float(high), signal_ref, candles, window_days,
+            windows=replay_windows)
+        self._analysis_timing["touch_signal_s"] = self._analysis_timing.get("touch_signal_s", 0.0) + (
+            time.perf_counter() - touch_started)
         cached = json.loads(json.dumps(cached))
         window_results = cached["window_results"]
         estimate = cached["summary"]
@@ -721,9 +776,80 @@ class MetaOperator:
                    "loans_pct": float(cfg.get("loan_cap_pct", 0)) if strategy_name == "smart" else 0}]
         return {"symbol": symbol, "strategy": strategy_name, "pieces": pieces, "estimate": estimate,
                 "scanner_score": row.get("score"), "signals_used": [],
+                "touch_signal": touch_signal, "_touch_observations": touch_observations,
                 "replay_probability": estimate["probability"], "window_results": window_results,
                 "shadow_decision": {"scanner_score": row.get("score"), "advisor_strategy": strategy},
                 "reason": "alternativa de replay histórico"}
+
+    def _touch_signal_for(self, symbol, strategy, n, low, high, ref, candles, window_days, *, windows=None):
+        """Calcula estadísticas por celda y ventana, con precios reescalados."""
+        horizons = {"4h": 4 * 12, "24h": 24 * 12, f"{int(window_days)}d": int(window_days) * 24 * 12}
+        if strategy == "individual_bot":
+            cells = [(low, high)]
+        else:
+            lines = compute_lines(low, high, int(n), FILTERS)
+            cells = list(zip([float(value) for value in lines[:-1]],
+                             [float(value) for value in lines[1:]]))
+        payload = {"version": 1, "symbol": symbol, "day": self.clock() // 86400,
+            "strategy": strategy, "n": int(n), "window_days": int(window_days),
+            "buy_sell_relative": [[round(float(x) / ref, 10), round(float(y) / ref, 10)] for x, y in cells],
+            "horizons": horizons}
+        process_key = ("touch_signal", json.dumps(payload, sort_keys=True))
+        self._analysis_timing = getattr(self, "_analysis_timing", {})
+        self._analysis_timing.setdefault("touch_signal_s", 0.0)
+        self._analysis_timing.setdefault("touch_signal_cache_hits", 0)
+        cached = self._cache.get(process_key)
+        if cached is None:
+            cached = self._persistent_cache_get("touch_signal", payload)
+        if cached is not None:
+            self._analysis_timing["touch_signal_cache_hits"] = self._analysis_timing.get(
+                "touch_signal_cache_hits", 0) + 1
+            return cached["summary"], cached["observations"]
+
+        windows = list(windows) if windows is not None else build_windows(candles, int(window_days), 7)
+        observations = []
+        by_cell_horizon = {(cell_index, horizon): [] for cell_index in range(len(cells))
+                           for horizon in horizons}
+        for window in windows:
+            sample = _slice(candles, window["start_idx"], window["end_idx"])
+            scale = float(sample.open[0]) / float(ref)
+            window_start = datetime.fromtimestamp(int(window["start"]), timezone.utc).date().isoformat()
+            for cell_index, (buy, sell) in enumerate(cells):
+                for horizon_name, horizon_candles in horizons.items():
+                    stats = touch_stats(sample, buy * scale, sell * scale, horizon_candles)
+                    rate = stats["sell_rate"]
+                    stats["normalized_value"] = None if rate is None else 2 * float(rate) - 1
+                    observation = {"cell_index": cell_index, "window_start": window_start,
+                        "horizon": horizon_name, "buy_relative": float(buy) / float(ref),
+                        "sell_relative": float(sell) / float(ref), "stats": stats}
+                    observations.append(observation)
+                    by_cell_horizon[(cell_index, horizon_name)].append(stats)
+
+        summary_cells = []
+        for cell_index, (buy, sell) in enumerate(cells):
+            cell_horizons = {name: aggregate_touch_stats(by_cell_horizon[(cell_index, name)])
+                             for name in horizons}
+            for value in cell_horizons.values():
+                rate = value["sell_rate"]
+                value["normalized_value"] = None if rate is None else 2 * float(rate) - 1
+                value.pop("sell_candles", None)
+            summary_cells.append({"cell_index": cell_index, "buy_relative": float(buy) / ref,
+                                  "sell_relative": float(sell) / ref, "horizons": cell_horizons})
+        aggregate = {}
+        for horizon_name in horizons:
+            value = aggregate_touch_stats([cell["horizons"][horizon_name] for cell in summary_cells])
+            rate = value["sell_rate"]
+            value["normalized_value"] = None if rate is None else 2 * float(rate) - 1
+            value.pop("sell_candles", None)
+            aggregate[horizon_name] = value
+        for observation in observations:
+            observation["stats"].pop("sell_candles", None)
+        result = {"summary": {"horizons": aggregate, "cells": summary_cells,
+                              "weight": 0, "shadow_only": True},
+                  "observations": observations}
+        self._cache[process_key] = result
+        self._persistent_cache_set("touch_signal", payload, result)
+        return result["summary"], result["observations"]
 
     def _apply_intelligence(self, alternative, row, price, low, high, cfg, *, advisor_result=None):
         """Ajuste logit aditivo: logit(p_meta)=logit(p_replay)+sum(peso*señal)."""
@@ -915,7 +1041,10 @@ class MetaOperator:
             value = current_value
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": getattr(self, "_last_review_shadow", None),
-            "valuation": value})
+            "valuation": value, "touch_decision_id": plan.get("decision_id"),
+            "touch_alternatives": [{"alternative_id": item.get("alternative_id"),
+                "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
+                for item in plan.get("alternatives", [])]})
         if result.get("decision") == "no_hacer_nada":
             self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
         return result
