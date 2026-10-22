@@ -75,7 +75,9 @@ echo
 
 paso "5/5 Verificar"
 systemctl status "$SERVICIO" --no-pager | sed -n '3p'
-errores=$(journalctl -u "$SERVICIO" --since "$inicio" --no-pager | grep -E "Traceback|ERROR|CRITICAL" | head -20 || true)
+# Avisos conocidos que no son fallas (Prophet sin plotly: solo afecta gráficos interactivos que la app no usa).
+IGNORAR='prophet.plot: Importing plotly failed'
+errores=$(journalctl -u "$SERVICIO" --since "$inicio" --no-pager | grep -E "Traceback|ERROR|CRITICAL" | grep -v -F "$IGNORAR" | head -20 || true)
 if [ "$ok" = 1 ] && [ -z "$errores" ]; then
   verde "Listo: S1 actualizado de $antes a $despues. Salud: $(curl -s "$SALUD")"
   exit 0
