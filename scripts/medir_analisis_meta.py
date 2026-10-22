@@ -6,6 +6,10 @@ import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
+import sys
+
+# Permite correrlo como "python scripts/medir_analisis_meta.py" desde la raíz del repo.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.engine import make_url
