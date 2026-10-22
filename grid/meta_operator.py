@@ -498,12 +498,27 @@ class MetaOperator:
             replay_started = time.perf_counter()
             windows = build_windows(candles, window_days, 7)
             rows, window_results = [], []
+            # El rango del plan está en precios de HOY. En cada ventana histórica se
+            # reescala al precio de inicio de esa ventana (mismo ancho relativo), para
+            # simular "abrir esta misma pieza en ese momento". Sin esto, una ventana
+            # cuyo precio estaba fuera del rango actual rompe todo el análisis.
+            book = row.get("book") or {}
+            try:
+                ref = (float(book.get("bid_price")) + float(book.get("ask_price"))) / 2
+            except (TypeError, ValueError):
+                ref = 0.0
+            if strategy != "individual_bot" and not (float(low) < ref < float(high)):
+                ref = math.sqrt(float(low) * float(high))
+            if ref <= 0:
+                ref = math.sqrt(float(low) * float(high))
             for window in windows:
                 sample = _slice(candles, window["start_idx"], window["end_idx"])
                 start_ts = datetime.fromtimestamp(int(window["start"]), timezone.utc).date().isoformat()
+                scale = float(sample.open[0]) / ref
+                w_low, w_high = float(low) * scale, float(high) * scale
                 if strategy == "individual_bot":
                     from grid.sim.meta_bot import run_meta_bot
-                    replay = run_meta_bot(sample, capital=capital, buy_price=low, sell_price=high,
+                    replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
                                           target_usdt=target_usdt, fee_pct=.1)
                     result_row = {"window_start": start_ts, "reached": replay["reached"],
                                   "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
@@ -511,7 +526,7 @@ class MetaOperator:
                 else:
                     params = {"target_usdt": target_usdt, "target_basis": "cash"}
                     simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
-                        low=low, high=high, width_pct=None, params=params, fee_pct=.1,
+                        low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
                         close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False)
                     event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
                     days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
