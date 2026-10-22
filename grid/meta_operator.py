@@ -187,9 +187,26 @@ class MetaOperator:
                 self._jobs[job_id] = {"job_id": job_id, "status": "FAILED", "error": str(exc),
                                       "analysis_seconds": round(time.perf_counter() - started, 4)}
 
+    def _book_ticker(self, symbol):
+        """Libro bid/ask desde el cliente público del Scanner.
+
+        El cliente público real (BinanceClient) no tiene get_book_ticker; igual que
+        GridScanService, se cae al cliente crudo de python-binance.
+        """
+        client = self.scanner.client
+        if callable(getattr(client, "get_book_ticker", None)):
+            book = client.get_book_ticker(symbol)
+        else:
+            raw = getattr(client, "client", client)
+            book = raw.get_orderbook_ticker(symbol=symbol)
+        book = dict(book)
+        book["bid_price"] = book.get("bid_price", book.get("bidPrice"))
+        book["ask_price"] = book.get("ask_price", book.get("askPrice"))
+        return book
+
     def _candidate_alternatives(self, row, capital, target_usdt, cfg):
         symbol = row["symbol"]
-        book = self.scanner.client.get_book_ticker(symbol)
+        book = self._book_ticker(symbol)
         price = (float(book["bid_price"]) + float(book["ask_price"])) / 2
         row = {**row, "book": book}
         margins = [float(cfg.get("min_margin_pct", .3)) + extra for extra in (0, .2, .4)]
@@ -625,7 +642,7 @@ class MetaOperator:
         cfg = goal.get("config_snapshot") or {}
         max_drift = float(cfg.get("plan_price_drift_pct", self.price_drift_pct))
         for symbol, planned in self._plan_prices(plan).items():
-            current = self.scanner.client.get_book_ticker(symbol)
+            current = self._book_ticker(symbol)
             mid = (float(current["bid_price"]) + float(current["ask_price"])) / 2
             if abs(mid / planned - 1) * 100 > max_drift:
                 raise ValueError(f"El precio de {symbol} se movió más de {max_drift:g}%; solicite un análisis nuevo.")
