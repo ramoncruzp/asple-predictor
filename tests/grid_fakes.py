@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import datetime, timezone
 
 from data.exchange_filters import SymbolFilters
 from data.testnet_client import TestnetOrderError
@@ -43,6 +44,11 @@ class FakeExchange:
 
     def get_book_ticker(self, symbol):
         return {"bid_price": self.bid, "ask_price": self.ask, "bid_qty": Decimal("100"), "ask_qty": Decimal("100")}
+
+    def get_order_book_depth(self, symbol, limit=5):
+        return {"bids": [(self.bid, Decimal("100000"))],
+                "asks": [(self.ask, Decimal("100000"))],
+                "read_at": datetime.now(timezone.utc)}
 
     def get_avg_price(self, symbol):
         return self.avg

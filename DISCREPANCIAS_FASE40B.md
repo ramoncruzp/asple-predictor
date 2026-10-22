@@ -65,3 +65,16 @@ La suite final quedo verde: 1.450 passed, 1 skipped, 18 deselected, 55 warnings,
 - En el caso histórico de S1, los 30 USDT libres se explican por el límite de 70 % por moneda y la evaluación de carteras; falta reejecutar tras el nuevo desempate para saber si la segunda moneda empeora la puntuación recalculada.
 
 La suite final está verde: 1.456 passed, 1 skipped, 18 deselected, 55 warnings. No se hizo commit ni despliegue.
+
+## 40b-4A — discrepancias
+
+### Cerrado
+
+- El inventario ya no se valora multiplicando todo por el mejor bid. Se consume el libro hasta cinco niveles; el valor ejecutable incorpora comisión y se usa para el límite, el aviso del 75 % y el plan de cancelación. El valor del mejor bid también se conserva para mostrar ambos.
+- Estados `KNOWN`, `PARCIAL` y `DESCONOCIDO`; estado y cadencias de Telegram persisten por meta y moneda. El umbral de pérdida requiere dos ciclos consecutivos y su contador persiste en `meta_runs`.
+- La meta no cierra automáticamente cuando la valoración es DESCONOCIDO; bloquea nuevas piezas y alerta después del umbral configurado.
+
+### Sigue abierto
+
+- La estimación de inventario restante de un libro PARCIAL aplica haircut y comisión, pero no garantiza que esa cantidad pueda venderse al último nivel observado. La profundidad se mantiene en cinco niveles y se limita a una lectura por símbolo/minuto.
+- B queda pendiente: pérdida máxima en replay, precálculo diario y lectura de caché persistente en modo solo lectura para el medidor.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Callable, TypeVar
@@ -297,6 +298,16 @@ class TestnetClient:
             "ask_price": Decimal(str(result["askPrice"])),
             "ask_qty": Decimal(str(result["askQty"])),
         }
+
+    def get_order_book_depth(self, symbol: str, limit: int = 5) -> dict[str, Any]:
+        """Lee profundidad Spot y devuelve niveles Decimal con hora local de lectura."""
+        normalized = self._symbol(symbol)
+        if int(limit) < 1 or int(limit) > 100:
+            raise ValueError("limit debe estar entre 1 y 100")
+        result = self._run_read(lambda: self.client.get_order_book(symbol=normalized, limit=int(limit)))
+        return {"bids": [(Decimal(str(price)), Decimal(str(qty))) for price, qty in result.get("bids", [])],
+                "asks": [(Decimal(str(price)), Decimal(str(qty))) for price, qty in result.get("asks", [])],
+                "read_at": datetime.now(timezone.utc), "last_update_id": result.get("lastUpdateId")}
 
     def get_order(
         self,

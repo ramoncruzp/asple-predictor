@@ -47,16 +47,17 @@ Ramón elige el perfil al crear la meta. **El objetivo es el mismo en los dos pe
 ## 3. Cálculo del valor y de la pérdida
 
 ```
-Valor actual = USDT libre de la meta
-             + Σ (cantidad de cada moneda en mano × precio BID actual)
-             − comisión estimada de venta (0,1 % de lo anterior)
-
-Resultado %  = (Valor actual − Capital inicial) / Capital inicial × 100
+valor_best_bid = efectivo atribuible + inventario × mejor BID × (1 − comisión 0,1 %)
+valor_ejecutable = efectivo atribuible + venta simulada recorriendo niveles BID − comisión
+resultado % = (valor_ejecutable − capital inicial) / capital inicial × 100
 ```
 
-- Incluye lo **realizado** (ventas ya hechas, comisiones pagadas) y lo **no realizado** (monedas en mano valoradas a lo que pagarían hoy).
-- Precio: **bid del libro** (lo que realmente pagarían al vender), no el último precio.
-- Si el libro de una moneda no tiene compradores (`BOOK_ONE_SIDED` o similar): el resultado se marca **DESCONOCIDO**, no se toma como cero. En ese estado: no abre piezas nuevas y avisa por Telegram.
+- El efectivo atribuible es capital inicial − USDT entregado a piezas + USDT devuelto por ventas/cierres − comisiones pagadas.
+- Se conserva `valor_best_bid` para comparación. La valoración operativa usa `valor_ejecutable`: consume la profundidad disponible, hasta cinco niveles. Una moneda se consulta como máximo una vez por minuto y las piezas de la misma moneda comparten la lectura.
+- Estados por pieza y de la meta (precedencia `DESCONOCIDO` > `PARCIAL` > `KNOWN`): `KNOWN` cuando los bids absorben todo el inventario; `PARCIAL` cuando absorben parte y el remanente se estima con el último nivel absorbido menos un haircut configurable (1 % predeterminado), sin valor cero; `DESCONOCIDO` ante libro sin bids, viejo, inválido o error. Nunca se convierte a cero.
+- Pérdida máxima: se calcula con valor ejecutable conocido/parcial y cierra solo tras dos vigilancias consecutivas de un minuto bajo el límite; el contador se conserva en la corrida. Aviso del 75 %: valor ejecutable sin confirmación, bloquea piezas nuevas. Meta cumplida: sigue dependiendo solo de USDT realizado.
+- Si `DESCONOCIDO` dura más de 10 minutos, se bloquean piezas y se alerta por Telegram; se repite cada 30 minutos, sin cierre automático. `PARCIAL` alerta tras más de 30 minutos solo si falta más del 25 % del inventario, y se repite como máximo cada seis horas. Se avisa de recuperación a `KNOWN` solo si antes se alertó. Umbrales editables por perfil en `meta_profile_settings`.
+- La bitácora y las respuestas exponen ambos valores. El capital de la meta está **aislado**: solo se usan saldos, operaciones e inventario de sus piezas.
 - El capital de la meta está **aislado**: el cálculo usa solo saldos y órdenes de las piezas de esa meta, no el resto de la cuenta Testnet.
 
 ---
@@ -65,7 +66,7 @@ Resultado %  = (Valor actual − Capital inicial) / Capital inicial × 100
 
 | Ciclo | Frecuencia | Qué hace |
 |---|---|---|
-| **Vigilancia de pérdida** | Cada **1 minuto** | Calcula el valor (§3). Si toca la pérdida máxima → cierre total (§6). Si toca el 75 % → alerta y bloqueo de piezas nuevas. |
+| **Vigilancia de pérdida** | Cada **1 minuto** | Calcula el valor ejecutable (§3). Dos cruces consecutivos del límite → cierre total (§6). Al 75 % → alerta y bloqueo de piezas nuevas. |
 | **Revisión del plan** | Cada **15 minutos** | Analiza mercado (Scanner, σ, modelos) y decide abrir / ajustar / cerrar piezas. |
 
 La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con el monitor existente. Registrar en cada corrida cuánto se pasó del límite en el momento del cierre (deslizamiento).

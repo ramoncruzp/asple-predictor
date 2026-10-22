@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from database.db_manager import DBManager
-from grid.meta import MetaCore, attributable_cash
+from grid.meta import MetaCore, attributable_cash, executable_value
 from alerts.dispatcher import AlertDispatcher
 
 
@@ -15,6 +15,7 @@ class FakeTestnet:
 
     def __init__(self, free=1000, bid=10):
         self.free, self.bid = free, bid
+        self.clock = lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     def get_balance(self, asset=None):
         return {"USDT": {"free": self.free, "locked": 0}}
@@ -22,16 +23,39 @@ class FakeTestnet:
     def get_book_ticker(self, symbol):
         return {"bid_price": self.bid, "ask_price": self.bid + 0.01}
 
+    def get_order_book_depth(self, symbol, limit=5):
+        from datetime import timezone
+        return {"bids": ([(Decimal(str(self.bid)), Decimal("1000000"))] if self.bid > 0 else []),
+                "asks": [], "read_at": self.clock().astimezone(timezone.utc)}
+
 
 def _core(tmp_path, *, exchange=None, enabled=True, alert=None):
     db = DBManager(f"sqlite:///{tmp_path / 'meta.sqlite'}")
     settings = SimpleNamespace(meta_mode_enabled=enabled, meta_max_active=1, alerts_enabled=False)
-    return db, MetaCore(db, exchange or FakeTestnet(), settings=settings, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc), alert=alert)
+    exchange = exchange or FakeTestnet()
+    core = MetaCore(db, exchange, settings=settings, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc), alert=alert)
+    exchange.clock = lambda: core.clock()
+    return db, core
 
 
 def test_attributable_cash_fixed_numbers():
     # 100 iniciales - 60 entregados + 70 devueltos - 1 de comisiones = 109.
     assert attributable_cash("100", "60", "70", "1") == Decimal("109")
+
+
+def test_executable_value_consumes_depth_and_marks_partial_unknown_and_stale():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    known = executable_value("3", [("10", "1"), ("9", "2")], .1, 1, now, now, 60)
+    assert known["status"] == "KNOWN"
+    assert Decimal(known["received_net"]) == Decimal("27.972")
+    partial = executable_value("4", [("10", "1"), ("9", "2")], .1, 1, now, now, 60)
+    assert partial["status"] == "PARCIAL"
+    assert Decimal(partial["missing_value_est"]) == Decimal("8.90109")
+    assert Decimal(partial["missing_value_est"]) > 0
+    empty = executable_value("1", [], .1, 1, now, now, 60)
+    stale = executable_value("1", [("10", "1")], .1, 1, now - timedelta(seconds=61), now, 60)
+    assert empty["status"] == stale["status"] == "DESCONOCIDO"
+    assert empty["received_net"] is stale["received_net"] is None
 
 
 def test_meta_target_percent_and_disabled_gate(tmp_path):
@@ -79,6 +103,7 @@ def test_valuation_uses_piece_cash_bid_and_estimated_sell_fee(tmp_path):
     # Efectivo 100 - 60 + 70 - 1 = 109; inventario 1 * BID 10 * 0.999 = 9.99.
     assert Decimal(value["cash_usdt"]) == Decimal("109.0")
     assert Decimal(value["value_usdt"]) == Decimal("118.990")
+    assert Decimal(value["value_best_bid"]) == Decimal("118.990")
     assert Decimal(value["result_pct"]) == Decimal("18.9900")
 
 
@@ -100,14 +125,13 @@ def test_one_sided_book_returns_unknown_and_records_alert(tmp_path):
         conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
             grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now))
     result = core.valuation(goal["id"])
-    assert result["status"] == "UNKNOWN"
-    assert core.ledger(goal["id"])[-1]["event_type"] == "META_UNKNOWN"
-    assert alerts and alerts[0][0] == "META_UNKNOWN"
-    # La repetición está limitada a una alerta por cada 30 minutos de estado desconocido.
-    clock_now[0] += timedelta(minutes=29)
+    assert result["status"] == "DESCONOCIDO"
+    assert not any(row["event_type"] == "META_UNPROTECTED" for row in core.ledger(goal["id"]))
+    assert not alerts
+    clock_now[0] += timedelta(minutes=11)
     core.valuation(goal["id"])
-    assert len(alerts) == 1
-    clock_now[0] += timedelta(minutes=1)
+    assert len(alerts) == 1 and alerts[0][0] == "META_UNPROTECTED"
+    clock_now[0] += timedelta(minutes=30)
     core.valuation(goal["id"])
     assert len(alerts) == 2
     with db.engine.begin() as conn:
@@ -179,7 +203,12 @@ def test_loss_watch_closes_linked_grid_and_warns(tmp_path, profile, bid, close_p
                 details={"cash_proceeds_net": close_proceeds, "fee_usdt": "0"})
             return {"status": "CLOSED"}
 
-    core.engine = ClosingEngine()
+    closing_engine = ClosingEngine()
+    core.engine = closing_engine
+    core.run_once()
+    # Un proceso nuevo conserva en meta_runs el primer cruce del límite.
+    core = MetaCore(db, core.exchange, closing_engine, settings=core.settings,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc), alert=lambda *args: alerts.append(args))
     core.run_once()
     assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
     assert any(kind == "META_LOSS_WARNING" for kind, _meta_id, _data in alerts)
@@ -193,8 +222,10 @@ def test_slow_operator_review_does_not_block_monitor_loss_close(tmp_path):
     db = DBManager(f"sqlite:///{tmp_path / 'slow-review.sqlite'}")
     exchange = FakeTestnet(bid=10)
     settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=1, alerts_enabled=False)
+    clock_now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
     core = MetaCore(db, exchange, settings=settings, monitor=monitor,
-        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+        clock=lambda: clock_now[0])
+    exchange.clock = lambda: clock_now[0]
     goal = core.create_goal(100, 10, profile="RAPIDO")
     now = datetime(2026, 1, 1)
     with db.engine.begin() as conn:
@@ -246,6 +277,9 @@ def test_slow_operator_review_does_not_block_monitor_loss_close(tmp_path):
     assert skipped["decision"] == "no_hacer_nada"
     assert any(row["event_type"] == "META_OPERATOR_REVIEW_SKIPPED" for row in core.ledger(goal["id"]))
     exchange.bid = 8.2  # La pérdida máxima aparece mientras el análisis del operador sigue lento.
+    clock_now[0] += timedelta(minutes=1)
+    core.run_once()
+    clock_now[0] += timedelta(minutes=1)
     core.run_once()
     assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
     assert db.get_grid(grid_id)["status"] == "CLOSED"

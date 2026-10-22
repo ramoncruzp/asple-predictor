@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import uuid
 import threading
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -11,19 +12,28 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 
 FEE = Decimal("0.001")
+VALUATION_STATES = {"KNOWN": 0, "PARCIAL": 1, "DESCONOCIDO": 2}
 DEFAULT_PROFILES = {
     "PRUDENTE": {"capital_per_coin_pct": 40, "max_grids": 2, "max_bots": 4,
                  "max_loss_pct": 8, "warning_loss_pct": 6, "max_days": 45, "loan_cap_pct": 30,
                  "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.7,
                  "plan_price_drift_pct": 1.0, "signal_logit_cap": 1.0,
                  "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
-                 "direction": 0.25, "scanner": 0.25, "advisor": 0.25}},
+                 "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
+                 "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
+                 "valuation_unknown_alert_after_min": 10, "valuation_unknown_repeat_min": 30,
+                 "valuation_partial_alert_after_min": 30, "valuation_partial_missing_pct": 25,
+                 "valuation_partial_repeat_h": 6},
     "RAPIDO": {"capital_per_coin_pct": 70, "max_grids": 4, "max_bots": 8,
                "max_loss_pct": 18, "warning_loss_pct": 13.5, "max_days": 20, "loan_cap_pct": 50,
                "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.3,
                "plan_price_drift_pct": 1.0, "signal_logit_cap": 1.0,
                "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
-               "direction": 0.25, "scanner": 0.25, "advisor": 0.25}},
+               "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
+               "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
+               "valuation_unknown_alert_after_min": 10, "valuation_unknown_repeat_min": 30,
+               "valuation_partial_alert_after_min": 30, "valuation_partial_missing_pct": 25,
+               "valuation_partial_repeat_h": 6},
 }
 
 
@@ -34,6 +44,46 @@ def _d(value: Any) -> Decimal:
 def attributable_cash(capital_initial, delivered, returned, commissions) -> Decimal:
     """Efectivo lógico atribuible: capital − entregas + devoluciones − comisiones."""
     return _d(capital_initial) - _d(delivered) + _d(returned) - _d(commissions)
+
+
+def executable_value(qty, bids, fee_pct, haircut_pct, read_at, now, max_age_s):
+    """Valora una venta contra niveles de bids; una lectura dudosa nunca equivale a cero."""
+    try:
+        quantity = _d(qty)
+        fee = _d(fee_pct) / Decimal(100)
+        haircut = _d(haircut_pct) / Decimal(100)
+        if quantity < 0 or fee < 0 or not 0 <= haircut < 1 or not bids:
+            raise ValueError("cantidad, comisión, descuento o bids inválidos")
+        read = read_at if read_at.tzinfo else read_at.replace(tzinfo=timezone.utc)
+        current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        age = (current - read).total_seconds()
+        if age < -1 or age > float(max_age_s):
+            raise ValueError("lectura de profundidad vieja")
+        remaining, gross, absorbed, last_price = quantity, Decimal(0), Decimal(0), Decimal(0)
+        for row in bids:
+            price, available = _d(row[0]), _d(row[1])
+            if price <= 0 or available <= 0:
+                raise ValueError("nivel de bid inválido")
+            take = min(remaining, available)
+            gross += take * price
+            absorbed += take
+            remaining -= take
+            last_price = price
+            if remaining <= 0:
+                break
+        missing_value = (remaining * last_price * (1 - haircut) * (1 - fee)
+                         if remaining > 0 and last_price > 0 else Decimal(0))
+        if quantity > 0 and absorbed <= 0:
+            raise ValueError("sin profundidad compradora válida")
+        state = "KNOWN" if remaining == 0 else "PARCIAL"
+        return {"status": state, "reason": None if state == "KNOWN" else "profundidad insuficiente",
+                "received_net": str(gross * (1 - fee)), "absorbed_qty": str(absorbed),
+                "missing_qty": str(remaining), "missing_value_est": str(missing_value),
+                "last_absorbed_price": str(last_price), "age_s": age}
+    except Exception as exc:
+        return {"status": "DESCONOCIDO", "reason": str(exc), "received_net": None,
+                "absorbed_qty": "0", "missing_qty": str(qty), "missing_value_est": None,
+                "last_absorbed_price": None, "age_s": None}
 
 
 def smart_grid_params_for_goal(goal: dict, *, target_usdt: float | None = None) -> dict:
@@ -302,10 +352,14 @@ class MetaCore:
         return {"meta_id": int(meta_id), "grid_id": int(grid_id), "piece_type": piece_type}
 
     def valuation(self, meta_id):
+        from sqlalchemy import select
         goal = self.get_goal(meta_id)
         links = self._owned_grids(meta_id)
-        delivered = returned = commissions = inventory = Decimal(0)
+        delivered = returned = commissions = Decimal(0)
         try:
+            pieces = []
+            quantities_by_symbol = defaultdict(Decimal)
+            books_by_symbol = {}
             for link in links:
                 grid = self.db.get_grid(int(link["grid_id"]))
                 if grid is None:
@@ -331,34 +385,138 @@ class MetaCore:
                             quote, fee = self._fill_cash(grid, event, details)
                             returned += quote
                             commissions += fee
-                book = self.exchange.get_book_ticker(grid["symbol"])
-                bid = _d(book.get("bid_price"))
-                if bid <= 0:
-                    raise ValueError(f"BOOK_ONE_SIDED:{grid['symbol']}")
                 if repo_id is None:
                     inventory_levels = self.db.get_grid_levels(int(grid["id"]))
                 else:
                     mapped_ids = {int(idx) for idx in level_map.values()}
                     inventory_levels = [level for level in self.db.get_grid_levels(int(repo_id))
                                         if int(level["level_idx"]) in mapped_ids]
-                for level in inventory_levels:
-                    inventory += _d(level.get("held_qty")) * bid
+                held = sum((_d(level.get("held_qty")) for level in inventory_levels), Decimal(0))
+                pieces.append({"symbol": grid["symbol"], "grid_id": int(link["grid_id"]),
+                               "qty": held, "levels": inventory_levels})
+                quantities_by_symbol[grid["symbol"]] += held
             cash = attributable_cash(goal["capital_initial"], delivered, returned, commissions)
-            value = cash + inventory * (Decimal(1) - FEE)
-            result = (value - _d(goal["capital_initial"])) / _d(goal["capital_initial"]) * 100
-            return {"status": "KNOWN", "cash_usdt": str(cash), "inventory_bid_gross_usdt": str(inventory),
-                    "value_usdt": str(value), "result_pct": str(result), "estimated_sell_fee_pct": "0.1"}
+            cfg_raw = goal.get("config_snapshot") or {}
+            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw)
+            profile_cfg = self._profile_settings().get(goal["profile"], {})
+            haircut = cfg.get("valuation_haircut_pct", profile_cfg.get("valuation_haircut_pct", 1.0))
+            coin_values, state_rows = {}, []
+            for symbol, quantity in quantities_by_symbol.items():
+                if quantity <= 0:
+                    continue
+                now = self.clock()
+                cached = getattr(self, "_depth_cache", {}).get(symbol)
+                if cached and (now - cached[0]).total_seconds() < 60:
+                    book = cached[1]
+                else:
+                    getter = getattr(self.exchange, "get_order_book_depth", None)
+                    if callable(getter):
+                        book = getter(symbol, limit=5)
+                    else:
+                        ticker = self.exchange.get_book_ticker(symbol)
+                        book = {"bids": [(ticker.get("bid_price"), ticker.get("bid_qty"))],
+                                "asks": [(ticker.get("ask_price"), ticker.get("ask_qty"))],
+                                "read_at": now}
+                    if not hasattr(self, "_depth_cache"):
+                        self._depth_cache = {}
+                    self._depth_cache[symbol] = (now, book)
+                bid = _d(book.get("bids", [(0, 0)])[0][0]) if book.get("bids") else Decimal(0)
+                best_gross = quantity * bid if bid > 0 else None
+                executable = executable_value(quantity, book.get("bids"), 0.1, haircut,
+                    book.get("read_at"), now, 60)
+                coin_values[symbol] = {**executable, "best_bid_gross": best_gross}
+                state_rows.append((symbol, executable))
+            status = "KNOWN"
+            for _symbol, result in state_rows:
+                if VALUATION_STATES[result["status"]] > VALUATION_STATES[status]:
+                    status = result["status"]
+            inventory_best = sum((value["best_bid_gross"] or Decimal(0) for value in coin_values.values()), Decimal(0))
+            inventory_exec = sum((_d(value["received_net"]) + _d(value["missing_value_est"])
+                                  for value in coin_values.values() if value["status"] != "DESCONOCIDO"), Decimal(0))
+            for piece in pieces:
+                coin = coin_values.get(piece["symbol"], {})
+                total_qty = quantities_by_symbol[piece["symbol"]]
+                ratio = piece["qty"] / total_qty if total_qty else Decimal(0)
+                piece["absorbed_qty"] = str(_d(coin.get("absorbed_qty")) * ratio)
+                piece["missing_qty"] = str(_d(coin.get("missing_qty")) * ratio)
+                piece["value_executable"] = (str((_d(coin.get("received_net")) + _d(coin.get("missing_value_est"))) * ratio)
+                                              if coin.get("status") != "DESCONOCIDO" else None)
+                piece["value_best_bid"] = str(_d(coin.get("best_bid_gross")) * ratio) if coin.get("best_bid_gross") is not None else None
+                piece["status"] = coin.get("status", "KNOWN")
+            self._update_valuation_state(meta_id, state_rows, profile_cfg)
+            value_best = cash + inventory_best * (Decimal(1) - FEE)
+            value_exec = cash + inventory_exec
+            result_best = (value_best - _d(goal["capital_initial"])) / _d(goal["capital_initial"]) * 100
+            result_exec = (value_exec - _d(goal["capital_initial"])) / _d(goal["capital_initial"]) * 100
+            return {"status": status, "cash_usdt": str(cash), "inventory_bid_gross_usdt": str(inventory_best),
+                    "inventory_executable_usdt": str(inventory_exec), "value_usdt": str(value_exec),
+                    "value_best_bid": str(value_best), "value_executable": str(value_exec),
+                    "result_pct": str(result_exec) if status != "DESCONOCIDO" else None,
+                    "result_pct_best_bid": str(result_best),
+                    "result_pct_executable": str(result_exec) if status != "DESCONOCIDO" else None,
+                    "estimated_sell_fee_pct": "0.1", "pieces": pieces}
         except Exception as exc:
-            now = self._now()
-            self._ledger(meta_id, None, "META_UNKNOWN", {"error": str(exc)})
-            # Se vuelve a alertar si el estado desconocido persiste 30 minutos.
-            previous = getattr(self, "_unknown_since", {}).get(int(meta_id))
-            if not hasattr(self, "_unknown_since"):
-                self._unknown_since = {}
-            if previous is None or (now - previous).total_seconds() >= 1800:
-                self._unknown_since[int(meta_id)] = now
-                self.alert("META_UNKNOWN", int(meta_id), {"error": str(exc), "since": str(now)})
-            return {"status": "UNKNOWN", "reason": str(exc)}
+            symbol = next((self.db.get_grid(int(link["grid_id"])).get("symbol") for link in links
+                           if self.db.get_grid(int(link["grid_id"]))), "UNKNOWN")
+            self._update_valuation_state(meta_id, [(symbol, {"status": "DESCONOCIDO", "reason": str(exc),
+                "missing_qty": "0", "missing_value_est": None})], self._profile_settings().get(goal["profile"], {}))
+            return {"status": "DESCONOCIDO", "reason": str(exc), "value_best_bid": None,
+                    "value_executable": None, "result_pct": None, "pieces": []}
+
+    def _update_valuation_state(self, meta_id, states, cfg):
+        """Persiste transiciones y cadencias de alertas, incluso tras reiniciar el proceso."""
+        from sqlalchemy import select
+        now = self._now()
+        for symbol, result in states:
+            state = result["status"]
+            ledger_events = []
+            alert_event = None
+            with self.db.engine.begin() as conn:
+                old = conn.execute(select(self.db.meta_valuation_states).where(
+                    self.db.meta_valuation_states.c.meta_id == int(meta_id),
+                    self.db.meta_valuation_states.c.symbol == symbol)).mappings().first()
+                if old is None or old["state"] != state:
+                    conn.execute(self.db.meta_valuation_states.delete().where(
+                        self.db.meta_valuation_states.c.meta_id == int(meta_id),
+                        self.db.meta_valuation_states.c.symbol == symbol))
+                    conn.execute(self.db.meta_valuation_states.insert().values(meta_id=int(meta_id), symbol=symbol,
+                        state=state, state_since=now, last_alert_at=None, alert_sent=False,
+                        last_reason=result.get("reason")))
+                    if old is not None and old["alert_sent"] and state == "KNOWN":
+                        ledger_events.append(("META_VALUATION_RECOVERED", {"symbol": symbol}))
+                    ledger_events.append(("META_VALUATION_STATE", {"symbol": symbol, "status": state,
+                        "reason": result.get("reason")}))
+                    old = None
+                row = conn.execute(select(self.db.meta_valuation_states).where(
+                    self.db.meta_valuation_states.c.meta_id == int(meta_id),
+                    self.db.meta_valuation_states.c.symbol == symbol)).mappings().first()
+                duration = max(0, (now - row["state_since"]).total_seconds())
+                alert_kind, due, interval = None, False, 0
+                if state == "DESCONOCIDO":
+                    alert_kind = "META_UNPROTECTED"
+                    due = duration > float(cfg.get("valuation_unknown_alert_after_min", 10)) * 60
+                    interval = float(cfg.get("valuation_unknown_repeat_min", 30)) * 60
+                elif state == "PARCIAL":
+                    best = _d(result.get("best_bid_gross"))
+                    missing_pct = (_d(result.get("missing_value_est")) / best * 100) if best > 0 else Decimal(0)
+                    due = duration > float(cfg.get("valuation_partial_alert_after_min", 30)) * 60 and missing_pct > _d(cfg.get("valuation_partial_missing_pct", 25))
+                    alert_kind = "META_VALUATION_PARTIAL"
+                    interval = float(cfg.get("valuation_partial_repeat_h", 6)) * 3600
+                if due and (row["last_alert_at"] is None or (now - row["last_alert_at"]).total_seconds() >= interval):
+                    details = {"symbol": symbol, "duration_min": round(duration / 60, 1),
+                               "reason": result.get("reason"), "missing_qty": result.get("missing_qty")}
+                    alert_event = (alert_kind, details)
+                    conn.execute(self.db.meta_valuation_states.update().where(
+                        self.db.meta_valuation_states.c.meta_id == int(meta_id),
+                        self.db.meta_valuation_states.c.symbol == symbol).values(last_alert_at=now, alert_sent=True))
+            for kind, details in ledger_events:
+                self._ledger(meta_id, None, kind, details)
+                if kind == "META_VALUATION_RECOVERED":
+                    self.alert(kind, int(meta_id), details)
+            if alert_event:
+                kind, details = alert_event
+                self._ledger(meta_id, None, kind, details)
+                self.alert(kind, int(meta_id), details)
 
     def _fill_cash(self, grid, event, details):
         quote_value = details.get("cummulative_quote_qty", details.get("quote_qty", details.get("executed_quote_qty")))
@@ -392,7 +550,7 @@ class MetaCore:
                     results.append({"meta_id": goal["id"], "status": "CLOSING_RETRIED"})
                     continue
                 valuation = self.valuation(goal["id"])
-                if valuation["status"] != "KNOWN":
+                if valuation["status"] == "DESCONOCIDO":
                     if goal["status"] == "ACTIVE":
                         with self.db.engine.begin() as conn:
                             conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
@@ -402,20 +560,25 @@ class MetaCore:
                 if goal["status"] == "PIECES_BLOCKED":
                     with self.db.engine.begin() as conn:
                         conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="ACTIVE"))
-                    self._ledger(goal["id"], None, "META_VALUATION_RECOVERED", {})
-                    self._unknown_since.pop(int(goal["id"]), None)
+                cfg = goal["config_snapshot"]
                 result_pct = _d(valuation["result_pct"])
                 with self.db.engine.begin() as conn:
                     active_run = conn.execute(select(self.db.meta_runs).where(
                         self.db.meta_runs.c.meta_id == goal["id"],
                         self.db.meta_runs.c.status == "ACTIVE").order_by(self.db.meta_runs.c.id.desc())).mappings().first()
                     if active_run:
+                        breached = result_pct <= -_d(cfg.get("max_loss_pct", 8))
+                        breach_count = int(active_run.get("loss_limit_breach_count") or 0) + 1 if breached else 0
                         conn.execute(self.db.meta_runs.update().where(self.db.meta_runs.c.id == active_run["id"]).values(
-                            worst_result_pct=min(float(active_run.get("worst_result_pct") or 0), float(result_pct))))
-                cfg = goal["config_snapshot"]
+                            worst_result_pct=min(float(active_run.get("worst_result_pct") or 0), float(result_pct)),
+                            loss_limit_breach_count=breach_count))
+                    else:
+                        breach_count = 0
                 if goal["status"] == "SURPLUS_WAIT":
                     self._ledger(goal["id"], None, "META_SURPLUS_VALUATION", {
                         "value_usdt": valuation["value_usdt"], "result_pct": valuation["result_pct"],
+                        "value_best_bid": valuation["value_best_bid"],
+                        "value_executable": valuation["value_executable"],
                         "cash_usdt": valuation["cash_usdt"], "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
                         "decision": "mantener_ventas_vivas_sin_recomprar"})
                     self._update_realized_extra(goal)
@@ -427,7 +590,9 @@ class MetaCore:
                     results.append({"meta_id": goal["id"], "valuation": valuation, "surplus_wait": True})
                     continue
                 self._ledger(goal["id"], None, "META_VALUATION", {
-                    "status": goal["status"], "value_usdt": valuation["value_usdt"],
+                    "status": valuation["status"], "value_usdt": valuation["value_usdt"],
+                    "value_best_bid": valuation["value_best_bid"],
+                    "value_executable": valuation["value_executable"],
                     "result_pct": valuation["result_pct"], "cash_usdt": valuation["cash_usdt"],
                     "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
                     "profile": goal["profile"], "decision": "revisar_limites_y_objetivo"})
@@ -439,7 +604,7 @@ class MetaCore:
                 limit = -_d(cfg.get("max_loss_pct", 8))
                 if goal["status"] == "TARGET_CLOSING":
                     self._target_met(goal)
-                elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and result_pct <= limit:
+                elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and result_pct <= limit and breach_count >= int(cfg.get("loss_confirm_minutes", 2)):
                     self._close_owned(goal, "CORTADA_POR_PERDIDA")
                 elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and _d(valuation["cash_usdt"]) >= _d(goal["capital_initial"]) + _d(goal["target_usdt"]):
                     self._target_met(goal)
@@ -472,7 +637,7 @@ class MetaCore:
 
     def _record_close_slippage(self, goal):
         final_value = self.valuation(goal["id"])
-        if final_value.get("status") != "KNOWN":
+        if final_value.get("status") not in {"KNOWN", "PARCIAL"}:
             return
         threshold = _d(goal["capital_initial"]) * (Decimal(1) - _d((goal.get("config_snapshot") or {}).get("max_loss_pct", 8)) / 100)
         slip = max(Decimal(0), threshold - _d(final_value.get("value_usdt")))
@@ -567,19 +732,19 @@ class MetaCore:
         valuation = self.valuation(meta_id)
         links = self._owned_grids(meta_id)
         pieces = []
+        by_grid = {int(item["grid_id"]): item for item in valuation.get("pieces", [])}
         for link in links:
             grid = self.db.get_grid(int(link["grid_id"]))
             if grid is None:
                 continue
-            book = self.exchange.get_book_ticker(grid["symbol"])
-            bid = _d(book.get("bid_price"))
+            valuation_piece = by_grid.get(int(link["grid_id"]), {})
             levels = self.db.get_grid_levels(int(link.get("repository_grid_id") or link["grid_id"]))
             estimate = Decimal(0)
             for level in levels:
-                qty, entry = _d(level.get("held_qty")), _d(level.get("entry_price"))
-                if qty > 0 and bid > 0:
-                    estimate += qty * bid * (Decimal(1) - FEE) - qty * entry
-                estimate += _d(level.get("pnl"))
+                entry = _d(level.get("entry_price"))
+                estimate += _d(level.get("pnl")) - _d(level.get("held_qty")) * entry
+            if valuation_piece.get("value_executable") is not None:
+                estimate += _d(valuation_piece["value_executable"])
             pieces.append({"grid_id": link["grid_id"], "symbol": grid["symbol"],
                            "estimated_pnl_usdt": str(estimate), "repository_grid_id": link.get("repository_grid_id")})
         token = uuid.uuid4().hex

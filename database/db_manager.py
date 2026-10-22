@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, case, create_engine, event, exists, func, or_, select, text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, case, create_engine, event, exists, func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from config.models_config import TARGET_HORIZON_CANDLES, TARGET_UP_THRESHOLD
 from config.models_config import (
@@ -298,7 +298,7 @@ class DBManager:
             Column("status", String, nullable=False), Column("started_at", DateTime, nullable=False),
             Column("finished_at", DateTime), Column("worst_result_pct", Float),
             Column("close_slippage_usdt", Float), Column("realized_extra_usdt", Float, nullable=False, default=0.0),
-            Column("control_plan_json", Text))
+            Column("control_plan_json", Text), Column("loss_limit_breach_count", Integer, nullable=False, default=0))
         self.meta_piece_links = Table("meta_piece_links", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
@@ -322,6 +322,11 @@ class DBManager:
             Column("cache_key", String(64), primary_key=True), Column("cache_kind", String(32), nullable=False),
             Column("analysis_day", String(10), nullable=False), Column("value_json", Text, nullable=False),
             Column("created_at", DateTime, nullable=False))
+        self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
+            Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
+            Column("state_since", DateTime, nullable=False), Column("last_alert_at", DateTime),
+            Column("alert_sent", Boolean, nullable=False, default=False), Column("last_reason", Text))
         self.metadata.create_all(self.engine)
         self._migrate_direction_verification_columns()
         self._migrate_widen_columns()
@@ -376,12 +381,15 @@ class DBManager:
                 run_present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('meta_runs')")}
                 if "control_plan_json" not in run_present:
                     conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN control_plan_json TEXT")
+                if "loss_limit_breach_count" not in run_present:
+                    conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN IF NOT EXISTS {name} {sql_type}")
                 for name, sql_type in goal_additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN IF NOT EXISTS {name} {sql_type}")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_plan_json TEXT")
+                conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""

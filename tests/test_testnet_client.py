@@ -87,6 +87,10 @@ class FakeTestnetHTTP:
     def get_account(self):
         return self.account_result
 
+    def get_order_book(self, **params):
+        self.depth_calls = getattr(self, "depth_calls", []) + [params]
+        return {"lastUpdateId": 12, "bids": [["1.2", "3"]], "asks": [["1.3", "4"]]}
+
 
 def make_client(fake=None, **kwargs):
     return _TestnetClient(
@@ -377,6 +381,11 @@ def test_extended_read_methods_normalize_exchange_data():
         "bid_price": Decimal("1.2"), "bid_qty": Decimal("3"),
         "ask_price": Decimal("1.3"), "ask_qty": Decimal("4"),
     }
+    depth = client.get_order_book_depth("xrp/usdt", limit=5)
+    assert depth["bids"] == [(Decimal("1.2"), Decimal("3"))]
+    assert depth["asks"] == [(Decimal("1.3"), Decimal("4"))]
+    assert depth["last_update_id"] == 12
+    assert fake.depth_calls == [{"symbol": "XRPUSDT", "limit": 5}]
     order = client.get_order("XRPUSDT", order_id=42)
     assert order["executed_qty"] == Decimal("2")
     assert order["cummulative_quote_qty"] == Decimal("2.5")

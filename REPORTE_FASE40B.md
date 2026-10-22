@@ -171,3 +171,22 @@ Corrida completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tes
 ### Estado
 
 40b-3 cierra la carrera de bloqueo, el desempate, el texto de capital libre y las pruebas de los errores observados en S1. El rendimiento queda parcialmente abierto: no hay medición post-cambio de S1 ni medición de análisis de mercado en este PC y las metas de 2 min/60 s no se certifican. No hubo commit ni despliegue.
+
+## 40b-4A — valoración ejecutable por profundidad
+
+### Implementado
+
+- `data/testnet_client.py:295` consulta profundidad Spot con `limit=5`, convierte bids/asks a `Decimal` y devuelve `read_at`. Binance asigna peso 2 a `/api/v3/depth` para límites 1–100; cinco niveles permiten recorrer más que el mejor bid. [Documentación oficial de Binance Spot](https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md#order-book).
+- `grid/meta.py:55` añade la función pura `executable_value`: recorre niveles, resta comisión de venta, calcula cantidad absorbida y remanente con haircut configurable y devuelve `KNOWN`, `PARCIAL` o `DESCONOCIDO`. Una lectura vieja, sin bids o inválida nunca produce valor cero válido.
+- `grid/meta.py:360` agrega inventario por símbolo, comparte una lectura de profundidad por minuto y distribuye la valoración entre piezas. La respuesta expone `value_best_bid` y `value_executable`; el alias legado `value_usdt` y `result_pct` apuntan al ejecutable. El límite y el aviso de 75 % usan este último; la meta cumplida continúa basándose solo en efectivo realizado.
+- `database/db_manager.py:322, 386` persiste estado, duración y cadencia de alertas por meta/moneda y añade `loss_limit_breach_count` a `meta_runs`. El cierre por pérdida necesita dos ciclos consecutivos; el contador sobrevive a reiniciar `MetaCore`. Al 75 % se bloquean piezas sin esperar confirmación. Los umbrales de haircut y avisos son editables por perfil.
+- `grid/meta.py:472` registra cambios de estado; DESCONOCIDO alerta tras más de 10 min y repite cada 30 min; PARCIAL solo alerta tras más de 30 min y más del 25 % faltante, con repetición cada 6 h. La recuperación solo se notifica después de una alerta previa. No se cierra automáticamente con valoración DESCONOCIDO.
+- `grid/meta.py:729` usa el valor ejecutable en la estimación de cancelación. `ESPEC_FASE40_MODO_META.md:47` documenta estados, fórmulas y reglas operativas.
+
+### Pruebas y resultado
+
+`tests/test_meta_core.py`, `tests/test_testnet_client.py`, `tests/test_app_settings_api.py` con `ASPLE_OFFLINE=1`, `-m "not live"` y carpeta temporal nueva bajo `$env:TEMP`: **46 passed, 1 deselected, 10 warnings, 2,74 s**. Incluye absorción completa/parcial, comisión, haircut no nulo, libro vacío/viejo, umbral y repetición de alertas, pérdida en dos ciclos tras reconstruir el núcleo, y lectura de profundidad Decimal. Una corrida anterior sin `-m "not live"` intentó el test marcado `live`; el socket fue denegado y no se accedió a Testnet.
+
+### Límites
+
+La valoración parcial es una estimación: el remanente usa el último bid absorbido menos haircut y comisión, no garantiza ejecución. El libro se refresca una vez por minuto por símbolo y las piezas de una moneda comparten liquidez disponible; no se consultan endpoints de profundidad fuera de las monedas con inventario. Sin profundidad válida la meta queda bloqueada y sin protección de pérdida hasta recuperar valoración.
