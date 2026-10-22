@@ -318,6 +318,10 @@ class DBManager:
         self.meta_profile_settings = Table("meta_profile_settings", self.metadata,
             Column("profile", String, primary_key=True), Column("settings", Text, nullable=False),
             Column("updated_at", DateTime, nullable=False))
+        self.meta_analysis_cache = Table("meta_analysis_cache", self.metadata,
+            Column("cache_key", String(64), primary_key=True), Column("cache_kind", String(32), nullable=False),
+            Column("analysis_day", String(10), nullable=False), Column("value_json", Text, nullable=False),
+            Column("created_at", DateTime, nullable=False))
         self.metadata.create_all(self.engine)
         self._migrate_direction_verification_columns()
         self._migrate_widen_columns()

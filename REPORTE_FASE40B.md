@@ -122,3 +122,52 @@ No hubo commit ni despliegue. Las pruebas live permanecen excluidas; no se acced
 ### Archivos de 40b-2
 
 Cambios funcionales y de prueba: `grid/meta_operator.py`, `grid/engine.py`, `grid/meta.py`, `api/routes/grids.py`, `api/routes/metas.py`, `tests/test_meta_operator.py`, `tests/test_grid_close.py`. Script añadido: `scripts/medir_analisis_meta.py`. El resto de archivos de 40b enumerados arriba pertenecen a la base de trabajo de esta fase.
+
+## 40b-3 — bloqueo, rendimiento y desempate
+
+### Bloqueo del monitor
+
+`grid/meta_operator.py:829-896` ejecuta el análisis de revisión sin `ops_lock`: `review_once` usa un guard separado y no solapable. Si llega otra cadencia mientras el análisis sigue activo, devuelve no-op y registra `META_OPERATOR_REVIEW_SKIPPED`. `grid/meta_operator.py:861-883` vuelve a consultar meta y valoración bajo `ops_lock`, aplica otra vez los frenos de estado DESCONOCIDO/75 % y compara el precio con el plan antes de permitir acciones. La comparación cubre símbolos de todas las alternativas, no solo la cartera seleccionada (`grid/meta_operator.py:812-819`). La ejecución de acciones continúa dentro del lock. El scheduler permite una segunda invocación breve para que registre el skip (`grid/meta_operator.py:1111`).
+
+Prueba integrada: `tests/test_meta_core.py:189` deja el análisis detenido, llama el wrapper `GridMonitor.run_once`, cambia el precio para cruzar la pérdida máxima y corre `MetaCore.run_once`; el cierre ocurre mientras el análisis sigue vivo. La siguiente revisión concurrente se salta y se anota. Resultado final del archivo junto con las pruebas del operador: 47 passed.
+
+### Rendimiento
+
+El cache diario persistente de Advisor y replay usa la tabla nueva `meta_analysis_cache` (`database/db_manager.py:321`) y operaciones tolerantes a base antigua/solo lectura (`grid/meta_operator.py:167-198`). La llave incluye día UTC y parámetros exactos; el replay usa capital, objetivo, niveles, plazo y ancho relativo del rango. No se escala por capital: los mínimos de notional, polvo, niveles y comisiones impiden asumir equivalencia sin medirlo. El cache no altera el resultado del simulador. Las lecturas de velas permanecen cacheadas por moneda y día.
+
+El Advisor se consulta a capital máximo por moneda permitido, una vez por símbolo y cada uno de los tres márgenes; para cada asignación se simula con su capital real y se limita el número de niveles (`grid/meta_operator.py:254-316`, `grid/meta_operator.py:365-381`). Las recomendaciones repetidas en el plan se deduplican por moneda y margen (`grid/meta_operator.py:486-490`). El medidor de S1 sigue con cache desactivado para conservar solo lectura (`scripts/medir_analisis_meta.py:89`).
+
+| Medición | Antes | Después de 40b-3 |
+|---|---:|---:|
+| Análisis completo en S1, RAPIDO 100→110 | 1.537,9 s (25,6 min) | Sin medición posterior: requiere desplegar/ejecutar el medidor en S1 |
+| Scanner / Advisor / replay / selección / Advisor de control | 46 / 609 / 786 / 1.480 / 11 s | Cache persistente evita repetir Advisor y replay del mismo día; Advisor reduce llamadas a un máximo de 3 por moneda |
+| Selección exclusiva estimada del dato anterior | 1.480 s reportados | ≈85 s: 1.480−609−786; el cronómetro anterior incluía Advisor y replay dos veces |
+| Análisis en este PC | No corrido con mercado real | No medido; no se usó red ni BD configurada |
+| Suite offline completa | — | 304,81 s (pytest); 307,55 s de pared |
+
+La reducción de Advisor es una estimación condicional, no una medición: si el caso anterior llamó al Advisor para seis tamaños de asignación por moneda, el coste bajaría aproximadamente de 609 a 102 s. Con scanner 46 s, replay frío 786 s, selección exclusiva 85 s y control 11 s, el análisis frío se estimaría en ≈1.030 s (17,2 min). Por eso el objetivo frío de ≤2 min **no queda demostrado ni se espera cumplir con estos cambios solos**. En una revisión caliente el cache quita replay y Advisor repetidos, pero quedan el Scanner y la selección de cartera; tampoco hay medición que certifique ≤60 s.
+
+No se añadió precálculo al iniciar el servicio ni paralelismo de procesos: no se midió su impacto y el prompt pide dejar margen a las 2 OCPU de S1. No se pasó a velas de 15 min: el simulador actual rechaza intervalos de 900 s (`simulation candles must have 300-second or 3600-second spacing`), y por tanto no existe comparación válida contra 5 min. Se conserva 5 min. Las siguientes mediciones deben ser el medidor de solo lectura en S1, una vez desplegado, en frío y luego caliente.
+
+### Desempate y capital libre
+
+`grid/meta_operator.py:45-52` ordena ambos perfiles por probabilidad histórica de replay, progreso mediano (ganancia neta mediana por ventana / objetivo), menor mediana de días y menor peor caída. El progreso se calcula al combinar ventanas alineadas (`grid/meta_operator.py:21-42, 99-101`). El plan señala literalmente cuando ninguna alternativa alcanza la meta e informa el avance mediano de la más cercana (`grid/meta_operator.py:453-461`).
+
+Cada combinación evaluada registra capital total usado, probabilidad, progreso, plazo y peor caída (`grid/meta_operator.py:433-440`). `capital_usage` explica el efectivo libre y muestra la mejor cartera probada con mayor capital (`grid/meta_operator.py:445-479`). Se siguen probando combinaciones de monedas/piezas y el filtro común decide; no se fuerza a invertir el remanente. El caso S1 anterior dejó 30 USDT porque el perfil Rápido limitaba cada moneda al 70 % y el resto de combinaciones no superó a la seleccionada según el criterio anterior; no se puede afirmar si la segunda moneda empeoraba la nueva puntuación sin reejecutar el análisis posterior.
+
+### Pruebas y resultado
+
+Pruebas añadidas:
+
+- `tests/test_meta_operator.py:49,64`: replay todo-cero y precedencia de probabilidad histórica.
+- `tests/test_meta_operator.py:74`: forma real de `BinanceClient` con `.client.get_orderbook_ticker`.
+- `tests/test_meta_operator.py:88,116`: capital de referencia del Advisor y persistencia del cache.
+- `tests/test_meta_operator.py:407`: ventanas con precio histórico 50 % arriba/abajo del precio actual.
+- `tests/test_meta_core.py:189`: GridMonitor y cierre de pérdida durante análisis lento.
+
+Corrida enfocada final: `tests/test_meta_operator.py tests/test_meta_core.py` — 47 passed, 3 warnings, 2,71 s.
+Corrida completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp="$env:TEMP\asple_pytest_40b3_20261022_final"` — 1.456 passed, 1 skipped, 18 deselected, 55 warnings, 304,81 s (pytest; 307,55 s de pared). La ruta solicitada `$TEMP\asple_pytest` estaba bloqueada por Windows incluso para listar; se usó una carpeta nueva bajo `$TEMP`. Live excluidas; ningún Testnet, red, `.env` ni BD real.
+
+### Estado
+
+40b-3 cierra la carrera de bloqueo, el desempate, el texto de capital libre y las pruebas de los errores observados en S1. El rendimiento queda parcialmente abierto: no hay medición post-cambio de S1 ni medición de análisis de mercado en este PC y las metas de 2 min/60 s no se certifican. No hubo commit ni despliegue.

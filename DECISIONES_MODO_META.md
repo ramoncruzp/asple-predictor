@@ -82,7 +82,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | Fase | Qué | Estado (2026-10-21) |
 |---|---|---|
 | 40a | Núcleo: datos, valoración, vigilancia, límites, cierres, Cancelar, API | Hecha, en main (`a5e6d1e`) y desplegada en S1 |
-| 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 |
+| 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Pendiente |
 
@@ -108,3 +108,11 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 - Señales en la estimación (propuesto 2026-10-22, vale cuando Ramón envíe el prompt 40b-2): entran sumadas en el logit de la probabilidad histórica; peso por defecto 0,25 por señal y ajuste total máximo ±1,0 en logit, hasta que 40d aprenda los pesos. El plan muestra la probabilidad histórica y la ajustada por separado.
 - Ventanas del replay = plazo del perfil (45 / 20 días).
 - Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido).
+
+## 12. Medición real en S1 (2026-10-22)
+
+- Perfil Rápido, 100 → 110: el análisis tardó **1538 s (~25,6 min)**; Advisor 609 s y replays 786 s. Objetivo: ≤ 2 min.
+- **0 de 14 ventanas** de 20 días alcanzaron +10 USDT (probabilidad histórica 0 %; ajustada por señales 1,6 %). Coincide con la evidencia anterior: +10 % en 20 días no ocurrió en el historial con estas monedas.
+- Plan elegido: una sola pieza, GRAMUSDT Simple con 70 USDT; 30 USDT sin usar.
+- Errores encontrados con datos reales y ya corregidos por Nexo: cliente público sin get_book_ticker; rango del replay en precios de hoy aplicado a ventanas viejas.
+- **Riesgo encontrado:** la revisión de 15 min mantiene tomado el bloqueo del monitor durante todo el análisis (~25 min), lo que frenaría el monitor de todos los grids y la vigilancia de pérdida. **No activar el Modo Meta en S1 hasta desplegar 40b-3.**

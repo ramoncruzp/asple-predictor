@@ -47,3 +47,21 @@ Esta seccion prevalece sobre el inventario historico de discrepancias anterior, 
 - La estimacion de grids Smart no modela prestamos; el aviso lo declara. La cartera y las senales son una estimacion historica, no una garantia ni calibracion estadistica.
 
 La suite final quedo verde: 1.450 passed, 1 skipped, 18 deselected, 55 warnings, 350,61 s; las 18 pruebas live se excluyeron. La primera suite tuvo un fallo de compatibilidad ya corregido. Por estos limites, la fase no afirma certificacion completa de D5 ni medicion S1. No hubo commit ni despliegue.
+
+## 40b-3 — estado de discrepancias
+
+### Cerradas
+
+- Bloqueo: Scanner/Advisor/replay/cartera ya no ocupan `GridMonitor.ops_lock`; el guard separado impide análisis de revisión solapados y registra la revisión omitida. La acción vuelve a validar estado, valoración, freno de pérdida y precio bajo el lock.
+- Selección: desempate histórico reproducible por progreso mediano, días y peor caída cuando empata la probabilidad de replay; el plan explica el caso sin aciertos y el capital libre.
+- Errores observados en S1: cobertura de libro con la forma del cliente real y de ventanas cuyo precio histórico difiere más de 50 %.
+- Cache persistente diario para Advisor/replay y reducción de consultas de Advisor por moneda.
+
+### Abiertas
+
+- No hay corrida posterior del medidor en S1, ni medición del análisis con mercado real en este PC. El objetivo de análisis frío ≤2 min y revisión ≤60 s no está demostrado. Una extrapolación condicional deja el análisis frío cerca de 17 min, dominado por replay; no se presenta como resultado medido.
+- No se aplica escalado de replays por capital porque faltan mediciones de invariancia en mínimos de notional, polvo, comisiones y niveles.
+- No se añadió precálculo diario, procesamiento paralelo, ni replay a 15 min. No hay benchmarks comparables; el runner rechaza velas de 900 s y no se altera su fidelidad.
+- En el caso histórico de S1, los 30 USDT libres se explican por el límite de 70 % por moneda y la evaluación de carteras; falta reejecutar tras el nuevo desempate para saber si la segunda moneda empeora la puntuación recalculada.
+
+La suite final está verde: 1.456 passed, 1 skipped, 18 deselected, 55 warnings. No se hizo commit ni despliegue.

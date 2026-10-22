@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -183,6 +184,75 @@ def test_loss_watch_closes_linked_grid_and_warns(tmp_path, profile, bid, close_p
     assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
     assert any(kind == "META_LOSS_WARNING" for kind, _meta_id, _data in alerts)
     assert any(kind == "META_CORTADA_POR_PERDIDA" for kind, _meta_id, _data in alerts)
+
+
+def test_slow_operator_review_does_not_block_monitor_loss_close(tmp_path):
+    from grid.meta_operator import MetaOperator
+
+    monitor = SimpleNamespace(ops_lock=threading.RLock())
+    db = DBManager(f"sqlite:///{tmp_path / 'slow-review.sqlite'}")
+    exchange = FakeTestnet(bid=10)
+    settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=1, alerts_enabled=False)
+    core = MetaCore(db, exchange, settings=settings, monitor=monitor,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    goal = core.create_goal(100, 10, profile="RAPIDO")
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=9, range_high=11,
+            n_levels=1, capital_total=100, reserve=0, status="ACTIVE", created_at=now,
+            environment="testnet", strategy="simple", params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0, price=10, capital=100,
+            state="HOLDING", held_qty=10, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now - timedelta(days=1), realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=now - timedelta(days=1)))
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
+            grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now))
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id, level_idx=0,
+        event_type="BUY_FILLED", details={"cummulative_quote_qty": "100", "fee_usdt": "0"})
+
+    class ClosingEngine:
+        def close_grid(self, close_grid_id, _mode, **_kwargs):
+            db.update_grid(close_grid_id, status="CLOSED")
+            db.update_level(close_grid_id, 0, state="DONE", held_qty=0)
+            db.add_grid_event(run_id=None, source="CLI", ts=now, grid_id=close_grid_id,
+                event_type="CELL_LIQUIDATED", details={"cash_proceeds_net": "81.9", "fee_usdt": "0"})
+            return {"status": "CLOSED"}
+
+    core.engine = ClosingEngine()
+    from grid.monitor import GridMonitor
+    grid_monitor = GridMonitor(db, exchange, core.engine, settings,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    grid_monitor.ops_lock = monitor.ops_lock
+    grid_monitor._run_once_locked = lambda _trigger: {"status": "MONITOR_RAN"}
+    core.monitor = grid_monitor
+    operator = MetaOperator(core, db, None, core.engine, settings)
+    analysis_entered, allow_analysis_to_finish = threading.Event(), threading.Event()
+
+    def slow_plan(_goal):
+        analysis_entered.set()
+        assert allow_analysis_to_finish.wait(5)
+        return {"pieces": [], "alternatives": [], "candidates": [], "shadow_decision": None}
+
+    operator._build_plan = slow_plan
+    result_holder = []
+    review = threading.Thread(target=lambda: result_holder.append(operator.review_once(goal["id"])))
+    review.start()
+    assert analysis_entered.wait(2)
+    assert grid_monitor.run_once() == {"status": "MONITOR_RAN"}
+    # A cadence arriving during a slow pass is logged and does not start a second analysis.
+    skipped = operator.review_once(goal["id"])
+    assert skipped["decision"] == "no_hacer_nada"
+    assert any(row["event_type"] == "META_OPERATOR_REVIEW_SKIPPED" for row in core.ledger(goal["id"]))
+    exchange.bid = 8.2  # La pérdida máxima aparece mientras el análisis del operador sigue lento.
+    core.run_once()
+    assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
+    assert db.get_grid(grid_id)["status"] == "CLOSED"
+    allow_analysis_to_finish.set()
+    review.join(timeout=5)
+    assert not review.is_alive()
+    assert result_holder[0]["decision"] == "no_hacer_nada"
 
 
 def test_75_percent_loss_warning_blocks_new_pieces_without_closing(tmp_path):

@@ -46,13 +46,83 @@ def test_individual_bot_replay_sells_once_and_never_rebuys():
     assert result["final_inventory"] == 0
 
 
-def test_profiles_share_probability_then_median_days_ranking():
+def test_profiles_rank_zero_hit_replays_by_median_progress_then_time_and_drawdown():
     alternatives = [
-        {"symbol": "HIGHVOL", "estimate": {"probability": .7, "days_median": 8}},
-        {"symbol": "FAST", "estimate": {"probability": .7, "days_median": 6}},
-        {"symbol": "SLOW", "estimate": {"probability": .6, "days_median": 2}},
+        {"symbol": "LOW_PROGRESS", "estimate": {"probability": .95, "probability_replay": 0,
+            "median_progress_pct": 35, "days_median": 2, "worst_drawdown_pct": 1}},
+        {"symbol": "HIGH_PROGRESS", "estimate": {"probability": .05, "probability_replay": 0,
+            "median_progress_pct": 60, "days_median": 8, "worst_drawdown_pct": 5}},
+        {"symbol": "FASTER", "estimate": {"probability": .05, "probability_replay": 0,
+            "median_progress_pct": 60, "days_median": 4, "worst_drawdown_pct": 5}},
+        {"symbol": "LOWER_DD", "estimate": {"probability": .05, "probability_replay": 0,
+            "median_progress_pct": 60, "days_median": 4, "worst_drawdown_pct": 2}},
     ]
-    assert rank_alternatives(alternatives)[0]["symbol"] == "FAST"
+    assert [row["symbol"] for row in rank_alternatives(alternatives)] == [
+        "LOWER_DD", "FASTER", "HIGH_PROGRESS", "LOW_PROGRESS"]
+
+
+def test_replay_probability_remains_the_primary_ranking_signal():
+    rows = [
+        {"symbol": "MORE_PROGRESS", "estimate": {"probability_replay": .4,
+            "probability": .1, "median_progress_pct": 90, "days_median": 5}},
+        {"symbol": "MORE_PROBABLE", "estimate": {"probability_replay": .5,
+            "probability": .9, "median_progress_pct": 20, "days_median": 10}},
+    ]
+    assert rank_alternatives(rows)[0]["symbol"] == "MORE_PROBABLE"
+
+
+def test_public_binance_client_book_ticker_shape_is_supported():
+    from grid.meta_operator import MetaOperator
+
+    class RawClient:
+        def get_orderbook_ticker(self, *, symbol):
+            assert symbol == "XRPUSDT"
+            return {"bidPrice": "1.2", "askPrice": "1.3"}
+
+    operator = MetaOperator(object(), None, type("Scanner", (), {
+        "client": type("BinanceClient", (), {"client": RawClient()})()})(), None, None)
+    assert operator._book_ticker("XRPUSDT") == {
+        "bidPrice": "1.2", "askPrice": "1.3", "bid_price": "1.2", "ask_price": "1.3"}
+
+
+def test_daily_advisor_cache_uses_profile_reference_capital():
+    from grid.meta_operator import MetaOperator
+
+    calls = []
+    def advisor(symbol, capital, margin, days):
+        calls.append((symbol, capital, margin, days))
+        return {"recommended_floor": 90, "recommended_ceiling": 110, "suggested_grids": 4}
+
+    class Client:
+        def get_book_ticker(self, _symbol): return {"bid_price": 100, "ask_price": 100}
+
+    operator = MetaOperator(object(), object(), type("Scanner", (), {"client": Client()})(),
+        None, None, advisor=advisor)
+    operator._analysis_timing = {"advisor_s": 0, "replay_s": 0}
+    operator._evaluate = lambda row, strategy, capital, target, low, high, n, cfg, margin_pct=None: {
+        "symbol": row["symbol"], "strategy": strategy, "pieces": [{"symbol": row["symbol"],
+        "strategy": strategy, "piece_type": "grid", "capital_usdt": capital, "n_levels": n,
+        "floor": low, "ceiling": high, "margin_pct": margin_pct}],
+        "estimate": {"probability": .5, "evidence_sufficient": False}, "replay_probability": .5}
+    operator._apply_intelligence = lambda *_args, **_kwargs: None
+    cfg = {"min_margin_pct": .3, "max_days": 20, "_advisor_reference_capital": 70}
+    operator._candidate_alternatives({"symbol": "XRPUSDT"}, 30, 3, cfg)
+    operator._candidate_alternatives({"symbol": "XRPUSDT"}, 20, 2, cfg)
+    assert len(calls) == 3
+    assert {call[1] for call in calls} == {70}
+    assert operator._analysis_timing["advisor_cache_hits"] == 3
+
+
+def test_daily_cache_persists_results_for_reuse(tmp_path):
+    from database.db_manager import DBManager
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-cache.sqlite'}")
+    operator = MetaOperator(object(), db, None, None, None, clock=lambda: 1_800_000_000)
+    payload = ("XRPUSDT", 70, .3, 20)
+    value = {"recommended_floor": 1.0, "recommended_ceiling": 2.0}
+    operator._persistent_cache_set("advisor", payload, value)
+    assert operator._persistent_cache_get("advisor", payload) == value
 
 
 def test_prudent_requires_medium_sigma_and_complete_model_stats_rapid_does_not():
@@ -332,6 +402,38 @@ def test_replay_builder_uses_profile_deadline_for_window_length(monkeypatch):
         {"max_days": 45, "min_margin_pct": .7})
     assert observed == [(45, 7)]
     assert result["estimate"]["window_days"] == 45
+
+
+def test_replay_rescales_plan_range_for_historical_prices_over_fifty_percent_away(monkeypatch):
+    import pandas as pd
+    import numpy as np
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    class Client:
+        def get_historical_klines(self, *_args):
+            return pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC"),
+                "open": [200.0, 201, 50, 51], "high": [202.0, 202, 52, 53],
+                "low": [198.0, 199, 49, 50], "close": [201.0, 200, 51, 52]})
+
+    operator = MetaOperator(object(), object(), type("Scanner", (), {"client": Client()})(), None, None,
+        clock=lambda: 1_800_000_000)
+    operator._analysis_timing = {"replay_s": 0, "advisor_s": 0}
+    monkeypatch.setattr(module, "build_windows", lambda *_args: [
+        {"start_idx": 0, "end_idx": 2, "start": 1767225600},
+        {"start_idx": 2, "end_idx": 4, "start": 1767225900}])
+    ranges = []
+
+    def replay(_sample, **kwargs):
+        ranges.append((kwargs["low"], kwargs["high"]))
+        return {"events": [], "metrics": {"equity_final_after_repository_liquidation": kwargs["capital"],
+            "max_drawdown_pct": 0}}
+
+    monkeypatch.setattr(module, "run_simulation", replay)
+    operator._evaluate({"symbol": "XRPUSDT", "book": {"bid_price": 100, "ask_price": 100},
+        "sigma_24h_open": .1}, "simple", 100, 10, 90, 110, 4, {"max_days": 20})
+    assert ranges[0] == pytest.approx((180, 220))
+    assert ranges[1] == pytest.approx((45, 55))
 
 
 @pytest.mark.parametrize(("profile", "piece_cap"), [("PRUDENTE", 100), ("RAPIDO", 175)])

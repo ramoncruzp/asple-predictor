@@ -86,7 +86,7 @@ def main():
             return None
 
     core = ReadOnlyCore()
-    operator = MetaOperator(core, db, scanner, None, settings, advisor=advisor)
+    operator = MetaOperator(core, db, scanner, None, settings, advisor=advisor, cache_enabled=False)
     profile = args.perfil.upper()
     goal = {"id": 0, "capital_initial": args.capital, "target_usdt": args.objetivo,
             "profile": profile, "config_snapshot": dict(DEFAULT_PROFILES[profile])}
