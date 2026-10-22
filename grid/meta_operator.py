@@ -5,6 +5,8 @@ import json
 import itertools
 import hashlib
 import math
+import logging
+import os
 import threading
 import time
 import uuid
@@ -136,12 +138,13 @@ class MetaOperator:
     PLAN_TTL_SECONDS = 300
 
     def __init__(self, core, db, scanner, engine, settings, *, advisor=None, alert=None,
-                 clock=time.time, price_drift_pct=1.0, cache_enabled=True):
+                 clock=time.time, price_drift_pct=1.0, cache_enabled=True, cache_writes=True):
         self.core, self.db, self.scanner = core, db, scanner
         self.engine, self.settings, self.advisor = engine, settings, advisor
         self.alert = alert or (lambda *_args: None)
         self.clock, self.price_drift_pct = clock, float(price_drift_pct)
         self.cache_enabled = bool(cache_enabled)
+        self.cache_writes = bool(cache_writes)
         self._lock = threading.RLock()
         self._jobs = {}
         self._plans = {}
@@ -151,6 +154,7 @@ class MetaOperator:
         self._above_ceiling_count = {}
         self._hard_filter_misses = {}
         self._review_guard = threading.Lock()
+        self._precompute_guard = threading.Lock()
         self._thread = None
         self._opener = None
         self.scheduler = BackgroundScheduler(timezone="UTC")
@@ -178,7 +182,7 @@ class MetaOperator:
             return None
 
     def _persistent_cache_set(self, kind, payload, value):
-        if not self.cache_enabled or self.db is None or not hasattr(self.db, "meta_analysis_cache"):
+        if not self.cache_enabled or not self.cache_writes or self.db is None or not hasattr(self.db, "meta_analysis_cache"):
             return
         key, day = self._cache_key(kind, payload)
         try:
@@ -266,12 +270,14 @@ class MetaOperator:
                        int(cfg.get("max_days", 20)))
                 if key in self._advisor_cache:
                     self._analysis_timing["advisor_cache_hits"] += 1
+                    self._analysis_timing["advisor_process_cache_hits"] = self._analysis_timing.get("advisor_process_cache_hits", 0) + 1
                     advisor_rows.append({"margin_target_pct": margin,
                         "recommendation": self._advisor_cache[key], "cached": True})
                     continue
                 cached_advisor = self._persistent_cache_get("advisor", key)
                 if cached_advisor is not None:
                     self._analysis_timing["advisor_cache_hits"] += 1
+                    self._analysis_timing["advisor_persistent_cache_hits"] = self._analysis_timing.get("advisor_persistent_cache_hits", 0) + 1
                     self._advisor_cache[key] = cached_advisor
                     advisor_rows.append({"margin_target_pct": margin,
                         "recommendation": cached_advisor, "cached": True})
@@ -302,23 +308,41 @@ class MetaOperator:
             levels = min(int(advisory.get("suggested_grids") or 4), int(float(capital) // 5.5))
             planned = levels if levels >= 4 else 1
             strategies = ("simple", "smart") if planned >= 4 else ("individual_bot",)
+            ranges = [(low, high, None)]
+            if planned == 1:
+                # Para bots se comparan compras más cercanas y lejanas al mercado,
+                # conservando el margen neto recomendado por el Advisor.
+                minimum = float(cfg.get("min_margin_pct", .3))
+                target_margin = max(minimum, float(advisor_row["margin_target_pct"]))
+                ranges = []
+                for buy_distance_pct in (.5, 1.5, 3.0):
+                    buy_x = price * (1 - buy_distance_pct / 100)
+                    sell_y = buy_x * (1 + (target_margin + .21) / 100)
+                    ranges.append((buy_x, sell_y, buy_distance_pct))
             for strategy in strategies:
-                alternative = self._evaluate(row, strategy, capital, target_usdt, low, high,
-                    planned, cfg, margin_pct=advisor_row["margin_target_pct"])
-                alternative["mid_at_plan"] = price
-                alternative["advisor"] = advisory
-                alternative["advisor_margin_target_pct"] = advisor_row["margin_target_pct"]
-                for piece in alternative["pieces"]:
-                    piece["mid_at_plan"] = price
-                self._apply_intelligence(alternative, row, price, low, high, cfg,
-                    advisor_result=advisory if self.advisor is not None else None)
-                alternatives.append(alternative)
+                for variant_low, variant_high, buy_distance in ranges:
+                    alternative = self._evaluate(row, strategy, capital, target_usdt, variant_low, variant_high,
+                        planned, cfg, margin_pct=advisor_row["margin_target_pct"])
+                    alternative["mid_at_plan"] = price
+                    alternative["advisor"] = advisory
+                    alternative["advisor_margin_target_pct"] = advisor_row["margin_target_pct"]
+                    if buy_distance is not None:
+                        alternative["bot_buy_distance_pct"] = buy_distance
+                        alternative["bot_x"] = variant_low
+                        alternative["bot_y"] = variant_high
+                    for piece in alternative["pieces"]:
+                        piece["mid_at_plan"] = price
+                    self._apply_intelligence(alternative, row, price, low, high, cfg,
+                        advisor_result=advisory if self.advisor is not None else None)
+                    alternatives.append(alternative)
         return alternatives, [{"symbol": symbol, **item} for item in advisor_rows]
 
-    def _build_plan(self, goal):
+    def _build_plan(self, goal, *, record=True):
         timing_started = time.perf_counter()
         self._analysis_timing = {"advisor_s": 0.0, "replay_s": 0.0,
-                                 "advisor_cache_hits": 0, "replay_cache_hits": 0}
+                                 "advisor_cache_hits": 0, "replay_cache_hits": 0,
+                                 "advisor_process_cache_hits": 0, "advisor_persistent_cache_hits": 0,
+                                 "replay_process_cache_hits": 0, "replay_persistent_cache_hits": 0}
         scan = self.scanner.scan(capital=float(goal["capital_initial"]), with_sim=False)
         scan_seconds = time.perf_counter() - timing_started
         candidates = list(scan.get("results", []))
@@ -502,8 +526,12 @@ class MetaOperator:
                 "timings_s": {"scanner": round(scan_seconds, 3), "candidate_filter": round(preparation_seconds, 3),
                     "advisor": round(self._analysis_timing["advisor_s"], 3),
                     "advisor_cache_hits": self._analysis_timing["advisor_cache_hits"],
+                    "advisor_process_cache_hits": self._analysis_timing.get("advisor_process_cache_hits", 0),
+                    "advisor_persistent_cache_hits": self._analysis_timing.get("advisor_persistent_cache_hits", 0),
                     "replays": round(self._analysis_timing["replay_s"], 3),
                     "replay_cache_hits": self._analysis_timing["replay_cache_hits"],
+                    "replay_process_cache_hits": self._analysis_timing.get("replay_process_cache_hits", 0),
+                    "replay_persistent_cache_hits": self._analysis_timing.get("replay_persistent_cache_hits", 0),
                     "portfolio_selection": round(max(0.0, time.perf_counter() - portfolio_started - control_seconds
                         - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]), 3),
                     "control_advisor": round(control_seconds, 3)},
@@ -526,12 +554,13 @@ class MetaOperator:
                     "probability": shadow["shadow_probability"], "signals": shadow["shadow_signals"]},
                 "control_plan": control_plan,
                 "probability_under_25_pct": best["estimate"]["low_likelihood"]}
-        self._ledger(goal["id"], "META_PLAN_EVALUATED", {"alternatives": public_alternatives,
-                      "advisor_comparisons": advisor_comparisons,
-                      "combinations_evaluated": evaluated_combinations,
-                      "shadow_decision": plan["shadow_decision"],
-                      "selected": {key: value for key, value in best.items() if key != "window_results"},
-                      "sigma_bands": plan["sigma_bands"]})
+        if record:
+            self._ledger(goal["id"], "META_PLAN_EVALUATED", {"alternatives": public_alternatives,
+                          "advisor_comparisons": advisor_comparisons,
+                          "combinations_evaluated": evaluated_combinations,
+                          "shadow_decision": plan["shadow_decision"],
+                          "selected": {key: value for key, value in best.items() if key != "window_results"},
+                          "sigma_bands": plan["sigma_bands"]})
         return plan
 
     def _model_snapshot(self, symbol):
@@ -602,15 +631,17 @@ class MetaOperator:
             current_mid = math.sqrt(float(low) * float(high))
         key = (symbol, self.clock() // 86400, strategy, round(target_usdt, 4), n,
                round(capital, 4), window_days, round(float(low) / current_mid, 8),
-               round(float(high) / current_mid, 8))
+               round(float(high) / current_mid, 8), round(float(cfg.get("max_loss_pct", 0)), 4))
         cached = self._cache.get(key)
         self._analysis_timing.setdefault("replay_cache_hits", 0)
         if cached is None:
             cached = self._persistent_cache_get("replay", key)
             if cached is not None:
                 self._analysis_timing["replay_cache_hits"] += 1
+                self._analysis_timing["replay_persistent_cache_hits"] = self._analysis_timing.get("replay_persistent_cache_hits", 0) + 1
         else:
             self._analysis_timing["replay_cache_hits"] += 1
+            self._analysis_timing["replay_process_cache_hits"] = self._analysis_timing.get("replay_process_cache_hits", 0) + 1
         if cached is None:
             replay_started = time.perf_counter()
             windows = build_windows(candles, window_days, 7)
@@ -636,29 +667,41 @@ class MetaOperator:
                 if strategy == "individual_bot":
                     from grid.sim.meta_bot import run_meta_bot
                     replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
-                                          target_usdt=target_usdt, fee_pct=.1)
+                                          target_usdt=target_usdt, fee_pct=.1,
+                                          max_loss_pct=cfg.get("max_loss_pct"),
+                                          min_margin_pct=cfg.get("min_margin_pct", .3))
                     result_row = {"window_start": start_ts, "reached": replay["reached"],
                                   "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
-                                  "drawdown_pct": replay["drawdown_pct"], "step_days": 7}
+                                  "drawdown_pct": replay["drawdown_pct"], "step_days": 7,
+                                  "loss_cut": replay["loss_cut"], "bought": replay["bought"],
+                                  "sold": replay["sold"]}
                 else:
                     params = {"target_usdt": target_usdt, "target_basis": "cash"}
                     simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
                         low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
-                        close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False)
+                        close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
+                        meta_max_loss_pct=cfg.get("max_loss_pct"))
                     event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
+                    loss_cut = any(e.get("type") == "META_LOSS_CUT" for e in simulation["events"])
                     days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
                     metrics = simulation["metrics"]
                     result_row = {"window_start": start_ts, "reached": event is not None,
                                   "days": days,
-                                  "pnl_usdt": float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital,
+                                  "pnl_usdt": (float(metrics.get("cash_final", capital)) - capital if loss_cut else
+                                      float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital),
                                   "drawdown_pct": max(0.0, float(metrics.get("max_drawdown_pct", 0))),
-                                  "step_days": 7}
+                                  "step_days": 7, "loss_cut": loss_cut}
                 rows.append(result_row)
                 window_results.append(result_row)
+                if getattr(self, "_low_priority_precompute", False):
+                    time.sleep(.001)
             cached = {"summary": summarize_replays(rows, independent_window_days=window_days, target_usdt=target_usdt),
                       "window_results": window_results}
+            cached["summary"]["loss_cut_windows"] = sum(bool(row.get("loss_cut")) for row in rows)
+            if strategy == "individual_bot":
+                cached["summary"]["bot_windows_bought"] = sum(bool(row.get("bought")) for row in rows)
+                cached["summary"]["bot_windows_sold"] = sum(bool(row.get("sold")) for row in rows)
             self._cache[key] = cached
-            self._persistent_cache_set("replay", key, cached)
             self._persistent_cache_set("replay", key, cached)
             self._analysis_timing["replay_s"] += time.perf_counter() - replay_started
         cached = json.loads(json.dumps(cached))
@@ -1106,9 +1149,82 @@ class MetaOperator:
                     self.db.meta_goals.c.id)).first()
         return None if row is None else self.review_once(int(row[0]))
 
+    def precompute_daily(self):
+        """Precarga Advisor/replay de perfiles sin tomar el lock del monitor."""
+        if not bool(getattr(self.settings, "meta_mode_enabled", False)):
+            return {"status": "disabled", "reason": "Modo Meta apagado"}
+        if not self._precompute_guard.acquire(blocking=False):
+            return {"status": "skipped", "reason": "precálculo anterior sigue activo"}
+        started = time.perf_counter()
+        logger = logging.getLogger(__name__)
+        try:
+            # Renuncia CPU cuando la plataforma expone prioridad por hilo; el job
+            # usa un solo worker y no puede exceder el límite de dos procesos.
+            try:
+                if hasattr(os, "setpriority") and hasattr(os, "PRIO_PROCESS"):
+                    worker_id = threading.get_native_id()
+                    current = os.getpriority(os.PRIO_PROCESS, worker_id)
+                    os.setpriority(os.PRIO_PROCESS, worker_id, min(19, current + 5))
+            except (AttributeError, OSError):
+                pass
+            worker = MetaOperator(self.core, self.db, self.scanner, self.engine, self.settings,
+                advisor=self.advisor, alert=self.alert, clock=self.clock,
+                price_drift_pct=self.price_drift_pct, cache_enabled=True, cache_writes=True)
+            worker._low_priority_precompute = True
+            before = 0
+            try:
+                from sqlalchemy import func, select
+                with self.db.engine.connect() as conn:
+                    before = conn.execute(select(func.count()).select_from(
+                        self.db.meta_analysis_cache)).scalar_one()
+            except Exception:
+                pass
+            configs = self.core._profile_settings()
+            bases = {(100.0, 10.0)}
+            try:
+                from sqlalchemy import select
+                with self.db.engine.connect() as conn:
+                    rows = conn.execute(select(self.db.meta_goals.c.capital_initial,
+                        self.db.meta_goals.c.target_usdt).where(self.db.meta_goals.c.status.in_(
+                            ["DRAFT", "ACTIVE", "PIECES_BLOCKED"]))).all()
+                if rows:
+                    bases.update((float(row[0]), float(row[1])) for row in rows)
+            except Exception:
+                pass
+            for capital, target in sorted(bases):
+                for profile in ("PRUDENTE", "RAPIDO"):
+                    if not bool(getattr(self.settings, "meta_mode_enabled", False)):
+                        return {"status": "disabled", "reason": "Modo Meta apagado durante precálculo"}
+                    cfg = dict(configs.get(profile, {}))
+                    goal = {"id": 0, "capital_initial": capital, "target_usdt": target,
+                        "target_input_type": "USDT", "profile": profile, "config_snapshot": cfg}
+                    worker._build_plan(goal, record=False)
+                    time.sleep(.05)
+            after = before
+            try:
+                with self.db.engine.connect() as conn:
+                    after = conn.execute(select(func.count()).select_from(
+                        self.db.meta_analysis_cache)).scalar_one()
+            except Exception:
+                pass
+            result = {"status": "completed", "duration_s": round(time.perf_counter() - started, 3),
+                      "cache_entries_before": int(before), "cache_entries_after": int(after),
+                      "cache_entries_added": max(0, int(after) - int(before)), "workers": 1}
+            logger.info("Meta daily precompute finished duration_s=%.3f cache_entries_before=%d cache_entries_after=%d",
+                        result["duration_s"], result["cache_entries_before"], result["cache_entries_after"])
+            return result
+        except Exception:
+            logger.exception("Falló el precálculo diario de Meta después de %.3f s", time.perf_counter() - started)
+            return {"status": "failed", "duration_s": round(time.perf_counter() - started, 3)}
+        finally:
+            self._precompute_guard.release()
+
     def start(self):
         self.scheduler.add_job(self.review_active, "interval", minutes=15, id="meta_operator_review",
                                replace_existing=True, max_instances=2, coalesce=True)
+        self.scheduler.add_job(self.precompute_daily, "cron", hour=8, minute=0, timezone="UTC",
+                               id="meta_daily_precompute", replace_existing=True,
+                               max_instances=1, coalesce=True)
         if not self.scheduler.running:
             self.scheduler.start()
 

@@ -44,6 +44,43 @@ def test_individual_bot_replay_sells_once_and_never_rebuys():
     assert result["state"] == "DONE"
     assert result["rebuys"] == 0
     assert result["final_inventory"] == 0
+    assert result["bought"] and result["sold"] and not result["loss_cut"]
+
+
+def test_meta_bot_loss_cut_sells_at_low_and_reports_realized_loss():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from grid.sim.meta_bot import run_meta_bot
+    candles = CandleData(timestamp=np.array([0, 300, 600]),
+        open=np.array([10.0, 10.0, 8.0]), high=np.array([10.1, 10.1, 8.2]),
+        low=np.array([9.8, 9.8, 7.0]), close=np.array([10.0, 10.0, 8.0]), gaps=0)
+    result = run_meta_bot(candles, capital=100, buy_price=9.9, sell_price=10.2,
+        target_usdt=10, max_loss_pct=5, min_margin_pct=.3)
+    assert result["loss_cut"] is True
+    assert result["reached"] is False
+    assert result["event"]["reason"] == "CORTADA_POR_PERDIDA"
+    assert result["final_inventory"] == 0
+    assert result["final_cash"] < 95
+    assert result["pnl_usdt"] == pytest.approx(result["final_cash"] - 100)
+
+
+def test_grid_replay_cuts_at_intracandle_low_with_realized_fees():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from grid.sim.runner import run_simulation
+    candles = CandleData(timestamp=np.array([0, 300, 600, 900]),
+        open=np.array([1.05, 1.05, .8, .8]), high=np.array([1.06, 1.06, .9, .81]),
+        low=np.array([1.04, 1.04, .75, .79]), close=np.array([1.05, 1.05, .8, .8]), gaps=0)
+    result = run_simulation(candles, strategy="simple", n=4, capital=100, low=.9, high=1.1,
+        params={"target_usdt": 10, "target_basis": "cash"}, stoploss_enabled=False,
+        meta_max_loss_pct=5)
+    cuts = [event for event in result["events"] if event["type"] == "META_LOSS_CUT"]
+    assert len(cuts) == result["metrics"]["loss_cut_windows"] == 1
+    assert cuts[0]["reason"] == "CORTADA_POR_PERDIDA"
+    assert float(cuts[0]["details"]["fees_usdt"]) > 0
+    assert result["metrics"]["cash_final"] == pytest.approx(
+        float(cuts[0]["details"]["realized_cash_usdt"]))
+    assert result["metrics"]["cash_final"] - 100 < -5
 
 
 def test_profiles_rank_zero_hit_replays_by_median_progress_then_time_and_drawdown():
@@ -113,6 +150,40 @@ def test_daily_advisor_cache_uses_profile_reference_capital():
     assert operator._analysis_timing["advisor_cache_hits"] == 3
 
 
+def test_individual_bot_optimizer_compares_near_and_far_x_y():
+    from grid.meta_operator import MetaOperator, rank_alternatives
+
+    class Client:
+        def get_book_ticker(self, _symbol):
+            return {"bid_price": 99.99, "ask_price": 100.01}
+
+    operator = MetaOperator(object(), object(), type("Scanner", (), {"client": Client()})(),
+        None, None, advisor=lambda *_args: {"recommended_floor": 90, "recommended_ceiling": 110,
+            "suggested_grids": 1})
+    operator._analysis_timing = {"advisor_s": 0, "replay_s": 0}
+    operator._evaluate = lambda row, strategy, capital, target, low, high, n, cfg, margin_pct=None: {
+        "symbol": row["symbol"], "strategy": strategy,
+        "pieces": [{"symbol": row["symbol"], "floor": low, "ceiling": high,
+            "piece_type": "individual_bot_grid"}],
+        "estimate": {"probability": .9 if low > 99 else .1,
+            "probability_replay": .9 if low > 99 else .1, "evidence_sufficient": True}}
+    operator._apply_intelligence = lambda *_args, **_kwargs: None
+    alternatives, _ = operator._candidate_alternatives({"symbol": "XRPUSDT"}, 20, 10,
+        {"min_margin_pct": .3, "max_days": 20})
+    assert {row["bot_buy_distance_pct"] for row in alternatives} == {.5, 1.5, 3.0}
+    assert len(alternatives) == 9
+    assert rank_alternatives(alternatives)[0]["bot_buy_distance_pct"] == .5
+    import numpy as np
+    from grid.sim.data import CandleData
+    from grid.sim.meta_bot import run_meta_bot
+    candles = CandleData(timestamp=np.array([0, 300]), open=np.array([100., 100.]),
+        high=np.array([100.1, 100.1]), low=np.array([100., 100.]),
+        close=np.array([100., 100.]), gaps=0)
+    for row in alternatives:
+        run_meta_bot(candles, capital=20, buy_price=row["bot_x"], sell_price=row["bot_y"],
+            target_usdt=2, min_margin_pct=.3)
+
+
 def test_daily_cache_persists_results_for_reuse(tmp_path):
     from database.db_manager import DBManager
     from grid.meta_operator import MetaOperator
@@ -123,6 +194,65 @@ def test_daily_cache_persists_results_for_reuse(tmp_path):
     value = {"recommended_floor": 1.0, "recommended_ceiling": 2.0}
     operator._persistent_cache_set("advisor", payload, value)
     assert operator._persistent_cache_get("advisor", payload) == value
+
+
+def test_medidor_cache_is_read_only_and_reports_separate_cache_sources(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from sqlalchemy import func, select
+    from database.db_manager import DBManager
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-cache-readonly.sqlite'}")
+    clock = lambda: 1_800_000_000
+    reader = MetaOperator(object(), db, None, None, None, clock=clock,
+        cache_enabled=True, cache_writes=False)
+    payload, value = ("XRPUSDT", 70, .3, 20), {"recommended_floor": 1.0}
+    key, day = reader._cache_key("advisor", payload)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_analysis_cache.insert().values(cache_key=key, cache_kind="advisor",
+            analysis_day=day, value_json=json.dumps(value), created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+    assert reader._persistent_cache_get("advisor", payload) == value
+    reader._persistent_cache_set("advisor", payload, {"recommended_floor": 2.0})
+    with db.engine.connect() as conn:
+        assert conn.execute(db.meta_analysis_cache.select()).mappings().one()["value_json"] == json.dumps(value)
+        assert conn.execute(select(func.count()).select_from(db.meta_analysis_cache)).scalar_one() == 1
+
+
+def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from database.db_manager import DBManager
+    from grid.meta import DEFAULT_PROFILES
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-precompute.sqlite'}")
+    class ForbiddenLock:
+        def __enter__(self):
+            raise AssertionError("precompute no puede tomar ops_lock")
+        def __exit__(self, *_args):
+            return False
+    class Core:
+        monitor = SimpleNamespace(ops_lock=ForbiddenLock())
+        def _profile_settings(self):
+            return DEFAULT_PROFILES
+
+    settings = SimpleNamespace(meta_mode_enabled=False)
+    operator = MetaOperator(Core(), db, None, None, settings,
+        clock=lambda: 1_800_000_000)
+    assert operator.precompute_daily()["status"] == "disabled"
+    settings.meta_mode_enabled = True
+    calls = []
+    def warm(self, goal, *, record=True):
+        calls.append((goal["profile"], record))
+        self._persistent_cache_set("advisor", (goal["profile"],), {"ok": True})
+        return {"timings_s": {}}
+    monkeypatch.setattr(MetaOperator, "_build_plan", warm)
+    result = operator.precompute_daily()
+    assert result["status"] == "completed"
+    assert result["workers"] == 1
+    assert calls == [("PRUDENTE", False), ("RAPIDO", False)]
+    assert result["cache_entries_after"] == 2
+    assert operator._persistent_cache_get("advisor", ("PRUDENTE",)) == {"ok": True}
 
 
 def test_prudent_requires_medium_sigma_and_complete_model_stats_rapid_does_not():

@@ -86,7 +86,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    fee_asset=None, include_details=False, trace_callback=None,
                    sigma_values=None, idle_shrink_enabled=False, adjust_enabled_global=True,
                    stoploss_enabled=True, close_wait_enabled=False, respacing_enabled=False,
-                   direction_signal=None, direction_threshold=0.60):
+                   direction_signal=None, direction_threshold=0.60,
+                   meta_max_loss_pct=None):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -94,6 +95,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                      if params else None)
     if n < 4 or capital <= 0 or resync_candles < 1 or fee_pct < 0:
         raise ValueError("n >= 4, capital > 0, resync-candles >= 1 and fee-pct >= 0 required")
+    if meta_max_loss_pct is not None and not 0 < float(meta_max_loss_pct) < 100:
+        raise ValueError("meta_max_loss_pct debe estar entre 0 y 100")
     if strategy == "smart":
         effective = validate_params(policy_params, n)
         effective["out_of_range_mode"] = "wait" if close_wait_enabled else "close"
@@ -195,6 +198,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     max_usdt_balance = float(exchange.usdt)
     max_equity_cells = float(exchange.usdt)
     max_equity_incl_dust = float(exchange.usdt)
+    loss_cut_count = 0
     for i, (ts, lo, hi, close) in enumerate(zip(candles.timestamp, candles.low, candles.high, closes)):
         resumed_this_pass = False
         sigma_used = float(sigma[i])
@@ -644,6 +648,23 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                             events.append({"ts": int(ts), "type": "BUY_REJECTED", "level_idx": idx,
                                            "reason": str(exc)})
                             c["state"] = "IDLE"
+        if (meta_max_loss_pct is not None and status in {"ACTIVE", "PAUSED", "HOLDING"}
+                and exchange.usdt + exchange.base * Decimal(str(lo)) * (1 - exchange.fee_rate)
+                <= Decimal(str(capital)) * (1 - Decimal(str(meta_max_loss_pct)) / 100)):
+            marked = exchange.usdt + exchange.base * Decimal(str(lo)) * (1 - exchange.fee_rate)
+            for c in cells:
+                exchange.cancel(c["level_idx"])
+                if c["held_qty"] > 0:
+                    exchange.market_sell(c, lo)
+                if c["held_qty"] <= 0:
+                    c.update(state="DONE", capital=Decimal(0))
+            swept = exchange.sweep_dust(lo, filters) if dust_sweep_enabled else {"sweepable": False}
+            status = "CLOSED"
+            loss_cut_count += 1
+            events.append({"ts": int(ts), "type": "META_LOSS_CUT", "reason": "CORTADA_POR_PERDIDA",
+                "details": {"threshold_pct": float(meta_max_loss_pct), "mark_at_low_usdt": str(marked),
+                    "realized_cash_usdt": str(exchange.usdt), "realized_pnl_usdt": str(exchange.realized),
+                    "fees_usdt": str(exchange.fees), "dust_swept_usdt": str(swept.get("proceeds_net", 0))}})
         if status == "PAUSED":
             paused += 1
         market_equity = exchange.usdt + exchange.base * Decimal(str(close))
@@ -699,6 +720,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
     metric["adjust_rejected_events"] = adjust_rejected_events
     target_events = [event for event in events if event.get("type") == "TARGET_REACHED"]
     metric["target_reached"] = bool(target_events)
+    metric["loss_cut_windows"] = loss_cut_count
+    metric["loss_cut_reached"] = loss_cut_count > 0
     metric["target_cash_total"] = target_events[-1]["details"].get("cash_total") if target_events else None
     metric["target_equity_total_at_close"] = (target_events[-1]["details"].get("equity_total_at_close")
                                                 if target_events else None)
@@ -775,13 +798,15 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                          },
                      },
                      "resync_candles": resync_candles, "halflife_h": halflife_h,
-                     "sigma_scale": sigma_scale, "params": effective}
+                     "sigma_scale": sigma_scale, "meta_max_loss_pct": meta_max_loss_pct,
+                     "params": effective}
     params_digest = hashlib.sha256(json.dumps(hashed_params,
                                                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     result = {"strategy": strategy, "start": int(candles.timestamp[0]), "end": int(candles.timestamp[-1]),
             "candles": len(candles.timestamp), "gaps": candles.gaps,
             "low": str(lines[0]), "high": str(lines[-1]), "n": n, "capital": float(capital),
             "fee_pct": float(fee_pct), "fee_asset": fee_asset,
+            "meta_max_loss_pct": meta_max_loss_pct,
             "filters": hashed_params["filters"], "resync_candles": resync_candles,
             "halflife_h": float(halflife_h), "sigma_scale": float(sigma_scale),
             "csv_sha256": csv_hash, "params_sha256": params_digest, "metrics": metric,

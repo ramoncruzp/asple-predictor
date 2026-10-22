@@ -79,10 +79,12 @@ Los números son punto de partida y se ajustan con los resultados.
 
 ## 8. Fases
 
-| Fase | Qué | Estado (2026-10-21) |
+| Fase | Qué | Estado (2026-10-22) |
 |---|---|---|
 | 40a | Núcleo: datos, valoración, vigilancia, límites, cierres, Cancelar, API | Hecha, en main (`a5e6d1e`) y desplegada en S1 |
-| 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 |
+| 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 (hecha, `9a49a2b`: el monitor ya no se bloquea; caché diario; desempate) |
+| 40b-4 | A: valoración ejecutable por profundidad del libro. B: límite de pérdida en el replay, precálculo nocturno, medidor con caché, bot individual | Hecha y commiteada: A `e31ba8c`; B en esta entrega; suite completa offline verde |
+| 40b-5 | Señal "toque compra→venta" en sombra (peso 0), idea portada de ASPLE Trade `touch_event_analyzer.py` sin su puntaje | Pendiente; debe ir antes de 40d |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Pendiente |
 
@@ -104,7 +106,7 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 ## 11. Pendientes
 
 - Prueba manual de 40a en Testnet (meta de 100 USDT, ligar un grid, valoración, Cancelar con cada opción).
-- Hacer commit de: `deploy/`, `.gitattributes`, `DECISIONES_MODO_META.md` y los cambios de `ESPEC_FASE40_MODO_META.md`.
+- Revisar en S1 los tiempos del medidor, ejecutar el análisis con `--con-cache` y medir cuántas ventanas históricas de XRP compran/venden con el plan nuevo.
 - Señales en la estimación (propuesto 2026-10-22, vale cuando Ramón envíe el prompt 40b-2): entran sumadas en el logit de la probabilidad histórica; peso por defecto 0,25 por señal y ajuste total máximo ±1,0 en logit, hasta que 40d aprenda los pesos. El plan muestra la probabilidad histórica y la ajustada por separado.
 - Ventanas del replay = plazo del perfil (45 / 20 días).
 - Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido).
@@ -116,3 +118,22 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 - Plan elegido: una sola pieza, GRAMUSDT Simple con 70 USDT; 30 USDT sin usar.
 - Errores encontrados con datos reales y ya corregidos por Nexo: cliente público sin get_book_ticker; rango del replay en precios de hoy aplicado a ventanas viejas.
 - **Riesgo encontrado:** la revisión de 15 min mantiene tomado el bloqueo del monitor durante todo el análisis (~25 min), lo que frenaría el monitor de todos los grids y la vigilancia de pérdida. **No activar el Modo Meta en S1 hasta desplegar 40b-3.**
+- **Después de 40b-3** (sin caché persistente): 1165 s (~19,4 min); Advisor bajó de 609 s a 92 s; replays 941 s siguen dominando. El monitor ya no se bloquea durante el análisis.
+- Plan nuevo: JUPUSDT Simple 70 USDT + bot individual XRPUSDT 20 USDT; 0 % histórico, progreso mediano 39 % de la meta, peor caída histórica 20,4 %. Esa medición precede al límite de pérdida implementado en 40b-4B; no se recalculó con historial real en esta fase.
+
+## 13. Decisiones del 2026-10-22 (valoración y orden)
+
+- **Orden:** 40b-4 (valoración + replay/precálculo, fusionadas) → 40b-5 (señal en sombra) → 40c → 40d.
+- **Valoración ejecutable:** lo que de verdad se recibiría vendiendo contra los niveles de bids, menos comisión. Tres estados: KNOWN (el libro absorbe todo), PARCIAL (absorbe una parte; lo faltante al último nivel absorbido menos 1 %, nunca cero), DESCONOCIDO (sin bids, libro viejo o error; nunca cero).
+- **Qué usa cada cosa:** pérdida máxima → valor ejecutable (KNOWN o PARCIAL), confirmado 2 minutos seguidos; aviso 75 % → valor ejecutable sin confirmación; meta cumplida → solo USDT realizado; pantalla → los dos valores (mejor bid y ejecutable).
+- **DESCONOCIDO deja la meta sin protección de pérdida:** si dura > 10 min, alerta fuerte por Telegram y repite cada 30 min. Sin cierre automático.
+- **Alertas sin ruido:** solo al cambiar de estado; PARCIAL solo si dura > 30 min y falta > 25 % del inventario, máximo una cada 6 h.
+- **Señal toque compra→venta (40b-5):** solo estadísticas (toques, % que llegó a venta en un horizonte, velas hasta vender, excursión adversa), corrigiendo toques repetidos, censura al final y reescalado de rango; peso 0 en sombra hasta que 40d la mida.
+- **Reglas de los prompts:** commit al final de cada fase sin push; pruebas de lo tocado durante el trabajo y suite completa antes del commit final; carpeta temporal nueva bajo $env:TEMP.
+
+## 14. Fase 40b-4 (2026-10-22)
+
+- Parte A está implementada y commiteada en `e31ba8c`: valoración por profundidad, estados `KNOWN`/`PARCIAL`/`DESCONOCIDO`, alertas persistidas, contador de pérdida a dos minutos, y estimación ejecutable en cancelación.
+- Parte B está implementada y la suite completa queda verde: 1.462 passed, 1 skipped, 18 deselected, 55 warnings, 299,58 s. El replay corta al límite usando el `low` de la vela; el precálculo UTC diario comprueba el interruptor; `--con-cache` lee en solo lectura. El precálculo usa un solo worker y no toma `ops_lock`.
+- El bot individual compara X a 0,5 %, 1,5 % y 3 % bajo el midpoint; Y se deriva del margen neto del Advisor con 0,21 puntos añadidos para las comisiones aproximadas de 0,1 % y un pequeño margen de redondeo. El replay reporta cuántas ventanas compran y venden.
+- La medición S1 previa indicaba para XRP X=1,2191 e Y=1,3942 desde piso/techo Advisor. No se guardaron los recuentos de compra/venta en esa corrida y no se pueden reconstruir sin su historial; la nueva salida los incluirá en el próximo análisis. No se ejecutó análisis real en esta fase.

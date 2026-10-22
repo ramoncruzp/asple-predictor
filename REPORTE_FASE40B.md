@@ -176,12 +176,12 @@ Corrida completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tes
 
 ### Implementado
 
-- `data/testnet_client.py:295` consulta profundidad Spot con `limit=5`, convierte bids/asks a `Decimal` y devuelve `read_at`. Binance asigna peso 2 a `/api/v3/depth` para límites 1–100; cinco niveles permiten recorrer más que el mejor bid. [Documentación oficial de Binance Spot](https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md#order-book).
-- `grid/meta.py:55` añade la función pura `executable_value`: recorre niveles, resta comisión de venta, calcula cantidad absorbida y remanente con haircut configurable y devuelve `KNOWN`, `PARCIAL` o `DESCONOCIDO`. Una lectura vieja, sin bids o inválida nunca produce valor cero válido.
-- `grid/meta.py:360` agrega inventario por símbolo, comparte una lectura de profundidad por minuto y distribuye la valoración entre piezas. La respuesta expone `value_best_bid` y `value_executable`; el alias legado `value_usdt` y `result_pct` apuntan al ejecutable. El límite y el aviso de 75 % usan este último; la meta cumplida continúa basándose solo en efectivo realizado.
+- `data/testnet_client.py:302` consulta profundidad Spot con `limit=5`, convierte bids/asks a `Decimal` y devuelve `read_at`. Binance asigna peso 2 a `/api/v3/depth` para límites 1–100; cinco niveles permiten recorrer más que el mejor bid. [Documentación oficial de Binance Spot](https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md#order-book).
+- `grid/meta.py:49` añade la función pura `executable_value`: recorre niveles, resta comisión de venta, calcula cantidad absorbida y remanente con haircut configurable y devuelve `KNOWN`, `PARCIAL` o `DESCONOCIDO`. Una lectura vieja, sin bids o inválida nunca produce valor cero válido.
+- `grid/meta.py:354` agrega inventario por símbolo, comparte una lectura de profundidad por minuto y distribuye la valoración entre piezas. La respuesta expone `value_best_bid` y `value_executable`; el alias legado `value_usdt` y `result_pct` apuntan al ejecutable. El límite y el aviso de 75 % usan este último; la meta cumplida continúa basándose solo en efectivo realizado.
 - `database/db_manager.py:322, 386` persiste estado, duración y cadencia de alertas por meta/moneda y añade `loss_limit_breach_count` a `meta_runs`. El cierre por pérdida necesita dos ciclos consecutivos; el contador sobrevive a reiniciar `MetaCore`. Al 75 % se bloquean piezas sin esperar confirmación. Los umbrales de haircut y avisos son editables por perfil.
 - `grid/meta.py:472` registra cambios de estado; DESCONOCIDO alerta tras más de 10 min y repite cada 30 min; PARCIAL solo alerta tras más de 30 min y más del 25 % faltante, con repetición cada 6 h. La recuperación solo se notifica después de una alerta previa. No se cierra automáticamente con valoración DESCONOCIDO.
-- `grid/meta.py:729` usa el valor ejecutable en la estimación de cancelación. `ESPEC_FASE40_MODO_META.md:47` documenta estados, fórmulas y reglas operativas.
+- `grid/meta.py:740` usa el valor ejecutable en la estimación de cancelación. `ESPEC_FASE40_MODO_META.md:47` documenta estados, fórmulas y reglas operativas.
 
 ### Pruebas y resultado
 
@@ -190,3 +190,20 @@ Corrida completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tes
 ### Límites
 
 La valoración parcial es una estimación: el remanente usa el último bid absorbido menos haircut y comisión, no garantiza ejecución. El libro se refresca una vez por minuto por símbolo y las piezas de una moneda comparten liquidez disponible; no se consultan endpoints de profundidad fuera de las monedas con inventario. Sin profundidad válida la meta queda bloqueada y sin protección de pérdida hasta recuperar valoración.
+
+## 40b-4B — límite del replay, precálculo y medidor
+
+### Implementado
+
+- `grid/sim/runner.py:83, 201, 664` acepta el parámetro opcional `meta_max_loss_pct` (sin alterar simulaciones normales cuando no se pasa). En cada vela compara efectivo más inventario al `low` menos comisión. Al cruzar el límite cancela órdenes, liquida el inventario simulado al `low`, registra `META_LOSS_CUT` / `CORTADA_POR_PERDIDA`, comisión y pérdida realizada, y termina esa ventana. `grid/meta_operator.py:631, 680, 700` entrega el tope del perfil, usa efectivo realizado para el progreso de las ventanas cortadas y expone `loss_cut_windows` por alternativa.
+- La simulación histórica no tiene profundidad intravela: usar el `low` de cada vela con fee de venta es la aproximación conservadora documentada para el peor bid. El aviso del 75 % no se modela: el replay compara una alternativa fija y no añade piezas durante la ventana.
+- `grid/sim/meta_bot.py:9, 51` aplica el mismo corte al bot de una celda, incluye la venta y su comisión, marca `CORTADA_POR_PERDIDA` y conserva `rebuys=0`. Para bots, `grid/meta_operator.py:305, 668` prueba X a 0,5 %, 1,5 % y 3 % por debajo del midpoint. Y = X × (1 + margen neto Advisor + 0,21 %), que cubre el 0,1 % aproximado de cada operación más un margen de redondeo, y respeta el mínimo del perfil. El criterio común del ranking decide. Las métricas del replay muestran `bot_windows_bought` y `bot_windows_sold`.
+- En la corrida S1 previa, XRP tenía X=1,2191 y Y=1,3942: eran el piso/techo recomendados por el Advisor para aquella alternativa, no niveles optimizados por porcentaje de distancia. El replay de entonces no registraba compras/ventas por ventana, por lo que esos recuentos no existen en el artefacto disponible. No se ejecutó una consulta de mercado ni Testnet para reconstruirlos; el siguiente análisis expondrá esos conteos y comparará variantes cercanas/lejana.
+- `grid/meta_operator.py:1152, 1225` programa el precálculo diario a las 08:00 UTC (cron UTC), verifica el interruptor al comenzar y durante la tarea, usa un solo hilo/worker (por debajo del máximo de dos), rebaja prioridad por hilo cuando el SO lo permite y cede CPU entre ventanas/perfiles. No adquiere `GridMonitor.ops_lock`. Precalienta ambos perfiles para 100→110 y para capital/objetivo de metas existentes; si faltan entradas, el análisis normal calcula el resto. Registra duración y número de entradas de caché.
+- `scripts/medir_analisis_meta.py:60, 98` añade `--con-cache`: lee caché persistente en conexión reflejada de solo lectura, nunca escribe y reporta por separado aciertos persistentes y del proceso. Sin la opción mantiene la caché persistente apagada.
+
+### Pruebas B y resultado
+
+La corrida enfocada de `tests/test_meta_operator.py`, `tests/test_meta_core.py` y `tests/test_testnet_client.py` dio **74 passed, 1 deselected, 3 warnings, 2,96 s**. Tras endurecer el redondeo del margen X/Y y separar el evento de corte del objetivo, `tests/test_meta_operator.py` dio **35 passed, 3 warnings, 2,26 s**. Cubren corte de grid al mínimo intravela con fees realizados, corte del bot, actividad por ventana, comparación X/Y, switch/lock del precálculo y lectura persistente sin escritura. `scripts/medir_analisis_meta.py --help` confirma `--con-cache`; no se ejecutó el análisis real.
+
+Suite completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp="$env:TEMP\asple_40b4b_20261022_final3"` — **1.462 passed, 1 skipped, 18 deselected, 55 warnings, 299,58 s** (exit code 0). Playwright no reportó hosts externos; no se usó red, Testnet, `.env` ni BD real. No hubo push ni despliegue.

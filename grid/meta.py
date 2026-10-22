@@ -403,6 +403,11 @@ class MetaCore:
             coin_values, state_rows = {}, []
             for symbol, quantity in quantities_by_symbol.items():
                 if quantity <= 0:
+                    empty_value = {"status": "KNOWN", "reason": None, "received_net": "0",
+                        "absorbed_qty": "0", "missing_qty": "0", "missing_value_est": "0",
+                        "best_bid_gross": Decimal(0)}
+                    coin_values[symbol] = empty_value
+                    state_rows.append((symbol, empty_value))
                     continue
                 now = self.clock()
                 cached = getattr(self, "_depth_cache", {}).get(symbol)
@@ -551,6 +556,10 @@ class MetaCore:
                     continue
                 valuation = self.valuation(goal["id"])
                 if valuation["status"] == "DESCONOCIDO":
+                    with self.db.engine.begin() as conn:
+                        conn.execute(self.db.meta_runs.update().where(
+                            self.db.meta_runs.c.meta_id == goal["id"],
+                            self.db.meta_runs.c.status == "ACTIVE").values(loss_limit_breach_count=0))
                     if goal["status"] == "ACTIVE":
                         with self.db.engine.begin() as conn:
                             conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))

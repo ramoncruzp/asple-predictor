@@ -78,3 +78,20 @@ La suite final está verde: 1.456 passed, 1 skipped, 18 deselected, 55 warnings.
 
 - La estimación de inventario restante de un libro PARCIAL aplica haircut y comisión, pero no garantiza que esa cantidad pueda venderse al último nivel observado. La profundidad se mantiene en cinco niveles y se limita a una lectura por símbolo/minuto.
 - B queda pendiente: pérdida máxima en replay, precálculo diario y lectura de caché persistente en modo solo lectura para el medidor.
+
+## 40b-4B — discrepancias
+
+### Cerrado
+
+- El replay corta a pérdida máxima usando el low por vela, vende el inventario simulado con comisión y calcula el avance con pérdida realizada. Cada alternativa cuenta sus ventanas cortadas; en el bot, también cuenta compras y ventas.
+- El optimizador compara X/Y a tres distancias de compra bajo el midpoint, con margen neto mínimo del perfil más 0,01 puntos de tolerancia de redondeo y el mismo criterio de selección.
+- Precalculo UTC a las 08:00, switch validado, un solo worker de baja prioridad cooperativa y sin `ops_lock`. Se precargan ambos perfiles y las asignaciones que salen de objetivos estándar o metas existentes. Los misses se calculan en el análisis normal.
+- El medidor puede leer la caché persistente en solo lectura con `--con-cache`; los aciertos del proceso y persistentes se separan.
+
+### Sigue abierto
+
+- No es posible informar retrospectivamente cuántas ventanas de la medición S1 anterior compraron y vendieron el bot XRP (X=1,2191; Y=1,3942): ese replay no guardó esos contadores. La nueva salida los expone, pero hay que ejecutar el próximo análisis en S1 para obtener los números reales.
+- El replay aproxima la protección con el low de la vela y la comisión; no simula el spread/profundidad intravela. Tampoco simula el aviso del 75 %, porque no añade nuevas piezas dentro de una ventana.
+- El precálculo no garantiza terminar un día antes de las 08:00 siguiente; la ejecución y el cache parcial permiten que el análisis complete los misses a demanda. El tiempo real y el ahorro deben medirse en S1.
+
+Suite completa tras 40b-4B: 1.462 passed, 1 skipped, 18 deselected, 55 warnings, 299,58 s; la evidencia del bot XRP de S1 continúa pendiente porque la corrida anterior no guardó actividad por ventana.

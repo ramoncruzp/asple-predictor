@@ -57,6 +57,8 @@ def main():
     parser.add_argument("--capital", type=float, default=100)
     parser.add_argument("--objetivo", type=float, default=10, help="ganancia objetivo en USDT")
     parser.add_argument("--perfil", choices=("PRUDENTE", "RAPIDO"), default="RAPIDO")
+    parser.add_argument("--con-cache", action="store_true",
+                        help="lee meta_analysis_cache existente en solo lectura; nunca escribe")
     parser.add_argument("--database-url", default=None,
                         help="URL existente; de forma predeterminada usa DATABASE_URL del entorno (no lee .env)")
     args = parser.parse_args()
@@ -86,7 +88,8 @@ def main():
             return None
 
     core = ReadOnlyCore()
-    operator = MetaOperator(core, db, scanner, None, settings, advisor=advisor, cache_enabled=False)
+    operator = MetaOperator(core, db, scanner, None, settings, advisor=advisor,
+                            cache_enabled=args.con_cache, cache_writes=False)
     profile = args.perfil.upper()
     goal = {"id": 0, "capital_initial": args.capital, "target_usdt": args.objetivo,
             "profile": profile, "config_snapshot": dict(DEFAULT_PROFILES[profile])}
@@ -95,6 +98,7 @@ def main():
     plan["timings_s"]["full_analysis"] = round(time.perf_counter() - started, 3)
     print(json.dumps({"read_only": True, "opened_orders": False, "created_goal": False,
         "profile": profile, "capital_usdt": args.capital, "target_gain_usdt": args.objetivo,
+        "persistent_cache_read": bool(args.con_cache), "persistent_cache_write": False,
         "timings_s": plan["timings_s"], "candidate_count": len(plan["candidates"]),
         "evaluated_combinations": len(plan["combinations_evaluated"]),
         "selected_pieces": plan["pieces"], "estimate": plan["estimated_time"],
