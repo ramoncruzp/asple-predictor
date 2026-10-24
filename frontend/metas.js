@@ -5,6 +5,13 @@
   let analysisPollTimer = null;
   let countdownTimer = null;
   let currentHash = '';
+  // Mientras hay un análisis corriendo o un plan a la vista, el refresco automático
+  // no debe redibujar la pantalla (eso borraba el progreso y detenía la consulta).
+  let planVisible = false;
+  const JOB_KEY = 'asple-metas-analysis-job';
+  function saveJob(job) { try { sessionStorage.setItem(JOB_KEY, JSON.stringify(job)); } catch (e) { /* sin almacenamiento */ } }
+  function loadJob() { try { return JSON.parse(sessionStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } }
+  function clearJob() { try { sessionStorage.removeItem(JOB_KEY); } catch (e) { /* sin almacenamiento */ } }
   let ledgerState = { page: 1, pageSize: 50, includeValuation: false, type: 'all' };
 
   function esc(value) {
@@ -164,27 +171,38 @@
 
   function startAnalysis(container, metaId) {
     stopAnalysisPoll();
+    planVisible = false;
     const slot = container.querySelector(`[data-analysis-slot="${metaId}"]`);
-    const startedAtMs = Date.now();
-    slot.innerHTML = `<p class="metas-analyzing">⏳ Analizando… puede tardar varios minutos si el caché del día no está listo. Tiempo transcurrido: <span data-elapsed>0:00</span></p>`;
+    slot.innerHTML = `<p class="metas-analyzing">⏳ Iniciando análisis…</p>`;
     apiPost(`/api/metas/${metaId}/analysis`).then(({ job_id: jobId }) => {
-      countdownTimer = setInterval(() => {
-        const el = slot.querySelector('[data-elapsed]');
-        if (el) el.textContent = elapsedLabel(startedAtMs);
-      }, 1000);
-      analysisPollTimer = setInterval(async () => {
-        try {
-          const job = await apiGet(`/api/metas/${metaId}/analysis/${jobId}`);
-          if (job.status === 'COMPLETE') { stopAnalysisPoll(); renderPlanResult(container, metaId, job.plan); }
-          else if (job.status === 'FAILED') { stopAnalysisPoll(); slot.innerHTML = `<p class="metas-error">El análisis falló: ${esc(job.error)}</p><button type="button" class="button secondary" data-reanalyze="${metaId}">Analizar de nuevo</button>`; wireReanalyze(container, metaId); }
-        } catch (error) {
-          // El trabajo vive en memoria; si el servicio se reinició, ya no existe.
-          stopAnalysisPoll();
-          slot.innerHTML = `<p class="metas-error">El análisis ya no está disponible; analiza de nuevo.</p><button type="button" class="button secondary" data-reanalyze="${metaId}">Analizar de nuevo</button>`;
-          wireReanalyze(container, metaId);
-        }
-      }, 3000);
+      const job = { metaId, jobId, startedAtMs: Date.now() };
+      saveJob(job);
+      pollAnalysis(container, job);
     }).catch(error => { slot.innerHTML = `<p class="metas-error">${esc(error.message)}</p>`; });
+  }
+
+  function pollAnalysis(container, job) {
+    stopAnalysisPoll();
+    const { metaId, jobId, startedAtMs } = job;
+    const slot = container.querySelector(`[data-analysis-slot="${metaId}"]`);
+    if (!slot) { clearJob(); return; }
+    slot.innerHTML = `<p class="metas-analyzing">⏳ Analizando… puede tardar varios minutos si el caché del día no está listo. Tiempo transcurrido: <span data-elapsed>${elapsedLabel(startedAtMs)}</span></p>`;
+    countdownTimer = setInterval(() => {
+      const el = slot.querySelector('[data-elapsed]');
+      if (el) el.textContent = elapsedLabel(startedAtMs);
+    }, 1000);
+    analysisPollTimer = setInterval(async () => {
+      try {
+        const result = await apiGet(`/api/metas/${metaId}/analysis/${jobId}`);
+        if (result.status === 'COMPLETE') { stopAnalysisPoll(); clearJob(); renderPlanResult(container, metaId, result.plan); }
+        else if (result.status === 'FAILED') { stopAnalysisPoll(); clearJob(); slot.innerHTML = `<p class="metas-error">El análisis falló: ${esc(result.error)}</p><button type="button" class="button secondary" data-reanalyze="${metaId}">Analizar de nuevo</button>`; wireReanalyze(container, metaId); }
+      } catch (error) {
+        // El trabajo vive en memoria; si el servicio se reinició, ya no existe.
+        stopAnalysisPoll(); clearJob();
+        slot.innerHTML = `<p class="metas-error">El análisis ya no está disponible; analiza de nuevo.</p><button type="button" class="button secondary" data-reanalyze="${metaId}">Analizar de nuevo</button>`;
+        wireReanalyze(container, metaId);
+      }
+    }, 3000);
   }
 
   function wireReanalyze(container, metaId) {
@@ -247,8 +265,9 @@
     const tick = () => {
       const remaining = Math.max(0, Math.round((expiresAtMs - Date.now()) / 1000));
       countdownEl.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
-      if (remaining <= 0) { clearInterval(planCountdown); startButton.disabled = true; expiredNote.classList.remove('hidden'); }
+      if (remaining <= 0) { clearInterval(planCountdown); planVisible = false; startButton.disabled = true; expiredNote.classList.remove('hidden'); }
     };
+    planVisible = true;
     const planCountdown = setInterval(tick, 1000);
     tick();
     startButton.addEventListener('click', () => confirmStart(container, metaId, plan));
@@ -458,6 +477,7 @@
   async function render(container, hash) {
     if (!container) return;
     stopAnalysisPoll();
+    planVisible = false;
     container.innerHTML = '<p class="muted">Cargando…</p>';
     let config, goals;
     try {
@@ -491,6 +511,10 @@
 
     wireCreateForm(container);
     wireDraftActions(container);
+    // Si había un análisis en curso (por ejemplo, tras recargar la página), retoma su consulta.
+    const pending = loadJob();
+    if (pending && drafts.some(g => Number(g.id) === Number(pending.metaId))) pollAnalysis(container, pending);
+    else if (pending) clearJob();
     if (active) wireActivePanel(container, active.id);
     container.querySelector('[data-show-discarded]')?.addEventListener('change', e => {
       container.querySelectorAll('.metas-discarded').forEach(el => el.classList.toggle('hidden', !e.target.checked));
@@ -505,6 +529,7 @@
     refreshTimer = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       if ((location.hash || '').split('/')[0] !== '#metas') return;
+      if (analysisPollTimer || planVisible) return;
       render(container, currentHash);
     }, 30000);
   }
