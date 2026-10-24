@@ -803,9 +803,12 @@ class MetaOperator:
         if strategy == "individual_bot":
             cells = [(low, high)]
         else:
-            lines = compute_lines(low, high, int(n), FILTERS)
-            cells = list(zip([float(value) for value in lines[:-1]],
-                             [float(value) for value in lines[1:]]))
+            # Mismo espaciado que compute_lines, pero sin redondear al tick genérico de la
+            # simulación (0.0001): en monedas de precio muy bajo ese redondeo junta las
+            # líneas. Para contar toques no hace falta redondear.
+            step = (float(high) - float(low)) / int(n)
+            lines = [float(low) + step * i for i in range(int(n) + 1)]
+            cells = list(zip(lines[:-1], lines[1:]))
         payload = {"version": 1, "symbol": symbol, "day": self.clock() // 86400,
             "strategy": strategy, "n": int(n), "window_days": int(window_days),
             "buy_sell_relative": [[round(float(x) / ref, 10), round(float(y) / ref, 10)] for x, y in cells],
