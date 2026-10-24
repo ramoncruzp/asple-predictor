@@ -18,7 +18,7 @@ from grid.sim.sweep import build_windows, _slice
 from grid.sim.touch_stats import aggregate_touch_stats, touch_stats
 from grid.sim.runner import run_simulation
 from grid.sim.runner import FILTERS
-from grid.levels import compute_lines
+from grid.levels import compute_lines, GridConfigError
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import break_prob, DEFAULT_SMART_PARAMS
 
@@ -50,6 +50,7 @@ def summarize_replays(rows, independent_window_days=30, target_usdt=None):
 def rank_alternatives(alternatives):
     """Probabilidad de replay, avance mediano, días y drawdown."""
     return sorted(alternatives, key=lambda row: (
+        0 if int(row["estimate"].get("rolling_windows", 1) or 0) > 0 else 1,
         -float(row["estimate"].get("probability_replay", row["estimate"].get("probability", 0))),
         -float(row["estimate"].get("median_progress_pct") or 0),
         float(row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf),
@@ -686,7 +687,7 @@ class MetaOperator:
             replay_started = time.perf_counter()
             windows = build_windows(candles, window_days, 7)
             replay_windows = windows
-            rows, window_results = [], []
+            rows, window_results, skipped_windows = [], [], []
             # El rango del plan está en precios de HOY. En cada ventana histórica se
             # reescala al precio de inicio de esa ventana (mismo ancho relativo), para
             # simular "abrir esta misma pieza en ese momento". Sin esto, una ventana
@@ -705,39 +706,23 @@ class MetaOperator:
                 start_ts = datetime.fromtimestamp(int(window["start"]), timezone.utc).date().isoformat()
                 scale = float(sample.open[0]) / ref
                 w_low, w_high = float(low) * scale, float(high) * scale
-                if strategy == "individual_bot":
-                    from grid.sim.meta_bot import run_meta_bot
-                    replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
-                                          target_usdt=target_usdt, fee_pct=.1,
-                                          max_loss_pct=cfg.get("max_loss_pct"),
-                                          min_margin_pct=cfg.get("min_margin_pct", .3))
-                    result_row = {"window_start": start_ts, "reached": replay["reached"],
-                                  "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
-                                  "drawdown_pct": replay["drawdown_pct"], "step_days": 7,
-                                  "loss_cut": replay["loss_cut"], "bought": replay["bought"],
-                                  "sold": replay["sold"]}
-                else:
-                    params = {"target_usdt": target_usdt, "target_basis": "cash"}
-                    simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
-                        low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
-                        close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
-                        meta_max_loss_pct=cfg.get("max_loss_pct"))
-                    event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
-                    loss_cut = any(e.get("type") == "META_LOSS_CUT" for e in simulation["events"])
-                    days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
-                    metrics = simulation["metrics"]
-                    result_row = {"window_start": start_ts, "reached": event is not None,
-                                  "days": days,
-                                  "pnl_usdt": (float(metrics.get("cash_final", capital)) - capital if loss_cut else
-                                      float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital),
-                                  "drawdown_pct": max(0.0, float(metrics.get("max_drawdown_pct", 0))),
-                                  "step_days": 7, "loss_cut": loss_cut}
+                try:
+                    result_row = self._replay_window(sample, start_ts, strategy, n, capital, target_usdt,
+                                                     w_low, w_high, cfg)
+                except GridConfigError as exc:
+                    # Con el precio reescalado de una ventana vieja, el redondeo al tick
+                    # puede juntar líneas. Esa ventana se omite y se cuenta; no se cae todo.
+                    skipped_windows.append({"window_start": start_ts, "reason": str(exc)})
+                    continue
                 rows.append(result_row)
                 window_results.append(result_row)
                 if getattr(self, "_low_priority_precompute", False):
                     time.sleep(.001)
             cached = {"summary": summarize_replays(rows, independent_window_days=window_days, target_usdt=target_usdt),
                       "window_results": window_results}
+            cached["summary"]["skipped_windows"] = len(skipped_windows)
+            if skipped_windows:
+                cached["summary"]["skipped_reason"] = skipped_windows[0]["reason"]
             cached["summary"]["loss_cut_windows"] = sum(bool(row.get("loss_cut")) for row in rows)
             if strategy == "individual_bot":
                 cached["summary"]["bot_windows_bought"] = sum(bool(row.get("bought")) for row in rows)
@@ -780,6 +765,37 @@ class MetaOperator:
                 "replay_probability": estimate["probability"], "window_results": window_results,
                 "shadow_decision": {"scanner_score": row.get("score"), "advisor_strategy": strategy},
                 "reason": "alternativa de replay histórico"}
+
+    def _replay_window(self, sample, start_ts, strategy, n, capital, target_usdt, w_low, w_high, cfg):
+        """Simula una ventana histórica; lanza GridConfigError si el rango no es simulable."""
+        if strategy == "individual_bot":
+            from grid.sim.meta_bot import run_meta_bot
+            replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
+                                  target_usdt=target_usdt, fee_pct=.1,
+                                  max_loss_pct=cfg.get("max_loss_pct"),
+                                  min_margin_pct=cfg.get("min_margin_pct", .3))
+            result_row = {"window_start": start_ts, "reached": replay["reached"],
+                          "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
+                          "drawdown_pct": replay["drawdown_pct"], "step_days": 7,
+                          "loss_cut": replay["loss_cut"], "bought": replay["bought"],
+                          "sold": replay["sold"]}
+        else:
+            params = {"target_usdt": target_usdt, "target_basis": "cash"}
+            simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
+                low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
+                close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
+                meta_max_loss_pct=cfg.get("max_loss_pct"))
+            event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
+            loss_cut = any(e.get("type") == "META_LOSS_CUT" for e in simulation["events"])
+            days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
+            metrics = simulation["metrics"]
+            result_row = {"window_start": start_ts, "reached": event is not None,
+                          "days": days,
+                          "pnl_usdt": (float(metrics.get("cash_final", capital)) - capital if loss_cut else
+                              float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital),
+                          "drawdown_pct": max(0.0, float(metrics.get("max_drawdown_pct", 0))),
+                          "step_days": 7, "loss_cut": loss_cut}
+        return result_row
 
     def _touch_signal_for(self, symbol, strategy, n, low, high, ref, candles, window_days, *, windows=None):
         """Calcula estadísticas por celda y ventana, con precios reescalados."""
