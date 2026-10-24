@@ -20,6 +20,10 @@ def calculate_metrics(equity, capital, cells, exchange, closes, paused=0, trappe
         "cycles_completed": sum(c["cycles_completed"] for c in cells),
         "max_drawdown_usdt": float(dd.max()),
         "max_drawdown_pct": float((dd / np.maximum(peak, 1e-12)).max() * 100),
+        # Caída máxima medida contra el CAPITAL INICIAL (no contra el máximo de la
+        # ventana como max_drawdown_pct): esta es la que se compara con el límite
+        # de pérdida del perfil Meta. Ver REPORTE_FASE40C.md, parte B3.
+        "worst_loss_vs_capital_pct": float(max(0.0, (capital - values.min()) / capital * 100)),
         "average_trapped_capital_pct": float(np.mean(trapped) / capital * 100),
         "pause_pct": float(paused / max(1, len(values)) * 100),
         "buy_hold_pnl_usdt": float(capital * (closes[-1] / closes[0] - 1)),

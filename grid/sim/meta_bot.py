@@ -28,6 +28,7 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
     event = None
     loss_cut = False
     peak, max_drawdown_pct = Decimal(0), Decimal(0)
+    trough = capital
     target_cash = capital + Decimal(str(target_usdt))
     for idx, (low, high, close) in enumerate(zip(candles.low, candles.high, candles.close)):
         was_bought = bought
@@ -43,6 +44,7 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
             sold = True
         marked = cash + inventory * Decimal(str(close)) * (1 - fee)
         peak = max(peak, marked)
+        trough = min(trough, marked)
         if peak > 0:
             max_drawdown_pct = max(max_drawdown_pct, (peak - marked) / peak * 100)
         if sold and cash >= target_cash and event is None:
@@ -61,11 +63,14 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
                          "mark_at_low_usdt": str(marked_low), "realized_cash_usdt": str(cash)}}
             break
     final_mark = cash + inventory * Decimal(str(candles.close[-1])) * (1 - fee)
+    trough = min(trough, final_mark)
+    worst_loss_vs_capital_pct = max(Decimal(0), (capital - trough) / capital * 100) if capital > 0 else Decimal(0)
     reached = event is not None and event.get("type") == "TARGET_REACHED"
     return {"reached": reached, "event": event,
             "days": (None if not reached else
                      (int(event["ts"]) - int(candles.timestamp[0])) / 86400),
-            "drawdown_pct": float(max_drawdown_pct), "windows": 1,
+            "drawdown_pct": float(max_drawdown_pct),
+            "worst_loss_vs_capital_pct": float(worst_loss_vs_capital_pct), "windows": 1,
             "final_cash": float(cash), "final_inventory": float(inventory),
             "pnl_usdt": float(final_mark - capital),
             "state": ("CORTADA_POR_PERDIDA" if loss_cut else

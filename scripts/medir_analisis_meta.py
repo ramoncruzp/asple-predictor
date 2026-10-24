@@ -53,6 +53,13 @@ def read_only_db(db_url: str):
 
 
 def main():
+    # Fase 40c, parte B4.4: en S1 la terminal no siempre usa UTF-8 (cp1252 por
+    # defecto en Windows) y la salida mostraba "pr?stamos" en vez de "préstamos".
+    # Forzar UTF-8 en stdout no depende de la configuración regional del host.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capital", type=float, default=100)
     parser.add_argument("--objetivo", type=float, default=10, help="ganancia objetivo en USDT")
@@ -96,12 +103,47 @@ def main():
     started = time.perf_counter()
     plan = operator._build_plan(goal)
     plan["timings_s"]["full_analysis"] = round(time.perf_counter() - started, 3)
+
+    piece_estimates = plan.get("piece_estimates", [])
+    most_common_reason = None
+    reasons = [item.get("skipped_reason") for item in piece_estimates if item.get("skipped_reason")]
+    if reasons:
+        most_common_reason = max(set(reasons), key=reasons.count)
+
+    # Tiempo que la app (vía POST /api/metas/{id}/analysis) reportó la última
+    # vez, si meta_ledger existe y tiene algún META_ANALYSIS_COMPLETE/FAILED
+    # real -- esto es puramente informativo, de solo lectura.
+    app_reported = None
+    if hasattr(db, "meta_ledger"):
+        from sqlalchemy import select
+        try:
+            with db.engine.connect() as conn:
+                row = conn.execute(select(db.meta_ledger.c.event_type, db.meta_ledger.c.details,
+                    db.meta_ledger.c.ts).where(db.meta_ledger.c.event_type.in_(
+                        ["META_ANALYSIS_COMPLETE", "META_ANALYSIS_FAILED"])).order_by(
+                            db.meta_ledger.c.id.desc()).limit(1)).first()
+            if row is not None:
+                details = json.loads(row[1] or "{}")
+                app_reported = {"event_type": row[0], "analysis_seconds": details.get("analysis_seconds"),
+                                 "ts": str(row[2])}
+        except Exception as exc:
+            app_reported = {"error": f"no se pudo leer meta_ledger: {exc}"}
+
     print(json.dumps({"read_only": True, "opened_orders": False, "created_goal": False,
         "profile": profile, "capital_usdt": args.capital, "target_gain_usdt": args.objetivo,
         "persistent_cache_read": bool(args.con_cache), "persistent_cache_write": False,
-        "timings_s": plan["timings_s"], "candidate_count": len(plan["candidates"]),
+        "timings_s": plan["timings_s"], "app_reported_last_analysis": app_reported,
+        "candidate_count": len(plan["candidates"]),
         "evaluated_combinations": len(plan["combinations_evaluated"]),
         "selected_pieces": plan["pieces"], "estimate": plan["estimated_time"],
+        "piece_estimates": piece_estimates,
+        "piece_estimates_summary": {
+            "most_common_skip_reason": most_common_reason,
+            "total_skipped_windows": sum(item.get("skipped_windows", 0) for item in piece_estimates),
+            "total_loss_cut_windows": sum(item.get("loss_cut_windows", 0) for item in piece_estimates),
+            "bots": [{"symbol": item["symbol"], "bought": item.get("bot_windows_bought"),
+                      "sold": item.get("bot_windows_sold")} for item in piece_estimates
+                     if item.get("bot_windows_bought") is not None]},
         "warnings": plan.get("warnings", [])}, ensure_ascii=False, indent=2))
     db.engine.dispose()
 

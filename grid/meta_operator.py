@@ -19,6 +19,7 @@ from grid.sim.touch_stats import aggregate_touch_stats, touch_stats
 from grid.sim.runner import run_simulation
 from grid.sim.runner import FILTERS
 from grid.levels import compute_lines, GridConfigError
+from data.exchange_filters import SymbolFilters
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import break_prob, DEFAULT_SMART_PARAMS
 
@@ -28,6 +29,7 @@ def summarize_replays(rows, independent_window_days=30, target_usdt=None):
     hits = [row for row in rows if row.get("reached")]
     times = [float(row["days"]) for row in hits if row.get("days") is not None]
     drawdowns = [float(row.get("drawdown_pct", 0.0)) for row in rows]
+    worst_loss_vs_capital = [float(row.get("worst_loss_vs_capital_pct", 0.0)) for row in rows]
     step_days = [float(row.get("step_days", 7.0)) for row in rows]
     step = max(1.0, min(step_days, default=7.0))
     independent = max(1, int(math.ceil(float(independent_window_days) / step)))
@@ -35,7 +37,12 @@ def summarize_replays(rows, independent_window_days=30, target_usdt=None):
             "days_median": float(np.median(times)) if times else None,
             "days_p10": float(np.percentile(times, 10)) if times else None,
             "days_p90": float(np.percentile(times, 90)) if times else None,
+            # worst_drawdown_pct: desde el máximo de la ventana (puede superar el
+            # límite de pérdida sin haberlo tocado nunca). worst_loss_vs_capital_pct:
+            # contra el capital inicial, la que de verdad se compara con el límite
+            # del perfil. Ver REPORTE_FASE40C.md, parte B3.
             "worst_drawdown_pct": max(drawdowns, default=0.0),
+            "worst_loss_vs_capital_pct": max(worst_loss_vs_capital, default=0.0),
             "median_progress_pct": (float(np.median([float(row.get("pnl_usdt", 0.0)) for row in rows]))
                                     / float(target_usdt) * 100 if rows and target_usdt else None),
             "rolling_windows": len(rows),
@@ -102,6 +109,8 @@ def combine_aligned_replays(alternatives, target_usdt, window_days):
         rows.append({"reached": pnl >= float(target_usdt), "pnl_usdt": pnl,
                      "days": max(reached_days) if reached_days else None,
                      "drawdown_pct": max(float(row.get("drawdown_pct", 0)) for row in outcomes),
+                     "worst_loss_vs_capital_pct": max(
+                         float(row.get("worst_loss_vs_capital_pct", 0)) for row in outcomes),
                      "step_days": 7})
     return summarize_replays(rows, independent_window_days=window_days, target_usdt=target_usdt), rows
 
@@ -140,6 +149,15 @@ def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready):
 class MetaOperator:
     """Planes de cinco minutos, análisis asíncrono y revisiones de quince minutos."""
     PLAN_TTL_SECONDS = 300
+    # Fase 40c, parte B4: el precio se mueve continuamente y una clave de caché
+    # redondeada a 8 decimales casi nunca se repite. Se cuantiza el rango
+    # relativo en pasos de 0.25% del precio: un movimiento intradía menor a eso
+    # reutiliza el mismo resultado de replay.
+    REPLAY_RANGE_QUANT_STEP = 0.0025
+    # El Advisor se cachea en relativo (piso/techo sobre el precio de cuando se
+    # calculó) y se reancla al precio actual al leer; si el precio se movió más
+    # de este umbral (o quedó fuera del rango original), se recalcula.
+    ADVISOR_REANCHOR_DRIFT_PCT = 3.0
 
     def __init__(self, core, db, scanner, engine, settings, *, advisor=None, alert=None,
                  clock=time.time, price_drift_pct=1.0, cache_enabled=True, cache_writes=True):
@@ -157,6 +175,7 @@ class MetaOperator:
         self._candles_cache = {}
         self._above_ceiling_count = {}
         self._hard_filter_misses = {}
+        self._symbol_filters_cache = {}
         self._review_guard = threading.Lock()
         self._precompute_guard = threading.Lock()
         self._thread = None
@@ -171,6 +190,52 @@ class MetaOperator:
         day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
         encoded = json.dumps({"day": day, "kind": kind, "payload": payload}, sort_keys=True, default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), day
+
+    def _quantize_relative_range(self, ratio, step=None):
+        """Redondea un ratio precio/precio a pasos fijos (0.25% por defecto)
+        para que pequeños movimientos intradía no invaliden el caché de replay."""
+        step = self.REPLAY_RANGE_QUANT_STEP if step is None else step
+        if ratio <= 0 or step <= 0:
+            return ratio
+        return round(round(ratio / step) * step, 6)
+
+    def _store_advisor_cache_entry(self, advisory, anchor_price):
+        """Guarda la recomendación del Advisor en relativo (piso/techo sobre el
+        precio de hoy) para poder reanclarla al precio actual al leerla."""
+        entry = dict(advisory)
+        floor_val, ceiling_val = advisory.get("recommended_floor"), advisory.get("recommended_ceiling")
+        if floor_val is not None and ceiling_val is not None and anchor_price > 0:
+            entry["recommended_floor_ratio"] = float(floor_val) / anchor_price
+            entry["recommended_ceiling_ratio"] = float(ceiling_val) / anchor_price
+            entry["anchor_price"] = anchor_price
+            entry.pop("recommended_floor", None)
+            entry.pop("recommended_ceiling", None)
+        return entry
+
+    def _reanchor_advisor_cache(self, entry, price):
+        """Reancla una entrada de caché del Advisor al precio actual.
+
+        Devuelve None (caché inservible; hay que recalcular) si la entrada es de
+        un formato viejo sin ratio, si el precio se movió más del umbral, o si
+        el precio actual quedó fuera del rango original con el que se calculó.
+        """
+        if not entry or "recommended_floor_ratio" not in entry or "recommended_ceiling_ratio" not in entry:
+            return None
+        anchor_price = float(entry.get("anchor_price") or 0)
+        if anchor_price <= 0 or price <= 0:
+            return None
+        drift_pct = abs(price / anchor_price - 1) * 100
+        floor_ratio, ceiling_ratio = float(entry["recommended_floor_ratio"]), float(entry["recommended_ceiling_ratio"])
+        original_floor, original_ceiling = floor_ratio * anchor_price, ceiling_ratio * anchor_price
+        if drift_pct > self.ADVISOR_REANCHOR_DRIFT_PCT or not (original_floor < price < original_ceiling):
+            return None
+        reanchored = dict(entry)
+        reanchored["recommended_floor"] = floor_ratio * price
+        reanchored["recommended_ceiling"] = ceiling_ratio * price
+        reanchored.pop("recommended_floor_ratio", None)
+        reanchored.pop("recommended_ceiling_ratio", None)
+        reanchored.pop("anchor_price", None)
+        return reanchored
 
     def _persistent_cache_get(self, kind, payload):
         if not self.cache_enabled or self.db is None or not hasattr(self.db, "meta_analysis_cache"):
@@ -230,17 +295,24 @@ class MetaOperator:
             data = self._build_plan(goal)
             plan_id = uuid.uuid4().hex
             now = self.clock()
+            seconds = round(time.perf_counter() - started, 4)
             data.update({"plan_id": plan_id, "meta_id": int(goal["id"]),
                          "created_at": now, "expires_at": now + self.PLAN_TTL_SECONDS,
-                         "analysis_seconds": round(time.perf_counter() - started, 4)})
+                         "expires_in_seconds": self.PLAN_TTL_SECONDS,
+                         "analysis_seconds": seconds})
             with self._lock:
                 self._plans[plan_id] = data
                 self._jobs[job_id] = {"job_id": job_id, "meta_id": int(goal["id"]),
                                       "status": "COMPLETE", "plan": data}
+            self._ledger(goal["id"], "META_ANALYSIS_COMPLETE",
+                         {"job_id": job_id, "plan_id": plan_id, "analysis_seconds": seconds})
         except Exception as exc:
+            seconds = round(time.perf_counter() - started, 4)
             with self._lock:
                 self._jobs[job_id] = {"job_id": job_id, "status": "FAILED", "error": str(exc),
-                                      "analysis_seconds": round(time.perf_counter() - started, 4)}
+                                      "analysis_seconds": seconds}
+            self._ledger(goal["id"], "META_ANALYSIS_FAILED",
+                         {"job_id": job_id, "error": str(exc), "analysis_seconds": seconds})
 
     def _book_ticker(self, symbol):
         """Libro bid/ask desde el cliente público del Scanner.
@@ -272,26 +344,28 @@ class MetaOperator:
             for margin in margins:
                 key = (self.clock() // 86400, symbol, round(advisor_capital, 4), round(float(margin), 4),
                        int(cfg.get("max_days", 20)))
-                if key in self._advisor_cache:
+                in_process = self._advisor_cache.get(key)
+                reanchored = self._reanchor_advisor_cache(in_process, price) if in_process is not None else None
+                if reanchored is not None:
                     self._analysis_timing["advisor_cache_hits"] += 1
                     self._analysis_timing["advisor_process_cache_hits"] = self._analysis_timing.get("advisor_process_cache_hits", 0) + 1
-                    advisor_rows.append({"margin_target_pct": margin,
-                        "recommendation": self._advisor_cache[key], "cached": True})
+                    advisor_rows.append({"margin_target_pct": margin, "recommendation": reanchored, "cached": True})
                     continue
                 cached_advisor = self._persistent_cache_get("advisor", key)
-                if cached_advisor is not None:
+                reanchored = self._reanchor_advisor_cache(cached_advisor, price) if cached_advisor is not None else None
+                if reanchored is not None:
                     self._analysis_timing["advisor_cache_hits"] += 1
                     self._analysis_timing["advisor_persistent_cache_hits"] = self._analysis_timing.get("advisor_persistent_cache_hits", 0) + 1
                     self._advisor_cache[key] = cached_advisor
-                    advisor_rows.append({"margin_target_pct": margin,
-                        "recommendation": cached_advisor, "cached": True})
+                    advisor_rows.append({"margin_target_pct": margin, "recommendation": reanchored, "cached": True})
                     continue
                 try:
                     timer = time.perf_counter()
                     advisory = self.advisor(symbol, advisor_capital, margin, int(cfg.get("max_days", 20)))
                     self._analysis_timing["advisor_s"] += time.perf_counter() - timer
-                    self._advisor_cache[key] = advisory
-                    self._persistent_cache_set("advisor", key, advisory)
+                    stored = self._store_advisor_cache_entry(advisory, price)
+                    self._advisor_cache[key] = stored
+                    self._persistent_cache_set("advisor", key, stored)
                     advisor_rows.append({"margin_target_pct": margin, "recommendation": advisory})
                 except Exception as exc:
                     advisor_rows.append({"margin_target_pct": margin, "error": str(exc)})
@@ -449,9 +523,18 @@ class MetaOperator:
                         cfg.get("signal_weights") or {}, cap) if estimate["evidence_sufficient"]
                         else replay_probability)
                     pieces = [dict(item["pieces"][0]) for item in combination]
+                    piece_estimates = [{"symbol": item["symbol"], "strategy": item["strategy"],
+                        "skipped_windows": item["estimate"].get("skipped_windows", 0),
+                        "skipped_reason": item["estimate"].get("skipped_reason"),
+                        "loss_cut_windows": item["estimate"].get("loss_cut_windows", 0),
+                        "bot_windows_bought": item["estimate"].get("bot_windows_bought"),
+                        "bot_windows_sold": item["estimate"].get("bot_windows_sold"),
+                        "rolling_windows": item["estimate"].get("rolling_windows", 0)}
+                        for item in combination]
                     row = {"symbol": pieces[0]["symbol"], "symbols": symbols,
                         "strategy": ",".join(item["strategy"] for item in combination),
-                        "pieces": pieces, "estimate": estimate, "replay_probability": replay_probability,
+                        "pieces": pieces, "estimate": estimate, "piece_estimates": piece_estimates,
+                        "replay_probability": replay_probability,
                         "window_results": combined_rows, "signals_used": signals,
                         "signals_omitted": [entry for item in combination for entry in item.get("signals_omitted", [])],
                         "shadow_probability": shadow, "shadow_signals": shadow_signals,
@@ -466,7 +549,8 @@ class MetaOperator:
                         "days_median": estimate["days_median"], "days_p10": estimate["days_p10"],
                         "days_p90": estimate["days_p90"],
                         "independent_windows": estimate["independent_windows"],
-                        "worst_drawdown_pct": estimate["worst_drawdown_pct"]})
+                        "worst_drawdown_pct": estimate["worst_drawdown_pct"],
+                        "worst_loss_vs_capital_pct": estimate["worst_loss_vs_capital_pct"]})
         if not alternatives:
             raise ValueError("No hay estructuras del Advisor para comparar.")
         alternatives = rank_alternatives(alternatives)
@@ -532,6 +616,7 @@ class MetaOperator:
                 "candidates": prepared, "sigma_bands": {"q33": q33, "q67": q67},
                 "alternatives": public_alternatives, "combinations_evaluated": evaluated_combinations,
                 "pieces": pieces, "estimated_time": best["estimate"],
+                "piece_estimates": best.get("piece_estimates", []),
                 "advisor_comparisons": advisor_comparisons,
                 "timings_s": {"scanner": round(scan_seconds, 3), "candidate_filter": round(preparation_seconds, 3),
                     "advisor": round(self._analysis_timing["advisor_s"], 3),
@@ -645,9 +730,30 @@ class MetaOperator:
             count = 0
         return data["complete"] and count >= 50
 
+    def _symbol_filters(self, symbol):
+        """Filtros reales del símbolo (tick, step, notional mínimo), para que el
+        replay del operador Meta no junte líneas en monedas de precio muy bajo
+        con el tick genérico 0,0001 del simulador (ver REPORTE_FASE40C.md,
+        parte B1). Solo afecta el camino Meta; el Advisor normal sigue sin
+        pasar `filters` y usa el valor por defecto de grid/sim/runner.py."""
+        cached = self._symbol_filters_cache.get(symbol)
+        if cached is not None:
+            return cached
+        raw = getattr(self.scanner.client, "client", self.scanner.client)
+        info = raw.get_symbol_info(symbol)
+        filters = SymbolFilters.from_symbol_info(info)
+        self._symbol_filters_cache[symbol] = filters
+        return filters
+
     def _evaluate(self, row, strategy, capital, target_usdt, low, high, n, cfg, *,
                   margin_pct=None):
         symbol = row["symbol"]
+        try:
+            symbol_filters = self._symbol_filters(symbol)
+        except Exception:
+            # Sin filtros reales se usa el tick genérico de grid/sim/runner.py
+            # (comportamiento anterior); no se cae el análisis por esto.
+            symbol_filters = None
         # Historial público del Scanner; la ventana sigue el plazo del perfil y avanza 7d.
         candle_key = (symbol, self.clock() // 86400)
         candles = self._candles_cache.get(candle_key)
@@ -669,9 +775,15 @@ class MetaOperator:
             current_mid = 0.0
         if current_mid <= 0:
             current_mid = math.sqrt(float(low) * float(high))
+        # El rango relativo se cuantiza (B4 de 40c): la clave y la simulación usan
+        # el mismo piso/techo cuantizado, así un movimiento intradía menor al paso
+        # reutiliza el mismo resultado en vez de fallar la caché cada vez.
+        low_ratio = self._quantize_relative_range(float(low) / current_mid)
+        high_ratio = self._quantize_relative_range(float(high) / current_mid)
+        low, high = low_ratio * current_mid, high_ratio * current_mid
         key = (symbol, self.clock() // 86400, strategy, round(target_usdt, 4), n,
-               round(capital, 4), window_days, round(float(low) / current_mid, 8),
-               round(float(high) / current_mid, 8), round(float(cfg.get("max_loss_pct", 0)), 4))
+               round(capital, 4), window_days, low_ratio, high_ratio,
+               round(float(cfg.get("max_loss_pct", 0)), 4))
         cached = self._cache.get(key)
         self._analysis_timing.setdefault("replay_cache_hits", 0)
         if cached is None:
@@ -708,7 +820,7 @@ class MetaOperator:
                 w_low, w_high = float(low) * scale, float(high) * scale
                 try:
                     result_row = self._replay_window(sample, start_ts, strategy, n, capital, target_usdt,
-                                                     w_low, w_high, cfg)
+                                                     w_low, w_high, cfg, filters=symbol_filters)
                 except GridConfigError as exc:
                     # Con el precio reescalado de una ventana vieja, el redondeo al tick
                     # puede juntar líneas. Esa ventana se omite y se cuenta; no se cae todo.
@@ -766,17 +878,23 @@ class MetaOperator:
                 "shadow_decision": {"scanner_score": row.get("score"), "advisor_strategy": strategy},
                 "reason": "alternativa de replay histórico"}
 
-    def _replay_window(self, sample, start_ts, strategy, n, capital, target_usdt, w_low, w_high, cfg):
-        """Simula una ventana histórica; lanza GridConfigError si el rango no es simulable."""
+    def _replay_window(self, sample, start_ts, strategy, n, capital, target_usdt, w_low, w_high, cfg, *,
+                        filters=None):
+        """Simula una ventana histórica; lanza GridConfigError si el rango no es simulable.
+
+        `filters` son los filtros reales del símbolo (tick/step/notional); si
+        faltan, cada simulador cae a su propio tick genérico (comportamiento
+        anterior a la Fase 40c, parte B1)."""
         if strategy == "individual_bot":
             from grid.sim.meta_bot import run_meta_bot
             replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
-                                  target_usdt=target_usdt, fee_pct=.1,
+                                  target_usdt=target_usdt, fee_pct=.1, filters=filters,
                                   max_loss_pct=cfg.get("max_loss_pct"),
                                   min_margin_pct=cfg.get("min_margin_pct", .3))
             result_row = {"window_start": start_ts, "reached": replay["reached"],
                           "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
-                          "drawdown_pct": replay["drawdown_pct"], "step_days": 7,
+                          "drawdown_pct": replay["drawdown_pct"],
+                          "worst_loss_vs_capital_pct": replay["worst_loss_vs_capital_pct"], "step_days": 7,
                           "loss_cut": replay["loss_cut"], "bought": replay["bought"],
                           "sold": replay["sold"]}
         else:
@@ -784,7 +902,7 @@ class MetaOperator:
             simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
                 low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
                 close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
-                meta_max_loss_pct=cfg.get("max_loss_pct"))
+                meta_max_loss_pct=cfg.get("max_loss_pct"), filters=filters)
             event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
             loss_cut = any(e.get("type") == "META_LOSS_CUT" for e in simulation["events"])
             days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
@@ -794,6 +912,7 @@ class MetaOperator:
                           "pnl_usdt": (float(metrics.get("cash_final", capital)) - capital if loss_cut else
                               float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital),
                           "drawdown_pct": max(0.0, float(metrics.get("max_drawdown_pct", 0))),
+                          "worst_loss_vs_capital_pct": max(0.0, float(metrics.get("worst_loss_vs_capital_pct", 0))),
                           "step_days": 7, "loss_cut": loss_cut}
         return result_row
 
@@ -947,6 +1066,78 @@ class MetaOperator:
                 "strategy": "smart", "same_analysis_date": True, "opened": False,
                 "range_low": best["pieces"][0]["floor"], "range_high": best["pieces"][0]["ceiling"],
                 "n_levels": max(4, int(best["pieces"][0]["n_levels"]))}
+
+    def compare_control(self, run_id):
+        """Replay (sin abrir nada) del plan de control sobre las MISMAS fechas
+        de una corrida ya terminada. Si la corrida sigue activa, solo devuelve
+        el plan de control guardado (no hay fechas de cierre aún). El
+        resultado se guarda en meta_runs.control_result_json para no repetir
+        el replay en cada consulta."""
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            run = conn.execute(select(self.db.meta_runs).where(
+                self.db.meta_runs.c.id == int(run_id))).mappings().first()
+        if run is None:
+            raise ValueError("Corrida no encontrada.")
+        control_plan = json.loads(run.get("control_plan_json") or "null")
+        if control_plan is None:
+            return {"run_id": int(run_id), "control_plan": None, "control_result": None,
+                    "note": "Esta corrida no guardó un plan de control."}
+        if run.get("finished_at") is None:
+            return {"run_id": int(run_id), "control_plan": control_plan, "control_result": None,
+                    "note": "La corrida sigue activa; solo se muestra el plan de control."}
+        cached = json.loads(run.get("control_result_json") or "null")
+        if cached is not None:
+            return {"run_id": int(run_id), "control_plan": control_plan, "control_result": cached}
+        result = self._replay_control(control_plan, run["started_at"], run["finished_at"])
+        with self.db.engine.begin() as conn:
+            conn.execute(self.db.meta_runs.update().where(self.db.meta_runs.c.id == int(run_id)).values(
+                control_result_json=json.dumps(result, sort_keys=True, default=str)))
+        return {"run_id": int(run_id), "control_plan": control_plan, "control_result": result}
+
+    def _replay_control(self, control_plan, started_at, finished_at):
+        """Simula el plan de control (Smart normal, sin meta) desde started_at
+        hasta finished_at con velas públicas reales de ese rango exacto -- no
+        reescala precios ni busca ventanas: es la misma línea de tiempo real
+        de la corrida que se está comparando."""
+        import pandas as pd
+        from grid.sim.data import CandleData
+        symbol = control_plan["symbol"]
+        started = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        finished = finished_at if finished_at.tzinfo else finished_at.replace(tzinfo=timezone.utc)
+        if finished <= started:
+            raise ValueError("La corrida no tiene un rango de fechas válido para comparar.")
+        lookback_days = max(1, math.ceil((datetime.now(timezone.utc) - started).total_seconds() / 86400) + 1)
+        candles_raw = self.scanner.client.get_historical_klines(symbol, "5m", lookback_days, start_time=started)
+        frame = candles_raw if isinstance(candles_raw, pd.DataFrame) else pd.DataFrame(candles_raw)
+        if frame.empty:
+            raise ValueError("Sin velas históricas públicas para el plan de control.")
+        timestamps = (pd.to_datetime(frame["timestamp"], utc=True).astype("int64").to_numpy() // 1_000_000_000)
+        mask = timestamps <= int(finished.timestamp())
+        if int(mask.sum()) < 2:
+            raise ValueError("Sin velas suficientes dentro del rango de la corrida.")
+        candles = CandleData(timestamp=timestamps[mask].astype("int64"),
+                             open=frame["open"].to_numpy(float)[mask], high=frame["high"].to_numpy(float)[mask],
+                             low=frame["low"].to_numpy(float)[mask], close=frame["close"].to_numpy(float)[mask],
+                             gaps=0)
+        try:
+            symbol_filters = self._symbol_filters(symbol)
+        except Exception:
+            symbol_filters = None
+        capital = float(control_plan["capital_usdt"])
+        simulation = run_simulation(candles, strategy=control_plan.get("strategy", "smart"),
+            n=max(4, int(control_plan["n_levels"])), capital=capital,
+            low=float(control_plan["range_low"]), high=float(control_plan["range_high"]), width_pct=None,
+            params=None, fee_pct=.1, close_wait_enabled=True, adjust_enabled_global=False,
+            stoploss_enabled=False, filters=symbol_filters)
+        metrics = simulation["metrics"]
+        final_equity = float(metrics.get("equity_final_after_repository_liquidation", capital))
+        pnl = final_equity - capital
+        return {"symbol": symbol, "capital_usdt": capital, "pnl_usdt": pnl,
+                "result_pct": (pnl / capital * 100) if capital else 0.0,
+                "max_drawdown_pct": float(metrics.get("max_drawdown_pct", 0)),
+                "worst_loss_vs_capital_pct": float(metrics.get("worst_loss_vs_capital_pct", 0)),
+                "candles_used": int(mask.sum())}
 
     def start_plan(self, meta_id, plan_id, opener):
         with self._operation_lock:

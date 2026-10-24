@@ -359,6 +359,13 @@ def test_plan_search_can_choose_two_distinct_coins_with_bounded_allocation(monke
     assert 80 <= sum(piece["capital_usdt"] for piece in plan["pieces"]) <= 100
     assert all(piece["capital_usdt"] <= 70 for piece in plan["pieces"])
     assert any(len(row["symbols"]) == 2 for row in plan["combinations_evaluated"])
+    # Fase 40c, parte B2: el medidor necesita un desglose por pieza, con
+    # valores por defecto honestos cuando el estimate no trae esos campos.
+    assert len(plan["piece_estimates"]) == len(plan["pieces"])
+    for item in plan["piece_estimates"]:
+        assert item["skipped_windows"] == 0
+        assert item["loss_cut_windows"] == 0
+        assert item["bot_windows_bought"] is None
 
 
 def test_advisor_signal_comes_from_advisor_result_not_scanner_structure(monkeypatch):
@@ -740,3 +747,439 @@ def test_review_does_not_move_capital_when_valuation_unknown_or_loss_warning_rea
     assert "75%" in second["reason"]
     assert sum(row[0][2] == "META_OPERATOR_REVIEW_DECISION" for row in core.ledger_rows) == 2
 
+
+
+def test_meta_replay_uses_real_symbol_filters_pepe_like_price_not_omitted(monkeypatch):
+    """Fase 40c, parte B1: con el tick generico 0.0001 del simulador, un rango
+    PEPE-like (~0.00001) colapsa a una sola linea y la ventana se omite. Con los
+    filtros reales del simbolo (tick fino), la misma ventana se simula bien."""
+    import pandas as pd
+    import numpy as np
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    n_candles = 300
+    base = 0.00001
+    prices = base * (1 + 0.01 * np.sin(np.linspace(0, 6.28, n_candles)))
+
+    class Client:
+        def get_historical_klines(self, *_args):
+            return pd.DataFrame({
+                "timestamp": pd.date_range("2026-01-01", periods=n_candles, freq="5min", tz="UTC"),
+                "open": prices, "high": prices * 1.001, "low": prices * 0.999, "close": prices,
+            })
+
+        def get_symbol_info(self, _symbol):
+            return {"filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.00000001", "maxPrice": "1000", "tickSize": "0.00000001"},
+                {"filterType": "LOT_SIZE", "minQty": "1", "maxQty": "100000000000", "stepSize": "1"},
+                {"filterType": "NOTIONAL", "minNotional": "1", "applyMinToMarket": True},
+            ]}
+
+    class Scanner:
+        client = Client()
+
+    operator = MetaOperator(object(), object(), Scanner(), None, None, clock=lambda: 1_800_000_000)
+    operator._analysis_timing = {"replay_s": 0, "advisor_s": 0, "touch_signal_s": 0}
+    monkeypatch.setattr(module, "build_windows", lambda _candles, days, step: [
+        {"start_idx": 0, "end_idx": n_candles, "start": 1767225600}])
+
+    low, high = base * 0.95, base * 1.05
+    result = operator._evaluate({"symbol": "PEPEUSDT", "book": {"bid_price": base, "ask_price": base},
+        "sigma_24h_open": .1}, "simple", 100, 10, low, high, 4, {"max_days": 20, "min_margin_pct": .3})
+    assert result["estimate"]["skipped_windows"] == 0
+
+
+def test_meta_replay_without_real_filters_falls_back_to_generic_tick_and_omits(monkeypatch):
+    """Mismo escenario pero sin filtros reales disponibles (get_symbol_info
+    falla): cae al tick generico 0.0001 de antes, la ventana PEPE-like se omite
+    y se cuenta -- no rompe el analisis (arreglo 5d23260, sin cambios)."""
+    import pandas as pd
+    import numpy as np
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    n_candles = 300
+    base = 0.00001
+    prices = base * (1 + 0.01 * np.sin(np.linspace(0, 6.28, n_candles)))
+
+    class Client:
+        def get_historical_klines(self, *_args):
+            return pd.DataFrame({
+                "timestamp": pd.date_range("2026-01-01", periods=n_candles, freq="5min", tz="UTC"),
+                "open": prices, "high": prices * 1.001, "low": prices * 0.999, "close": prices,
+            })
+
+        def get_symbol_info(self, _symbol):
+            raise RuntimeError("sin acceso al publico en esta prueba")
+
+    class Scanner:
+        client = Client()
+
+    operator = MetaOperator(object(), object(), Scanner(), None, None, clock=lambda: 1_800_000_000)
+    operator._analysis_timing = {"replay_s": 0, "advisor_s": 0, "touch_signal_s": 0}
+    monkeypatch.setattr(module, "build_windows", lambda _candles, days, step: [
+        {"start_idx": 0, "end_idx": n_candles, "start": 1767225600}])
+
+    low, high = base * 0.95, base * 1.05
+    result = operator._evaluate({"symbol": "PEPEUSDT", "book": {"bid_price": base, "ask_price": base},
+        "sigma_24h_open": .1}, "simple", 100, 10, low, high, 4, {"max_days": 20, "min_margin_pct": .3})
+    assert result["estimate"]["skipped_windows"] == 1
+
+
+def _rotation_setup(liquidated_cells):
+    """Pieza perdedora (AAAUSDT) con una alternativa mejor (BBBUSDT); el cierre
+    verificado trae las comisiones y el P&L real de `liquidated_cells`."""
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self):
+            self.events = []
+        def _owned_grids(self, _goal_id):
+            return [{"grid_id": 7, "piece_type": "grid"}]
+        def _ledger(self, *args, **kwargs):
+            self.events.append((args, kwargs))
+
+    class DB:
+        def get_grid(self, _grid_id):
+            return {"id": 7, "status": "ACTIVE", "symbol": "AAAUSDT", "strategy": "simple",
+                    "capital_total": 40, "range_high": 110, "range_low": 90,
+                    "open_price": 100, "n_levels": 4}
+        def get_grid_levels(self, _grid_id):
+            return [{"held_qty": 1, "entry_price": 120, "price": 120}]
+
+    class Exchange:
+        def get_book_ticker(self, _symbol):
+            return {"bid_price": 100}
+
+    class Engine:
+        exchange = Exchange()
+        def __init__(self):
+            self.closed = []
+        def close_grid(self, grid_id, mode, close_reason=None):
+            self.closed.append((grid_id, mode, close_reason))
+            return {"status": "CLOSED", "liquidated_cells": liquidated_cells}
+
+    core, engine = Core(), Engine()
+    operator = MetaOperator(core, DB(), None, engine, None)
+    operator._add_piece_from_free_cash = lambda *_args: None
+    plan = {"candidates": [{"symbol": "AAAUSDT", "scanner_eligible": True, "eligible": True}],
+            "alternatives": [
+                {"symbol": "BBBUSDT", "strategy": "simple",
+                 "pieces": [{"piece_type": "grid", "symbol": "BBBUSDT"}],
+                 "estimate": {"evidence_sufficient": True, "probability": .9,
+                              "days_median": 2, "days_p90": 3}},
+                {"symbol": "AAAUSDT", "strategy": "simple",
+                 "pieces": [{"piece_type": "grid", "symbol": "AAAUSDT"}],
+                 "estimate": {"days_p90": 10}},
+            ]}
+    goal = {"id": 1, "target_usdt": 50, "config_snapshot": {}}
+    return core, engine, operator, plan, goal
+
+
+def test_review_rotation_accepts_and_reopens_when_verified_gain_covers_loss_and_fees():
+    # P&L real de la liquidación: pérdida pequeña (10 USDT) y comisiones registradas.
+    core, engine, operator, plan, goal = _rotation_setup(
+        [{"pnl_realized": -10, "buy_fee_usdt": 0.1, "sell_fee_usdt": 0.1}])
+    opened_calls = []
+    operator._open_replacement = lambda _goal, alternative, cash: (
+        opened_calls.append((alternative["symbol"], cash)) or {"grid_id": 99, "capital_usdt": cash})
+
+    result = operator._review_allocations(goal, {}, plan=plan)
+
+    assert result["decision"] == "cerrar_y_reasignar"
+    assert engine.closed == [(7, "liquidate", "META_OPERATOR_ROTATION")]
+    assert opened_calls == [("BBBUSDT", 40)]
+    close_events = [event for event in core.events if event[0][2] == "META_OPERATOR_CLOSE"]
+    assert close_events, "se espera un evento META_OPERATOR_CLOSE con las comisiones registradas"
+    details = close_events[0][0][3]
+    assert details["actual_costs"]["recorded_trade_fees_usdt"] == pytest.approx(0.2)
+    assert details["reallocation_allowed_after_verified_close"] is True
+    assert not any(event[0][2] == "META_OPERATOR_ROTATION_REJECTED" for event in core.events)
+
+
+def test_review_rotation_rejects_reopen_when_verified_loss_exceeds_expected_gain():
+    # P&L real de la liquidación: pérdida grande (100 USDT) que ninguna ganancia
+    # esperada cubre; no debe reabrir aunque haya una alternativa mejor.
+    core, engine, operator, plan, goal = _rotation_setup(
+        [{"pnl_realized": -100, "buy_fee_usdt": 0.3, "sell_fee_usdt": 0.3}])
+    operator._open_replacement = lambda *_args: pytest.fail("no debía reabrir")
+
+    result = operator._review_allocations(goal, {}, plan=plan)
+
+    assert result["decision"] == "cerrar_sin_reasignar"
+    assert engine.closed == [(7, "liquidate", "META_OPERATOR_ROTATION")]
+    close_events = [event for event in core.events if event[0][2] == "META_OPERATOR_CLOSE"]
+    assert close_events
+    details = close_events[0][0][3]
+    assert details["actual_costs"]["recorded_trade_fees_usdt"] == pytest.approx(0.6)
+    assert details["reallocation_allowed_after_verified_close"] is False
+    rejected_events = [event for event in core.events if event[0][2] == "META_OPERATOR_ROTATION_REJECTED"]
+    assert rejected_events, "se espera un evento META_OPERATOR_ROTATION_REJECTED"
+
+
+def test_review_once_opens_a_real_piece_on_the_fake_exchange_using_free_cash(tmp_path):
+    """Integración de punta a punta de 40c, parte C: una meta sin piezas tiene
+    efectivo libre; review_once debe abrir un grid de verdad en el exchange
+    falso (no un mock de apertura) y enlazarlo a la meta."""
+    import time
+    from types import SimpleNamespace
+
+    from database.db_manager import DBManager
+    from grid.engine import GridEngine
+    from grid.meta import MetaCore
+    from grid.meta_operator import MetaOperator
+    from tests.grid_fakes import FakeExchange
+
+    class TestExchange(FakeExchange):
+        testnet = True
+
+    exchange = TestExchange()
+    db = DBManager(f"sqlite:///{tmp_path / 'free_cash.sqlite'}")
+    db.add_or_reactivate_coin("XRPUSDT")
+    settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=1, alerts_enabled=False,
+        grid_api_token="", max_grids_simultaneos=5, usdt_por_grid=100,
+        capital_max_por_nivel_pct=.3, grid_min_step_pct=.003,
+        same_coin_sell_tolerance_pct=.05, scanner_timeout_seconds=5,
+        scanner_fee_pct=.1, scanner_min_spacing_pct=.8,
+        grid_min_margin_after_fees_pct=.7, scanner_history_days=30)
+    engine = GridEngine(db, exchange, settings)
+    core = MetaCore(db, exchange, engine, settings=settings)
+    core.start = lambda: None
+
+    class Scanner:
+        client = exchange
+        def clock(self): return time.monotonic()
+
+    operator = MetaOperator(core, db, Scanner(), engine, settings)
+    plan = {"candidates": [{"symbol": "XRPUSDT", "excluded_reason": None}],
+            "alternatives": [{"symbol": "XRPUSDT", "strategy": "simple", "reason": "efectivo libre",
+                "pieces": [{"piece_type": "grid", "symbol": "XRPUSDT", "strategy": "simple",
+                    "capital_usdt": 100, "n_levels": 4, "floor": 90, "ceiling": 110,
+                    "mid_at_plan": 100.005}],
+                "estimate": {"evidence_sufficient": True, "probability": .6}}]}
+    operator._build_plan = lambda _goal: plan
+
+    goal = core.create_goal(250, 10, profile="RAPIDO")
+    core.start_goal(goal["id"])
+
+    result = operator.review_once(goal["id"])
+
+    assert result["decision"] == "abrir_pieza_con_efectivo_libre"
+    linked = core._owned_grids(goal["id"])
+    assert len(linked) == 1
+    opened_grid = db.get_grid(linked[0]["grid_id"])
+    assert opened_grid["symbol"] == "XRPUSDT"
+    assert opened_grid["status"] in {"OPENING", "ACTIVE"}
+    assert float(opened_grid["capital_total"]) == pytest.approx(100)
+
+
+def test_full_api_driven_analysis_runs_real_scanner_advisor_and_replay_over_short_history(tmp_path):
+    """Fase 40c, parte C: análisis disparado por la API sin plan sintético --
+    `_build_plan` corre de verdad (Scanner, Advisor y replay reales) sobre un
+    historial corto (25 días de velas de 5 min), no un plan mockeado."""
+    import time
+    import numpy as np
+    import pandas as pd
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+
+    from database.db_manager import DBManager
+    from grid.engine import GridEngine
+    from grid.meta import MetaCore
+    from grid.meta_operator import MetaOperator
+    from tests.grid_fakes import FakeExchange
+    from api.routes import metas
+
+    n_candles = 25 * 288  # 25 días de velas de 5 min: historial corto, no los 540 días de producción.
+    prices = 100 * (1 + 0.03 * np.sin(np.linspace(0, 6.28 * 3, n_candles)))
+    candles = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n_candles, freq="5min", tz="UTC"),
+        "open": prices, "high": prices * 1.001, "low": prices * 0.999, "close": prices,
+    })
+
+    class TestExchange(FakeExchange):
+        testnet = True
+        def get_historical_klines(self, *_args, **_kwargs):
+            return candles
+        def get_symbol_info(self, _symbol):
+            # stepSize fino para que el redondeo de cantidad no colapse celdas
+            # de ~17 USDT a precio ~100 (edge case de notional, no lo que se prueba aquí).
+            return {"filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.01", "maxPrice": "100000", "tickSize": "0.01"},
+                {"filterType": "LOT_SIZE", "minQty": "0.01", "maxQty": "1000000", "stepSize": "0.01"},
+                {"filterType": "NOTIONAL", "minNotional": "1", "applyMinToMarket": True},
+            ]}
+
+    exchange = TestExchange()
+    db = DBManager(f"sqlite:///{tmp_path / 'real_analysis.sqlite'}")
+    db.add_or_reactivate_coin("XRPUSDT")
+    settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=1, alerts_enabled=False,
+        grid_api_token="test-token", max_grids_simultaneos=5, usdt_por_grid=100,
+        capital_max_por_nivel_pct=.3, grid_min_step_pct=.003,
+        same_coin_sell_tolerance_pct=.05, scanner_timeout_seconds=5,
+        scanner_fee_pct=.1, scanner_min_spacing_pct=.8,
+        grid_min_margin_after_fees_pct=.7, scanner_history_days=30)
+    engine = GridEngine(db, exchange, settings)
+    core = MetaCore(db, exchange, engine, settings=settings)
+    core.start = lambda: None
+
+    def advisor_fn(_symbol, _capital, _margin_pct, _max_days):
+        # Recomendación real del Advisor (no mockeamos _build_plan/_candidate_alternatives);
+        # la réplica/replay que sigue sí corre con el historial corto de verdad.
+        return {"recommended_floor": 90, "recommended_ceiling": 110, "suggested_grids": 4,
+                "suggested_strategy": "simple", "net_per_cycle_after_dust_usdt": 0.05}
+
+    class Scanner:
+        client = exchange
+        def scan(self, capital, with_sim=False):
+            return {"results": [{"symbol": "XRPUSDT", "eligible": True, "score": .9,
+                "sigma_24h_open": .05, "hard_filters": []}]}
+        def clock(self): return time.monotonic()
+
+    operator = MetaOperator(core, db, Scanner(), engine, settings, advisor=advisor_fn)
+
+    app = FastAPI()
+    app.include_router(metas.router, prefix="/api/metas")
+    app.state.meta_core, app.state.meta_operator = core, operator
+    app.state.settings, app.state.db = settings, db
+    app.state.grid_engine = engine
+    app.state.testnet_client = exchange
+
+    goal = core.create_goal(100, 10, profile="RAPIDO")
+    with TestClient(app, headers={"X-API-Token": "test-token"}) as client:
+        job = client.post(f"/api/metas/{goal['id']}/analysis").json()
+        assert "job_id" in job, job
+        state = None
+        for _ in range(200):
+            state = client.get(f"/api/metas/{goal['id']}/analysis/{job['job_id']}").json()
+            if state["status"] != "PENDING":
+                break
+            time.sleep(.05)
+        assert state["status"] == "COMPLETE", state
+
+    plan = state["plan"]
+    assert plan["candidates"][0]["symbol"] == "XRPUSDT"
+    assert len(plan["pieces"]) == 1
+    assert plan["pieces"][0]["symbol"] == "XRPUSDT"
+    # El replay real produjo al menos una ventana histórica (no un valor sintético fijo).
+    assert plan["estimated_time"]["rolling_windows"] >= 1
+    assert plan["piece_estimates"][0]["symbol"] == "XRPUSDT"
+
+
+def test_quantize_relative_range_steps_at_quarter_percent():
+    from grid.meta_operator import MetaOperator
+
+    operator = MetaOperator(object(), object(), object(), None, None)
+    # 0.25% de paso: valores dentro del mismo paso cuantizan igual.
+    assert operator._quantize_relative_range(0.899) == pytest.approx(0.9)
+    assert operator._quantize_relative_range(0.9008) == pytest.approx(0.9)
+    assert operator._quantize_relative_range(0.891) == pytest.approx(0.89)
+    assert operator._quantize_relative_range(0) == 0
+
+
+def test_advisor_cache_reanchors_on_small_drift_and_recalculates_past_threshold(monkeypatch):
+    """Fase 40c, parte B4.2: el Advisor se cachea en relativo al precio de
+    cuando se calculó; un movimiento de 0.1% reutiliza el caché, uno de 5% lo
+    invalida porque supera el umbral de reanclaje (3%)."""
+    import numpy as np
+    import pandas as pd
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    n_candles = 50
+    prices = np.full(n_candles, 100.0)
+
+    class Client:
+        price = 100.0
+        def get_historical_klines(self, *_args):
+            return pd.DataFrame({
+                "timestamp": pd.date_range("2026-01-01", periods=n_candles, freq="5min", tz="UTC"),
+                "open": prices, "high": prices * 1.001, "low": prices * 0.999, "close": prices})
+        def get_symbol_info(self, _symbol):
+            raise RuntimeError("sin filtros reales en esta prueba")
+        def get_book_ticker(self, _symbol):
+            return {"bid_price": self.price, "ask_price": self.price}
+
+    client = Client()
+    scanner = type("Scanner", (), {"client": client})()
+    calls = []
+
+    def advisor_fn(_symbol, _capital, _margin, _max_days):
+        calls.append(client.price)
+        return {"recommended_floor": 90, "recommended_ceiling": 110, "suggested_grids": 4,
+                "suggested_strategy": "simple", "net_per_cycle_after_dust_usdt": 0.05}
+
+    class DB:
+        def get_readiness(self, _symbol): return {}
+        def get_latest_vol_model_stats_forecast_at(self, *_args): return None
+        def get_vol_model_stats_rows(self, *_args): return []
+        def get_latest_prediction(self, *_args): return None
+
+    operator = MetaOperator(object(), DB(), scanner, None, None,
+                             advisor=advisor_fn, clock=lambda: 1_800_000_000)
+    operator._analysis_timing = {"advisor_s": 0, "replay_s": 0, "touch_signal_s": 0}
+    # Sin ventanas: esta prueba es sobre el caché del Advisor, no sobre el replay.
+    monkeypatch.setattr(module, "build_windows", lambda _candles, _days, _step: [])
+    cfg = {"max_days": 20, "min_margin_pct": .3}
+    row = {"symbol": "XRPUSDT", "eligible": True}
+
+    operator._candidate_alternatives(row, 100, 10, cfg)
+    assert len(calls) == 3  # tres márgenes; primera vez, todas llaman al Advisor real
+
+    client.price = 100.1  # +0.1%: dentro del umbral, reancla desde caché
+    operator._candidate_alternatives(row, 100, 10, cfg)
+    assert len(calls) == 3
+
+    client.price = 105  # +5%: supera el umbral de 3%; recalcula
+    operator._candidate_alternatives(row, 100, 10, cfg)
+    assert len(calls) == 6
+
+
+def test_replay_cache_reused_for_subquantum_price_move_and_missed_past_the_step(monkeypatch):
+    """Fase 40c, parte B4.1: la clave de replay usa el rango relativo cuantizado
+    en pasos de 0.25%; un movimiento menor al paso reutiliza el mismo resultado
+    y uno mayor obliga a recalcular."""
+    import numpy as np
+    import pandas as pd
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    n_candles = 300
+    prices = 100 + 2 * np.sin(np.linspace(0, 6.28, n_candles))
+    candles_frame = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n_candles, freq="5min", tz="UTC"),
+        "open": prices, "high": prices * 1.001, "low": prices * 0.999, "close": prices})
+
+    class Client:
+        def get_historical_klines(self, *_args):
+            return candles_frame
+        def get_symbol_info(self, _symbol):
+            raise RuntimeError("sin filtros reales en esta prueba")
+
+    class Scanner:
+        client = Client()
+
+    operator = MetaOperator(object(), object(), Scanner(), None, None, clock=lambda: 1_800_000_000)
+    operator._analysis_timing = {"advisor_s": 0, "replay_s": 0, "touch_signal_s": 0}
+    build_calls = []
+    real_build_windows = module.build_windows
+
+    def counting_build_windows(candles, days, step):
+        build_calls.append(1)
+        return real_build_windows(candles, days, step)
+    monkeypatch.setattr(module, "build_windows", counting_build_windows)
+    cfg = {"max_days": 20, "min_margin_pct": .3}
+
+    row_a = {"symbol": "XRPUSDT", "book": {"bid_price": 100.0, "ask_price": 100.02}}
+    operator._evaluate(row_a, "simple", 100, 10, 90, 110, 4, cfg)
+    assert len(build_calls) == 1
+
+    row_b = {"symbol": "XRPUSDT", "book": {"bid_price": 100.08, "ask_price": 100.1}}  # ~+0.08%
+    operator._evaluate(row_b, "simple", 100, 10, 90, 110, 4, cfg)
+    assert len(build_calls) == 1, "un movimiento bajo el paso de 0.25% debe reutilizar el replay cacheado"
+
+    row_c = {"symbol": "XRPUSDT", "book": {"bid_price": 101.0, "ask_price": 101.02}}  # +1%
+    operator._evaluate(row_c, "simple", 100, 10, 90, 110, 4, cfg)
+    assert len(build_calls) == 2, "un movimiento que cruza el paso de cuantización debe recalcular"
