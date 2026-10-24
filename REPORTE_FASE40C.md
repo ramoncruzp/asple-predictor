@@ -38,3 +38,28 @@ Dirigidas durante el trabajo: `tests/test_meta_operator.py`, `tests/test_meta_co
 Antes de cada commit se corrió la suite completa offline (`ASPLE_OFFLINE=1`, `-m "not live"`) en una carpeta nueva bajo `$env:TEMP`: **1498 passed, 1 skipped, 18 deselected** (sin pruebas marcadas `live`). Esa corrida también atrapó dos pruebas existentes que dejaron de ser válidas por los cambios de esta fase (ver discrepancias) y ya quedaron corregidas.
 
 No se desplegó ni se tocó S1. Se hicieron dos commits sin push: `2d1b442` (Fase 40c-1: B+C) y `897f0d1` (Fase 40c-2: A).
+
+## Fase 40c-3 — defectos de presentación (prueba de QA de Ramón en S1)
+
+Ramón probó la pantalla en S1 con `4256f5e` ya puesto (el refresco automático ya no borra el análisis en curso ni el resultado; retoma la consulta al recargar). El análisis con caché tardó ~3 min, llegó el aviso de Telegram y se vieron Iniciar y la cuenta regresiva — la pantalla funciona. Encontró 10 defectos de presentación, todos corregidos en `3a513dc`:
+
+1. **Título ambiguo.** "Meta #1 · 100.00 → 10.00 USDT" se leía como si la meta fuera bajar a 10. Ahora muestra capital → capital+objetivo con el delta: "100 → 110 USDT (+10)" (o "(+10 %)" si la meta se creó en porcentaje).
+2. **σ en blanco.** La tabla de candidatas leía la clave `sigma_24h`, pero el plan real trae `sigma_24h_open` para las monedas incluidas (`sigma_24h` solo aparece en las excluidas, que ya no muestran esa columna). Corregido para leer la clave real y mostrarla como porcentaje, igual que el resto de la app (`sigma_24h_open * 100`).
+3. **Libro en inglés.** `book_state` ("two_sided") se traduce a "Dos lados" / "Un solo lado" / "Sin datos".
+4. **Precio de PEPE truncado.** Piso/techo usaban `toFixed(6)`, que redondea 0,00000437 a "0,000004". Se expuso `formatPrice` (cifras significativas, ya existía en `app.js` para el Advisor) en `window.ASPLEFormat` y se usa en la tabla del plan.
+5. **Falta la columna de préstamos.** Cada pieza ya trae `loans_pct` (50 % para Smart, 0 para el resto); se agregó la columna al plan.
+6. **"Cortadas por pérdida" en 0 cuando piece_estimates decía 3.** Causa real encontrada en el backend: `combine_aligned_replays` (usado para carteras de más de una pieza) nunca calculaba `loss_cut_windows` a nivel de cartera — ese campo simplemente faltaba en el `estimate` combinado. Se corrigió para que el total de cartera sea la suma real de `piece_estimates`, igual que lo que ya imprime el medidor en `piece_estimates_summary`.
+7. **Avisos incompletos.** La pantalla solo mostraba avisos calculados en el cliente (poco probable, motivo de capital, etc.), no los `warnings` que ya trae el plan desde el backend (por ejemplo, "El replay no modela los préstamos de grids Smart…"). Ahora se muestran todos. También se agregó la columna de estadísticas de modelo por candidata (readiness y verificaciones efectivas) que pedía la §8 del espec y que faltaba.
+8. **Tabla de límites cortada con scrollbar blanco.** La clase global `.data-table` fija `min-width:680px`; para una tabla de 3 columnas eso sobraba y forzaba un desbordamiento horizontal con el scrollbar sin estilo del navegador. Se quitó el `min-width` específicamente para `.metas-limits-table` y se le dio estilo oscuro al scrollbar de `.metas-table-scroll` por si alguna tabla con más columnas sí necesita desplazarse en 390 px.
+9. **Radios encima de su texto.** `.metas-create-form label{display:grid}` aplicaba a TODOS los labels del formulario, incluidos los de los radios dentro de los fieldsets, apilando el radio sobre el texto. Se acotó esa regla y se puso a los labels de radio en línea (`inline-flex`). Se agregó la leyenda "Meta (ganancia objetivo)" al fieldset que no tenía etiqueta.
+10. **Perfil elegido sin resaltar.** La tabla de límites ahora marca con un atributo `data-selected-profile` la columna del perfil elegido, que una regla CSS resalta; se actualiza al cambiar el radio.
+
+De paso se encontró y corrigió una **mojibake real** (no un falso positivo del guardia de `frontend/`): en `grid/meta_operator.py`, el texto de aviso de préstamos tenía bytes `?` literales en vez de "é"/"ó" ("pr?stamos", "estimaci?n"). Se revisaron los demás archivos Python tocados en esta fase y no se encontró otro caso.
+
+**Decisión de Ramón sobre el vencimiento del plan:** subir a 10 minutos. `plan_ttl_seconds` pasa de 300 a 600 por defecto y queda editable por perfil (mismo mecanismo que `plan_price_drift_pct`); la verificación de deriva de precio al Iniciar (1 %) no cambia.
+
+### Pruebas (40c-3)
+
+10 pruebas nuevas: backend (`test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates`, confirmando con mutación el bug real del punto 6) y Playwright (`test_plan_details_show_translated_states_significant_prices_loans_and_warnings` para los puntos 2, 3, 4, 5, 6 y 7; `test_profile_limits_table_highlights_selected_column` para el punto 10; `test_create_form_limits_table_has_no_overflow_at_desktop_or_mobile` para el punto 8, verificado a 1440 px y 390 px; y una extensión de `test_create_meta_then_appears_as_draft` para el punto 1). Confirmadas con mutación donde aplica (puntos 6 y 8).
+
+Suite completa offline antes del commit: **1502 passed, 1 skipped, 18 deselected**. No se desplegó ni se tocó S1. Commit sin push: `3a513dc` ("Fase 40c-3: defectos de la pantalla Metas").
