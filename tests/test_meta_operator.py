@@ -368,6 +368,64 @@ def test_plan_search_can_choose_two_distinct_coins_with_bounded_allocation(monke
         assert item["bot_windows_bought"] is None
 
 
+def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
+    """Fase 40c-3, defecto 6: combine_aligned_replays no sabe de "loss_cut" y
+    el total de cartera quedaba en 0 aunque las piezas sí tuvieran ventanas
+    cortadas por pérdida (ej. PEPE 2 + JUP 1 = 3, pero la pantalla mostraba 0).
+    El total a nivel de plan debe coincidir con la suma real de las piezas."""
+    from grid.meta_operator import MetaOperator
+
+    class DB:
+        def get_active_coins(self): return [{"symbol": "AAAUSDT"}, {"symbol": "BBBUSDT"}]
+        def get_readiness(self, _symbol): return {}
+        def get_latest_vol_model_stats_forecast_at(self, *_args): return None
+        def get_vol_model_stats_rows(self, *_args): return []
+        def get_latest_prediction(self, *_args): return None
+
+    class Core:
+        def _ledger(self, *_args, **_kwargs): pass
+
+    class Client:
+        def get_book_ticker(self, _symbol): return {"bid_price": 100, "ask_price": 100.1}
+
+    class Scanner:
+        client = Client()
+        def scan(self, **_kwargs):
+            return {"results": [{"symbol": "AAAUSDT", "eligible": True, "score": .9,
+                "sigma_24h_open": .1}, {"symbol": "BBBUSDT", "eligible": True,
+                "score": .8, "sigma_24h_open": .2}]}
+
+    operator = MetaOperator(Core(), DB(), Scanner(), None, None)
+    loss_cuts = {"AAAUSDT": 2, "BBBUSDT": 1}
+
+    def options(row, capital, target, _cfg):
+        piece = {"symbol": row["symbol"], "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": capital, "n_levels": 4, "floor": 90, "ceiling": 110,
+            "mid_at_plan": 100, "margin_pct": .7, "loans_pct": 0}
+        outcome = [{"window_start": f"2026-01-{day:02d}", "pnl_usdt": capital * .12,
+            "days": 10, "drawdown_pct": 1, "step_days": 7} for day in (1, 8, 15, 22, 29, 36, 43)]
+        estimate = {"probability": .7, "days_median": 10, "days_p10": 10, "days_p90": 10,
+            "worst_drawdown_pct": 1, "rolling_windows": 7, "independent_windows": 2,
+            "evidence_sufficient": False, "low_likelihood": False,
+            "loss_cut_windows": loss_cuts[row["symbol"]]}
+        return [{"symbol": row["symbol"], "strategy": "simple", "pieces": [piece],
+            "estimate": estimate, "replay_probability": estimate["probability"],
+            "window_results": outcome, "signals_used": [], "signals_omitted": [],
+            "shadow_probability": estimate["probability"], "shadow_signals": [], "advisor": {},
+            "reason": "fake"}], []
+
+    monkeypatch.setattr(operator, "_candidate_alternatives", options)
+    monkeypatch.setattr(operator, "_control_plan", lambda _best, capital: {"capital_usdt": capital})
+    plan = operator._build_plan({"id": 5, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 10, "config_snapshot": {"capital_per_coin_pct": 70,
+        "max_grids": 4, "max_bots": 8, "max_days": 20, "min_margin_pct": .3,
+        "signal_weights": {}, "signal_logit_cap": 1}})
+    assert len(plan["pieces"]) == 2
+    piece_total = sum(item["loss_cut_windows"] for item in plan["piece_estimates"])
+    assert piece_total == 3
+    assert plan["estimated_time"]["loss_cut_windows"] == piece_total
+
+
 def test_advisor_signal_comes_from_advisor_result_not_scanner_structure(monkeypatch):
     from grid.meta_operator import MetaOperator
     import grid.meta_operator as module

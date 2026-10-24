@@ -79,7 +79,7 @@ function updateAgeLabel(node, timestamp) {
   if (node._ageTimer) clearInterval(node._ageTimer);
   node._ageTimer = setInterval(update, 60000);
 }
-window.ASPLEFormat = { parseApiTime, formatDate, formatDateTime, formatNumber, formatUsdt, statusLabel, updateAgeLabel, tooltip: content => tooltip(content) };
+window.ASPLEFormat = { parseApiTime, formatDate, formatDateTime, formatNumber, formatUsdt, formatPrice, statusLabel, updateAgeLabel, tooltip: content => tooltip(content) };
 const percent = (value, digits = 1) => value == null ? '\u2014' : Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(digits)}%` : '\u2014';
 const money = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '\u2014' : `$${formatNumber(value, digits)}`;
 function formatIndicator(value) {

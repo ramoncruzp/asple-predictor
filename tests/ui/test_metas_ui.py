@@ -60,6 +60,43 @@ SYNTHETIC_PLAN = {
 }
 
 
+QA_PLAN = {
+    "candidates": [{"symbol": "XRPUSDT", "sigma_24h_open": 0.0234, "score": 0.81,
+                     "book_state": "two_sided",
+                     "model_statistics": {"readiness": "lista", "effective_verifications": 12.0,
+                                          "complete": True}, "excluded_reason": None},
+                    {"symbol": "ADAUSDT", "excluded_reason": "fuera de banda de sigma"}],
+    "pieces": [{"symbol": "PEPEUSDT", "strategy": "simple", "piece_type": "grid",
+                "capital_usdt": 50, "n_levels": 4, "floor": 0.00000437, "ceiling": 0.00000441,
+                "mid_at_plan": 0.00000439, "margin_pct": 0.5, "loans_pct": 0},
+               {"symbol": "JUPUSDT", "strategy": "smart", "piece_type": "grid",
+                "capital_usdt": 50, "n_levels": 4, "floor": 0.35, "ceiling": 0.45,
+                "mid_at_plan": 0.40, "margin_pct": 0.7, "loans_pct": 50}],
+    "estimated_time": {"probability_replay": 0.0, "probability_adjusted": 0.03,
+                        "median_progress_pct": 35.0, "days_median": None,
+                        "worst_drawdown_pct": 20.1, "worst_loss_vs_capital_pct": 17.4,
+                        "rolling_windows": 23, "independent_windows": 7,
+                        "loss_cut_windows": 3, "skipped_windows": 1,
+                        "skipped_reason": "ventana no simulable", "low_likelihood": True,
+                        "evidence_warning": None},
+    "piece_estimates": [{"symbol": "PEPEUSDT", "strategy": "simple", "loss_cut_windows": 2,
+                          "skipped_windows": 0, "skipped_reason": None,
+                          "bot_windows_bought": None, "bot_windows_sold": None, "rolling_windows": 10},
+                         {"symbol": "JUPUSDT", "strategy": "smart", "loss_cut_windows": 1,
+                          "skipped_windows": 0, "skipped_reason": None,
+                          "bot_windows_bought": None, "bot_windows_sold": None, "rolling_windows": 10}],
+    "combinations_evaluated": [], "advisor_comparisons": [],
+    "capital_usage": {"reason": None}, "signals_used": [], "signals_omitted": [],
+    "warnings": ["El replay no modela los préstamos de grids Smart; la estimación no incluye capital prestado."],
+    "control_plan": {"type": "control", "symbol": "PEPEUSDT", "capital_usdt": 100, "strategy": "smart",
+        "range_low": 0.00000437, "range_high": 0.00000441, "n_levels": 4, "opened": False},
+    "target_usdt": 10.0, "loss_max_usdt": 18.0, "deadline_days": 20,
+    "selection_reason": "fake", "shadow_decision": {"symbol": "PEPEUSDT", "strategy": "simple",
+        "probability": 0.03, "signals": []},
+    "probability_under_25_pct": True, "historical_evidence_note": None,
+}
+
+
 @dataclass
 class MetasServer:
     url: str
@@ -174,7 +211,10 @@ def test_create_meta_then_appears_as_draft(metas_page):
     page.click('[name="profile"][value="RAPIDO"]')
     page.click('#meta-create-form button[type="submit"]')
     page.wait_for_selector(".metas-draft")
-    assert "100" in page.locator(".metas-draft").first.inner_text()
+    title = page.locator(".metas-draft").first.inner_text()
+    # Fase 40c-3, defecto 1: "100 -> 10 USDT" se leía como si la meta fuera
+    # bajar a 10; debe mostrar capital -> capital+objetivo con el delta.
+    assert "100 → 110 USDT (+10)" in title
 
 
 def test_analysis_completes_and_start_opens_a_grid(metas_page):
@@ -254,3 +294,66 @@ def test_mobile_viewport_390_renders_without_horizontal_overflow(chromium_browse
         assert scroll_width <= client_width + 1
     finally:
         context.close()
+
+
+def test_plan_details_show_translated_states_significant_prices_loans_and_warnings(metas_page):
+    """Fase 40c-3, defectos 3, 4, 5, 6, 7: traducción del libro, precio de PEPE
+    con cifras significativas, columna de préstamos, total real de ventanas
+    cortadas por pérdida y todos los avisos del plan (incluido el de
+    préstamos de grids Smart)."""
+    page, server = metas_page
+    goal = server.core.create_goal(100, 10, profile="RAPIDO")
+    server.operator._build_plan = lambda _goal: {**QA_PLAN, "meta_id": goal["id"]}
+    page.goto(f"{server.url}/#metas")
+    page.wait_for_selector(f'[data-analyze="{goal["id"]}"]')
+    page.click(f'[data-analyze="{goal["id"]}"]')
+    page.wait_for_selector('[data-start-plan]', timeout=15000)
+    content = page.locator(f'[data-analysis-slot="{goal["id"]}"]').inner_text()
+
+    assert "Dos lados" in content
+    assert "two_sided" not in content
+    # Defecto 2: sigma_24h_open (0.0234) con su unidad, no "—".
+    assert "2.34%" in content
+    # 0.00000437 / 0.00000441 no deben colapsar a "0.000004" (pierde el precio real).
+    assert "437" in content
+    assert "441" in content
+    assert "0.000004\n" not in content and "0.000004 " not in content
+    # Columna de préstamos: JUPUSDT Smart va con 50 %.
+    assert "50" in content
+    # El total de "cortadas por pérdida" debe ser la suma real de las piezas (2+1=3).
+    assert "3" in content
+    # Aviso del plan sobre préstamos de grids Smart, no solo los avisos calculados en el cliente.
+    assert "préstamos de grids Smart" in content
+
+
+def test_profile_limits_table_highlights_selected_column(metas_page):
+    """Fase 40c-3, defecto 10: la tabla de límites resalta la columna del
+    perfil elegido, no solo el radio."""
+    page, server = metas_page
+    page.goto(f"{server.url}/#metas")
+    table = page.locator(".metas-limits-table")
+    page.wait_for_selector(".metas-limits-table")
+    assert table.get_attribute("data-selected-profile") == "RAPIDO"
+    page.click('[name="profile"][value="PRUDENTE"]')
+    assert table.get_attribute("data-selected-profile") == "PRUDENTE"
+
+
+def test_create_form_limits_table_has_no_overflow_at_desktop_or_mobile(chromium_browser, metas_live_server):
+    """Fase 40c-3, defecto 8: la tabla de límites se cortaba a la derecha con
+    un scrollbar blanco sin estilo; no debe necesitar scroll en ninguno de los
+    dos anchos."""
+    for width, height in ((1440, 1000), (390, 760)):
+        context = chromium_browser.new_context(viewport={"width": width, "height": height})
+        page = context.new_page()
+        page.route("**/*", lambda route: route.continue_() if (
+            "127.0.0.1" in route.request.url or "localhost" in route.request.url)
+            else route.fulfill(status=200, content_type="text/plain", body=""))
+        try:
+            page.goto(f"{metas_live_server.url}/#metas")
+            page.wait_for_selector(".metas-table-scroll")
+            wrap = page.locator(".metas-table-scroll").first
+            scroll_width = wrap.evaluate("el => el.scrollWidth")
+            client_width = wrap.evaluate("el => el.clientWidth")
+            assert scroll_width <= client_width + 1, f"overflow at width={width}"
+        finally:
+            context.close()

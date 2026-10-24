@@ -148,7 +148,7 @@ def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready):
 
 class MetaOperator:
     """Planes de cinco minutos, análisis asíncrono y revisiones de quince minutos."""
-    PLAN_TTL_SECONDS = 300
+    PLAN_TTL_SECONDS = 600  # Fase 40c-3: Ramón subió el vencimiento de 5 a 10 min; editable por perfil (plan_ttl_seconds)
     # Fase 40c, parte B4: el precio se mueve continuamente y una clave de caché
     # redondeada a 8 decimales casi nunca se repite. Se cuantiza el rango
     # relativo en pasos de 0.25% del precio: un movimiento intradía menor a eso
@@ -296,9 +296,10 @@ class MetaOperator:
             plan_id = uuid.uuid4().hex
             now = self.clock()
             seconds = round(time.perf_counter() - started, 4)
+            ttl = int((goal.get("config_snapshot") or {}).get("plan_ttl_seconds", self.PLAN_TTL_SECONDS))
             data.update({"plan_id": plan_id, "meta_id": int(goal["id"]),
-                         "created_at": now, "expires_at": now + self.PLAN_TTL_SECONDS,
-                         "expires_in_seconds": self.PLAN_TTL_SECONDS,
+                         "created_at": now, "expires_at": now + ttl,
+                         "expires_in_seconds": ttl,
                          "analysis_seconds": seconds})
             with self._lock:
                 self._plans[plan_id] = data
@@ -531,6 +532,10 @@ class MetaOperator:
                         "bot_windows_sold": item["estimate"].get("bot_windows_sold"),
                         "rolling_windows": item["estimate"].get("rolling_windows", 0)}
                         for item in combination]
+                    # combine_aligned_replays sólo alinea ventanas compartidas por fecha y no
+                    # sabe de "loss_cut"; el total de cartera se toma de la suma por pieza para
+                    # que coincida con lo que ve el medidor (piece_estimates_summary).
+                    estimate["loss_cut_windows"] = sum(item["loss_cut_windows"] for item in piece_estimates)
                     row = {"symbol": pieces[0]["symbol"], "symbols": symbols,
                         "strategy": ",".join(item["strategy"] for item in combination),
                         "pieces": pieces, "estimate": estimate, "piece_estimates": piece_estimates,
@@ -633,7 +638,7 @@ class MetaOperator:
                         - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]
                         - self._analysis_timing["touch_signal_s"]), 3),
                     "control_advisor": round(control_seconds, 3)},
-                "warnings": (["El replay no modela los pr?stamos de grids Smart; la estimaci?n no incluye capital prestado."]
+                "warnings": (["El replay no modela los préstamos de grids Smart; la estimación no incluye capital prestado."]
                     if any(piece["strategy"] == "smart" for piece in pieces) else []),
                 "target_usdt": float(goal["target_usdt"]), "loss_max_usdt": capital * float(cfg.get("max_loss_pct", 0)) / 100,
                 "deadline_days": int(cfg.get("max_days", 0)),

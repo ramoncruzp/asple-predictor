@@ -35,6 +35,26 @@
     if (!Number.isFinite(num) || Math.abs(num) < 0.005) return 'pnl-neutral';
     return num > 0 ? 'pnl-positive' : 'pnl-negative';
   }
+  // Precio con cifras significativas (no trunca monedas de precio muy bajo como PEPE).
+  function fmtPrice(value) { return window.ASPLEFormat?.formatPrice?.(value) ?? fmtMoney(value, 6); }
+  const BOOK_STATE_LABELS = { two_sided: 'Dos lados', one_sided: 'Un solo lado' };
+  function bookStateLabel(value) { return BOOK_STATE_LABELS[value] || 'Sin datos'; }
+  function modelStatsLabel(stats) {
+    if (!stats) return 'Sin datos';
+    const readiness = stats.readiness ? esc(stats.readiness) : 'sin estado';
+    const verifications = stats.effective_verifications != null ? Number(stats.effective_verifications).toFixed(1) : '0';
+    return `${readiness} · ${verifications} verif.`;
+  }
+  // "100 -> 110 USDT (+10)" o "(+10 %)" si la meta se creó en porcentaje; evita
+  // que "100 -> 10 USDT" se lea como si la meta fuera bajar a 10.
+  function goalTitle(goal) {
+    const capital = Number(goal.capital_initial);
+    const targetUsdt = Number(goal.target_usdt);
+    const endTotal = capital + targetUsdt;
+    const deltaLabel = goal.target_input_type === 'PCT'
+      ? `+${esc(goal.target_input_value)}%` : `+${fmtMoney(targetUsdt, 0)}`;
+    return `${fmtMoney(capital, 0)} → ${fmtMoney(endTotal, 0)} USDT (${deltaLabel})`;
+  }
 
   async function apiGet(path) {
     const base = (window.API_BASE || window.location.origin);
@@ -82,7 +102,7 @@
   function closeDialog() { const modal = document.getElementById('meta-action-dialog'); if (modal) modal.hidden = true; }
 
   const PROFILE_LABELS = { PRUDENTE: 'Prudente', RAPIDO: 'Rápido' };
-  function profileLimitsTable(profiles) {
+  function profileLimitsTable(profiles, selected) {
     const rows = [
       ['Pérdida máxima', p => `−${fmtPct(p.max_loss_pct, 0)}`],
       ['Aviso (75 %)', p => `−${fmtPct(p.warning_loss_pct, 1)}`],
@@ -92,8 +112,9 @@
       ['Préstamos (tope)', p => fmtPct(p.loan_cap_pct, 0)],
     ];
     const cols = Object.keys(PROFILE_LABELS).filter(k => profiles[k]);
-    return `<div class="metas-table-scroll"><table class="data-table metas-limits-table"><thead><tr><th></th>${cols.map(c => `<th>${PROFILE_LABELS[c]}</th>`).join('')}</tr></thead>
-      <tbody>${rows.map(([label, fn]) => `<tr><td>${label}</td>${cols.map(c => `<td>${fn(profiles[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    return `<div class="metas-table-scroll"><table class="data-table metas-limits-table" data-selected-profile="${esc(selected || '')}">
+      <thead><tr><th></th>${cols.map(c => `<th data-profile-col="${c}">${PROFILE_LABELS[c]}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(([label, fn]) => `<tr><td>${label}</td>${cols.map(c => `<td data-profile-col="${c}">${fn(profiles[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
 
   // -- Zone 1: create ----------------------------------------------------
@@ -111,15 +132,17 @@
       <form id="meta-create-form" class="metas-create-form">
         <label>Capital (USDT)<input name="capital_usdt" type="number" min="1" step="0.01" value="100" required></label>
         <fieldset class="metas-target-type">
+          <legend class="metas-field-legend">Meta (ganancia objetivo)</legend>
           <label><input type="radio" name="target_type" value="USDT" checked> USDT</label>
           <label><input type="radio" name="target_type" value="PCT"> %</label>
-          <input name="target_value" type="number" min="0.01" step="0.01" value="10" required>
+          <input name="target_value" type="number" min="0.01" step="0.01" value="10" required aria-label="Valor de la meta">
         </fieldset>
         <fieldset class="metas-profile-choice">
+          <legend class="metas-field-legend">Perfil</legend>
           <label><input type="radio" name="profile" value="PRUDENTE"> Prudente</label>
           <label><input type="radio" name="profile" value="RAPIDO" checked> Rápido</label>
         </fieldset>
-        ${profileLimitsTable(profiles)}
+        ${profileLimitsTable(profiles, 'RAPIDO')}
         <button type="submit" class="button primary">Crear meta</button>
         <p class="metas-form-error" role="alert"></p>
       </form>
@@ -129,6 +152,10 @@
   function wireCreateForm(container) {
     const form = container.querySelector('#meta-create-form');
     if (!form) return;
+    form.querySelectorAll('[name="profile"]').forEach(radio => radio.addEventListener('change', () => {
+      const table = form.querySelector('.metas-limits-table');
+      if (table) table.dataset.selectedProfile = radio.value;
+    }));
     form.addEventListener('submit', async event => {
       event.preventDefault();
       const errorBox = form.querySelector('.metas-form-error');
@@ -153,7 +180,7 @@
   function renderDraftCard(goal) {
     return `<div class="card metas-draft" data-meta-id="${goal.id}">
       <div class="metas-draft-head">
-        <h3>Meta #${goal.id} · ${fmtMoney(goal.capital_initial)} → ${fmtMoney(goal.target_usdt)} USDT · ${PROFILE_LABELS[goal.profile] || goal.profile}</h3>
+        <h3>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile}</h3>
         <div class="metas-draft-actions">
           <button type="button" class="button primary" data-analyze="${goal.id}">Analizar</button>
           <button type="button" class="button secondary" data-discard="${goal.id}">Descartar</button>
@@ -211,25 +238,27 @@
 
   function candidatesTable(candidates) {
     const rows = (candidates || []).map(c => {
-      if (c.excluded_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="3">Excluida: ${esc(c.excluded_reason)}</td></tr>`;
-      return `<tr><td>${esc(c.symbol)}</td><td>${c.sigma_24h != null ? Number(c.sigma_24h).toFixed(4) : '—'}</td>
-        <td>${c.score != null ? Number(c.score).toFixed(2) : '—'}</td><td>${esc(c.book_state || '—')}</td></tr>`;
+      if (c.excluded_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="4">Excluida: ${esc(c.excluded_reason)}</td></tr>`;
+      const sigma = c.sigma_24h_open ?? c.sigma_24h;
+      return `<tr><td>${esc(c.symbol)}</td><td>${sigma != null ? `${(Number(sigma) * 100).toFixed(2)}%` : '—'}</td>
+        <td>${c.score != null ? Number(c.score).toFixed(2) : '—'}</td><td>${bookStateLabel(c.book_state)}</td>
+        <td>${modelStatsLabel(c.model_statistics)}</td></tr>`;
     }).join('');
-    return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Símbolo</th><th>σ</th><th>Score Scanner</th><th>Libro</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Símbolo</th><th>σ</th><th>Score Scanner</th><th>Libro</th><th>Modelo</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function piecesTable(pieces) {
-    return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>Capital</th><th>Piso</th><th>Techo</th><th>Niveles</th><th>Margen</th></tr></thead>
+    return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>Capital</th><th>Piso</th><th>Techo</th><th>Niveles</th><th>Margen</th><th>Préstamos</th></tr></thead>
       <tbody>${(pieces || []).map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.piece_type === 'individual_bot_grid' ? 'bot' : p.strategy)}</td>
-        <td>${fmtMoney(p.capital_usdt)} USDT</td><td>${fmtMoney(p.floor, 6)}</td><td>${fmtMoney(p.ceiling, 6)}</td>
-        <td>${esc(p.n_levels)}</td><td>${fmtPct(p.margin_pct)}</td></tr>`).join('')}</tbody></table></div>`;
+        <td>${fmtMoney(p.capital_usdt)} USDT</td><td>${fmtPrice(p.floor)}</td><td>${fmtPrice(p.ceiling)}</td>
+        <td>${esc(p.n_levels)}</td><td>${fmtPct(p.margin_pct)}</td><td>${p.loans_pct ? fmtPct(p.loans_pct) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function renderPlanResult(container, metaId, plan) {
     const slot = container.querySelector(`[data-analysis-slot="${metaId}"]`);
     if (!slot) return;
     const est = plan.estimated_time || {};
-    const expiresAtMs = Date.now() + (plan.expires_in_seconds || 300) * 1000;
+    const expiresAtMs = Date.now() + (plan.expires_in_seconds || 600) * 1000;
     const warnings = [];
     if (est.low_likelihood) warnings.push('⚠ "Poco probable" (probabilidad bajo 25 %).');
     if (plan.capital_usage?.reason) warnings.push(`ℹ ${esc(plan.capital_usage.reason)}`);
@@ -237,6 +266,8 @@
     if (!est.probability_replay && est.rolling_windows > 0) {
       warnings.push(`⚠ Ninguna alternativa alcanzó la meta en el historial; esta es la que más se acercó (${fmtPct(est.median_progress_pct, 1)}).`);
     }
+    // Avisos propios del plan (ej. "el replay no modela préstamos de grids Smart").
+    (plan.warnings || []).forEach(w => warnings.push(`⚠ ${esc(w)}`));
     slot.innerHTML = `
       <div class="metas-plan-section"><h4>Candidatas</h4>${candidatesTable(plan.candidates)}</div>
       <div class="metas-plan-section"><h4>Plan propuesto</h4>${piecesTable(plan.pieces)}</div>
@@ -256,7 +287,7 @@
       </div>
       <div class="metas-plan-actions">
         <button type="button" class="button primary" data-start-plan="${plan.plan_id}" data-meta-id="${metaId}">Iniciar con este plan</button>
-        <span class="muted">Este plan vence en <b data-plan-countdown>5:00</b></span>
+        <span class="muted">Este plan vence en <b data-plan-countdown>…</b></span>
       </div>
       <p class="metas-plan-expired hidden">El plan venció; analiza de nuevo.</p>`;
     const countdownEl = slot.querySelector('[data-plan-countdown]');
@@ -378,7 +409,7 @@
       ? `<p class="metas-blocked-note">⏸ Piezas bloqueadas: ${valuation.status === 'DESCONOCIDO' ? 'valoración DESCONOCIDO' : 'aviso del 75 % del límite de pérdida'}.</p>` : '';
     return `<div class="card metas-active" data-meta-id="${goal.id}">
       <div class="metas-active-head">
-        <h2>Meta #${goal.id} · ${fmtMoney(goal.capital_initial)} → ${fmtMoney(goal.target_usdt)} USDT · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${esc(goal.status)}</h2>
+        <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${esc(goal.status)}</h2>
         <button type="button" class="button secondary" data-cancel-op="${goal.id}">Cancelar operación</button>
       </div>
       ${statusNote}

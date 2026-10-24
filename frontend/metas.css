@@ -8,8 +8,21 @@
 .metas-create-form input{padding:8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px}
 .metas-target-type,.metas-profile-choice{display:flex;gap:14px;align-items:center;border:none;padding:0;margin:0;flex-wrap:wrap}
 .metas-target-type input[type="number"]{width:120px;max-width:100%}
+/* Las etiquetas de radio dentro de estos fieldsets no deben heredar el
+   display:grid de .metas-create-form label (eso ponía el radio arriba del
+   texto); van en línea, radio y texto juntos. */
+.metas-target-type label,.metas-profile-choice label{display:inline-flex;align-items:center;gap:6px}
+.metas-field-legend{flex-basis:100%;width:100%;padding:0;margin:0 0 2px;color:var(--muted);font-size:12px}
 .metas-table-scroll{overflow-x:auto;max-width:100%}
-.metas-limits-table{margin:8px 0;font-size:12px}
+.metas-table-scroll::-webkit-scrollbar{height:8px}
+.metas-table-scroll::-webkit-scrollbar-track{background:var(--bg)}
+.metas-table-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+/* La tabla global .data-table fija min-width:680px; para la tabla de límites
+   (3 columnas) eso forzaba desbordamiento y un scrollbar sin estilo. */
+.metas-limits-table{margin:8px 0;font-size:12px;min-width:0;width:100%}
+.metas-limits-table [data-profile-col]{transition:background .15s}
+.metas-limits-table[data-selected-profile="PRUDENTE"] [data-profile-col="PRUDENTE"],
+.metas-limits-table[data-selected-profile="RAPIDO"] [data-profile-col="RAPIDO"]{background:var(--surface2);font-weight:700}
 .metas-form-error{color:var(--red)}
 .metas-drafts{display:flex;flex-direction:column;gap:12px}
 .metas-draft-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
