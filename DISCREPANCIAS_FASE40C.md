@@ -1,0 +1,23 @@
+# Fase 40c — Discrepancias y trabajo pendiente
+
+La suite completa quedó verde (1498 passed, 1 skipped, 18 deselected), pero eso no certifica el flujo integral en Testnet real ni en S1. Estas diferencias quedan abiertas.
+
+1. **`grid/meta_operator.py` mezcla B y soporte de A en el mismo commit.** Las correcciones B1/B3/B4 y las adiciones que soportan la pantalla (bitácora de análisis terminado/fallado con `analysis_seconds`/`expires_in_seconds`, `compare_control`/`_replay_control`) viven en los mismos métodos del mismo archivo. Separarlas en dos commits habría exigido partir manualmente los mismos bloques de código, con riesgo de dejar un commit intermedio que no corre; se optó por commitear el archivo completo en `2d1b442` (40c-1) en vez de en `897f0d1` (40c-2), aunque parte de su contenido es soporte de A.
+
+2. **B4 no se verificó con una segunda corrida real de `--con-cache` en S1.** La corrección (cuantización del rango relativo, Advisor reanclado al precio con umbral de 3 %) está probada con pruebas unitarias/integradas que simulan movimientos de precio controlados (0,1 % reutiliza caché; 5 % recalcula), pero no se corrió el medidor dos veces seguidas contra Testnet/S1 para confirmar que la segunda corrida trae "casi todos los replays desde caché" como pidió Ramón. Documentado como pendiente en `DECISIONES_MODO_META.md` §16.
+
+3. **El umbral de reanclaje del Advisor (3 %) y el paso de cuantización del replay (0,25 %) son valores fijos, no configurables por perfil.** Se eligieron por ser los que pidió Ramón en el pedido de B4; no hay evidencia de que sean los óptimos para todas las monedas (una moneda muy volátil podría necesitar un paso mayor para que el caché sirva, o uno menor para no perder precisión). Queda para una fase futura si se observan recálculos excesivos o insuficientes en S1.
+
+4. **Las entradas viejas del caché del Advisor (anteriores a esta fase, ya guardadas en `meta_analysis_cache` de una corrida previa en S1) no se reutilizan.** `_reanchor_advisor_cache` devuelve `None` (fuerza recálculo) si la entrada no tiene las claves `recommended_floor_ratio`/`recommended_ceiling_ratio` nuevas. Es el comportamiento más seguro (no reancla con una base desconocida), pero significa que la primera corrida en S1 después de desplegar esta fase no aprovechará el caché de Advisor que ya existía; se regenera en formato nuevo a partir de ahí.
+
+5. **El análisis real de punta a punta (parte C) prueba un solo candidato y una sola pieza.** `test_full_api_driven_analysis_runs_real_scanner_advisor_and_replay_over_short_history` confirma que Scanner, Advisor y replay reales corren sin mockear `_build_plan`, pero con un único símbolo elegible; no ejercita la búsqueda de cartera de varias piezas/monedas con datos reales (esa combinatoria sigue probada solo con alternativas sintéticas, como en 40b-2, porque correrla con historial real y búsqueda de varias piezas tomaría minutos por prueba).
+
+6. **La integración de Grids con Metas (parte A5) no tiene una prueba de interfaz dedicada.** La etiqueta "Meta #N" en Grids y el aviso no bloqueante en Scanner cuando hay una meta activa se implementaron y se verificó manualmente que la suite de Grids/Scanner/Laboratorio existente sigue en verde con los cambios, pero no se agregó un test de Playwright nuevo que abra la pantalla Grids con una pieza de meta vinculada y confirme la etiqueta visualmente, ni uno que abra Scanner con una meta activa y confirme el aviso.
+
+7. **Las pruebas de interfaz de la pantalla Metas usan un plan sintético (`operator._build_plan` mockeado), igual que 40b-2.** Es deliberado (el análisis real tarda minutos y no es razonable para pruebas de Playwright), pero significa que el flujo "Analizar → ver plan real → Iniciar" nunca se probó de punta a punta a través del navegador con Scanner/Advisor/replay reales; eso lo cubre, a nivel de API/backend (sin navegador), la prueba de la parte C descrita arriba.
+
+8. **No se ejecutó ninguna prueba contra Testnet real ni se desplegó a S1.** Todo lo anterior corrió contra el exchange falso (`FakeExchange`) y bases de datos SQLite temporales, conforme a la instrucción explícita de no tocar S1 en esta fase.
+
+## Estado de entrega
+
+40c está commiteada (`2d1b442` y `897f0d1`) sin push y sin desplegar. La pantalla Metas y las correcciones B1–B4 están listas para que Ramón las revise y decida cuándo desplegar a S1; el punto 2 (medición `--con-cache` doble en S1) queda explícitamente para después del despliegue, como ya se hacía con el medidor en fases anteriores (40b-2, 40b-3, 40b-4B).

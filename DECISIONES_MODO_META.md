@@ -85,7 +85,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 (hecha, `9a49a2b`: el monitor ya no se bloquea; caché diario; desempate) |
 | 40b-4 | A: valoración ejecutable por profundidad del libro. B: límite de pérdida en el replay, precálculo nocturno, medidor con caché, bot individual | Hecha y commiteada: A `e31ba8c`; B en esta entrega; suite completa offline verde |
 | 40b-5 | Señal "toque compra→venta" en sombra (peso 0), estadísticas de `touch_event_analyzer.py` sin su puntaje | Hecha en este cambio; siguiente fase 40c |
-| 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control | Pendiente |
+| 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C) y `897f0d1` (A); siguiente fase 40d |
 | 40d | Aprendizaje continuo de pesos por señal | Pendiente |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
@@ -106,10 +106,10 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 ## 11. Pendientes
 
 - Prueba manual de 40a en Testnet (meta de 100 USDT, ligar un grid, valoración, Cancelar con cada opción).
-- Revisar en S1 los tiempos del medidor, ejecutar el análisis con `--con-cache` y medir cuántas ventanas históricas de XRP compran/venden con el plan nuevo.
+- Revisar en S1 los tiempos del medidor, ejecutar el análisis con `--con-cache` y medir cuántas ventanas históricas de XRP compran/venden con el plan nuevo. Hecho (2026-10-24, ver §16): con caché, el replay seguía dominando el tiempo (799 s) porque la clave cacheaba el rango exacto redondeado a 8 decimales y casi nunca repetía; corregido en 40c (B4, cuantización a pasos de 0,25% y Advisor reanclado al precio actual). **Falta correr `--con-cache` dos veces seguidas en S1 con la corrección puesta, para confirmar que la segunda corrida reutiliza casi todos los replays.**
 - Las señales aprobadas en 40b-2 entran en el logit de la probabilidad histórica con peso por defecto 0,25 y ajuste total máximo ±1,0; la probabilidad histórica y la ajustada se muestran por separado. La señal toque compra→venta queda fuera de ese ajuste, con peso 0, hasta que 40d la evalúe.
 - Ventanas del replay = plazo del perfil (45 / 20 días).
-- Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido).
+- Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido). Hecho en 40c (parte A5): aviso no bloqueante en Scanner y etiqueta "Meta #N" en Grids.
 
 ## 12. Medición real en S1 (2026-10-22)
 
@@ -144,3 +144,10 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 - Plan: JUPUSDT Simple 70 USDT + XRPUSDT Simple 30 USDT (usa todo el capital; el bot de XRP fue reemplazado por un grid chico). Probabilidad histórica 0 % (0 de 23 ventanas), progreso mediano 35 %, peor caída 20,1 %.
 - Por aclarar: si la "peor caída" se mide desde el máximo de la ventana (puede pasar del 18 % sin tocar el límite, que se mide contra el capital inicial). El medidor todavía no imprime ventanas cortadas por pérdida ni compras/ventas del bot.
 - Siguiente: encender Modo Meta para que corra el precálculo de las 04:00 y medir con `--con-cache`.
+
+## 16. Medición en S1 con `--con-cache` y corrección del caché (Fase 40c, parte B4, 2026-10-24)
+
+- Resultado medido: análisis completo **950 s** (sin caché, 1082 s). El Advisor sí sirvió del caché (0 s; 135 aciertos en memoria del proceso, 9 persistentes), pero los replays tardaron **799 s** con solo 81 de ~170 aciertos persistentes, pese a que el caché se había llenado 2 horas antes con un análisis por la API.
+- **Causa:** la clave del replay incluía el rango relativo (piso/precio actual, techo/precio actual) redondeado a 8 decimales; cualquier movimiento del precio cambia esa clave y el caché casi nunca servía. El caché del Advisor guardaba piso/techo como precios absolutos del momento en que se calculó, sin reanclarlos si el precio se movía.
+- **Corrección (B4):** el rango relativo se cuantiza en pasos de 0,25 % del precio tanto en la clave como en la simulación (misma pieza relativa reutiliza su resultado durante movimientos intradía pequeños); el caché del Advisor se guarda en relativo (piso/techo sobre el precio de cuando se calculó) y se reancla al precio actual al leer, recalculando si el precio se movió más de 3 % o quedó fuera del rango original. El medidor fuerza UTF-8 en `stdout` (`sys.stdout.reconfigure`) para no depender de la configuración regional de la terminal (corrige "pr?stamos" en la consola de S1).
+- Verificado con pruebas unitarias/integradas (no se corrió `--con-cache` dos veces seguidas en S1 con la corrección puesta): movimiento de 0,1 % reutiliza el mismo resultado cacheado; movimiento de 5 % recalcula; el rango usado siempre contiene el precio actual. **Pendiente:** confirmar en S1 que una segunda corrida con `--con-cache` tras esta corrección trae casi todos los replays desde caché.
