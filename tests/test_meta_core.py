@@ -474,3 +474,187 @@ def test_meta_telegram_unknown_alert_uses_30_minute_dispatcher_cooldown():
     assert dispatcher._process_meta_events(sender, config, now[0]) == 1
     assert len(sender.messages) == 2
 
+
+
+def test_meta_analysis_complete_alert_is_not_throttled_across_different_jobs():
+    """Cada corrida de análisis es un hecho propio (lleva job_id): no debe
+    enfriarse por el cooldown genérico de 60 minutos entre análisis distintos."""
+    class AlertDB:
+        def __init__(self):
+            self.state = {"meta_last_event_id": 0}
+            self.events = []
+            self.logs = []
+        def get_alert_state(self, key): return self.state.get(key)
+        def set_alert_state(self, key, value): self.state[key] = value
+        def list_meta_ledger_since(self, last_id, limit=5000): return [row for row in self.events if row["id"] > last_id]
+        def get_last_alert_sent_at(self, key): return next((row["ts"] for row in reversed(self.logs) if row["key"] == key), None)
+        def count_alert_log_since(self, kind, since): return len(self.logs)
+        def add_alert_log(self, **row): self.logs.append({**row, "key": row["alert_key"]})
+    class Sender:
+        def __init__(self): self.messages = []
+        def send(self, message): self.messages.append(message); return {"ok": True}
+
+    now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    db, sender = AlertDB(), Sender()
+    dispatcher = AlertDispatcher(db, lambda: None, clock=lambda: now[0], monotonic=lambda: now[0].timestamp())
+    config = SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30)
+    db.events.append({"id": 1, "meta_id": 1, "event_type": "META_ANALYSIS_COMPLETE",
+                       "details": {"job_id": "job-a", "analysis_seconds": 1080.2}})
+    assert dispatcher._process_meta_events(sender, config, now[0]) == 1
+    now[0] += timedelta(minutes=2)
+    db.events.append({"id": 2, "meta_id": 1, "event_type": "META_ANALYSIS_COMPLETE",
+                       "details": {"job_id": "job-b", "analysis_seconds": 60.0}})
+    assert dispatcher._process_meta_events(sender, config, now[0]) == 1
+    assert len(sender.messages) == 2
+    assert "analysis_seconds: 1080.2" in sender.messages[0]
+
+
+def test_meta_analysis_failed_alert_is_sent():
+    class AlertDB:
+        def __init__(self):
+            self.state = {"meta_last_event_id": 0}
+            self.events = [{"id": 1, "meta_id": 1, "event_type": "META_ANALYSIS_FAILED",
+                            "details": {"job_id": "job-x", "error": "Ninguna moneda cumple los límites del perfil."}}]
+            self.logs = []
+        def get_alert_state(self, key): return self.state.get(key)
+        def set_alert_state(self, key, value): self.state[key] = value
+        def list_meta_ledger_since(self, last_id, limit=5000): return [row for row in self.events if row["id"] > last_id]
+        def get_last_alert_sent_at(self, key): return next((row["ts"] for row in reversed(self.logs) if row["key"] == key), None)
+        def count_alert_log_since(self, kind, since): return len(self.logs)
+        def add_alert_log(self, **row): self.logs.append({**row, "key": row["alert_key"]})
+    class Sender:
+        def __init__(self): self.messages = []
+        def send(self, message): self.messages.append(message); return {"ok": True}
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db, sender = AlertDB(), Sender()
+    dispatcher = AlertDispatcher(db, lambda: None, clock=lambda: now, monotonic=lambda: now.timestamp())
+    config = SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30)
+    assert dispatcher._process_meta_events(sender, config, now) == 1
+    assert "Motivo: Ninguna moneda cumple" in sender.messages[0]
+
+
+def test_ledger_page_hides_valuation_rows_by_default_and_paginates(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    for i in range(3):
+        core._ledger(goal["id"], None, "META_VALUATION", {"status": "KNOWN", "tick": i})
+    core._ledger(goal["id"], None, "META_PIECE_LINKED", {"piece_type": "grid"})
+    hidden_page = core.ledger_page(goal["id"], page=1, page_size=50)
+    types = {row["event_type"] for row in hidden_page["events"]}
+    assert "META_VALUATION" not in types
+    assert "META_PIECE_LINKED" in types
+    assert "META_CREATED" in types
+    assert hidden_page["total"] == 2  # META_CREATED + META_PIECE_LINKED, not the 3 valuations
+    shown_page = core.ledger_page(goal["id"], page=1, page_size=50, include_valuation=True)
+    assert shown_page["total"] == 5
+    first_page = core.ledger_page(goal["id"], page=1, page_size=2, include_valuation=True)
+    assert len(first_page["events"]) == 2
+    assert first_page["total"] == 5
+    second_page = core.ledger_page(goal["id"], page=2, page_size=2, include_valuation=True)
+    assert len(second_page["events"]) == 2
+    assert {row["id"] for row in first_page["events"]}.isdisjoint({row["id"] for row in second_page["events"]})
+
+
+def test_list_runs_exposes_control_plan_and_result(tmp_path):
+    from sqlalchemy import select
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core.start_goal(goal["id"])
+    with db.engine.connect() as conn:
+        run_id = conn.execute(select(db.meta_runs.c.id).where(
+            db.meta_runs.c.meta_id == goal["id"])).scalar_one()
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_runs.update().where(db.meta_runs.c.id == run_id).values(
+            control_plan_json='{"symbol": "XRPUSDT", "capital_usdt": 100}'))
+    runs = core.list_runs(goal["id"])
+    assert len(runs) == 1
+    assert runs[0]["control_plan"] == {"symbol": "XRPUSDT", "capital_usdt": 100}
+    assert runs[0]["control_result"] is None
+    assert runs[0]["status"] == "ACTIVE"
+
+
+def test_discard_goal_only_works_on_draft_and_does_not_touch_exchange(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    assert goal["status"] == "DRAFT"
+    discarded = core.discard_goal(goal["id"])
+    assert discarded["status"] == "DESCARTADA"
+    assert core.ledger(goal["id"])[-1]["event_type"] == "META_DISCARDED"
+    with pytest.raises(ValueError, match="DRAFT"):
+        core.discard_goal(goal["id"])
+    # A discarded DRAFT must free the "one active goal" slot for a new one.
+    second = core.create_goal(100, 10)
+    assert second["id"] != goal["id"]
+
+
+def test_compare_control_replays_exact_run_dates_and_caches_result(tmp_path):
+    import json
+    import pandas as pd
+    import numpy as np
+    from sqlalchemy import select
+    from grid.meta_operator import MetaOperator
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core.start_goal(goal["id"])
+    with db.engine.connect() as conn:
+        run_id = conn.execute(select(db.meta_runs.c.id).where(
+            db.meta_runs.c.meta_id == goal["id"])).scalar_one()
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    finished = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_runs.update().where(db.meta_runs.c.id == run_id).values(
+            started_at=started.replace(tzinfo=None), finished_at=finished.replace(tzinfo=None),
+            control_plan_json=json.dumps({"symbol": "XRPUSDT", "capital_usdt": 1000,
+                "strategy": "smart", "range_low": 90, "range_high": 110, "n_levels": 4})))
+
+    n_candles = 600
+    prices = 100 + 2 * np.sin(np.linspace(0, 12, n_candles))
+    calls = []
+
+    class Client:
+        def get_historical_klines(self, symbol, interval, days, start_time=None):
+            calls.append((symbol, interval, days, start_time))
+            return pd.DataFrame({
+                "timestamp": pd.date_range(started, periods=n_candles, freq="5min", tz="UTC"),
+                "open": prices, "high": prices + 1, "low": prices - 1, "close": prices})
+
+        def get_symbol_info(self, _symbol):
+            raise RuntimeError("sin filtros en esta prueba")
+
+    class Scanner:
+        client = Client()
+
+    operator = MetaOperator(core, db, Scanner(), None, core.settings)
+    result = operator.compare_control(run_id)
+    assert result["control_plan"]["symbol"] == "XRPUSDT"
+    assert result["control_result"] is not None
+    assert "result_pct" in result["control_result"]
+    assert calls[0][3] == started.replace(tzinfo=None) or calls[0][3] == started
+
+    # Second call must reuse the cached result (no second klines request).
+    result_again = operator.compare_control(run_id)
+    assert result_again["control_result"] == result["control_result"]
+    assert len(calls) == 1
+
+
+def test_compare_control_shows_only_plan_while_run_is_active(tmp_path):
+    import json
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core.start_goal(goal["id"])
+    from sqlalchemy import select
+    with db.engine.connect() as conn:
+        run_id = conn.execute(select(db.meta_runs.c.id).where(
+            db.meta_runs.c.meta_id == goal["id"])).scalar_one()
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_runs.update().where(db.meta_runs.c.id == run_id).values(
+            control_plan_json=json.dumps({"symbol": "XRPUSDT", "capital_usdt": 100,
+                "strategy": "smart", "range_low": 90, "range_high": 110, "n_levels": 5})))
+    from grid.meta_operator import MetaOperator
+    operator = MetaOperator(core, db, None, None, core.settings)
+    result = operator.compare_control(run_id)
+    assert result["control_plan"] is not None
+    assert result["control_result"] is None
+    assert "activa" in result["note"]

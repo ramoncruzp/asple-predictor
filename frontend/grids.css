@@ -42,6 +42,7 @@
 .grid-detail-identity{display:flex;align-items:center;gap:10px}
 .grid-detail-identity h2{margin:0;font-size:18px}
 .badge-compound{padding:3px 8px;border-radius:99px;background:var(--surface2,#1d2430);color:var(--purple);font:600 10px var(--mono)}
+.meta-piece-badge{background:rgba(88,166,255,.15);color:var(--blue);cursor:pointer;margin-left:0}
 .grid-detail-price{margin-left:auto;font:700 28px var(--mono)}
 .grid-detail-price small{display:block;font:400 11px var(--body);color:var(--muted)}
 .grid-detail-controls{display:flex;gap:8px}

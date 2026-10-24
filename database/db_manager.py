@@ -298,7 +298,8 @@ class DBManager:
             Column("status", String, nullable=False), Column("started_at", DateTime, nullable=False),
             Column("finished_at", DateTime), Column("worst_result_pct", Float),
             Column("close_slippage_usdt", Float), Column("realized_extra_usdt", Float, nullable=False, default=0.0),
-            Column("control_plan_json", Text), Column("loss_limit_breach_count", Integer, nullable=False, default=0))
+            Column("control_plan_json", Text), Column("loss_limit_breach_count", Integer, nullable=False, default=0),
+            Column("control_result_json", Text))
         self.meta_piece_links = Table("meta_piece_links", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
@@ -398,6 +399,8 @@ class DBManager:
                     conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN control_plan_json TEXT")
                 if "loss_limit_breach_count" not in run_present:
                     conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
+                if "control_result_json" not in run_present:
+                    conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN control_result_json TEXT")
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN IF NOT EXISTS {name} {sql_type}")
@@ -405,6 +408,7 @@ class DBManager:
                     conn.exec_driver_sql(f"ALTER TABLE meta_goals ADD COLUMN IF NOT EXISTS {name} {sql_type}")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_plan_json TEXT")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
+                conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_result_json TEXT")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""

@@ -205,10 +205,19 @@
     return `Interruptores globales actuales (aplican desde el pr\u00f3ximo ciclo del monitor): ADJUST ${onOff(value('smart_adjust_enabled'))}; esperar fuera de rango ${onOff(value('smart_close_wait_enabled'))}; stop-loss ${onOff(value('stoploss_enabled'))}; re-espaciado Smart ${onOff(value('smart_respacing_enabled'))}. Espaciado por volatilidad ${onOff(value('advisor_vol_spacing_enabled'))} para nuevas recomendaciones.`;
   }
 
-  function gridRowHtml(grid, switchLine) {
+  // Fase 40c, parte A5: si un grid pertenece a una meta, se marca con una
+  // etiqueta "Meta #N" que lleva a la pantalla Metas (sin exponer la meta aquí).
+  function metaBadgeHtml(gridId, metaLinks) {
+    const link = (metaLinks || []).find(row => Number(row.grid_id) === Number(gridId));
+    // span, no <a>: estos badges viven dentro de la tarjeta-enlace del grid y un
+    // <a> anidado rompería el enlace exterior; la navegación se hace por delegación.
+    return link ? `<span class="status-badge meta-piece-badge" data-meta-badge="${esc(link.meta_id)}" title="Esta pieza pertenece a una meta activa; ir a Metas">Meta #${esc(link.meta_id)}</span>` : '';
+  }
+
+  function gridRowHtml(grid, switchLine, metaLinks) {
     return `<a class="grid-row-card" href="#grids/${grid.id}">
       <div class="grid-row-top"><span class="grid-id">#${grid.id}</span><span class="grid-symbol">${esc(grid.symbol)}</span>
-      <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${esc(statusLabel(grid.status))}</span></div>
+      <span class="grid-strategy">${esc(grid.strategy)}</span><span class="status-badge ${statusClass(grid.status)}">${esc(statusLabel(grid.status))}</span>${metaBadgeHtml(grid.id, metaLinks)}</div>
       ${['ACTIVE','PAUSED'].includes(grid.status) ? `<p class="muted grid-global-switches">${esc(switchLine)}</p>` : ''}
       <div class="grid-row-metrics">
         <div><span>Neta realizada</span><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></div>
@@ -220,7 +229,7 @@
 
   // Repositorio unificado: una sola tarjeta multimoneda. Por dentro sigue
   // habiendo un grid HOLDING por moneda; aquí solo se agrupan para mostrarlos.
-  function repositoryCardHtml(rows) {
+  function repositoryCardHtml(rows, metaLinks) {
     const total = (key) => {
       if (rows.some((g) => g[key] === null || g[key] === undefined || !Number.isFinite(Number(g[key])))) return null;
       return rows.reduce((acc, g) => acc + Number(g[key]), 0);
@@ -228,7 +237,7 @@
     const net = total('net_realized_usdt');
     const withInv = total('total_with_inventory_usdt');
     const coinRows = rows.map((grid) => `<a class="repo-coin-row" href="#grids/${grid.id}">
-        <span class="repo-coin-name"><span class="grid-id">#${grid.id}</span> <span class="grid-symbol">${esc(grid.symbol)}</span></span>
+        <span class="repo-coin-name"><span class="grid-id">#${grid.id}</span> <span class="grid-symbol">${esc(grid.symbol)}</span>${metaBadgeHtml(grid.id, metaLinks)}</span>
         <span><small>Neta realizada</small><b class="${pnlClass(grid.net_realized_usdt)}">${fmtMoney(grid.net_realized_usdt, 2)}</b></span>
         <span><small>Total con inventario</small><b class="${pnlClass(grid.total_with_inventory_usdt)}">${fmtMoney(grid.total_with_inventory_usdt, 2)}</b></span>
         <span><small>Desplegado</small><b>${fmtPct(grid.capital_deployed_pct, 1)}</b></span>
@@ -307,6 +316,7 @@
     const openRows = grids.filter((grid) => grid.status !== 'HOLDING');
     const switchLine = globalSwitchesLine(data.globalFlags);
     const repoRows = grids.filter((grid) => grid.status === 'HOLDING');
+    const metaLinks = data.metaLinks || [];
     container.innerHTML = `
       ${warning}
       <div class="grids-totals card">
@@ -320,8 +330,8 @@
       ${pairPanel}
       ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
-      <div class="grids-list">${openRows.map(grid => gridRowHtml(grid, switchLine)).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
-      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repositoryCardHtml(repoRows)}</div>` : ''}
+      <div class="grids-list">${openRows.map(grid => gridRowHtml(grid, switchLine, metaLinks)).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
+      ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repositoryCardHtml(repoRows, metaLinks)}</div>` : ''}
     `;
   }
 
@@ -405,7 +415,7 @@
     <div class="equity-legend"><span><i class="equity-dot-realized"></i>Realizado</span><span><i class="equity-dot-inventory"></i>Con inventario</span></div>`;
   }
 
-  function renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags) {
+  function renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags, metaLinks) {
     const switchLine = globalSwitchesLine(globalFlags);
     const summary = detail.summary;
     const cells = detail.cells;
@@ -494,7 +504,7 @@
       <div class="grid-detail-header card">
         <div class="grid-detail-identity"><span class="grid-id">#${summary.id}</span><h2>${esc(summary.symbol)}</h2>
           <span class="status-badge ${statusClass(summary.status)}">${esc(statusLabel(summary.status))}</span>
-          ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}</div>
+          ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}${metaBadgeHtml(summary.id, metaLinks)}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
           ${summary.price_as_of ? `<small class="muted">al ${esc(window.ASPLEFormat?.formatDateTime(summary.price_as_of) ?? summary.price_as_of)}</small>` : '<small class="muted">sin precio actual</small>'}</div>
         <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
@@ -588,7 +598,7 @@
 
   async function loadList(container) {
     try {
-      const [grids, loanSummaryResult, loanPairsResult, levelAdjustResult, globalFlags] = await Promise.all([
+      const [grids, loanSummaryResult, loanPairsResult, levelAdjustResult, metaLinksResult] = await Promise.all([
         apiGet('/api/grids').then(async data => ({...data, globalFlags: await apiGet('/api/settings/flags').catch(() => null)})),
         apiGet('/api/grids/loans/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
@@ -596,8 +606,9 @@
           .catch(error => ({ ok: false, error })),
         apiGet('/api/grids/level-adjust/summary').then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
+        apiGet('/api/metas/piece-links').then(data => data.links || []).catch(() => []),
       ]);
-      renderList(container, { ...grids, loanSummaryResult, loanPairsResult, levelAdjustResult });
+      renderList(container, { ...grids, loanSummaryResult, loanPairsResult, levelAdjustResult, metaLinks: metaLinksResult });
       const heading = document.getElementById('grids-heading');
       if (heading && window.ASPLEFormat?.updateAgeLabel) {
         let age = heading.parentElement.querySelector('.data-age');
@@ -611,7 +622,7 @@
 
   async function loadDetail(container, gridId) {
     try {
-      const [detail, operations, events, daily, equity, loanResult, globalFlags] = await Promise.all([
+      const [detail, operations, events, daily, equity, loanResult, globalFlags, metaLinks] = await Promise.all([
         apiGet(`/api/grids/${gridId}`),
         apiGet(`/api/grids/${gridId}/operations`),
         apiGet(`/api/grids/${gridId}/events`),
@@ -620,8 +631,9 @@
         apiGet(`/api/grids/${gridId}/loans`).then(data => ({ ok: true, data }))
           .catch(error => ({ ok: false, error })),
         apiGet('/api/settings/flags').catch(() => null),
+        apiGet('/api/metas/piece-links').then(data => data.links || []).catch(() => []),
       ]);
-      renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags);
+      renderDetail(container, detail, operations, events, daily, equity, loanResult, globalFlags, metaLinks);
     } catch (error) {
       if (error && error.status === 404) {
         container.innerHTML = '<div class="card grids-error">Ese grid no existe.</div>';
@@ -632,6 +644,8 @@
   }
 
   document.addEventListener('click', (event) => {
+    const badge = event.target.closest('[data-meta-badge]');
+    if (badge) { event.preventDefault(); event.stopPropagation(); location.hash = '#metas'; return; }
     const button = event.target.closest('[data-grid-action]');
     if (!button) return;
     const controls = button.closest('[data-grid-controls]');

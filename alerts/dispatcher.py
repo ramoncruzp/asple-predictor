@@ -188,6 +188,8 @@ class AlertDispatcher:
             "META_OPERATOR_OPEN": "Pieza abierta por el operador",
             "META_OPERATOR_WITHDRAW": "Pieza retirada por el operador",
             "META_OPERATOR_CLOSE": "Pieza cerrada por el operador",
+            "META_ANALYSIS_COMPLETE": "Análisis de meta terminado",
+            "META_ANALYSIS_FAILED": "Análisis de meta falló",
         }
         for event in events:
             event_id = int(event["id"])
@@ -196,18 +198,22 @@ class AlertDispatcher:
             if event_type not in titles:
                 continue
             meta_id = int(event["meta_id"])
+            details = event.get("details") or {}
             alert_key = f"{event_type}:{meta_id}"
+            if event_type in {"META_ANALYSIS_COMPLETE", "META_ANALYSIS_FAILED"} and details.get("job_id"):
+                # Cada corrida de análisis es un hecho distinto: no se enfría
+                # entre sí, solo evita reenviar el mismo job dos veces.
+                alert_key += f":{details['job_id']}"
             cooldown = 30 if event_type == "META_UNKNOWN" else int(getattr(cfg, "alerts_cooldown_min", 60))
             if not self._cooldown_ok(alert_key, cooldown, now):
                 continue
             if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
                 continue
-            details = event.get("details") or {}
             text = f"{titles[event_type]} · Meta #{meta_id}"
             reason = event.get("reason") or details.get("error")
             if reason:
                 text += f"\nMotivo: {reason}"
-            for key in ("result_pct", "threshold_pct", "target_usdt", "mode", "surplus_wait"):
+            for key in ("result_pct", "threshold_pct", "target_usdt", "mode", "surplus_wait", "analysis_seconds"):
                 if key in details:
                     text += f"\n{key}: {details[key]}"
             sent += int(self._send(sender, alert_key=alert_key, kind="operativa", text=text,

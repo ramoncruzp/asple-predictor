@@ -93,6 +93,13 @@ def list_goals(request: Request):
     return {"metas": _core(request).list_goals()}
 
 
+@router.get("/piece-links")
+def piece_links(request: Request):
+    """Para la pantalla Grids: qué grid pertenece a qué meta, sin exponer
+    toda la meta. No es un sub-recurso de {meta_id} porque abarca todas."""
+    return {"links": _core(request).list_active_piece_links()}
+
+
 @router.post("")
 def create_goal(request: Request, body: GoalCreate):
     return _call(_core(request).create_goal, body.capital_usdt, body.target_value,
@@ -102,6 +109,24 @@ def create_goal(request: Request, body: GoalCreate):
 @router.get("/{meta_id}")
 def get_goal(request: Request, meta_id: int):
     return _call(_core(request).get_goal, meta_id)
+
+
+@router.post("/{meta_id}/discard")
+def discard_goal(request: Request, meta_id: int):
+    return _call(_core(request).discard_goal, meta_id)
+
+
+@router.get("/{meta_id}/runs")
+def list_runs(request: Request, meta_id: int):
+    return {"runs": _call(_core(request).list_runs, meta_id)}
+
+
+@router.post("/{meta_id}/runs/{run_id}/control-comparison")
+def control_comparison(request: Request, meta_id: int, run_id: int):
+    runs = _call(_core(request).list_runs, meta_id)
+    if not any(int(row["id"]) == int(run_id) for row in runs):
+        raise HTTPException(404, "La corrida no pertenece a esta meta.")
+    return _call(_operator(request).compare_control, run_id)
 
 
 @router.post("/{meta_id}/analysis")
@@ -153,8 +178,10 @@ def valuation(request: Request, meta_id: int):
 
 
 @router.get("/{meta_id}/ledger")
-def ledger(request: Request, meta_id: int):
-    return {"events": _call(_core(request).ledger, meta_id)}
+def ledger(request: Request, meta_id: int, page: int = 1, page_size: int = 50,
+           include_valuation: bool = False):
+    return _call(_core(request).ledger_page, meta_id, page=page, page_size=page_size,
+                 include_valuation=include_valuation)
 
 
 @router.post("/{meta_id}/cancel-plan")

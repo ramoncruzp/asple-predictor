@@ -90,7 +90,8 @@ def test_latest_alert_escapes_api_text(ui_page, live_server):
     assert ui_page.locator("#last-alert-indicator img").count() == 0
 
 
-def test_mobile_menu_has_nine_routes_and_closes_accessibly(ui_page, live_server):
+def test_mobile_menu_has_ten_routes_and_closes_accessibly(ui_page, live_server):
+    # Fase 40c agregó la ruta #metas al menú móvil; antes eran 9 rutas.
     ui_page.set_viewport_size({"width": 390, "height": 844})
     ui_page.goto(f"{live_server.url}/#dashboard")
     button = ui_page.locator("#mobile-menu-toggle")
@@ -98,7 +99,7 @@ def test_mobile_menu_has_nine_routes_and_closes_accessibly(ui_page, live_server)
     expect(button).to_have_attribute("aria-expanded", "false")
     button.click()
     expect(button).to_have_attribute("aria-expanded", "true")
-    expect(menu.locator("a")).to_have_count(9)
+    expect(menu.locator("a")).to_have_count(10)
     expect(menu.locator('[data-mobile-route="dashboard"]')).to_have_class(re.compile("active"))
     menu.locator('[data-mobile-route="coins"]').click()
     expect(button).to_have_attribute("aria-expanded", "false")

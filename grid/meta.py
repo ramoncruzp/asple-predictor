@@ -253,6 +253,29 @@ class MetaCore:
             rows = conn.execute(select(self.db.meta_goals).order_by(self.db.meta_goals.c.id.desc())).mappings().all()
         return [dict(row) for row in rows]
 
+    def discard_goal(self, meta_id):
+        """Descarta un borrador (DRAFT): no toca el exchange, no cuenta como meta activa."""
+        goal = self.get_goal(meta_id)
+        if goal["status"] != "DRAFT":
+            raise ValueError("Solo se puede descartar una meta en DRAFT.")
+        now = self._now()
+        with self.db.engine.begin() as conn:
+            conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == int(meta_id)).values(
+                status="DESCARTADA", finished_at=now))
+        self._ledger(meta_id, None, "META_DISCARDED", {})
+        return self.get_goal(meta_id)
+
+    def list_active_piece_links(self):
+        """Mapa grid_id -> meta_id de piezas ligadas vivas, para que la
+        pantalla Grids pueda mostrar la etiqueta "Meta #N" sin duplicar la
+        lógica de propiedad de MetaCore."""
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(select(self.db.meta_piece_links.c.grid_id, self.db.meta_piece_links.c.meta_id,
+                self.db.meta_piece_links.c.piece_type).where(
+                    self.db.meta_piece_links.c.released_at.is_(None))).all()
+        return [{"grid_id": int(row[0]), "meta_id": int(row[1]), "piece_type": row[2]} for row in rows]
+
     def _owned_grids(self, meta_id):
         from sqlalchemy import select
         with self.db.engine.connect() as conn:
@@ -805,6 +828,46 @@ class MetaCore:
         result = [dict(row) for row in rows]
         for row in result:
             row["details"] = json.loads(row["details"] or "{}")
+        return result
+
+    LEDGER_HIDDEN_BY_DEFAULT = ("META_VALUATION", "META_SURPLUS_VALUATION")
+
+    def ledger_page(self, meta_id, *, page=1, page_size=50, include_valuation=False):
+        """Bitácora paginada; por defecto oculta META_VALUATION (una fila por
+        minuto) para que lo legible (decisiones, aperturas/retiros/cierres,
+        alertas) no quede enterrado detrás de ellas."""
+        from sqlalchemy import func, select
+        page = max(1, int(page))
+        page_size = max(1, min(200, int(page_size)))
+        statement = select(self.db.meta_ledger).where(self.db.meta_ledger.c.meta_id == int(meta_id))
+        count_statement = select(func.count()).select_from(self.db.meta_ledger).where(
+            self.db.meta_ledger.c.meta_id == int(meta_id))
+        if not include_valuation:
+            statement = statement.where(self.db.meta_ledger.c.event_type.notin_(self.LEDGER_HIDDEN_BY_DEFAULT))
+            count_statement = count_statement.where(
+                self.db.meta_ledger.c.event_type.notin_(self.LEDGER_HIDDEN_BY_DEFAULT))
+        statement = statement.order_by(self.db.meta_ledger.c.id.desc()).offset(
+            (page - 1) * page_size).limit(page_size)
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(statement).mappings().all()
+            total = conn.execute(count_statement).scalar_one()
+        result = [dict(row) for row in rows]
+        for row in result:
+            row["details"] = json.loads(row["details"] or "{}")
+        return {"events": result, "page": page, "page_size": page_size, "total": int(total)}
+
+    def list_runs(self, meta_id):
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(select(self.db.meta_runs).where(
+                self.db.meta_runs.c.meta_id == int(meta_id)).order_by(
+                    self.db.meta_runs.c.id.desc())).mappings().all()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["control_plan"] = json.loads(item.pop("control_plan_json") or "null")
+            item["control_result"] = json.loads(item.pop("control_result_json") or "null")
+            result.append(item)
         return result
 
     def _resume_close(self, goal):
