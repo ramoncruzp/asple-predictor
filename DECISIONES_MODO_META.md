@@ -15,6 +15,14 @@
 - Guarda récord de cada decisión y, con el tiempo, **aprende** qué señales sirven y cuáles no (Fase 40d).
 - Objetivo: **llegar a la meta lo más rápido posible.**
 
+### Visión a largo plazo (Ramón, 2026-10-25)
+
+> Llegar a una app que **vaya aprendiendo a leer el mercado para tomar decisiones**: que revise el mercado cada 15 minutos, simule cada decisión contra lo que el mercado hizo después y aprenda de cada una.
+
+- Cada revisión del operador deja alternativas evaluadas con sus señales; días después se comparan contra las velas reales (qué habría pasado) y eso alimenta el aprendizaje (Fase 40d).
+- El aprendizaje se mide a sí mismo: decisión real vs. decisión con pesos aprendidos vs. solo Scanner + Advisor. Si no mejora, se ve.
+- Usar los pesos aprendidos lo decide Ramón con la evidencia a la vista; el sistema no se activa solo.
+
 ## 2. Perfiles: solo cambian el riesgo, no el objetivo
 
 - Los dos perfiles buscan lo mismo: llegar lo más rápido posible.
