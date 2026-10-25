@@ -611,6 +611,10 @@ class GridMonitor:
                     if max_days_plan_started:
                         max_days_result = {**(current.get("params") or {}).get("max_days_close_plan", {}),
                                            "expired": True}
+                    if meta_owned:
+                        # El plazo pertenece a la Meta completa; la pieza sigue
+                        # bajo control de MetaOperator aunque conserve parámetros antiguos.
+                        max_days_result = {**max_days_result, "expired": False}
 
                     if policy_enabled and mid is not None and current.get("strategy", "simple") == "smart" \
                             and current["status"] in {"ACTIVE", "PAUSED"}:
@@ -640,6 +644,7 @@ class GridMonitor:
                         target_params = current.get("params") or {}
                         if (decision.action != "CLOSE_REPOSITORY" and current.get("strategy") == "smart"
                                 and current["status"] in {"ACTIVE", "PAUSED"}
+                                and not meta_owned
                                 and (target_params.get("target_pct") is not None
                                      or target_params.get("target_usdt") is not None)):
                             loans = self.db.list_grid_loans(grid_id) if hasattr(self.db, "list_grid_loans") else []
@@ -735,7 +740,7 @@ class GridMonitor:
                             )
                         else:
                             adjust = PolicyDecision("NONE", (), {"global_switch_off": True})
-                            if grid_id not in self._adjust_suspended_notified:
+                            if not meta_owned and grid_id not in self._adjust_suspended_notified:
                                 self._emit({"event_type": "ADJUST_SUSPENDED", "grid_id": grid_id,
                                     "reason": "global_switch_off", "price": mid,
                                     "details": {"reason": "global_switch_off"}})
@@ -971,7 +976,8 @@ class GridMonitor:
                                             "details": {"action": "TARGET", **decision.metrics["target"]}})
                                 self.logger.warning("grid=%s target close failed", grid_id, exc_info=True)
                     current = self.db.get_grid(grid_id) or current
-                    if (current.get("status") in {"ACTIVE", "PAUSED"} and mid is not None):
+                    if (current.get("status") in {"ACTIVE", "PAUSED"} and mid is not None
+                            and not bool(getattr(self.db, "is_meta_grid", lambda _grid_id: False)(grid_id))):
                         max_days_result = evaluate_max_days(current.get("params") or {},
                             current.get("created_at"), now)
                         max_days_plan_started = ((current.get("params") or {}).get(

@@ -166,3 +166,11 @@ De paso se encontró y corrigió una mojibake real en `grid/meta_operator.py` (b
 **Decisión de Ramón:** el vencimiento del plan sube de 5 a 10 minutos (`plan_ttl_seconds=600`), editable por perfil igual que `plan_price_drift_pct`; la deriva de precio al Iniciar (1 %) no cambia.
 
 Lección para fases futuras: un plan sintético bien formado en las pruebas de interfaz no garantiza que los nombres de campo coincidan con los que de verdad produce `_build_plan` (ej. `sigma_24h` vs. `sigma_24h_open`). Conviene, cuando sea práctico, construir los planes sintéticos de prueba copiando literalmente la forma de un plan real en vez de inventarla de memoria.
+
+## 18. Fase 40c-4 y primera operación real (2026-10-25)
+
+- Ramón informó que inició en Testnet S1 la primera Meta real: Meta #3, capital 100 USDT, objetivo 103 USDT, perfil Rápido. Grid #12 JUPUSDT Smart, 70 USDT, rango 0.2544–0.3185, 6 niveles; una compra se llenó y mantiene su venta. Es contexto informado por Ramón, no una verificación local ni una autorización para operar o desplegar en S1.
+- Una pieza Meta no debe tener un objetivo de grid ni un plazo individual que compita con la Meta completa. El objetivo/plazo los decide MetaCore; los parámetros heredados de la Meta #3 serán ignorados por el monitor tras el despliegue de la corrección.
+- A2 pendiente: propuesta para que el cierre de política Smart por salida de rango no envíe piezas Meta al repositorio; registrar el evento y dejar la decisión al operador Meta. Los cierres de protección 40a siguen vigentes. Esperar aprobación de Ramón antes de cambiar este comportamiento.
+- A3 pendiente: no hay interruptor global de préstamos en el código revisado. La apertura/ejecución se rige por `loans_enabled` guardado en el grid y Meta lo fija con el tope del perfil. Propuesta de mantener los préstamos según ese límite y dejar claro su estado; esperar aprobación antes de modificar.
+- A4–A5 y B1–B4 de presentación/control se detallan en `REPORTE_FASE40C.md`, §18. La suite offline del trabajo fue 1512 passed, 1 skipped, 18 deselected.

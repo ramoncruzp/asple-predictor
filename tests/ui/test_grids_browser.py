@@ -1307,6 +1307,23 @@ def test_inventory_age_label_is_shown_only_on_smart_grid_detail(live_server, ui_
     assert_no_js_errors(ui_page)
 
 
+def test_meta_owned_grid_hides_grid_cash_target_and_routes_cancel_to_meta(live_server, ui_page):
+    grid_id = live_server.grid_id
+    live_server.db.merge_grid_params(grid_id, {"target_usdt": 3, "target_basis": "cash"},
+        allowed=frozenset({"target_usdt", "target_basis"}))
+    ui_page.route("**/api/metas/piece-links", lambda route: route.fulfill(json={
+        "links": [{"meta_id": 3, "grid_id": grid_id, "piece_type": "grid"}]}))
+    ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
+    expect(ui_page.locator(".metas-grid-managed-warning")).to_contain_text("Meta #3")
+    expect(ui_page.locator(".metas-grid-managed-warning")).to_contain_text("La Meta decide los reajustes")
+    expect(ui_page.locator(".grid-detail-controls a[href='#metas']")).to_have_text("Cancelar desde Meta")
+    assert ui_page.locator(".progress-row").count() == 0
+    messages = []
+    ui_page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
+    ui_page.locator('[data-grid-action="pause"]').click()
+    assert messages and "pertenece a una Meta" in messages[0]
+
+
 def test_detail_idle_shrink_button_states_and_activation_warning(live_server, ui_page):
     grid_id = live_server.secondary_grid_id
     live_server.db.update_grid(grid_id, status="ACTIVE")

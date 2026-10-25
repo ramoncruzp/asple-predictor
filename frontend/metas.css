@@ -67,3 +67,5 @@
   .metas-valuation{gap:14px}
   .metas-estimate-grid{grid-template-columns:1fr 1fr}
 }
+
+.metas-live-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}.metas-live-facts>span{display:flex;flex-direction:column;gap:4px;padding:10px;background:var(--surface2);border-radius:6px;color:var(--muted);font-size:12px}.metas-live-facts b{color:var(--text);font:600 13px var(--mono)}

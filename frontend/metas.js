@@ -112,6 +112,12 @@
   function closeDialog() { const modal = document.getElementById('meta-action-dialog'); if (modal) modal.hidden = true; }
 
   const PROFILE_LABELS = { PRUDENTE: 'Prudente', RAPIDO: 'Rápido' };
+  const META_STATUS_LABELS = { DRAFT: 'Borrador', ACTIVE: 'Activa', PIECES_BLOCKED: 'Piezas bloqueadas',
+    CLOSING: 'Cierre en curso', TARGET_CLOSING: 'Cierre al cumplir', SURPLUS_WAIT: 'Sobrantes en venta',
+    CUMPLIDA: 'Cumplida', CORTADA_POR_PERDIDA: 'Cortada por pérdida', VENCIDA: 'Vencida',
+    CANCELADA: 'Cancelada', DESCARTADA: 'Descartada' };
+  const GRID_STATUS_LABELS = { ACTIVE: 'Activa', PAUSED: 'Pausada', CLOSING: 'Cerrando',
+    HOLDING: 'En repositorio', CLOSED: 'Cerrada', FAILED: 'Fallida' };
   function profileLimitsTable(profiles, selected) {
     const rows = [
       ['Pérdida máxima', p => `−${fmtPct(p.max_loss_pct, 0)}`],
@@ -368,7 +374,15 @@
 
   function piecesLinkList(valuation) {
     return `<ul class="metas-pieces-list">${(valuation.pieces || []).map(p =>
-      `<li>${esc(p.symbol)} — ${esc(p.status)} <a href="#grids/${p.grid_id}">ver grid #${p.grid_id}</a></li>`).join('') || '<li class="muted">Sin piezas ligadas aún.</li>'}</ul>`;
+      `<li>${esc(p.symbol)} — ${GRID_STATUS_LABELS[p.status] || esc(p.status)} <a href="#grids/${p.grid_id}">ver grid #${p.grid_id}</a></li>`).join('') || '<li class="muted">Sin piezas ligadas aún.</li>'}</ul>`;
+  }
+
+  function remainingDays(goal, profile) {
+    if (!goal.started_at) return null;
+    const days = Number(profile.max_days);
+    const started = Date.parse(goal.started_at);
+    if (!Number.isFinite(days) || !Number.isFinite(started)) return null;
+    return Math.max(0, days - (Date.now() - started) / 86400000);
   }
 
   const LEDGER_TYPE_FILTERS = {
@@ -380,11 +394,38 @@
 
   function ledgerRow(event) {
     const shadow = event.details?.shadow_decision;
-    const real = event.details?.decision || event.details?.reason || event.event_type;
+    const details = event.details || {};
+    const labels = { META_CREATED: 'Meta creada', META_STARTED: 'Meta iniciada', META_PIECE_LINKED: 'Pieza ligada',
+      META_OPERATOR_OPEN: 'Pieza abierta por el operador', META_OPERATOR_WITHDRAW: 'Pieza retirada por el operador',
+      META_OPERATOR_CLOSE: 'Pieza cerrada por el operador', META_OPERATOR_RECONFIGURE: 'Pieza reajustada',
+      META_OPERATOR_REVIEW_DECISION: 'Revisión del operador', META_OPERATOR_NOOP: 'El operador mantuvo las piezas',
+      META_PLAN_EVALUATED: 'Alternativas de cartera evaluadas', META_UNKNOWN: 'Valoración desconocida',
+      META_VALUATION_PARTIAL: 'Valoración parcial', META_VALUATION_RECOVERED: 'Valoración recuperada',
+      META_LOSS_WARNING: 'Aviso de pérdida', META_CORTADA_POR_PERDIDA: 'Cortada por pérdida',
+      META_VENCIDA: 'Meta vencida', META_CUMPLIDA: 'Meta cumplida', META_CANCELLED: 'Meta cancelada' };
+    const actionLabels = { no_hacer_nada: 'No hacer nada', mantener: 'Mantener', abrir: 'Abrir pieza',
+      retirar: 'Retirar pieza', reajustar: 'Reajustar pieza', cerrar: 'Cerrar pieza' };
+    const label = labels[event.event_type] || 'Evento de Meta';
+    const symbol = details.symbol || details.piece?.symbol || '';
+    const capital = details.capital_usdt ?? details.piece?.capital_usdt;
+    const range = details.piece?.floor != null
+      ? ` · rango ${fmtPrice(details.piece.floor)}–${fmtPrice(details.piece.ceiling)}` : '';
+    const decision = actionLabels[details.decision] || details.decision;
+    const reasonLabels = { price_near_edge: 'Precio cerca del límite del rango', outside_range: 'Precio fuera del rango',
+      insufficient_improvement: 'La mejora estimada no compensa el coste', no_free_capital: 'No hay efectivo libre',
+      profile_limit: 'Límite del perfil alcanzado', blocked_75_pct: 'Bloqueada por el aviso del 75 %',
+      valuation_unknown: 'Valoración desconocida' };
+    const reasonText = reasonLabels[details.reason] || details.reason;
+    const oldNew = details.old && details.new
+      ? ` · antes ${fmtPrice(details.old.floor)}–${fmtPrice(details.old.ceiling)} (${details.old.n_levels ?? '—'} niveles); ahora ${fmtPrice(details.new.floor)}–${fmtPrice(details.new.ceiling)} (${details.new.n_levels ?? '—'} niveles)` : '';
+    const improvement = details.estimated_probability_improvement_pp == null ? ''
+      : ` · mejora estimada ${fmtMoney(details.estimated_probability_improvement_pp, 1)} puntos`;
+    const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
+      oldNew, decision || reasonText || '', improvement].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
-      <td>${esc(event.event_type)}</td>
-      <td>${esc(real)}${shadow ? `<br><span class="muted">Sombra (Scanner+Advisor): ${esc(shadow.symbol || '')} ${esc(shadow.strategy || '')}</span>` : ''}</td>
+      <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
+      <td>${esc(detailText)}${details.reason && details.reason !== decision ? `<br><span class="muted">Motivo: ${esc(reasonText)}</span>` : ''}${shadow ? `<br><span class="muted">Decisión en sombra (Scanner y Advisor): ${esc(shadow.symbol || '')} · ${esc(shadow.strategy || '')}</span>` : ''}</td>
     </tr>`;
   }
 
@@ -422,11 +463,14 @@
       ? `<p class="metas-blocked-note">⏸ Piezas bloqueadas: ${valuation.status === 'DESCONOCIDO' ? 'valoración DESCONOCIDO' : 'aviso del 75 % del límite de pérdida'}.</p>` : '';
     return `<div class="card metas-active" data-meta-id="${goal.id}">
       <div class="metas-active-head">
-        <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${esc(goal.status)}</h2>
+        <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${META_STATUS_LABELS[goal.status] || esc(goal.status)}</h2>
         <button type="button" class="button secondary" data-cancel-op="${goal.id}">Cancelar operación</button>
       </div>
       ${statusNote}
       ${valuationBlock(goal, valuation)}
+      <div class="metas-live-facts"><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
+        <span>Efectivo libre para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
+        <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span></div>
       ${progressBars(goal, valuation, profile)}
       <div class="metas-pieces"><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
       <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
@@ -528,7 +572,7 @@
       ${showDiscarded ? `<label><input type="checkbox" data-show-discarded> Mostrar descartadas</label>` : ''}
       <div class="metas-history-list">${goals.filter(g => g.status !== 'DRAFT').map(g => `
         <div class="metas-history-goal ${g.status === 'DESCARTADA' ? 'metas-discarded hidden' : ''}">
-          <h3>Meta #${g.id} · ${PROFILE_LABELS[g.profile] || g.profile} · ${esc(g.status)}</h3>
+          <h3>Meta #${g.id} · ${PROFILE_LABELS[g.profile] || g.profile} · ${META_STATUS_LABELS[g.status] || esc(g.status)}</h3>
           <div data-history-slot data-goal-id="${g.id}"></div>
         </div>`).join('')}</div>
     </div>`;

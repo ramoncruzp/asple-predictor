@@ -63,3 +63,27 @@ De paso se encontró y corrigió una **mojibake real** (no un falso positivo del
 10 pruebas nuevas: backend (`test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates`, confirmando con mutación el bug real del punto 6) y Playwright (`test_plan_details_show_translated_states_significant_prices_loans_and_warnings` para los puntos 2, 3, 4, 5, 6 y 7; `test_profile_limits_table_highlights_selected_column` para el punto 10; `test_create_form_limits_table_has_no_overflow_at_desktop_or_mobile` para el punto 8, verificado a 1440 px y 390 px; y una extensión de `test_create_meta_then_appears_as_draft` para el punto 1). Confirmadas con mutación donde aplica (puntos 6 y 8).
 
 Suite completa offline antes del commit: **1502 passed, 1 skipped, 18 deselected**. No se desplegó ni se tocó S1. Commit sin push: `3a513dc` ("Fase 40c-3: defectos de la pantalla Metas").
+
+## 18. Fase 40c-4 — primera Meta real y ownership de las piezas
+
+El 2026-10-25 se inició en Testnet S1 la Meta #3 (100 → 103 USDT, Rápido), con el grid #12 JUPUSDT Smart de 70 USDT, rango 0.2544–0.3185, 6 niveles. Este dato procede del reporte del operador; no se consultó S1 ni se modificó la operación.
+
+### Revisión de A1–A3 y cambios aprobados directamente
+
+- **A1 confirmado y corregido:** `smart_grid_params_for_goal` ya no asigna `target_usdt` a cada grid (`grid/meta.py:97`); el objetivo y el plazo son de la Meta. Para piezas ya ligadas con parámetros antiguos, el monitor ignora `TARGET` y `MAX_DAYS`, además de no volver a ejecutar el cierre por plazo tras la política (`grid/monitor.py:607-614, 647, 980`). La protección 40a del objetivo y el plazo de la Meta completa sigue en `MetaCore`. Prueba de regresión: `tests/test_grid_monitor_policy.py:142`, grid con target heredado y plazo vencido permanece activo.
+- **A4 corregido:** el detalle de un grid Meta avisa que la Meta lo gestiona, explica que los cambios manuales pueden entrar en conflicto y pide confirmación para acciones manuales. “Cerrar” lleva a `#metas` para usar Cancelar desde la Meta; no ejecuta el cierre genérico (`frontend/grids.js:425` y controles del detalle). Los reajustes `ADJUST_SUSPENDED` ya no se emiten para piezas Meta; el texto explica que la Meta controla rango/niveles/margen y que la dirección es informativa (`grid/monitor.py:743`, `frontend/grids.js:425`).
+- **A5 corregido:** el progreso y la caja calculados para un grid individual se ocultan si pertenece a Meta. El aviso enlaza al estado agregado en `#metas` (`frontend/grids.js:425-436`).
+- **B1 corregido:** la valoración devuelve efectivo disponible para nuevas piezas como `max(0, capital inicial − capital asignado a piezas abiertas)` y la ganancia extra realizada de la corrida activa (`grid/meta.py:498-499`). La pantalla activa muestra además los días restantes a partir del inicio y el plazo editable del perfil (`frontend/metas.js:380, 471-473`).
+- **B2–B3 corregidos:** la bitácora muestra una descripción española y conserva el código técnico como texto secundario; para reajustes presenta rango/niveles anteriores y nuevos y la mejora estimada (`frontend/metas.js:395-438`). Los estados de Meta y de grid se traducen en la vista activa y el historial (`frontend/metas.js:115, 466, 575`).
+- **B4 corregido:** no se emite `ADJUST_SUSPENDED` en piezas Meta, y el aviso del detalle aclara qué significan los eventos de dirección. `missing_prediction` se presenta como falta de pronóstico reciente, solo informativa (`frontend/grids.js:425`, `frontend/metas.js:395-438`).
+
+### A2 y A3: pendientes de confirmación
+
+- **A2:** confirmado en código que el cierre automático Smart al repositorio usa `close_grid(..., "repository")` sin `meta_id`; el repositorio puede quedar fuera de los enlaces y de la valoración atribuible normal de la Meta (`grid/monitor.py:944-949`, `grid/engine.py:2651, 2850`). Propuesta presentada: para una pieza Meta, registrar motivo/alerta y dejar que el operador decida en la revisión, sin alterar cierres de pérdida/protecciones de 40a. No implementado hasta recibir OK.
+- **A3:** confirmado que la ejecución de préstamos depende de `params.loans_enabled`, asignado por el tope del perfil; no se encontró un interruptor global de préstamos. El texto global próximo controla la reducción de niveles ociosos (`frontend/grids.js:466`). Propuesta presentada: mantener el tope Prudente/Rápido y aclarar el estado efectivo. No implementado hasta recibir OK.
+
+### Archivos y verificación
+
+Archivos modificados: `grid/meta.py`, `grid/meta_operator.py`, `grid/monitor.py`, `frontend/grids.js`, `frontend/grids.css`, `frontend/metas.js`, `frontend/metas.css`, `tests/test_grid_engine.py`, `tests/test_grid_monitor_policy.py`, `tests/test_meta_operator.py`, `tests/ui/test_grids_browser.py` y `tests/ui/test_metas_ui.py`.
+
+Pruebas enfocadas: `tests/test_grid_monitor_policy.py`, `tests/test_grid_engine.py`, `tests/test_meta_operator.py`, `tests/test_meta_core.py`, `tests/ui/test_metas_ui.py`, `tests/ui/test_grids_browser.py`: **199 passed, 7 warnings, 116,30 s**. Suite completa offline (`ASPLE_OFFLINE=1`, `tests -m "not live"`, basetemp nuevo bajo `%TEMP%`): **1512 passed, 1 skipped, 18 deselected, 56 warnings, 345,44 s**. Los hosts externos quedaron bloqueados por el harness Playwright. No se consultó Testnet, no se desplegó ni se hizo commit.

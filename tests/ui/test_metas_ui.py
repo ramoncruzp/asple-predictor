@@ -252,6 +252,24 @@ def test_active_meta_with_unknown_valuation_shows_unprotected_banner(metas_page)
     assert "SIN PROTECCIÓN" in page.locator(".metas-unprotected").inner_text()
 
 
+def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(metas_page):
+    page, server = metas_page
+    goal = server.core.create_goal(150, 10, profile="RAPIDO")
+    server.core.start_goal(goal["id"])
+    grid = server.engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
+    server.core.link_grid(goal["id"], grid["id"])
+    server.core._ledger(goal["id"], None, "META_OPERATOR_NOOP", {"decision": "no_hacer_nada"})
+    page.goto(f"{server.url}/#metas")
+    active = page.locator(".metas-active")
+    page.wait_for_selector(".metas-live-facts")
+    assert "Activa" in active.locator("h2").inner_text()
+    assert "50" in active.locator(".metas-live-facts").inner_text()
+    assert "Plazo restante" in active.locator(".metas-live-facts").inner_text()
+    assert "Ganancia extra realizada" in active.locator(".metas-live-facts").inner_text()
+    page.check("[data-ledger-valuation]")
+    page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
+
+
 def test_active_meta_shows_recent_reconfiguration_in_plain_spanish(metas_page):
     page, server = metas_page
     goal = server.core.create_goal(150, 10, profile="RAPIDO")

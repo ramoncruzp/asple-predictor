@@ -656,7 +656,7 @@ def test_meta_smart_piece_activates_profile_loan_cap(profile, cap):
         "config_snapshot": {"loan_cap_pct": cap}})
     assert params["loans_enabled"] is True
     assert params["loan_cap_pct"] == params["loan_topup_pct"] == params["loan_lender_max_pct"] == cap
-    assert params["target_usdt"] == 10
+    assert "target_usdt" not in params and "target_basis" not in params
 
 
 def test_candidate_search_asks_advisor_for_three_margin_alternatives():

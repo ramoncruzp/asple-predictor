@@ -419,19 +419,23 @@
     const switchLine = globalSwitchesLine(globalFlags);
     const summary = detail.summary;
     const cells = detail.cells;
+    const metaLink = (metaLinks || []).find(row => Number(row.grid_id) === Number(summary.id));
+    const metaOwned = Boolean(metaLink);
+    const metaManagedNote = metaOwned
+      ? `<div class="card metas-grid-managed-warning"><b>Esta pieza la gestiona la Meta #${esc(metaLink.meta_id)}.</b> Los cambios manuales pueden chocar con el operador. La Meta decide los reajustes de rango, niveles y margen; los eventos de dirección son informativos. Revisa sus decisiones en <a href="#metas">Metas</a>; para cancelar, usa la opción de la Meta.</div>` : '';
     const recovery = summary.recovery_mode === true
       ? '<div class="recovery-banner">El precio est\u00e1 bajo todos los niveles de venta con posici\u00f3n abierta: las '
         + 'posiciones esperan su precio de venta. El sistema puede cerrar por p\u00e9rdida m\u00e1xima, meta o plazo si '
         + 'est\u00e1n configurados.</div>'
       : '';
-    const progressTarget = summary.progress.target
+    const progressTarget = !metaOwned && summary.progress.target
       ? `<div class="progress-block"><span>Meta (${esc(summary.progress.target.basis)})</span>
          <b>${fmtPct(summary.progress.target.progress_pct, 1)}</b>
          <small>Caja estimada: ${fmtMoney(summary.progress.target.cash_now_usdt, 2)} USDT; avance: ${fmtMoney(summary.progress.target.cash_profit_usdt, 2)} USDT / ${fmtMoney(summary.progress.target.target_profit_usdt, 2)} USDT</small>
          ${summary.progress.target.equity_now_usdt === null ? '' : `<small>Equity estimada: ${fmtMoney(summary.progress.target.equity_now_usdt, 2)} USDT</small>`}
          <small class="muted">${esc(summary.progress.target.note)}</small></div>`
       : '';
-    const progressDays = summary.progress.max_days
+    const progressDays = !metaOwned && summary.progress.max_days
       ? `<div class="progress-block"><span>Plazo</span><b>${summary.progress.max_days.days_remaining === null ? '—'
           : summary.progress.max_days.days_remaining.toFixed(1) + ' d restantes'}</b></div>`
       : '';
@@ -451,7 +455,7 @@
       <td class="mono">${fmtMoney(op.sell_qty, 4)}</td><td class="${pnlClass(op.net_pnl_usdt)}">${fmtMoney(op.net_pnl_usdt, 4)}</td>
       <td>${op.duration_hours === null ? '—' : op.duration_hours.toFixed(1) + ' h'}</td></tr>`).join('');
     const eventRows = (events.events || []).map((ev) => `<tr class="severity-${esc(ev.severity)}">
-      <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(({policy_adjust: 'Reajuste por pol\u00edtica'})[ev.reason] || ev.reason || '')}</td></tr>`).join('');
+      <td>${esc(window.ASPLEFormat?.formatDateTime(ev.ts) ?? ev.ts)}</td><td>${esc(ev.message)}</td><td class="muted">${esc(({policy_adjust: 'Reajuste por pol\u00edtica', missing_prediction: 'Sin pron\u00f3stico reciente; evento informativo'})[ev.reason] || ev.reason || '')}</td></tr>`).join('');
     let loanBlock = '';
     let loanDisableAction = '';
     let idleShrinkAction = '';
@@ -507,10 +511,10 @@
           ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}${metaBadgeHtml(summary.id, metaLinks)}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
           ${summary.price_as_of ? `<small class="muted">al ${esc(window.ASPLEFormat?.formatDateTime(summary.price_as_of) ?? summary.price_as_of)}</small>` : '<small class="muted">sin precio actual</small>'}</div>
-        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
+        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-meta-owned="${metaOwned}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="pause">Pausar</button>' : ''}
           ${summary.status === 'PAUSED' ? '<button class="button secondary" data-grid-action="resume">Reanudar</button>' : ''}
-          ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button danger" data-grid-action="close">Cerrar</button>' : ''}
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? (metaOwned ? '<a class="button danger" href="#metas">Cancelar desde Meta</a>' : '<button class="button danger" data-grid-action="close">Cerrar</button>') : ''}
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
@@ -519,6 +523,7 @@
         </div>
       </div>
       ${['ACTIVE','PAUSED'].includes(summary.status) ? `<p class="card muted grid-global-switches">${esc(switchLine)}</p>` : ''}
+      ${metaManagedNote}
       ${experimentCard}
       ${loanBlock}
       ${recovery}
@@ -656,6 +661,8 @@
       compound_ratio: Number(controls?.dataset.compoundRatio),
       compound_max_growth_pct: Number(controls?.dataset.compoundCap) };
     const parent = document.getElementById('grids-content');
+    if (controls?.dataset.metaOwned === 'true'
+        && !window.confirm('Esta pieza pertenece a una Meta. El operador puede reajustarla en su próxima revisión. ¿Quieres continuar con este cambio manual?')) return;
     button.disabled = true;
     controlFlow(gridId, button.dataset.gridAction, summary, parent).catch(error => showActionDialog(parent, 'Error de acción', `<p>${esc(error.message)}</p>`));
   });

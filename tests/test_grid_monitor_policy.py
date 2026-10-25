@@ -135,7 +135,32 @@ def test_meta_smart_monitor_keeps_pause_policy_but_never_runs_automatic_adjustme
     monitor.run_once()
     assert db.get_grid(grid["id"])["status"] == "PAUSED"
     assert db.get_last_event(grid["id"], "GRID_PAUSED") is not None
+    assert db.list_grid_events(grid_id=grid["id"], event_type="ADJUST_SUSPENDED") == []
     assert calls == []
+
+
+def test_meta_piece_ignores_legacy_grid_target_and_max_days():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
+    grid = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000, strategy="smart",
+        params={"target_usdt": 0.01, "target_basis": "cash", "max_days": 1,
+                "adjust_enabled": False})
+    db.update_grid(grid["id"], created_at=old)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=1000, target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet", created_at=old,
+            started_at=old, config_snapshot="{}")).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(
+            meta_id=meta_id, status="ACTIVE", started_at=old, realized_extra_usdt=0,
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=meta_id, run_id=run_id,
+            grid_id=grid["id"], piece_type="grid", origin_grid_id=grid["id"], created_at=old))
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol(0.001))
+    monitor.run_once()
+    assert db.get_grid(grid["id"])["status"] == "ACTIVE"
+    assert db.get_last_event(grid["id"], "TARGET_CLOSE_STARTED") is None
+    assert db.get_last_event(grid["id"], "MAX_DAYS_REACHED") is None
 
 def test_smart_out_of_range_auto_close_goes_to_repository_and_simple_is_untouched():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")

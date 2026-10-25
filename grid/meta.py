@@ -94,12 +94,13 @@ def executable_value(qty, bids, fee_pct, haircut_pct, read_at, now, max_age_s):
                 "last_absorbed_price": None, "age_s": None}
 
 
-def smart_grid_params_for_goal(goal: dict, *, target_usdt: float | None = None) -> dict:
+def smart_grid_params_for_goal(goal: dict) -> dict:
     """Parámetros de crédito propios del perfil Meta para un grid Smart."""
     config = goal.get("config_snapshot") or {}
     loan_cap = float(config.get("loan_cap_pct", 0))
-    params = {"target_usdt": float(goal["target_usdt"] if target_usdt is None else target_usdt), "target_basis": "cash",
-              "loans_enabled": loan_cap > 0}
+    # El objetivo y el plazo pertenecen a la Meta completa. No asignarlos a cada
+    # grid evita que la política normal cierre una pieza por separado.
+    params = {"loans_enabled": loan_cap > 0}
     if loan_cap > 0:
         params.update({"loan_cap_pct": loan_cap, "loan_topup_pct": loan_cap,
                        "loan_lender_max_pct": loan_cap, "reserve_pct": 0.0})
@@ -484,7 +485,19 @@ class MetaCore:
             value_exec = cash + inventory_exec
             result_best = (value_best - _d(goal["capital_initial"])) / _d(goal["capital_initial"]) * 100
             result_exec = (value_exec - _d(goal["capital_initial"])) / _d(goal["capital_initial"]) * 100
-            return {"status": status, "cash_usdt": str(cash), "inventory_bid_gross_usdt": str(inventory_best),
+            allocated = sum((_d(self.db.get_grid(int(link["grid_id"])).get("capital_total"))
+                             for link in links if self.db.get_grid(int(link["grid_id"]))
+                             and self.db.get_grid(int(link["grid_id"])).get("status")
+                             in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}), Decimal(0))
+            free_capital = max(Decimal(0), _d(goal["capital_initial"]) - allocated)
+            with self.db.engine.connect() as conn:
+                run = conn.execute(select(self.db.meta_runs).where(
+                    self.db.meta_runs.c.meta_id == int(meta_id),
+                    self.db.meta_runs.c.status == "ACTIVE").order_by(
+                        self.db.meta_runs.c.id.desc())).mappings().first()
+            return {"status": status, "cash_usdt": str(cash), "free_capital_usdt": str(free_capital),
+                    "realized_extra_usdt": str(_d(run.get("realized_extra_usdt")) if run else Decimal(0)),
+                    "inventory_bid_gross_usdt": str(inventory_best),
                     "inventory_executable_usdt": str(inventory_exec), "value_usdt": str(value_exec),
                     "value_best_bid": str(value_best), "value_executable": str(value_exec),
                     "result_pct": str(result_exec) if status != "DESCONOCIDO" else None,

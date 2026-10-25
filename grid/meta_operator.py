@@ -1580,7 +1580,7 @@ class MetaOperator:
         else:
             if piece["strategy"] == "smart":
                 from grid.meta import smart_grid_params_for_goal
-                params = smart_grid_params_for_goal(goal, target_usdt=piece.get("target_usdt"))
+                params = smart_grid_params_for_goal(goal)
             else:
                 params = None
             grid = self.engine.create_grid(piece["symbol"], piece["floor"], piece["ceiling"],

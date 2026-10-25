@@ -162,6 +162,7 @@ def test_meta_smart_grid_persists_profile_loan_cap(profile, loan_cap):
     stored = db.get_grid(grid["id"])["params"]
     assert stored["loans_enabled"] is True
     assert stored["loan_cap_pct"] == stored["loan_topup_pct"] == stored["loan_lender_max_pct"] == loan_cap
+    assert "target_usdt" not in stored and "target_basis" not in stored
 
 
 def test_smart_grid_persists_new_defaults_but_keeps_explicit_saved_parameters():
