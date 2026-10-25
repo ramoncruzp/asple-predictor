@@ -604,6 +604,7 @@ class GridMonitor:
                     elif status_before == "HOLDING":
                         self.engine.sync_repository(grid_id)
                     current = self.db.get_grid(grid_id) or current
+                    meta_owned = bool(getattr(self.db, "is_meta_grid", lambda _grid_id: False)(grid_id))
                     max_days_result = evaluate_max_days(current.get("params") or {}, current.get("created_at"), now)
                     max_days_plan_started = ((current.get("params") or {}).get(
                         "max_days_close_plan", {}).get("phase") == "STARTED")
@@ -722,7 +723,10 @@ class GridMonitor:
                         # Adjustment has precedence over PAUSE, but CLOSE remains
                         # the highest priority. Legacy grids without the new
                         # adjust_enabled key stay on the 15B-1 policy path.
-                        adjust_enabled = bool(getattr(self.settings, "smart_adjust_enabled", True))
+                        # Las piezas Meta las reajusta exclusivamente MetaOperator;
+                        # la política de pausa/cierre y las protecciones siguen activas.
+                        adjust_enabled = (not meta_owned and
+                            bool(getattr(self.settings, "smart_adjust_enabled", True)))
                         if adjust_enabled:
                             self._adjust_suspended_notified.discard(grid_id)
                             adjust = adjust_decision(
@@ -736,7 +740,7 @@ class GridMonitor:
                                     "reason": "global_switch_off", "price": mid,
                                     "details": {"reason": "global_switch_off"}})
                                 self._adjust_suspended_notified.add(grid_id)
-                        if (getattr(self.settings, "smart_respacing_enabled", False)
+                        if (not meta_owned and getattr(self.settings, "smart_respacing_enabled", False)
                                 and adjust.action != "ADJUST"
                                 and decision.action not in {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}):
                             try:
@@ -765,7 +769,7 @@ class GridMonitor:
                             if respace.action == "ADJUST":
                                 adjust = respace
                         params = current.get("params") or {}
-                        if (adjust_enabled and adjust.action == "NONE" and decision.action not in
+                        if (not meta_owned and adjust_enabled and adjust.action == "NONE" and decision.action not in
                                 {"CLOSE_REPOSITORY", "TARGET", "MAX_DAYS"}
                                 and params.get("adjust_idle_shrink") is True
                                 and getattr(self.settings, "adjust_idle_shrink_enabled", False)):

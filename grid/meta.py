@@ -24,7 +24,10 @@ DEFAULT_PROFILES = {
                  "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
                  "valuation_unknown_alert_after_min": 10, "valuation_unknown_repeat_min": 30,
                  "valuation_partial_alert_after_min": 30, "valuation_partial_missing_pct": 25,
-                 "valuation_partial_repeat_h": 6},
+                 "valuation_partial_repeat_h": 6,
+                 "reconfig_min_probability_delta_pp": 5.0,
+                 "reconfig_probability_tie_tolerance_pp": 2.0,
+                 "reconfig_min_progress_delta_pct": 10.0},
     "RAPIDO": {"capital_per_coin_pct": 70, "max_grids": 4, "max_bots": 8,
                "max_loss_pct": 18, "warning_loss_pct": 13.5, "max_days": 20, "loan_cap_pct": 50,
                "min_effective_verifications": 30,
@@ -35,7 +38,10 @@ DEFAULT_PROFILES = {
                "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
                "valuation_unknown_alert_after_min": 10, "valuation_unknown_repeat_min": 30,
                "valuation_partial_alert_after_min": 30, "valuation_partial_missing_pct": 25,
-               "valuation_partial_repeat_h": 6},
+               "valuation_partial_repeat_h": 6,
+               "reconfig_min_probability_delta_pp": 5.0,
+               "reconfig_probability_tie_tolerance_pp": 2.0,
+               "reconfig_min_progress_delta_pct": 10.0},
 }
 
 

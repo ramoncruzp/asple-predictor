@@ -102,11 +102,40 @@ def test_fulfilled_meta_surplus_grid_stays_paused_through_resume_cycle_and_resta
     assert not [o for o in exchange.get_open_orders("XRPUSDT") if o["side"] == "BUY"]
     assert db.get_last_event(grid["id"], "GRID_RESUMED") is None
 
-    # A fresh monitor instance must honor the persisted meta ownership too.
     GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol(0.001)).run_once()
     assert db.get_grid(grid["id"])["status"] == "PAUSED"
     assert not [o for o in exchange.get_open_orders("XRPUSDT") if o["side"] == "BUY"]
 
+
+def test_meta_smart_monitor_keeps_pause_policy_but_never_runs_automatic_adjustment(monkeypatch):
+    import grid.monitor as monitor_module
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _smart_grid(engine)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet", created_at=now,
+            started_at=now, config_snapshot="{}")).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(
+            meta_id=meta_id, status="ACTIVE", started_at=now, realized_extra_usdt=0,
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=meta_id, run_id=run_id,
+            grid_id=grid["id"], piece_type="grid", origin_grid_id=grid["id"], created_at=now))
+    settings = monitor_settings()
+    settings.smart_adjust_enabled = True
+    settings.smart_respacing_enabled = True
+    calls = []
+    monkeypatch.setattr(monitor_module, "adjust_decision",
+        lambda *args, **kwargs: (calls.append("adjust") or monitor_module.PolicyDecision("NONE")))
+    monkeypatch.setattr(monitor_module, "respace_decision",
+        lambda *args, **kwargs: (calls.append("respace") or monitor_module.PolicyDecision("NONE")))
+    vol = Vol(.5)
+    monitor = GridMonitor(db, exchange, engine, settings, vol_provider=vol)
+    monitor.run_once()
+    assert db.get_grid(grid["id"])["status"] == "PAUSED"
+    assert db.get_last_event(grid["id"], "GRID_PAUSED") is not None
+    assert calls == []
 
 def test_smart_out_of_range_auto_close_goes_to_repository_and_simple_is_untouched():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")

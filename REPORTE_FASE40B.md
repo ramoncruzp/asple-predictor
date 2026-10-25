@@ -247,6 +247,26 @@ El análisis expone la duración real del paso `touch_signal` para que el medido
 - Suite completa: `ASPLE_OFFLINE=1 .\\venv\\Scripts\\python.exe -m pytest tests -m "not live" -q --basetemp <carpeta nueva en $env:TEMP>` — **1.504 passed, 1 skipped, 18 deselected, 56 warnings, 504,27 s**, código de salida 0.
 - `node --check frontend/metas.js` y `git diff --check` pasaron. Playwright no registró hosts externos; sin Testnet, `.env` ni BD real.
 
-### Parte B pendiente de aprobación
+## 40b-6B — Reajuste activo de piezas Meta
 
-40b-6B no está implementada. El diseño propuesto al final de esta revisión cubrirá los tipos de reajuste, simulación, costes, frenos, `ops_lock`, bitácora y pruebas solicitados; espero la aprobación de Ramón antes de modificar código de producción.
+### Cambios
+
+- `grid/meta_operator.py:1300-1344,1409-1517`: la revisión evalúa reajustes de piezas propias cuando el precio toca una franja de un nivel del piso/techo, o tras dos revisiones fuera del rango y un desplazamiento mayor a un nivel. El disparador solo habilita simulación; si mantener no es superado por materialidad, no reajusta ni retira por techo.
+- `grid/meta.py:19-44`: cada perfil permite editar `reconfig_min_probability_delta_pp` (5), `reconfig_probability_tie_tolerance_pp` (2) y `reconfig_min_progress_delta_pct` (10). Solo se acepta mejora histórica ≥5 puntos porcentuales, o empate dentro de ±2 puntos con avance mediano ≥10 % mejor.
+- `grid/meta_operator.py:1449-1509`: aplica enfriamiento de 1 hora por grid y máximo de 4 reajustes en 24 horas por meta. Registra valores viejos/nuevos, alternativas evaluadas, motivo, probabilidad y avance estimados, ejecución y decisión en sombra. El análisis sigue fuera de `ops_lock`; `review_once` revalida bloqueo, estado y movimiento de precio dentro del lock antes de ejecutar.
+- `grid/engine.py:1489-1545`: un bot individual sin inventario cancela su BUY vigente y coloca un BUY nuevo X y SELL Y, verificando precio, margen mínimo del perfil, notional y cancelación confirmada. Si ya compró, la función rechaza el reajuste y conserva su SELL. Los grids de varios niveles usan `adjust_grid`, que conserva celdas con inventario y sus ventas. El parámetro opcional de capital solo funciona para grid Meta activo, valida efectivo atribuible y límite por moneda y redistribuye solo celdas libres.
+- `database/db_manager.py:1536-1543`, `grid/monitor.py:607,728-773`: el monitor reconoce grids Meta por vínculo no liberado y no ejecuta ADJUST, re-espaciado ni idle-shrink en ellos, aunque los interruptores globales estén encendidos. Conserva PAUSE/RESUME Smart, cierres por pérdida máxima/plazo/filtros, stop-loss por celda según su interruptor, vigilancia 40a y transferencias de préstamos; el operador Meta es la autoridad única para rango, niveles y margen.
+- `frontend/metas.js:432,477-496`: la meta activa presenta los cinco reajustes más recientes en español con pieza, cambio de piso/techo/niveles, motivo y mejoras estimadas, además de la bitácora existente.
+- A5: `grid/meta_operator.py:1647-1680` guarda resultado por perfil/base y sigue con el otro perfil si no hay candidatas; responde `partial` cuando una base no pudo precalcularse. A6: `frontend/metas.js:11,148,166-176` conserva el objetivo escrito al volver a dibujar el formulario después de crear una meta.
+- `DECISIONES_MODO_META.md:55-64,88-91,114-118` y `ESPEC_FASE40_MODO_META.md:72,106-110` registran la decisión de 2026-10-25 y el reparto de responsabilidades del monitor.
+
+### Pruebas y resultado
+
+- Cobertura añadida: `tests/test_meta_operator.py:222-333,600-635` (precálculo parcial, umbrales de materialidad, franja de un nivel, dos revisiones/desplazamiento, enfriamiento, máximo diario y no retirada automática por techo si no hay mejora); `tests/test_grid_engine.py:82-139` (bot antes/después de compra y límites de capital); `tests/test_grid_monitor_policy.py:110-141` (Meta Smart mantiene PAUSE y el monitor no invoca ajuste/re-espaciado); `tests/ui/test_metas_ui.py:208-222,255-272` (objetivo persistido y presentación de reajuste).
+- Enfoque final de archivos afectados: **117 passed** (operator 47 + engine 50 + monitor policy 13 + UI Metas 7), advertencias de dependencias conocidas; corrida distribuida en dos invocaciones porque se corrigieron detalles detectados.
+- Suite completa offline final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp <carpeta nueva bajo $env:TEMP>` — **1509 passed, 1 skipped, 18 deselected, 56 warnings, 330,96 s**, código 0. `node --check frontend/metas.js` y `git diff --check` pasaron. Sin red externa, Testnet, `.env` ni BD real.
+
+### Límites observados
+
+- `adjust_grid` conserva inventario y órdenes SELL al cambiar geometría; si la nueva geometría no puede mapear celdas ocupadas y dejar las celdas libres mínimas, la alternativa se rechaza y la pieza se mantiene.
+- El operador no liquida con pérdida durante un reajuste. Las ventas con pérdida siguen reservadas al cierre verificado iniciado por las protecciones de 40a o por Ramón.

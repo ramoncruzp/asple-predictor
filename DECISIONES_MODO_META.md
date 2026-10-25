@@ -56,7 +56,8 @@ Los números son punto de partida y se ajustan con los resultados.
 
 - Abre, retira (cancela compras, deja ventas) o **cierra cualquier pieza, con ganancia o con pérdida**, y mueve el capital, cuando la estimación dice que así llega antes a la meta.
 - "Pérdida aceptable" = la ganancia esperada de la nueva asignación supera la pérdida realizada más comisiones.
-- **Decisión de Ramón (2026-10-25):** el operador activo puede reajustar cualquier parámetro necesario de sus piezas abiertas —piso, techo, número de niveles/bots, margen y capital asignado— cuando los datos y las simulaciones lo justifiquen. Esto sustituye la regla anterior de no ajustar rangos. Las protecciones, costes, límites y frenos se concretan en el diseño 40b-6B, que requiere aprobación antes de implementar.
+- **Decisión de Ramón (2026-10-25):** el operador activo puede reajustar piso, techo, número de niveles/bots, margen y capital asignado de sus piezas cuando las simulaciones lo justifiquen. En bots individuales, solo mueve compra/venta antes de comprar; tras comprar conserva la venta viva. Se exige mejora histórica de al menos 5 puntos porcentuales, o empate dentro de ±2 puntos y mejora del avance mediano de al menos 10 %. Evalúa al quedar a un nivel del borde o tras dos revisiones fuera con desplazamiento superior a un nivel. Enfría cada pieza 1 h y limita a cuatro cambios por meta en 24 h. No actúa bajo bloqueo 75 %/DESCONOCIDO. Ejecución bajo `ops_lock` tras revalidación; no vende inventario con pérdida.
+- **Monitor para piezas Meta:** mantiene PAUSE/RESUME por política Smart, stop-loss por celda, cierres de protección/40a y gestión de préstamos. Omite ADJUST, re-espaciado e idle-shrink autónomos porque el operador Meta decide los cambios de geometría.
 - Bot individual = grid de un solo nivel; al vender queda DONE y no recompra.
 - Antes de arrancar presenta estadísticas y el plan con el que propone comenzar; Ramón pulsa **Iniciar**.
 - Todo queda en la bitácora, incluido "no hacer nada", con los números de las alternativas.
@@ -85,8 +86,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 (hecha, `9a49a2b`: el monitor ya no se bloquea; caché diario; desempate) |
 | 40b-4 | A: valoración ejecutable por profundidad del libro. B: límite de pérdida en el replay, precálculo nocturno, medidor con caché, bot individual | Hecha y commiteada: A `e31ba8c`; B en esta entrega; suite completa offline verde |
 | 40b-5 | Señal "toque compra→venta" en sombra (peso 0), estadísticas de `touch_event_analyzer.py` sin su puntaje | Hecha en este cambio; siguiente fase 40c |
-| 40b-6A | Prudente con 30 verificaciones efectivas, umbral editable y presentación de readiness en español | Implementada y commiteada (`0fefb93`); pruebas enfocadas y suite completa offline verdes |
-| 40b-6B | Operador activo: reoptimización de piezas abiertas | Diseño pendiente de aprobación de Ramón; todavía sin implementación |
+| 40b-6A | Prudente con 30 verificaciones efectivas, umbral editable y presentación de readiness en español | Implementada y commiteada (`9797d9f`); pruebas enfocadas y suite completa offline verdes |
+| 40b-6B | Operador activo: reajuste de piezas abiertas, materialidad, frenos y presentación de cambios | Implementada, pruebas enfocadas y suite completa offline verdes; commit de esta entrega |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C), `897f0d1` (A) y `3a513dc` (40c-3: defectos de presentación de la prueba de QA en S1); siguiente fase 40d |
 | 40d | Aprendizaje continuo de pesos por señal | Pendiente |
 
@@ -112,7 +113,7 @@ Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revi
 - Las señales aprobadas en 40b-2 entran en el logit de la probabilidad histórica con peso por defecto 0,25 y ajuste total máximo ±1,0; la probabilidad histórica y la ajustada se muestran por separado. La señal toque compra→venta queda fuera de ese ajuste, con peso 0, hasta que 40d la evalúe.
 - Ventanas del replay = plazo del perfil (45 / 20 días).
 - Prudente requiere por defecto 30 verificaciones efectivas de 24 h (N_MIN), editable por perfil en `meta_profile_settings`; la ventana actual permite alcanzar al menos ese umbral.
-- El reajuste de piezas abiertas está autorizado para Meta cuando datos y simulaciones lo justifiquen. Falta aprobar el diseño operativo 40b-6B antes de implementarlo.
+- A5: el precálculo debe continuar si un perfil no tiene candidatas; A6: conservar el objetivo introducido al volver a dibujar el formulario. Incluidos en 40b-6B.
 - Propuesta para 40b/40c: avisar al crear un grid normal si hay una meta activa (el USDT de Testnet es compartido). Hecho en 40c (parte A5): aviso no bloqueante en Scanner y etiqueta "Meta #N" en Grids.
 
 ## 12. Medición real en S1 (2026-10-22)

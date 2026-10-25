@@ -1473,7 +1473,7 @@ class GridEngine:
 
     def adjust_grid(
         self, grid_id: int, new_low: Any, new_high: Any, new_n: int | None = None,
-        reason: str | None = None, details: dict | None = None,
+        reason: str | None = None, details: dict | None = None, new_capital_total: Any | None = None,
     ) -> dict[str, Any]:
         key = int(grid_id)
         with self._adjust_lock_guard:
@@ -1481,18 +1481,120 @@ class GridEngine:
         if not lock.acquire(blocking=False):
             return {"ok": False, "reason": "adjust_in_progress"}
         try:
-            return self._adjust_grid_locked(key, new_low, new_high, new_n, reason, details)
+            return self._adjust_grid_locked(key, new_low, new_high, new_n, reason, details,
+                                            new_capital_total)
         finally:
             lock.release()
 
+    def reposition_meta_bot(self, grid_id: int, new_buy: Any, new_sell: Any, *, reason: str) -> dict:
+        """Reprice an unfilled one-level Meta bot without closing its grid identity."""
+        grid = self.db.get_grid(int(grid_id))
+        if (grid is None or grid.get("status") != "ACTIVE"
+                or not self.db.is_meta_individual_bot_grid(int(grid_id))):
+            return {"ok": False, "reason": "not_an_active_meta_bot"}
+        levels = self.db.get_grid_levels(int(grid_id))
+        if (len(levels) != 1 or _d(levels[0].get("held_qty")) > 0
+                or levels[0].get("state") == "DONE"
+                or int(levels[0].get("cycles_completed") or 0) > 0):
+            return {"ok": False, "reason": "bot_has_inventory"}
+        level = levels[0]
+        buy, sell = _d(new_buy), _d(new_sell)
+        filters, snapshot, avg_price = self._market_context(grid["symbol"])
+        mid = book_mid(snapshot)
+        if mid is None or not buy < mid < sell:
+            return {"ok": False, "reason": "price_outside_new_bot_range"}
+        if (sell / buy - 1) * 100 < _d(_get(self.settings, "grid_min_step_pct", .003)) * 100:
+            return {"ok": False, "reason": "margin_below_exchange_minimum"}
+        params = grid.get("params") or {}
+        with self.db.engine.connect() as conn:
+            goal_row = conn.execute(select(self.db.meta_goals).where(
+                self.db.meta_goals.c.id == int(params.get("meta_id") or 0))).mappings().first()
+        if goal_row is None:
+            return {"ok": False, "reason": "meta_goal_not_found"}
+        goal_cfg = json.loads(goal_row["config_snapshot"] or "{}")
+        if (sell / buy - 1) * 100 - Decimal("0.20") < _d(goal_cfg.get("min_margin_pct", .3)):
+            return {"ok": False, "reason": "margin_below_meta_profile_minimum"}
+        qty = filters.round_qty_down(_d(level["capital"]) / buy)
+        if qty < filters.min_qty or qty * buy < filters.min_notional:
+            return {"ok": False, "reason": "buy_below_minimum"}
+        cancel = self.cancel_grid_orders(int(grid_id), finalize=False, buy_only=True)
+        if cancel.get("cancel_errors") or cancel.get("pending_order_ids"):
+            return {"ok": False, "reason": "buy_cancel_unconfirmed", "cancel": cancel}
+        level = self.db.get_grid_levels(int(grid_id))[0]
+        if _d(level.get("held_qty")) > 0 or level.get("state") == "SELL_OPEN":
+            return {"ok": False, "reason": "buy_filled_during_cancel"}
+        if level.get("order_id") is not None and int(level["order_id"]) in cancel.get("canceled_order_ids", []):
+            self.db.update_level(int(grid_id), int(level["level_idx"]), state="IDLE",
+                order_id=None, client_order_id=None, buy_client_order_id=None)
+            level = self.db.get_grid_levels(int(grid_id))[0]
+        if level.get("order_id") is not None:
+            return {"ok": False, "reason": "buy_cancel_pending"}
+        cid = "gM" + hashlib.sha256(
+            f"{grid_id}:{time.time_ns()}:{buy}:{sell}".encode("ascii")).hexdigest()[:30]
+        self.db.update_grid(int(grid_id), range_low=float(buy), range_high=float(sell),
+                            open_price=float(mid))
+        self.db.update_level(int(grid_id), int(level["level_idx"]), price=float(buy),
+            sell_price=float(sell), state="BUY_OPEN", client_order_id=cid,
+            buy_client_order_id=cid, order_id=None)
+        try:
+            order = self._send_limit(grid["symbol"], "BUY", qty, buy, cid, filters, avg_price)
+        except Exception:
+            self.db.update_level(int(grid_id), int(level["level_idx"]), state="IDLE",
+                client_order_id=None, buy_client_order_id=None, order_id=None)
+            raise
+        self.db.update_level(int(grid_id), int(level["level_idx"]), order_id=order["order_id"])
+        self._emit("META_BOT_REPOSITIONED", int(grid_id), int(level["level_idx"]),
+            client_order_id=cid, order_id=order["order_id"], reason=reason,
+            details={"buy_from": level["price"], "buy_to": str(buy),
+                     "sell_from": level.get("sell_price"), "sell_to": str(sell)})
+        return {"ok": True, "changed": True, "old_buy": level["price"],
+                "new_buy": float(buy), "old_sell": level.get("sell_price"), "new_sell": float(sell)}
+
     def _adjust_grid_locked(
         self, grid_id: int, new_low: Any, new_high: Any, new_n: int | None = None,
-        reason: str | None = None, details: dict | None = None,
+        reason: str | None = None, details: dict | None = None, new_capital_total: Any | None = None,
     ) -> dict[str, Any]:
         """Move free cells through recoverable write-ahead BUY intents."""
         grid = self.db.get_grid(int(grid_id))
         if grid is None or grid.get("status") != "ACTIVE":
             return {"ok": False, "reason": "grid_not_active" if grid else "grid_not_found"}
+        target_capital_total = _d(grid["capital_total"] if new_capital_total is None else new_capital_total)
+        if target_capital_total <= 0:
+            return {"ok": False, "reason": "capital_total_must_be_positive"}
+        if new_capital_total is not None and not self.db.is_meta_grid(int(grid_id)):
+            return {"ok": False, "reason": "capital_reassignment_requires_meta_ownership"}
+        if new_capital_total is not None:
+            from sqlalchemy import select
+            with self.db.engine.connect() as conn:
+                link = conn.execute(select(self.db.meta_piece_links.c.meta_id).where(
+                    self.db.meta_piece_links.c.grid_id == int(grid_id),
+                    self.db.meta_piece_links.c.released_at.is_(None)).limit(1)).first()
+                goal = None if link is None else conn.execute(select(self.db.meta_goals).where(
+                    self.db.meta_goals.c.id == int(link[0]))).mappings().first()
+                owned_rows = [] if link is None else conn.execute(select(
+                    self.db.meta_piece_links.c.grid_id).where(
+                        self.db.meta_piece_links.c.meta_id == int(link[0]),
+                        self.db.meta_piece_links.c.released_at.is_(None))).all()
+            if goal is None or goal["status"] not in {"ACTIVE", "PIECES_BLOCKED"}:
+                return {"ok": False, "reason": "meta_not_active"}
+            goal_cfg = json.loads(goal["config_snapshot"] or "{}")
+            used_total, used_symbol = 0.0, 0.0
+            for owned_row in owned_rows:
+                owned_grid = self.db.get_grid(int(owned_row[0]))
+                if owned_grid is None or owned_grid.get("status") not in {
+                        "OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}:
+                    continue
+                used_total += float(owned_grid.get("capital_total") or 0)
+                if owned_grid["symbol"] == grid["symbol"]:
+                    used_symbol += float(owned_grid.get("capital_total") or 0)
+            current_amount = float(grid.get("capital_total") or 0)
+            free_cash = max(0.0, float(goal["capital_initial"]) - used_total)
+            max_coin = float(goal["capital_initial"]) * float(goal_cfg.get("capital_per_coin_pct", 100)) / 100
+            if target_capital_total > _d(current_amount + free_cash) + Decimal("0.00000001"):
+                return {"ok": False, "reason": "meta_free_capital_exceeded"}
+            other_coin_capital = _d(max(0.0, used_symbol - current_amount))
+            if target_capital_total + other_coin_capital > _d(max_coin) + Decimal("0.00000001"):
+                return {"ok": False, "reason": "meta_capital_per_coin_exceeded"}
         loan_enabled = (grid.get("strategy") == "smart"
                         and (grid.get("params") or {}).get("loans_enabled") is True)
         if loan_enabled:
@@ -1507,17 +1609,42 @@ class GridEngine:
                 and int(grid["n_levels"]) == target_n):
             return {"ok": True, "changed": False, "reason": "already_at_target"}
         cells = self.db.get_grid_levels(grid_id)
-        reserve_target = (_d(grid["capital_total"])
+        delta_capital = target_capital_total - _d(grid["capital_total"])
+        if delta_capital and loan_enabled and any(row.get("status") in {"PENDING", "OPEN"}
+                for row in self.db.list_grid_loans(int(grid_id))):
+            return {"ok": False, "reason": "capital_reassignment_has_open_loans"}
+        reserve_target = (target_capital_total
                           * _d((grid.get("params") or {}).get("reserve_pct", 0)) / Decimal(100))
         reserve_excess = max(Decimal(0), _d(grid.get("reserve", 0)) - reserve_target) if loan_enabled else Decimal(0)
         planning_cells = [dict(row) for row in cells]
+        free_planning = [row for row in planning_cells if row.get("state") in {"IDLE", "BUY_OPEN", "DONE"}
+                         and _d(row.get("held_qty")) <= 0]
+        if delta_capital and not free_planning:
+            return {"ok": False, "reason": "no_free_cells_for_capital_reassignment"}
+        if delta_capital > 0:
+            share = delta_capital / Decimal(len(free_planning))
+            for row in free_planning:
+                row["capital"] = str(_d(row.get("capital")) + share)
+                row["capital_base"] = str(_d(row.get("capital_base")) + share)
+        elif delta_capital < 0:
+            remaining = -delta_capital
+            for row in free_planning:
+                take = min(remaining, _d(row.get("capital")))
+                row["capital"] = str(_d(row.get("capital")) - take)
+                row["capital_base"] = str(_d(row.get("capital_base")) - take)
+                remaining -= take
+                if remaining <= 0:
+                    break
+            if remaining > Decimal("0.00000001"):
+                return {"ok": False, "reason": "capital_reduction_exceeds_free_cells"}
         if reserve_excess:
             free = next((row for row in planning_cells if row.get("state") in {"IDLE", "BUY_OPEN", "DONE"}
                          and _d(row.get("held_qty", 0)) <= 0), None)
             if free is not None:
                 free["capital"] = str(_d(free.get("capital", 0)) + reserve_excess)
                 free["capital_base"] = str(_d(free.get("capital_base", 0)) + reserve_excess)
-        plan = plan_adjust(grid, planning_cells, new_low, new_high, target_n, mid, filters, self.settings)
+        planning_grid = {**grid, "capital_total": target_capital_total}
+        plan = plan_adjust(planning_grid, planning_cells, new_low, new_high, target_n, mid, filters, self.settings)
         if not plan.ok:
             return {"ok": False, "reason": plan.reason, "plan": plan.details}
         old_range = {"low": grid["range_low"], "high": grid["range_high"], "n": grid["n_levels"]}
@@ -1750,7 +1877,7 @@ class GridEngine:
         compound_normalized = sum((
             _d(by_idx[idx].get("capital_compound", 0)) for idx in capital_updates
         ), Decimal(0)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
-        normalized_capital_total = _d(grid["capital_total"]) + compound_normalized
+        normalized_capital_total = target_capital_total + compound_normalized
         event_details = {**(details or {}), "old": old_range,
             "new": {"low": str(plan.lines[0]), "high": str(plan.lines[-1]), "n": target_n},
             "free_capital": str(plan.free_capital), "capital_per_cell": str(plan.capital_per_cell),

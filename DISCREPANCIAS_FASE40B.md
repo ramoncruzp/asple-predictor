@@ -122,4 +122,18 @@ Suite completa: 1.473 passed, 1 skipped, 18 deselected, 55 warnings, 305,22 s. P
 ### Pendiente
 
 - No se inspeccionó una BD para certificar la historia concreta de onboarding de XRPUSDT. La causa observable en el código es que no existe una fila de readiness cuando la API devuelve `None`; el origen de esa ausencia requiere evidencia de la BD pertinente.
-- 40b-6B (reajuste activo de piezas abiertas) espera aprobación del diseño antes de implementar. No es una discrepancia de código en este commit.
+## 40b-6B — Reajuste activo de piezas Meta
+
+### Cerrado
+
+- El diseño aprobado se implementó: materialidad 5 pp / empate ±2 pp y avance +10 %, editable por perfil; un nivel del borde o dos revisiones fuera con desplazamiento mayor a un nivel habilitan evaluación; cooldown de 1 h por grid y máximo de cuatro reajustes en 24 h por meta.
+- Bots individuales sin inventario mueven compra y venta en el mismo grid; tras comprar conservan su venta viva. El motor normal de ajuste retiene celdas con inventario y sus ventas. Capital se cambia únicamente en grids Meta, con comprobación de saldo libre atribuible y límite de capital por moneda.
+- Las piezas Meta quedan excluidas del ajuste, re-espaciado e idle-shrink autónomos del monitor. PAUSE/RESUME, cierre Smart de seguridad, stop-loss por celda según interruptor, vigilancia/cierre de 40a y gestión de préstamos siguen activos.
+- El disparador de techo deja de cerrar/reabrir automáticamente una pieza sin mejora de simulación; el gate duro del Scanner en dos revisiones conserva su retirada sin liquidar inventario.
+- A5 precalcula por perfil/base y continúa cuando una de las combinaciones no tiene candidatas. A6 mantiene el objetivo escrito tras crear una meta.
+
+### Límites explícitos
+
+- No se cambia capital cuando el grid está pausado/no activo, no tiene celdas libres suficientes o conserva préstamos abiertos que impidan redistribuir; el operador espera otra revisión. El motor no fuerza reanudación para aplicar cambios.
+- El replay es una estimación; los cambios de capital usan la asignación de la pieza elegida por el mismo plan y no crean una simulación de préstamos nueva.
+- Sin discrepancias de alcance conocidas tras la suite completa offline. La medición operativa en S1 y cualquier despliegue siguen pendientes de Ramón.

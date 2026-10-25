@@ -210,14 +210,15 @@ def test_create_meta_then_appears_as_draft(metas_page):
     page.goto(f"{server.url}/#metas")
     page.wait_for_selector("#meta-create-form")
     page.fill('[name="capital_usdt"]', "100")
-    page.fill('[name="target_value"]', "10")
+    page.fill('[name="target_value"]', "25")
     page.click('[name="profile"][value="RAPIDO"]')
     page.click('#meta-create-form button[type="submit"]')
     page.wait_for_selector(".metas-draft")
     title = page.locator(".metas-draft").first.inner_text()
     # Fase 40c-3, defecto 1: "100 -> 10 USDT" se leía como si la meta fuera
     # bajar a 10; debe mostrar capital -> capital+objetivo con el delta.
-    assert "100 → 110 USDT (+10)" in title
+    assert "100 → 125 USDT (+25)" in title
+    assert page.locator('[name="target_value"]').input_value() == "25"
 
 
 def test_analysis_completes_and_start_opens_a_grid(metas_page):
@@ -249,6 +250,24 @@ def test_active_meta_with_unknown_valuation_shows_unprotected_banner(metas_page)
     page.goto(f"{server.url}/#metas")
     page.wait_for_selector(".metas-unprotected", timeout=10000)
     assert "SIN PROTECCIÓN" in page.locator(".metas-unprotected").inner_text()
+
+
+def test_active_meta_shows_recent_reconfiguration_in_plain_spanish(metas_page):
+    page, server = metas_page
+    goal = server.core.create_goal(150, 10, profile="RAPIDO")
+    server.core.start_goal(goal["id"])
+    grid = server.engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
+    server.core.link_grid(goal["id"], grid["id"], "grid")
+    server.core._ledger(goal["id"], None, "META_OPERATOR_RECONFIGURE", {
+        "old": {"floor": 90, "ceiling": 110, "n_levels": 4},
+        "new": {"floor": 92, "ceiling": 112, "n_levels": 5},
+        "reason": "precio cerca del techo", "estimated_probability_improvement_pp": 6,
+        "estimated_progress_improvement_pct": 12}, grid_id=grid["id"])
+    page.goto(f"{server.url}/#metas")
+    recent = page.locator("[data-recent-adjustments]")
+    page.wait_for_function("document.querySelector('[data-recent-adjustments]').innerText.includes('precio cerca del techo')")
+    assert "Pieza" in recent.inner_text()
+    assert "Mejora estimada" in recent.inner_text()
 
 
 def test_discard_draft_removes_it_from_the_screen(metas_page):

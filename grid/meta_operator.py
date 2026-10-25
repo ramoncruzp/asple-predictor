@@ -174,6 +174,7 @@ class MetaOperator:
         self._advisor_cache = {}
         self._candles_cache = {}
         self._above_ceiling_count = {}
+        self._outside_range_count = {}
         self._hard_filter_misses = {}
         self._symbol_filters_cache = {}
         self._review_guard = threading.Lock()
@@ -1310,13 +1311,21 @@ class MetaOperator:
             has_inventory = any(float(level.get("held_qty") or 0) > 0 for level in levels)
             book = self.engine.exchange.get_book_ticker(grid["symbol"])
             bid = float(book.get("bid_price") or 0)
+            key = (int(goal["id"]), int(grid["id"]))
             above = bid > float(grid["range_high"])
+            outside_now = bid < float(grid["range_low"]) or above
+            self._outside_range_count[key] = self._outside_range_count.get(key, 0) + 1 if outside_now else 0
             scan_row = scan_rows.get(grid["symbol"], {})
             hard_fail = not bool(scan_row) or not bool(scan_row.get("scanner_eligible"))
-            key = (int(goal["id"]), int(grid["id"]))
             self._above_ceiling_count[key] = self._above_ceiling_count.get(key, 0) + 1 if above else 0
             self._hard_filter_misses[key] = self._hard_filter_misses.get(key, 0) + 1 if hard_fail else 0
-            must_withdraw = self._above_ceiling_count[key] >= 2 or self._hard_filter_misses[key] >= 2
+            # Dos revisiones fuera habilitan la simulacion de recentrado; no fuerzan
+            # por si solas cerrar/reabrir si mantener sigue siendo mejor.
+            must_withdraw = self._hard_filter_misses[key] >= 2
+            reconfiguration = self._consider_piece_reconfiguration(
+                goal, grid, levels, bid, plan, link, key)
+            if reconfiguration is not None:
+                return reconfiguration
             is_alternative = best["symbol"] != grid["symbol"] or best["strategy"] != grid["strategy"]
             loss = 0.0
             close_fee = 0.0
@@ -1334,8 +1343,8 @@ class MetaOperator:
                 current_alternative["estimate"].get("days_p90") or math.inf)
             time_faster = (best["estimate"].get("days_median") is not None and
                 (best["estimate"].get("days_p90") or math.inf) < current_p90)
-            reason = ("precio sobre techo en dos revisiones" if self._above_ceiling_count[key] >= 2 else
-                      "fallo de filtros duros del Scanner en dos revisiones" if self._hard_filter_misses[key] >= 2 else
+            reason = ("fallo de filtros duros del Scanner en dos revisiones" if self._hard_filter_misses[key] >= 2 else
+                      "precio sobre techo en dos revisiones" if self._above_ceiling_count[key] >= 2 else
                       "alternativa estimada más rápida y ganancia esperada cubre pérdida y comisiones")
             if must_withdraw and has_inventory and (self._hard_filter_misses[key] >= 2 or
                                                      self._above_ceiling_count[key] >= 2):
@@ -1401,6 +1410,116 @@ class MetaOperator:
         return {"decision": "no_hacer_nada", "reason": "ninguna alternativa supera los límites de reasignación",
                 "alternatives": plan["alternatives"], "signals_used": plan.get("signals_used"),
                 "shadow_decision": plan.get("shadow_decision")}
+
+    def _consider_piece_reconfiguration(self, goal, grid, levels, bid, plan, link, key):
+        """Reajusta una pieza Meta solo cuando la simulacion supera materialidad."""
+        cfg = goal.get("config_snapshot") or {}
+        piece_type = link.get("piece_type", "grid")
+        is_bot = piece_type == "individual_bot_grid"
+        if is_bot and (any(float(row.get("held_qty") or 0) > 0 for row in levels)
+                or any(row.get("state") == "DONE" or int(row.get("cycles_completed") or 0) > 0
+                       for row in levels)):
+            return None  # Conserva intacta la venta viva del bot comprado.
+        width = float(grid["range_high"]) - float(grid["range_low"])
+        step = width / max(1, int(grid.get("n_levels") or 1))
+        outside = (self._outside_range_count.get(key, 0) >= 2
+            and (bid > float(grid["range_high"]) + step or bid < float(grid["range_low"]) - step))
+        near_edge = min(abs(bid - float(grid["range_low"])),
+                        abs(float(grid["range_high"]) - bid)) <= step
+        if not (outside or near_edge):
+            return None
+        candidates = [row for row in plan.get("alternatives", [])
+            if row.get("symbol") == grid["symbol"] and row.get("strategy") == grid["strategy"]
+            and row.get("estimate", {}).get("evidence_sufficient") and row.get("pieces")]
+        candidates = [row for row in candidates if (row["pieces"][0].get("piece_type") ==
+            ("individual_bot_grid" if is_bot else "grid"))]
+        if len(candidates) < 2:
+            return None
+        current = min(candidates, key=lambda row: abs(float(row["pieces"][0]["floor"])
+            - float(grid["range_low"])) + abs(float(row["pieces"][0]["ceiling"])
+            - float(grid["range_high"])))
+        old_est = current["estimate"]
+        tie = float(cfg.get("reconfig_probability_tie_tolerance_pp", 2.0))
+        material_candidates = []
+        for alternative in candidates:
+            estimate = alternative["estimate"]
+            probability_delta = (float(estimate.get("probability") or 0)
+                - float(old_est.get("probability") or 0)) * 100
+            previous_progress = float(old_est.get("median_progress_pct") or 0)
+            next_progress = float(estimate.get("median_progress_pct") or 0)
+            progress_improvement = ((next_progress / previous_progress - 1) * 100
+                if previous_progress > 0 else (100.0 if next_progress > 0 else 0.0))
+            if (probability_delta >= float(cfg.get("reconfig_min_probability_delta_pp", 5.0))
+                    or (abs(probability_delta) <= tie and progress_improvement >=
+                        float(cfg.get("reconfig_min_progress_delta_pct", 10.0)))):
+                material_candidates.append((alternative, probability_delta, progress_improvement))
+        if not material_candidates:
+            return None
+        candidate, prob_delta, progress_delta = max(material_candidates,
+            key=lambda row: (float(row[0]["estimate"].get("probability") or 0),
+                             float(row[0]["estimate"].get("median_progress_pct") or 0)))
+        now = datetime.fromtimestamp(self.clock(), timezone.utc).replace(tzinfo=None)
+        recent = []
+        for row in self.core.ledger(int(goal["id"])):
+            stamp = row.get("ts")
+            if row.get("event_type") != "META_OPERATOR_RECONFIGURE" or stamp is None:
+                continue
+            stamp = stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
+            if stamp.replace(tzinfo=None) >= now - timedelta(hours=24):
+                recent.append(row)
+        same_piece = [row for row in recent if int(row.get("grid_id") or -1) == int(grid["id"])]
+        last_stamp = (same_piece[-1]["ts"].replace(tzinfo=timezone.utc)
+                      if same_piece and same_piece[-1]["ts"].tzinfo is None
+                      else same_piece[-1]["ts"] if same_piece else None)
+        cooled = bool(last_stamp and (datetime.fromtimestamp(self.clock(), timezone.utc)
+                                      - last_stamp).total_seconds() < 3600)
+        if len(recent) >= 4 or cooled:
+            return None
+        piece = candidate["pieces"][0]
+        reason = ("precio fuera dos revisiones y desplazado mas de un nivel" if outside
+                  else "precio a un nivel o menos del piso o techo")
+        current_capital = float(grid.get("capital_total") or piece.get("capital_usdt") or 0)
+        target_capital = float(piece.get("capital_usdt") or current_capital)
+        if not is_bot and abs(target_capital - current_capital) > 1e-8:
+            links = self.core._owned_grids(int(goal["id"]))
+            used_by_symbol, used_total = {}, 0.0
+            for owned in links:
+                other = self.db.get_grid(int(owned["grid_id"]))
+                if other is not None and other.get("status") in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}:
+                    amount = float(other.get("capital_total") or 0)
+                    used_total += amount
+                    used_by_symbol[other["symbol"]] = used_by_symbol.get(other["symbol"], 0.0) + amount
+            free_cash = max(0.0, float(goal["capital_initial"]) - used_total)
+            other_coin_capital = max(0.0, used_by_symbol.get(grid["symbol"], 0.0)
+                - current_capital)
+            coin_cap = float(goal["capital_initial"]) * float(cfg.get("capital_per_coin_pct", 100)) / 100
+            if (target_capital > float(grid["capital_total"]) + free_cash + 1e-8
+                    or target_capital + other_coin_capital > coin_cap + 1e-8):
+                return None
+        if is_bot:
+            outcome = self.engine.reposition_meta_bot(int(grid["id"]), piece["floor"],
+                piece["ceiling"], reason=reason)
+        else:
+            outcome = self.engine.adjust_grid(int(grid["id"]), piece["floor"],
+                piece["ceiling"], int(piece["n_levels"]), reason="meta_operator_reconfigure",
+                details={"reason": reason, "alternative_id": candidate.get("alternative_id")},
+                new_capital_total=target_capital)
+        if not outcome.get("ok") or not outcome.get("changed", outcome.get("ok")):
+            return None
+        details = {"decision": "reajustar_pieza", "piece_type": piece_type,
+            "old": {"floor": grid["range_low"], "ceiling": grid["range_high"], "n_levels": grid["n_levels"]},
+            "new": {"floor": piece["floor"], "ceiling": piece["ceiling"],
+                    "n_levels": piece.get("n_levels", 1)},
+            "reason": reason, "estimated_probability_improvement_pp": prob_delta,
+            "estimated_progress_improvement_pct": progress_delta,
+            "alternatives_evaluated": [{"alternative_id": row.get("alternative_id"),
+                "floor": row["pieces"][0].get("floor"), "ceiling": row["pieces"][0].get("ceiling"),
+                "n_levels": row["pieces"][0].get("n_levels"),
+                "probability": row["estimate"].get("probability"),
+                "median_progress_pct": row["estimate"].get("median_progress_pct")} for row in candidates],
+            "shadow_decision": plan.get("shadow_decision"), "execution": outcome}
+        self._ledger(goal["id"], "META_OPERATOR_RECONFIGURE", details, grid_id=int(grid["id"]))
+        return details
 
     def _add_piece_from_free_cash(self, goal, links, plan):
         cfg = goal.get("config_snapshot") or {}
@@ -1541,6 +1660,7 @@ class MetaOperator:
                     bases.update((float(row[0]), float(row[1])) for row in rows)
             except Exception:
                 pass
+            profile_results = []
             for capital, target in sorted(bases):
                 for profile in ("PRUDENTE", "RAPIDO"):
                     if not bool(getattr(self.settings, "meta_mode_enabled", False)):
@@ -1548,7 +1668,20 @@ class MetaOperator:
                     cfg = dict(configs.get(profile, {}))
                     goal = {"id": 0, "capital_initial": capital, "target_usdt": target,
                         "target_input_type": "USDT", "profile": profile, "config_snapshot": cfg}
-                    worker._build_plan(goal, record=False)
+                    try:
+                        worker._build_plan(goal, record=False)
+                        profile_results.append({"capital_usdt": capital, "target_usdt": target,
+                            "profile": profile, "status": "completed"})
+                    except ValueError as exc:
+                        # Un perfil sin candidatas no debe impedir calentar el otro.
+                        message = str(exc)
+                        status = ("no_candidates" if ("Ninguna moneda cumple" in message
+                            or "No hay estructuras del Advisor" in message) else "failed")
+                        profile_results.append({"capital_usdt": capital, "target_usdt": target,
+                            "profile": profile, "status": status, "reason": message})
+                    except Exception as exc:
+                        profile_results.append({"capital_usdt": capital, "target_usdt": target,
+                            "profile": profile, "status": "failed", "reason": str(exc)})
                     time.sleep(.05)
             after = before
             try:
@@ -1557,7 +1690,10 @@ class MetaOperator:
                         self.db.meta_analysis_cache)).scalar_one()
             except Exception:
                 pass
-            result = {"status": "completed", "duration_s": round(time.perf_counter() - started, 3),
+            result = {"status": ("completed" if all(row["status"] == "completed"
+                        for row in profile_results) else "partial"),
+                      "profiles": profile_results,
+                      "duration_s": round(time.perf_counter() - started, 3),
                       "cache_entries_before": int(before), "cache_entries_after": int(after),
                       "cache_entries_added": max(0, int(after) - int(before)), "workers": 1}
             logger.info("Meta daily precompute finished duration_s=%.3f cache_entries_before=%d cache_entries_after=%d",

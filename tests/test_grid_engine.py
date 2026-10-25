@@ -79,6 +79,63 @@ def test_single_level_meta_bot_sells_once_and_stays_done_after_restart():
     assert len(exchange.create_calls) == before
 
 
+def test_meta_bot_reposition_cancels_buy_but_preserves_a_live_sell_after_fill():
+    from datetime import datetime
+    import json
+    engine, db, exchange = make_engine()
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet",
+            created_at=datetime(2026, 1, 1), config_snapshot=json.dumps({"min_margin_pct": .3})))\
+            .inserted_primary_key[0]
+    grid = engine.create_grid("XRPUSDT", 99, 101, 1, capital=100, strategy="simple",
+        meta_id=meta_id, meta_piece_type="individual_bot_grid")
+    old_buy = exchange.get_open_orders("XRPUSDT")[0]
+    moved = engine.reposition_meta_bot(grid["id"], 98, 101, reason="prueba")
+    assert moved["ok"] is True
+    buys = exchange.get_open_orders("XRPUSDT")
+    assert len(buys) == 1 and buys[0]["price"] == Decimal("98")
+    exchange.fill(buys[0]["order_id"])
+    engine.sync_grid(grid["id"])
+    level = db.get_grid_levels(grid["id"])[0]
+    assert level["state"] == "SELL_OPEN"
+    live_sell_id = level["order_id"]
+    refused = engine.reposition_meta_bot(grid["id"], 97, 101, reason="inventario")
+    assert refused == {"ok": False, "reason": "bot_has_inventory"}
+    assert exchange.get_order("XRPUSDT", order_id=live_sell_id)["status"] == "NEW"
+    assert exchange.get_order("XRPUSDT", order_id=old_buy["order_id"])["status"] == "CANCELED"
+    exchange.fill(live_sell_id)
+    engine.sync_grid(grid["id"])
+    assert db.get_grid_levels(grid["id"])[0]["state"] == "DONE"
+    assert engine.reposition_meta_bot(grid["id"], 96, 101, reason="no_rebuy")["ok"] is False
+
+
+def test_meta_grid_capital_reassignment_is_owned_and_respects_per_cell_limit():
+    from datetime import datetime
+    engine, db, _exchange = make_engine()
+    grid = engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(capital_initial=200,
+            target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet",
+            created_at=datetime(2026, 1, 1), config_snapshot='{"capital_per_coin_pct": 70}'))\
+            .inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=meta_id,
+            status="ACTIVE", started_at=datetime(2026, 1, 1), realized_extra_usdt=0))\
+            .inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=meta_id, run_id=run_id,
+            grid_id=grid["id"], piece_type="grid", origin_grid_id=grid["id"],
+            created_at=datetime(2026, 1, 1)))
+    blocked = engine.adjust_grid(grid["id"], 90, 110, 4, new_capital_total=150)
+    assert blocked["ok"] is False  # supera el tope de capital por moneda (70 % = 140).
+    changed = engine.adjust_grid(grid["id"], 92, 112, 4, reason="meta_operator_reconfigure",
+        new_capital_total=120)
+    assert changed["ok"] is True
+    assert db.get_grid(grid["id"])["capital_total"] == pytest.approx(120)
+    assert sum(float(row["capital"]) for row in db.get_grid_levels(grid["id"])) == pytest.approx(120)
+
+
 def test_normal_grid_still_requires_four_levels():
     engine, _db, _exchange = make_engine()
     with pytest.raises(GridConfigError, match="at least 4"):

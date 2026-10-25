@@ -69,7 +69,7 @@ resultado % = (valor_ejecutable − capital inicial) / capital inicial × 100
 | Ciclo | Frecuencia | Qué hace |
 |---|---|---|
 | **Vigilancia de pérdida** | Cada **1 minuto** | Calcula el valor ejecutable (§3). Dos cruces consecutivos del límite → cierre total (§6). Al 75 % → alerta y bloqueo de piezas nuevas. |
-| **Revisión del plan** | Cada **15 minutos** | Analiza mercado (Scanner, σ, modelos) y decide mantener, abrir, retirar, reajustar o cerrar piezas Meta según datos y simulaciones. La ejecución debe respetar bloqueo de la meta, límites del perfil y protecciones de inventario; los criterios de 40b-6B requieren diseño aprobado. |
+| **Revisión del plan** | Cada **15 minutos** | Analiza mercado (Scanner, σ, modelos) y decide mantener, abrir, retirar, reajustar o cerrar piezas Meta según datos y simulaciones. Reajustes: mejora histórica ≥5 puntos porcentuales, o probabilidad empatada dentro de ±2 puntos y avance mediano ≥10 % mejor; ambos umbrales editables. Evaluar a un nivel del borde o tras dos revisiones fuera con desplazamiento >1 nivel. Enfriamiento de 1 h por pieza y máximo de 4 por meta cada 24 h. Bloqueo 75 %/DESCONOCIDO impide acciones; simulación fuera de `ops_lock`, revalidación y ejecución dentro. |
 
 La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con el monitor existente. Registrar en cada corrida cuánto se pasó del límite en el momento del cierre (deslizamiento).
 
@@ -103,9 +103,9 @@ La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con 
 3. Pide confirmación antes de ejecutar.
 4. Queda registrado en la bitácora y en la corrida (opción elegida, valor al cancelar).
 
-Los stop-loss por celda de cada pieza siguen funcionando según el interruptor global (`STOPLOSS_ENABLED`); el límite de pérdida de la meta va **por encima** de ellos.
+Los stop-loss por celda de cada pieza siguen funcionando según el interruptor global (`STOPLOSS_ENABLED`); el límite de pérdida de la meta va **por encima** de ellos. En grids Smart ligados a una meta, el monitor conserva PAUSE/RESUME por `break_prob`, stop-loss, cierres de seguridad y traspasos de préstamos. No ejecuta ADJUST, re-espaciado ni idle-shrink: esa geometría la decide el operador Meta.
 
-El reajuste autorizado para el operador activo no sustituye estos cierres verificados ni permite que un reajuste venda inventario con pérdida. Los detalles de coste, simulación y frenos para reajustar se definirán en 40b-6B antes de implementarse.
+El reajuste autorizado para el operador activo no sustituye estos cierres verificados ni permite que un reajuste venda inventario con pérdida. Un bot individual sin inventario puede mover su X/Y cancelando y reponiendo la compra; después de comprar, mantiene intacta la venta.
 
 ---
 

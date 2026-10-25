@@ -8,6 +8,7 @@
   // Mientras hay un análisis corriendo o un plan a la vista, el refresco automático
   // no debe redibujar la pantalla (eso borraba el progreso y detenía la consulta).
   let planVisible = false;
+  let lastTargetValue = '10';
   const JOB_KEY = 'asple-metas-analysis-job';
   function saveJob(job) { try { sessionStorage.setItem(JOB_KEY, JSON.stringify(job)); } catch (e) { /* sin almacenamiento */ } }
   function loadJob() { try { return JSON.parse(sessionStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } }
@@ -144,7 +145,7 @@
           <legend class="metas-field-legend">Meta (ganancia objetivo)</legend>
           <label><input type="radio" name="target_type" value="USDT" checked> USDT</label>
           <label><input type="radio" name="target_type" value="PCT"> %</label>
-          <input name="target_value" type="number" min="0.01" step="0.01" value="10" required aria-label="Valor de la meta">
+          <input name="target_value" type="number" min="0.01" step="0.01" value="${esc(lastTargetValue)}" required aria-label="Valor de la meta">
         </fieldset>
         <fieldset class="metas-profile-choice">
           <legend class="metas-field-legend">Perfil</legend>
@@ -161,6 +162,8 @@
   function wireCreateForm(container) {
     const form = container.querySelector('#meta-create-form');
     if (!form) return;
+    const targetInput = form.querySelector('[name="target_value"]');
+    targetInput?.addEventListener('input', () => { lastTargetValue = targetInput.value; });
     form.querySelectorAll('[name="profile"]').forEach(radio => radio.addEventListener('change', () => {
       const table = form.querySelector('.metas-limits-table');
       if (table) table.dataset.selectedProfile = radio.value;
@@ -170,6 +173,7 @@
       const errorBox = form.querySelector('.metas-form-error');
       errorBox.textContent = '';
       const data = new FormData(form);
+      lastTargetValue = String(data.get('target_value') || lastTargetValue);
       try {
         await apiPost('/api/metas', {
           capital_usdt: Number(data.get('capital_usdt')),
@@ -425,6 +429,7 @@
       ${valuationBlock(goal, valuation)}
       ${progressBars(goal, valuation, profile)}
       <div class="metas-pieces"><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
+      <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
       <div class="metas-ledger">
         <h3>Bitácora</h3>
         <div class="metas-ledger-controls">
@@ -469,7 +474,24 @@
   function wireActivePanel(container, goalId) {
     container.querySelector(`[data-cancel-op]`)?.addEventListener('click', e => confirmCancel(container, e.target.dataset.cancelOp));
     wireLedgerControls(container, goalId);
+    renderRecentAdjustments(container, goalId);
     renderLedger(container, goalId);
+  }
+
+  async function renderRecentAdjustments(container, goalId) {
+    const slot = container.querySelector('[data-recent-adjustments]');
+    if (!slot) return;
+    try {
+      const page = await apiGet(`/api/metas/${goalId}/ledger?page=1&page_size=100&include_valuation=false`);
+      const rows = page.events.filter(row => row.event_type === 'META_OPERATOR_RECONFIGURE').slice(0, 5);
+      slot.innerHTML = rows.length ? rows.map(row => {
+        const d = row.details || {}, old = d.old || {}, next = d.new || {};
+        const piece = `Pieza ${row.grid_id || 'Meta'}`;
+        const change = `piso ${fmtMoney(old.floor, 6)} → ${fmtMoney(next.floor, 6)}, techo ${fmtMoney(old.ceiling, 6)} → ${fmtMoney(next.ceiling, 6)}, niveles ${esc(old.n_levels ?? '—')} → ${esc(next.n_levels ?? '—')}`;
+        const improvement = `probabilidad ${fmtMoney(d.estimated_probability_improvement_pp, 1)} puntos; avance mediano ${fmtMoney(d.estimated_progress_improvement_pct, 1)}%`;
+        return `<li><b>${piece}</b>: ${change}. Motivo: ${esc(d.reason || 'reajuste del operador')}. Mejora estimada: ${improvement}.</li>`;
+      }).join('') : '<li class="muted">Todavía no hay reajustes.</li>';
+    } catch (error) { slot.innerHTML = `<li class="metas-error">${esc(error.message)}</li>`; }
   }
 
   // -- Zone 4: history -----------------------------------------------------

@@ -1533,6 +1533,15 @@ class DBManager:
         with self.engine.connect() as conn:
             return conn.execute(statement).first() is not None
 
+    def is_meta_grid(self, grid_id: int) -> bool:
+        """Whether an unreleased piece link assigns this grid to a Meta goal."""
+        statement = select(self.meta_piece_links.c.id).where(
+            self.meta_piece_links.c.grid_id == int(grid_id),
+            self.meta_piece_links.c.released_at.is_(None),
+        ).limit(1)
+        with self.engine.connect() as conn:
+            return conn.execute(statement).first() is not None
+
     def get_grid_levels(self, grid_id: int) -> list[dict]:
         statement = select(self.grid_levels).where(
             self.grid_levels.c.grid_id == grid_id

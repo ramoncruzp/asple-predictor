@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 
 from grid.meta_operator import (loss_reallocation_allowed, rank_alternatives,
                                 profile_candidate_exclusion, signal_adjusted_probability,
@@ -253,6 +254,107 @@ def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(t
     assert calls == [("PRUDENTE", False), ("RAPIDO", False)]
     assert result["cache_entries_after"] == 2
     assert operator._persistent_cache_get("advisor", ("PRUDENTE",)) == {"ok": True}
+    calls.clear()
+    def one_profile_has_no_candidates(self, goal, *, record=True):
+        calls.append(goal["profile"])
+        if goal["profile"] == "PRUDENTE":
+            raise ValueError("Ninguna moneda cumple los filtros")
+        return {"timings_s": {}}
+    monkeypatch.setattr(MetaOperator, "_build_plan", one_profile_has_no_candidates)
+    partial = operator.precompute_daily()
+    assert partial["status"] == "partial"
+    assert [row["status"] for row in partial["profiles"]] == ["no_candidates", "completed"]
+    assert calls == ["PRUDENTE", "RAPIDO"]
+
+
+def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bots():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self): self.events, self.rows = [], []
+        def ledger(self, _meta_id): return list(self.rows)
+        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def reposition_meta_bot(self, *args, **kwargs):
+            self.calls.append(("bot", args, kwargs))
+            return {"ok": True, "changed": True}
+        def adjust_grid(self, *args, **kwargs):
+            self.calls.append(("grid", args, kwargs))
+            return {"ok": True, "changed": True}
+
+    def inputs(piece_type="grid", held=0, probability=.56, old_probability=.50,
+               new_progress=20, old_progress=20):
+        core, engine = Core(), Engine()
+        operator = MetaOperator(core, object(), None, engine, None, clock=lambda: 1_800_000_000)
+        grid = {"id": 7, "status": "ACTIVE", "symbol": "AAAUSDT", "strategy": "simple",
+                "range_low": 90, "range_high": 110, "n_levels": 4}
+        levels = [{"held_qty": held}]
+        def alt(low, high, p, progress):
+            return {"symbol": "AAAUSDT", "strategy": "simple", "pieces": [{
+                "piece_type": piece_type, "floor": low, "ceiling": high, "n_levels": 1 if piece_type == "individual_bot_grid" else 4}],
+                "estimate": {"evidence_sufficient": True, "probability": p,
+                "median_progress_pct": progress}, "alternative_id": str(low)}
+        plan = {"alternatives": [alt(90, 110, old_probability, old_progress),
+                                 alt(92, 112, probability, new_progress)],
+                "shadow_decision": {"symbol": "AAAUSDT", "strategy": "simple"}}
+        return core, engine, operator, grid, levels, plan
+
+    core, engine, operator, grid, levels, plan = inputs()
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"
+    assert engine.calls[0][0] == "grid"
+    event = core.events[-1][0]
+    assert event[2] == "META_OPERATOR_RECONFIGURE"
+    assert event[3]["estimated_probability_improvement_pp"] == pytest.approx(6)
+
+    core, engine, operator, grid, levels, plan = inputs(probability=.53)
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result is None  # 3 pp no supera la materialidad de 5 pp.
+    assert engine.calls == []
+
+    core, engine, operator, grid, levels, plan = inputs(probability=.51, new_progress=22)
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"  # empate ±2 pp y avance mediano +10 %.
+
+    core, engine, operator, grid, levels, plan = inputs()
+    assert operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 84, plan, {"piece_type": "grid"}, (1, 7)) is None
+    operator._outside_range_count[(1, 7)] = 2
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 84, plan, {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"  # dos revisiones, desplazamiento > un nivel.
+
+    core, engine, operator, grid, levels, plan = inputs()
+    core.rows = [{"event_type": "META_OPERATOR_RECONFIGURE", "grid_id": 7,
+        "ts": datetime.fromtimestamp(1_800_000_000 - 1800, timezone.utc).replace(tzinfo=None)}]
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result is None and engine.calls == []  # enfriamiento de 1 h.
+
+    core, engine, operator, grid, levels, plan = inputs()
+    core.rows = [{"event_type": "META_OPERATOR_RECONFIGURE", "grid_id": i,
+        "ts": datetime.fromtimestamp(1_800_000_000 - 3600, timezone.utc).replace(tzinfo=None)}
+        for i in range(4)]
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result is None and engine.calls == []  # máximo de cuatro en 24 h.
+
+    core, engine, operator, grid, levels, plan = inputs("individual_bot_grid")
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"
+    assert engine.calls[0][0] == "bot"
+    assert engine.calls[0][1][1:] == (92, 112)
+
+    core, engine, operator, grid, levels, plan = inputs("individual_bot_grid", held=1)
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
+    assert result is None and engine.calls == []
 
 
 def test_prudent_requires_medium_sigma_and_complete_model_stats_rapid_does_not():
@@ -518,9 +620,14 @@ def test_review_withdrawal_requires_two_consecutive_hard_filter_or_ceiling_check
     goal = {"id": 1, "target_usdt": 10, "config_snapshot": {}}
     assert operator._review_allocations(goal, {})["decision"] == "no_hacer_nada"
     result = operator._review_allocations(goal, {})
-    assert result["decision"] == "retirar_con_ventas_vivas"
-    assert engine.buy_only == [(7, {"finalize": False, "buy_only": True})]
-    assert any(event[0][2] == "META_OPERATOR_WITHDRAW" for event in core.events)
+    if trigger == "scanner":
+        assert result["decision"] == "retirar_con_ventas_vivas"
+        assert engine.buy_only == [(7, {"finalize": False, "buy_only": True})]
+    else:
+        # Dos revisiones fuera habilitan evaluación; no retira sin mejora material.
+        assert result["decision"] == "no_hacer_nada"
+        assert engine.buy_only == []
+    assert any(event[0][2] == "META_OPERATOR_WITHDRAW" for event in core.events) is (trigger == "scanner")
 
 
 def test_review_does_not_add_piece_when_75_percent_or_unknown_blocks_it():
