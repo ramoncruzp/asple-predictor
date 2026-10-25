@@ -62,6 +62,35 @@ def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     assert row["buy_relative"] == pytest.approx(.99)
 
 
+def test_learning_sample_and_labels_persist_with_source_provenance(tmp_path):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10, profile="RAPIDO")
+    operator = MetaOperator(core, db, None, None, core.settings)
+    alternative = {"alternative_id": "decision:0", "replay_probability": .35,
+        "signals_used": [{"name": "scanner", "normalized": .4}],
+        "pieces": [{"symbol": "XRPUSDT", "piece_type": "individual_bot_grid",
+            "strategy": "simple", "capital_usdt": 100, "n_levels": 1,
+            "floor": 99, "ceiling": 101, "mid_at_plan": 100}]}
+    assert operator._persist_learning_samples(goal, "decision", [alternative]) == 1
+    with db.engine.connect() as conn:
+        row = conn.execute(select(db.meta_learning_samples)).mappings().one()
+    assert row["source_kind"] == "live"
+    assert row["base_probability"] == .35
+    assert row["decision_id"] == "decision"
+    assert '"scanner"' in row["signals_json"]
+
+    label = {"72h": {"status": "labeled", "horizon": "72h", "reached": True,
+                     "net_advance_usdt": 2.0}}
+    assert operator._persist_learning_labels(row["id"], label, datetime.now(timezone.utc)) == 1
+    assert operator._persist_learning_labels(row["id"], label, datetime.now(timezone.utc)) == 0
+    with db.engine.connect() as conn:
+        stored = conn.execute(select(db.meta_learning_labels)).mappings().one()
+    assert stored["horizon"] == "72h"
+    assert '"reached": true' in stored["label_json"]
+
+
 def test_attributable_cash_fixed_numbers():
     # 100 iniciales - 60 entregados + 70 devueltos - 1 de comisiones = 109.
     assert attributable_cash("100", "60", "70", "1") == Decimal("109")

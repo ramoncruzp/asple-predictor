@@ -337,6 +337,28 @@ class DBManager:
             Column("sell_relative", Float, nullable=False),
             Column("stats_json", Text, nullable=False),
             Column("created_at", DateTime, nullable=False))
+        self.meta_learning_samples = Table("meta_learning_samples", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("sample_key", String(96), nullable=False, unique=True),
+            Column("meta_id", Integer, ForeignKey("meta_goals.id"), nullable=True),
+            Column("decision_id", String(64)), Column("alternative_id", String(96)),
+            Column("symbol", String(32), nullable=False), Column("profile", String(16), nullable=False),
+            Column("sample_at", DateTime(timezone=True), nullable=False),
+            Column("source_kind", String(32), nullable=False),
+            Column("base_probability", Float), Column("parameters_json", Text, nullable=False),
+            Column("signals_json", Text, nullable=False), Column("provenance_json", Text, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False))
+        self.meta_learning_labels = Table("meta_learning_labels", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("sample_id", Integer, ForeignKey("meta_learning_samples.id"), nullable=False),
+            Column("horizon", String(16), nullable=False),
+            Column("label_json", Text, nullable=False), Column("labeled_at", DateTime(timezone=True), nullable=False),
+            UniqueConstraint("sample_id", "horizon", name="uq_meta_learning_label_sample_horizon"))
+        self.meta_learning_runs = Table("meta_learning_runs", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("started_at", DateTime(timezone=True), nullable=False),
+            Column("finished_at", DateTime(timezone=True)), Column("status", String(24), nullable=False),
+            Column("summary_json", Text, nullable=False, default="{}"))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
@@ -362,6 +384,8 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_signal_observations_decision ON meta_signal_observations(decision_id, alternative_id, horizon)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_learning_samples_symbol_time ON meta_learning_samples(symbol, sample_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_learning_labels_horizon ON meta_learning_labels(horizon, labeled_at)"))
 
     def _seed_meta_profile_settings(self) -> None:
         """Seed editable Meta profile defaults without replacing operator values."""

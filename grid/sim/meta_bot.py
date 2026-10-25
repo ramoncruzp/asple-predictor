@@ -7,7 +7,7 @@ from grid.sim.runner import FILTERS
 
 
 def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pct=.1,
-                 filters=None, max_loss_pct=None, min_margin_pct=.30):
+                 filters=None, max_loss_pct=None, min_margin_pct=.30, trace_callback=None):
     if candles is None or len(candles.timestamp) < 2:
         raise ValueError("el replay del bot requiere al menos dos velas")
     capital, buy_price, sell_price = map(Decimal, map(str, (capital, buy_price, sell_price)))
@@ -43,6 +43,9 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
             inventory = Decimal(0)
             sold = True
         marked = cash + inventory * Decimal(str(close)) * (1 - fee)
+        if trace_callback is not None:
+            trace_callback({"timestamp": int(candles.timestamp[idx]), "equity": float(marked),
+                            "cash": float(cash), "inventory": float(inventory)})
         peak = max(peak, marked)
         trough = min(trough, marked)
         if peak > 0:

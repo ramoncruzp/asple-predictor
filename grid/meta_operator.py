@@ -182,6 +182,7 @@ class MetaOperator:
         self._symbol_filters_cache = {}
         self._review_guard = threading.Lock()
         self._precompute_guard = threading.Lock()
+        self._learning_guard = threading.Lock()
         self._thread = None
         self._opener = None
         self.scheduler = BackgroundScheduler(timezone="UTC")
@@ -815,6 +816,7 @@ class MetaOperator:
                                        if key not in {"window_results", "_touch_observations"}},
                           "sigma_bands": plan["sigma_bands"]})
             self._persist_touch_observations(int(goal["id"]), decision_id, alternatives)
+            self._persist_learning_samples(goal, decision_id, alternatives)
         return plan
 
     def _persist_touch_observations(self, meta_id, decision_id, alternatives):
@@ -840,6 +842,285 @@ class MetaOperator:
         if values:
             with self.db.engine.begin() as conn:
                 conn.execute(table.insert(), values)
+
+    @staticmethod
+    def _learning_parameters(goal, alternative):
+        cfg = dict(goal.get("config_snapshot") or {})
+        pieces = [{key: value for key, value in piece.items()
+                   if key in {"symbol", "strategy", "piece_type", "capital_usdt", "n_levels",
+                              "floor", "ceiling", "range_low", "range_high", "mid_at_plan",
+                              "margin_pct", "target_usdt"}}
+                  for piece in alternative.get("pieces", [])]
+        return {"profile": str(goal.get("profile", "RAPIDO")).upper(),
+            "profile_days": int(cfg.get("max_days", 20)),
+            "capital_usdt": float(goal.get("capital_initial", 0)),
+            "target_usdt": float(goal.get("target_usdt", 0)),
+            "max_loss_pct": float(cfg.get("max_loss_pct", 0)), "pieces": pieces}
+
+    def _store_learning_sample(self, values):
+        from sqlalchemy import select
+        table = self.db.meta_learning_samples
+        with self.db.engine.begin() as conn:
+            exists = conn.execute(select(table.c.id).where(
+                table.c.sample_key == values["sample_key"])).first()
+            if exists:
+                return False
+            conn.execute(table.insert().values(**values))
+        return True
+
+    def _persist_learning_samples(self, goal, decision_id, alternatives):
+        """Congela señales y geometría puntuales, sin copiar filas de replay futuras."""
+        table = getattr(self.db, "meta_learning_samples", None)
+        if table is None:
+            return 0
+        started_at = datetime.fromtimestamp(float(self.clock()), timezone.utc)
+        created = 0
+        for alternative in alternatives:
+            alt_id = str(alternative.get("alternative_id") or "")
+            if not alt_id:
+                continue
+            params = self._learning_parameters(goal, alternative)
+            pieces = params["pieces"]
+            if not pieces:
+                continue
+            sample_key = hashlib.sha256(f"live:{decision_id}:{alt_id}".encode()).hexdigest()
+            signals = {"signals_used": alternative.get("signals_used", []),
+                "touch_signal": alternative.get("touch_signal"),
+                "shadow_signals": alternative.get("shadow_signals", [])}
+            values = {"sample_key": sample_key, "meta_id": int(goal["id"]),
+                "decision_id": str(decision_id), "alternative_id": alt_id,
+                "symbol": str(pieces[0].get("symbol") or "").upper(),
+                "profile": params["profile"], "sample_at": started_at,
+                "source_kind": "live", "base_probability": alternative.get("replay_probability"),
+                "parameters_json": json.dumps(params, sort_keys=True, default=str),
+                "signals_json": json.dumps(signals, sort_keys=True, default=str),
+                "provenance_json": json.dumps({"source": "META_PLAN_EVALUATED",
+                    "decision_id": decision_id, "alternative_id": alt_id}, sort_keys=True),
+                "created_at": started_at}
+            created += int(self._store_learning_sample(values))
+        return created
+
+    def _import_legacy_learning_samples(self):
+        """Importa snapshots Meta anteriores al esquema 40d, de forma idempotente."""
+        from sqlalchemy import select
+        table = self.db.meta_learning_samples
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(select(self.db.meta_ledger, self.db.meta_goals).join(
+                self.db.meta_goals, self.db.meta_goals.c.id == self.db.meta_ledger.c.meta_id).where(
+                self.db.meta_ledger.c.event_type == "META_PLAN_EVALUATED")).mappings().all()
+        created = 0
+        for row in rows:
+            try:
+                details = json.loads(row["details"] or "{}")
+                decision_id = str(details.get("decision_id") or "")
+                cfg = json.loads(row["config_snapshot"] or "{}")
+                for alternative in details.get("alternatives", []):
+                    alt_id = str(alternative.get("alternative_id") or "")
+                    params = self._learning_parameters({"id": row["meta_id"],
+                        "profile": row["profile"], "capital_initial": row["capital_initial"],
+                        "target_usdt": row["target_usdt"], "config_snapshot": cfg}, alternative)
+                    pieces = params["pieces"]
+                    if not decision_id or not alt_id or not pieces:
+                        continue
+                    key = hashlib.sha256(f"live:{decision_id}:{alt_id}".encode()).hexdigest()
+                    ts = row["ts"]
+                    ts = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+                    values = {"sample_key": key, "meta_id": int(row["meta_id"]),
+                        "decision_id": decision_id, "alternative_id": alt_id,
+                        "symbol": str(pieces[0].get("symbol") or "").upper(),
+                        "profile": params["profile"], "sample_at": ts,
+                        "source_kind": "live", "base_probability": alternative.get("replay_probability"),
+                        "parameters_json": json.dumps(params, sort_keys=True, default=str),
+                        "signals_json": json.dumps({"signals_used": alternative.get("signals_used", []),
+                            "touch_signal": alternative.get("touch_signal"),
+                            "shadow_signals": alternative.get("shadow_signals", [])}, sort_keys=True, default=str),
+                        "provenance_json": json.dumps({"source": "legacy_meta_ledger",
+                            "ledger_id": row["id"], "decision_id": decision_id,
+                            "alternative_id": alt_id}, sort_keys=True), "created_at": datetime.now(timezone.utc)}
+                    created += int(self._store_learning_sample(values))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return created
+
+    def _learning_candles(self, symbol):
+        import pandas as pd
+        from grid.sim.data import CandleData
+        raw = self.scanner.client.get_historical_klines(symbol, "5m", 180)
+        frame = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
+        if frame.empty:
+            return None
+        timestamps = pd.to_datetime(frame["timestamp"], utc=True).astype("int64").to_numpy() // 1_000_000_000
+        return CandleData(timestamp=timestamps.astype("int64"),
+            open=frame["open"].to_numpy(float), high=frame["high"].to_numpy(float),
+            low=frame["low"].to_numpy(float), close=frame["close"].to_numpy(float), gaps=0)
+
+    def _learning_history_rows(self, symbol):
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            forecasts = conn.execute(select(self.db.vol_forecasts).where(
+                self.db.vol_forecasts.c.symbol == symbol).order_by(
+                    self.db.vol_forecasts.c.made_at)).mappings().all()
+            predictions = conn.execute(select(self.db.predictions).where(
+                self.db.predictions.c.symbol == symbol).order_by(
+                    self.db.predictions.c.predicted_at)).mappings().all()
+        return [dict(row) for row in forecasts], [dict(row) for row in predictions]
+
+    def _persist_learning_labels(self, sample_id, labels, now):
+        from sqlalchemy import select
+        table = self.db.meta_learning_labels
+        inserted = 0
+        with self.db.engine.begin() as conn:
+            for horizon, label in labels.items():
+                if label.get("status") != "labeled":
+                    continue
+                exists = conn.execute(select(table.c.id).where(table.c.sample_id == int(sample_id),
+                    table.c.horizon == str(horizon))).first()
+                if exists:
+                    continue
+                payload = dict(label)
+                payload.pop("status", None)
+                conn.execute(table.insert().values(sample_id=int(sample_id), horizon=str(horizon),
+                    label_json=json.dumps(payload, sort_keys=True), labeled_at=now))
+                inserted += 1
+        return inserted
+
+    def run_learning_daily(self):
+        """Etiqueta en prioridad baja sin tomar ops_lock ni ejecutar órdenes."""
+        from sqlalchemy import select
+        if not bool(getattr(self.settings, "meta_mode_enabled", False)):
+            return {"status": "disabled", "reason": "Modo Meta apagado"}
+        if not self._learning_guard.acquire(blocking=False):
+            return {"status": "skipped", "reason": "aprendizaje anterior sigue activo"}
+        from grid.meta_learning import replay_alternative_labels, reconstruct_historical_samples
+        started = datetime.now(timezone.utc)
+        timings = {"legacy_import_s": 0.0, "market_history_s": 0.0,
+                   "historical_reconstruction_s": 0.0,
+                   "label_simulation_s": 0.0, "persistence_s": 0.0}
+        counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
+                    "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0}
+        priority_lowered = False
+        run_id = None
+        try:
+            try:
+                if hasattr(os, "setpriority") and hasattr(os, "PRIO_PROCESS"):
+                    worker_id = threading.get_native_id()
+                    current = os.getpriority(os.PRIO_PROCESS, worker_id)
+                    os.setpriority(os.PRIO_PROCESS, worker_id, min(19, current + 5))
+                    priority_lowered = True
+            except (AttributeError, OSError):
+                pass
+            with self.db.engine.begin() as conn:
+                run_id = conn.execute(self.db.meta_learning_runs.insert().values(
+                    started_at=started, status="RUNNING", summary_json="{}")).inserted_primary_key[0]
+            t = time.perf_counter()
+            counters["legacy_samples_imported"] = self._import_legacy_learning_samples()
+            timings["legacy_import_s"] = time.perf_counter() - t
+            with self.db.engine.connect() as conn:
+                samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
+                labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
+                    self.db.meta_learning_labels.c.horizon)).all()
+            existing = {(int(row[0]), str(row[1])) for row in labels}
+            candles_by_symbol, sources = {}, {}
+            t = time.perf_counter()
+            for sample in samples:
+                params = json.loads(sample["parameters_json"])
+                for piece in params.get("pieces", []):
+                    symbol = str(piece.get("symbol") or "").upper()
+                    if symbol and symbol not in candles_by_symbol:
+                        try:
+                            candles_by_symbol[symbol] = self._learning_candles(symbol)
+                            sources[symbol] = self._learning_history_rows(symbol)
+                        except Exception:
+                            counters["symbols_failed"] += 1
+                            candles_by_symbol[symbol] = None
+            timings["market_history_s"] = time.perf_counter() - t
+            templates, seen_templates = [], set()
+            for sample in sorted(samples, key=lambda row: row["sample_at"], reverse=True):
+                if sample["source_kind"] != "live":
+                    continue
+                params = json.loads(sample["parameters_json"])
+                shape = json.dumps({"profile": sample["profile"], "pieces": [
+                    {key: piece.get(key) for key in ("symbol", "piece_type", "strategy", "n_levels",
+                        "capital_usdt", "floor", "ceiling", "mid_at_plan")}
+                    for piece in params.get("pieces", [])]}, sort_keys=True, default=str)
+                if shape not in seen_templates:
+                    seen_templates.add(shape)
+                    templates.append({"sample_key": sample["sample_key"], "parameters": params})
+            if templates:
+                t = time.perf_counter()
+                reconstructed = reconstruct_historical_samples(templates,
+                    candles_by_symbol={key: value for key, value in candles_by_symbol.items()
+                                       if value is not None},
+                    source_rows_by_symbol=sources, now=datetime.now(timezone.utc), lookback_days=180)
+                for item in reconstructed:
+                    params = item["parameters"]
+                    key = hashlib.sha256(("historical:" + str(item["template_sample_key"])
+                        + ":" + str(item["sample_at"])).encode()).hexdigest()
+                    sample_at = datetime.fromtimestamp(int(item["sample_at"]), timezone.utc)
+                    values = {"sample_key": key, "meta_id": None, "decision_id": None,
+                        "alternative_id": None, "symbol": item["symbol"], "profile": item["profile"],
+                        "sample_at": sample_at, "source_kind": "historical_reconstructed",
+                        "base_probability": item.get("base_probability"),
+                        "parameters_json": json.dumps(params, sort_keys=True, default=str),
+                        "signals_json": json.dumps(item["signals"], sort_keys=True, default=str),
+                        "provenance_json": json.dumps(item["provenance"], sort_keys=True),
+                        "created_at": datetime.now(timezone.utc)}
+                    counters["historical_samples_created"] += int(self._store_learning_sample(values))
+                timings["historical_reconstruction_s"] = time.perf_counter() - t
+                with self.db.engine.connect() as conn:
+                    samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
+                    labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
+                        self.db.meta_learning_labels.c.horizon)).all()
+                existing = {(int(row[0]), str(row[1])) for row in labels}
+            for sample in samples:
+                params = json.loads(sample["parameters_json"])
+                profile_horizon = f"{int(params.get('profile_days', 20))}d"
+                needed = [horizon for horizon in ("72h", profile_horizon)
+                          if (int(sample["id"]), horizon) not in existing]
+                if not needed:
+                    continue
+                symbols = {str(piece.get("symbol") or "").upper() for piece in params.get("pieces", [])}
+                market = {symbol: candles_by_symbol.get(symbol) for symbol in symbols}
+                if any(value is None for value in market.values()):
+                    counters["samples_immature"] += 1
+                    continue
+                start_s = int(sample["sample_at"].replace(tzinfo=timezone.utc).timestamp()
+                    if sample["sample_at"].tzinfo is None else sample["sample_at"].timestamp())
+                t = time.perf_counter()
+                outcomes = replay_alternative_labels(market, start_ts=start_s,
+                    parameters=params, include_horizons=needed)
+                timings["label_simulation_s"] += time.perf_counter() - t
+                fresh = {horizon: result for horizon, result in outcomes.items()
+                         if (int(sample["id"]), horizon) not in existing}
+                t = time.perf_counter()
+                count = self._persist_learning_labels(sample["id"], fresh, datetime.now(timezone.utc))
+                timings["persistence_s"] += time.perf_counter() - t
+                counters["labels_72h"] += int("72h" in fresh and fresh["72h"].get("status") == "labeled")
+                counters["labels_profile"] += sum(1 for horizon, label in fresh.items()
+                    if horizon != "72h" and label.get("status") == "labeled")
+            summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
+                "sample_count": len(samples), "symbols": len(candles_by_symbol),
+                "priority": "baja" if priority_lowered else "baja_best_effort_no_os_thread_priority",
+                "ops_lock": False}
+            with self.db.engine.begin() as conn:
+                conn.execute(self.db.meta_learning_runs.update().where(
+                    self.db.meta_learning_runs.c.id == int(run_id)).values(
+                        finished_at=datetime.now(timezone.utc), status="completed",
+                        summary_json=json.dumps(summary, sort_keys=True)))
+            return {"status": "completed", "run_id": run_id, **summary}
+        except Exception as exc:
+            summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
+                       "error": str(exc)}
+            if run_id is not None:
+                with self.db.engine.begin() as conn:
+                    conn.execute(self.db.meta_learning_runs.update().where(
+                        self.db.meta_learning_runs.c.id == int(run_id)).values(
+                            finished_at=datetime.now(timezone.utc), status="failed",
+                            summary_json=json.dumps(summary, sort_keys=True)))
+            logging.getLogger(__name__).exception("Fallo en etiquetas diarias Meta")
+            return {"status": "failed", "run_id": run_id, **summary}
+        finally:
+            self._learning_guard.release()
 
     def _model_snapshot(self, symbol):
         readiness = self.db.get_readiness(symbol) or {}
@@ -2025,6 +2306,9 @@ class MetaOperator:
                                replace_existing=True, max_instances=2, coalesce=True)
         self.scheduler.add_job(self.precompute_daily, "cron", hour=8, minute=0, timezone="UTC",
                                id="meta_daily_precompute", replace_existing=True,
+                               max_instances=1, coalesce=True)
+        self.scheduler.add_job(self.run_learning_daily, "cron", hour=8, minute=30, timezone="UTC",
+                               id="meta_learning_labels_daily", replace_existing=True,
                                max_instances=1, coalesce=True)
         if not self.scheduler.running:
             self.scheduler.start()
