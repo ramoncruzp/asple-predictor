@@ -1308,9 +1308,12 @@ def test_inventory_age_label_is_shown_only_on_smart_grid_detail(live_server, ui_
 
 
 def test_meta_owned_grid_hides_grid_cash_target_and_routes_cancel_to_meta(live_server, ui_page):
-    grid_id = live_server.grid_id
-    live_server.db.merge_grid_params(grid_id, {"target_usdt": 3, "target_basis": "cash"},
-        allowed=frozenset({"target_usdt", "target_basis"}))
+    grid_id = live_server.secondary_grid_id
+    live_server.db.merge_grid_params(grid_id, {"target_usdt": 3, "target_basis": "cash",
+        "loans_enabled": True, "loan_cap_pct": 30, "loan_topup_pct": 30,
+        "loan_lender_max_pct": 30},
+        allowed=frozenset({"target_usdt", "target_basis", "loans_enabled", "loan_cap_pct",
+            "loan_topup_pct", "loan_lender_max_pct"}))
     ui_page.route("**/api/metas/piece-links", lambda route: route.fulfill(json={
         "links": [{"meta_id": 3, "grid_id": grid_id, "piece_type": "grid"}]}))
     ui_page.goto(f"{live_server.url}/#grids/{grid_id}")
@@ -1318,6 +1321,8 @@ def test_meta_owned_grid_hides_grid_cash_target_and_routes_cancel_to_meta(live_s
     expect(ui_page.locator(".metas-grid-managed-warning")).to_contain_text("La Meta decide los reajustes")
     expect(ui_page.locator(".grid-detail-controls a[href='#metas']")).to_have_text("Cancelar desde Meta")
     assert ui_page.locator(".progress-row").count() == 0
+    expect(ui_page.locator(".loans-detail")).to_contain_text("tope de perfil 30.0%")
+    expect(ui_page.locator(".loans-detail")).to_contain_text("No hay un interruptor global de préstamos")
     messages = []
     ui_page.once("dialog", lambda dialog: (messages.append(dialog.message), dialog.dismiss()))
     ui_page.locator('[data-grid-action="pause"]').click()

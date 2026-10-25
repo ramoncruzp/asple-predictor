@@ -1799,6 +1799,42 @@ class DBManager:
             rows = conn.execute(statement).mappings().all()
         return [self._decode_json_fields(dict(row), ("details",)) for row in rows]
 
+    def record_meta_policy_review_required(self, grid_id: int, *, reason: str,
+                                          details: dict, ts: datetime,
+                                          cooldown_seconds: int = 900) -> dict | None:
+        """Add a throttled ledger alert when Smart policy wants to close a Meta piece."""
+        now = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        stored_now = now.replace(tzinfo=None) if self.engine.dialect.name == "sqlite" else now
+        with self.engine.begin() as conn:
+            link = conn.execute(select(self.meta_piece_links.c.meta_id,
+                    self.meta_piece_links.c.run_id, self.meta_goals.c.status)
+                .select_from(self.meta_piece_links.join(
+                    self.meta_goals, self.meta_piece_links.c.meta_id == self.meta_goals.c.id))
+                .where(self.meta_piece_links.c.grid_id == int(grid_id),
+                    self.meta_piece_links.c.released_at.is_(None),
+                    self.meta_goals.c.status.in_(("ACTIVE", "PIECES_BLOCKED", "SURPLUS_WAIT")))
+                .limit(1)).first()
+            if link is None:
+                return None
+            last = conn.execute(select(self.meta_ledger.c.ts).where(
+                self.meta_ledger.c.meta_id == int(link.meta_id),
+                self.meta_ledger.c.grid_id == int(grid_id),
+                self.meta_ledger.c.event_type == "META_OPERATOR_REVIEW_REQUIRED")
+                .order_by(self.meta_ledger.c.id.desc()).limit(1)).scalar()
+            if last is not None:
+                last_utc = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last.astimezone(timezone.utc)
+                if (now - last_utc).total_seconds() < max(0, int(cooldown_seconds)):
+                    return None
+            event_details = {**details, "reason": reason, "grid_id": int(grid_id)}
+            event_id = conn.execute(self.meta_ledger.insert().values(
+                meta_id=int(link.meta_id), run_id=link.run_id, ts=stored_now,
+                event_type="META_OPERATOR_REVIEW_REQUIRED", reason=reason,
+                grid_id=int(grid_id), details=self._json(event_details),
+            )).inserted_primary_key[0]
+        return {"id": int(event_id), "meta_id": int(link.meta_id), "grid_id": int(grid_id),
+                "event_type": "META_OPERATOR_REVIEW_REQUIRED", "reason": reason,
+                "details": event_details, "ts": stored_now}
+
     def get_max_grid_event_id(self) -> int:
         with self.engine.connect() as conn:
             value = conn.execute(select(func.max(self.grid_events.c.id))).scalar()

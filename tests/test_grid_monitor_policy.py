@@ -162,6 +162,41 @@ def test_meta_piece_ignores_legacy_grid_target_and_max_days():
     assert db.get_last_event(grid["id"], "TARGET_CLOSE_STARTED") is None
     assert db.get_last_event(grid["id"], "MAX_DAYS_REACHED") is None
 
+
+def test_meta_policy_out_of_range_requests_operator_review_without_repository_close():
+    engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    grid = _smart_grid(engine)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=1000, target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet", created_at=now,
+            started_at=now, config_snapshot="{}")).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(
+            meta_id=meta_id, status="ACTIVE", started_at=now, realized_extra_usdt=0,
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=meta_id, run_id=run_id,
+            grid_id=grid["id"], piece_type="grid", origin_grid_id=grid["id"], created_at=now))
+    exchange.move_price(120, 120.01, 120)
+    monitor = GridMonitor(db, exchange, engine, monitor_settings(), vol_provider=Vol(None))
+    monitor.run_once()
+    assert db.get_grid(grid["id"])["status"] == "ACTIVE"
+    assert db.get_last_event(grid["id"], "GRID_AUTO_CLOSE") is None
+    review = db.get_last_event(grid["id"], "META_OPERATOR_REVIEW_REQUIRED")
+    assert review and "out_of_range" in review["reason"]
+    ledger = db.list_meta_ledger_since(0)
+    assert any(row["event_type"] == "META_OPERATOR_REVIEW_REQUIRED"
+        and row["meta_id"] == meta_id and row["grid_id"] == grid["id"] for row in ledger)
+    from alerts.dispatcher import AlertDispatcher
+    class Sender:
+        def __init__(self): self.messages = []
+        def send(self, message): self.messages.append(message); return {"ok": True}
+    sender = Sender()
+    dispatcher = AlertDispatcher(db, lambda: None, clock=lambda: datetime.now(timezone.utc))
+    assert dispatcher._process_meta_events(sender,
+        SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30), datetime.now(timezone.utc)) == 1
+    assert any("revisión de la pieza Meta" in message for message in sender.messages)
+
 def test_smart_out_of_range_auto_close_goes_to_repository_and_simple_is_untouched():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     smart = _smart_grid(engine)

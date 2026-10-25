@@ -943,17 +943,29 @@ class GridMonitor:
                                                 "details": {"action": "RESUME", **details}})
                                     self.logger.warning("grid=%s resume action failed", grid_id, exc_info=True)
                         elif decision.action == "CLOSE_REPOSITORY":
-                            self._emit({"event_type": "GRID_AUTO_CLOSE", "grid_id": grid_id,
-                                        "reason": ",".join(decision.reasons), "price": mid,
-                                        "details": details})
-                            try:
-                                self.engine.close_grid(grid_id, "repository")
-                            except Exception as exc:
-                                failed += 1
-                                self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
-                                            "reason": str(exc), "price": mid,
-                                            "details": {"action": "CLOSE_REPOSITORY", **details}})
-                                self.logger.warning("grid=%s automatic close failed", grid_id, exc_info=True)
+                            close_reason = ",".join(decision.reasons)
+                            if meta_owned:
+                                record_review = getattr(self.db, "record_meta_policy_review_required", None)
+                                review_event = (record_review(grid_id, reason=close_reason,
+                                    details={**details, "symbol": current["symbol"], "price": mid,
+                                             "grid_status": current["status"]}, ts=now)
+                                    if callable(record_review) else None)
+                                if review_event:
+                                    self._emit({"event_type": "META_OPERATOR_REVIEW_REQUIRED",
+                                        "grid_id": grid_id, "reason": close_reason, "price": mid,
+                                        "details": {**details, "symbol": current["symbol"],
+                                                    "meta_id": review_event["meta_id"]}})
+                            else:
+                                self._emit({"event_type": "GRID_AUTO_CLOSE", "grid_id": grid_id,
+                                            "reason": close_reason, "price": mid, "details": details})
+                                try:
+                                    self.engine.close_grid(grid_id, "repository")
+                                except Exception as exc:
+                                    failed += 1
+                                    self._emit({"event_type": "POLICY_ACTION_FAILED", "grid_id": grid_id,
+                                                "reason": str(exc), "price": mid,
+                                                "details": {"action": "CLOSE_REPOSITORY", **details}})
+                                    self.logger.warning("grid=%s automatic close failed", grid_id, exc_info=True)
                         elif decision.action == "MAX_DAYS":
                             try:
                                 levels = self.db.get_grid_levels(grid_id)

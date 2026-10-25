@@ -399,6 +399,7 @@
       META_OPERATOR_OPEN: 'Pieza abierta por el operador', META_OPERATOR_WITHDRAW: 'Pieza retirada por el operador',
       META_OPERATOR_CLOSE: 'Pieza cerrada por el operador', META_OPERATOR_RECONFIGURE: 'Pieza reajustada',
       META_OPERATOR_REVIEW_DECISION: 'Revisión del operador', META_OPERATOR_NOOP: 'El operador mantuvo las piezas',
+      META_OPERATOR_REVIEW_REQUIRED: 'La política del grid pidió revisar esta pieza',
       META_PLAN_EVALUATED: 'Alternativas de cartera evaluadas', META_UNKNOWN: 'Valoración desconocida',
       META_VALUATION_PARTIAL: 'Valoración parcial', META_VALUATION_RECOVERED: 'Valoración recuperada',
       META_LOSS_WARNING: 'Aviso de pérdida', META_CORTADA_POR_PERDIDA: 'Cortada por pérdida',
@@ -414,8 +415,11 @@
     const reasonLabels = { price_near_edge: 'Precio cerca del límite del rango', outside_range: 'Precio fuera del rango',
       insufficient_improvement: 'La mejora estimada no compensa el coste', no_free_capital: 'No hay efectivo libre',
       profile_limit: 'Límite del perfil alcanzado', blocked_75_pct: 'Bloqueada por el aviso del 75 %',
-      valuation_unknown: 'Valoración desconocida' };
-    const reasonText = reasonLabels[details.reason] || details.reason;
+      valuation_unknown: 'Valoración desconocida', out_of_range: 'Precio fuera del rango',
+      pause_max_h: 'Pausa Smart alcanzó el tiempo máximo', max_loss_pct: 'Límite de pérdida del grid',
+      break_prob: 'Probabilidad de ruptura elevada', trapped_capital_pct: 'Capital atrapado elevado' };
+    const reasonText = String(details.reason || '').split(',').map(value =>
+      reasonLabels[value.trim()] || value.trim()).filter(Boolean).join(', ');
     const oldNew = details.old && details.new
       ? ` · antes ${fmtPrice(details.old.floor)}–${fmtPrice(details.old.ceiling)} (${details.old.n_levels ?? '—'} niveles); ahora ${fmtPrice(details.new.floor)}–${fmtPrice(details.new.ceiling)} (${details.new.n_levels ?? '—'} niveles)` : '';
     const improvement = details.estimated_probability_improvement_pp == null ? ''

@@ -52,6 +52,7 @@ EVENT_LABELS: dict[str, str] = {
     "CELL_STOPLOSS": "Stop-loss de celda ejecutado",
     "STOPLOSS_SUSPENDED": "Stop-loss omitido (interruptor apagado)",
     "GRID_AUTO_CLOSE": "Cierre automático a repositorio iniciado",
+    "META_OPERATOR_REVIEW_REQUIRED": "Pieza Meta pendiente de revisión del operador",
     "GRID_CLOSE_STARTED": "Cierre del grid iniciado",
     "GRID_CLOSED": "Grid cerrado",
     "REPOSITORY_CREATED": "Repositorio creado",

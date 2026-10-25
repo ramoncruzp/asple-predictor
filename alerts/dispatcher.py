@@ -188,6 +188,7 @@ class AlertDispatcher:
             "META_OPERATOR_OPEN": "Pieza abierta por el operador",
             "META_OPERATOR_WITHDRAW": "Pieza retirada por el operador",
             "META_OPERATOR_CLOSE": "Pieza cerrada por el operador",
+            "META_OPERATOR_REVIEW_REQUIRED": "La política del grid pide revisión de la pieza Meta",
             "META_ANALYSIS_COMPLETE": "Análisis de meta terminado",
             "META_ANALYSIS_FAILED": "Análisis de meta falló",
         }

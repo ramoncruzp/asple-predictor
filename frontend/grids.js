@@ -473,15 +473,20 @@
             idleShrinkAction = '<a class="grid-hint-link" href="#cuenta">Interruptor global apagado: act\u00edvalo en Cuenta \u2192 Ajustes globales</a>';
           }
         }
-        const groupLabel = loans.loans_group === 'control' ? 'Grupo de control (apagado)'
+        const profileLoanCap = loans.loan_lender_max_pct;
+        const groupLabel = metaOwned
+          ? `Meta · préstamos ${loans.loans_enabled ? 'activos' : 'apagados'} · tope de perfil ${profileLoanCap == null ? 'no disponible' : `${fmtPct(profileLoanCap, 1)}`}`
+          : loans.loans_group === 'control' ? 'Grupo de control (apagado)'
           : loans.loans_group === 'manual' ? (loans.loans_enabled ? 'Activo (configuración manual)' : 'Apagado (configuración manual)')
           : ['loans', 'loans_v2'].includes(loans.loans_group) ? 'Activo' : (loans.loans_enabled ? 'Activo' : 'Apagado');
+        const metaLoanNote = metaOwned
+          ? '<p class="muted">En piezas Meta, el perfil fija el tope. No hay un interruptor global de préstamos; el aviso global de esta pantalla se refiere a reducir niveles ociosos.</p>' : '';
         const counts = loans.counts || {};
         const openRows = (loans.open_loans || []).map((loan) => `<li>Nivel prestatario ${loan.borrower_idx}; ${loan.lender_source === 'reserva' ? 'reserva' : `nivel prestamista ${loan.lender_idx}`}; ${fmtMoney(loan.amount_usdt, 2)} USDT; ${loan.age_hours == null ? 'antigüedad no disponible' : `${fmtMoney(loan.age_hours, 1)} h`}</li>`).join('');
         if (loans.loans_enabled && ['ACTIVE', 'PAUSED', 'HOLDING'].includes(summary.status)) {
           loanDisableAction = '<button class="button secondary" data-grid-action="disable-loans">Apagar préstamos</button>';
         }
-        loanBlock = `<div class="card inventory-block loans-detail"><h3>Préstamos entre niveles</h3><p><b>${esc(groupLabel)}</b></p>
+        loanBlock = `<div class="card inventory-block loans-detail"><h3>Préstamos entre niveles</h3><p><b>${esc(groupLabel)}</b></p>${metaLoanNote}
           <div class="inventory-grid"><div><span>Abiertos</span><b>${counts.OPEN || 0}</b></div><div><span>Devueltos</span><b>${counts.REPAID || 0}</b></div><div><span>Transferidos</span><b>${counts.TRANSFERRED || 0}</b></div><div><span>Pendientes</span><b>${counts.PENDING || 0}</b></div><div><span>Cancelados</span><b>${counts.CANCELLED || 0}</b></div><div><span>Total prestado</span><b>${fmtMoney(loans.total_amount_lent_usdt, 2)} USDT</b></div><div><span>Tiempo medio hasta devolución</span><b>${loans.average_repaid_open_hours == null ? '—' : `${fmtMoney(loans.average_repaid_open_hours, 1)} h`}</b></div></div>
           <h4>Préstamos abiertos</h4><ul>${openRows || '<li>Sin préstamos abiertos</li>'}</ul></div>`;
       }
