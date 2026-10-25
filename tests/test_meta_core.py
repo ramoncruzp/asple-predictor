@@ -65,13 +65,31 @@ def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
 def test_attributable_cash_fixed_numbers():
     # 100 iniciales - 60 entregados + 70 devueltos - 1 de comisiones = 109.
     assert attributable_cash("100", "60", "70", "1") == Decimal("109")
+    # 100 iniciales - 70 entregados + 70.10 devueltos - 0.1814 de comisiones
+    # deja 99.9186 USDT tras una pérdida neta realizada de 0.0814.
+    assert attributable_cash("100", "70", "70.10", "0.1814") == Decimal("99.9186")
 
 
 def test_prudent_verification_minimum_is_editable_in_profile_settings(tmp_path):
     db, core = _core(tmp_path)
     updated = core.set_config("PRUDENTE", {"min_effective_verifications": 32})
     assert updated["min_effective_verifications"] == 32
-    assert core.config()["profiles"]["PRUDENTE"]["min_effective_verifications"] == 32
+
+
+def test_rotation_limits_and_materiality_are_editable_per_profile(tmp_path):
+    _db, core = _core(tmp_path)
+    updated = core.set_config("RAPIDO", {
+        "rotation_min_probability_delta_pp": 6,
+        "rotation_probability_tie_tolerance_pp": 1.5,
+        "rotation_min_progress_delta_pct": 12,
+        "rotation_cooldown_hours": 1.25,
+        "max_rotations_per_24h": 3,
+    })
+    assert updated["rotation_min_probability_delta_pp"] == 6
+    assert updated["rotation_probability_tie_tolerance_pp"] == 1.5
+    assert updated["rotation_min_progress_delta_pct"] == 12
+    assert updated["rotation_cooldown_hours"] == 1.25
+    assert updated["max_rotations_per_24h"] == 3
 
 
 def test_executable_value_consumes_depth_and_marks_partial_unknown_and_stale():

@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from datetime import timedelta, datetime, timezone
+from decimal import Decimal
 
 import numpy as np
 
@@ -18,10 +19,12 @@ from grid.sim.sweep import build_windows, _slice
 from grid.sim.touch_stats import aggregate_touch_stats, touch_stats
 from grid.sim.runner import run_simulation
 from grid.sim.runner import FILTERS
-from grid.levels import compute_lines, GridConfigError
+from grid.levels import compute_lines, plan_cells, GridConfigError
+from grid.market_book import book_is_two_sided, book_mid
+from grid.guards import sell_level_conflicts
 from data.exchange_filters import SymbolFilters
 from apscheduler.schedulers.background import BackgroundScheduler
-from grid.policy import break_prob, DEFAULT_SMART_PARAMS
+from grid.policy import break_prob, DEFAULT_SMART_PARAMS, validate_params
 
 
 def summarize_replays(rows, independent_window_days=30, target_usdt=None):
@@ -333,6 +336,123 @@ class MetaOperator:
         book["ask_price"] = book.get("ask_price", book.get("askPrice"))
         return book
 
+    def _testnet_openability(self, piece, goal, *, replacing_grid_id=None, include_held_proceeds=True):
+        """Valida Testnet y las restricciones de celdas sin crear órdenes."""
+        symbol = str(piece.get("symbol") or "").upper()
+        try:
+            if callable(getattr(self.engine, "_active_coin", None)) and not self.engine._active_coin(symbol):
+                return {"allowed": False, "reason": f"{symbol} no está activa en Coin Registry"}
+            filters, snapshot, avg_price = self.engine._market_context(symbol)
+            if not book_is_two_sided(snapshot):
+                return {"allowed": False, "reason": (f"libro de Testnet unilateral para {symbol}: "
+                    f"bid {snapshot.get('bid_price')}, ask {snapshot.get('ask_price')}")}
+            mid = book_mid(snapshot)
+            low, high = Decimal(str(piece["floor"])), Decimal(str(piece["ceiling"]))
+            if mid is None or not low < mid < high:
+                return {"allowed": False, "reason": f"precio de Testnet {mid} fuera del rango {low}–{high}"}
+            kind = piece.get("piece_type", "grid")
+            strategy = str(piece.get("strategy", "simple")).lower()
+            capital = Decimal(str(piece.get("capital_usdt") or 0))
+            cfg = goal.get("config_snapshot") or {}
+            if isinstance(cfg, str):
+                cfg = json.loads(cfg)
+            coin_cap = Decimal(str(goal["capital_initial"])) * Decimal(str(
+                cfg.get("capital_per_coin_pct", 100))) / Decimal(100)
+            if capital < Decimal("5.5") or capital > coin_cap:
+                return {"allowed": False, "reason": f"capital {capital} fuera del mínimo/tope por moneda {coin_cap}"}
+            n_levels = 1 if kind == "individual_bot_grid" else int(piece["n_levels"])
+            if kind == "individual_bot_grid":
+                if strategy != "simple":
+                    return {"allowed": False, "reason": "el bot individual requiere estrategia Simple"}
+                lines = compute_lines(low, high, 1, filters)
+                buy, sell = lines[0], lines[1]
+                if (sell - buy) / buy < Decimal(str(getattr(self.settings, "grid_min_step_pct", .003))):
+                    return {"allowed": False, "reason": "margen por debajo del paso mínimo"}
+                qty = filters.round_qty_down(capital / buy)
+                sell_qty = filters.round_qty_down(qty * Decimal("0.999"))
+                if qty < filters.min_qty or qty * buy < filters.min_notional:
+                    return {"allowed": False, "reason": "compra bajo cantidad o notional mínimo"}
+                if sell_qty < filters.min_qty or sell_qty * sell < filters.min_notional:
+                    return {"allowed": False, "reason": "venta neta bajo cantidad o notional mínimo"}
+                if (sell / buy - 1) * 100 - Decimal("0.20") < Decimal(str(cfg.get("min_margin_pct", .3))):
+                    return {"allowed": False, "reason": "margen neto bajo el mínimo del perfil"}
+                plans = []
+                buy_plans = [type("MetaBotBuy", (), {"capital": capital})()]
+                sell_prices = [sell]
+            else:
+                if strategy not in {"simple", "smart"}:
+                    return {"allowed": False, "reason": "estrategia no permitida"}
+                lines = compute_lines(low, high, n_levels, filters)
+                reserve = Decimal(0)
+                if strategy == "smart":
+                    from grid.meta import smart_grid_params_for_goal
+                    params = validate_params(smart_grid_params_for_goal(goal), n_levels)
+                    reserve = capital * Decimal(str(params.get("reserve_pct", 0))) / 100
+                plans = plan_cells(lines, capital - reserve, snapshot, filters, self.settings)
+                buy_plans = [row for row in plans if row.initial_state == "BUY_OPEN"]
+                sell_prices = [row.sell_price for row in plans]
+            exchange = self.engine.exchange
+            open_orders = exchange.get_open_orders(symbol)
+            replaced_prefix = f"g{int(replacing_grid_id)}L" if replacing_grid_id is not None else None
+            released_orders = [order for order in open_orders if replaced_prefix and
+                str(order.get("clientOrderId") or order.get("origClientOrderId") or "").startswith(replaced_prefix)]
+            existing_levels = []
+            for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"):
+                for active in self.db.list_grids_by_status({status}):
+                    active_id = int(active["id"])
+                    if active_id == int(replacing_grid_id or -1):
+                        continue
+                    if active.get("symbol") == symbol:
+                        existing_levels.extend(self.db.get_grid_levels(active_id))
+            current_order_count = max(0, len(open_orders) - len(released_orders))
+            if filters.max_num_orders is not None and current_order_count + len(buy_plans) > filters.max_num_orders:
+                return {"allowed": False, "reason": "se alcanzaría MAX_NUM_ORDERS"}
+            max_grids = int(getattr(self.settings, "max_grids_simultaneos", 5))
+            open_grid_count = int(self.db.count_open_grids())
+            if open_grid_count - (1 if replacing_grid_id is not None else 0) >= max_grids:
+                return {"allowed": False, "reason": "se alcanzaría el máximo de grids simultáneos"}
+            conflicts = sell_level_conflicts(sell_prices, existing_levels, filters.tick_size,
+                getattr(self.settings, "same_coin_sell_tolerance_pct", .05))
+            if conflicts:
+                return {"allowed": False, "reason": "conflicto con niveles de venta vivos"}
+            balance = exchange.get_balance("USDT").get("USDT", {"free": 0})
+            free = Decimal(str(balance.get("free", 0)))
+            releasable = Decimal(0)
+            if replacing_grid_id is not None:
+                current = self.db.get_grid(int(replacing_grid_id)) or {}
+                prefix = f"g{int(replacing_grid_id)}L"
+                current_orders = [order for order in exchange.get_open_orders(current.get("symbol", symbol))
+                    if str(order.get("clientOrderId") or order.get("origClientOrderId") or "").startswith(prefix)]
+                for order in current_orders:
+                    if str(order.get("side", "")).upper() == "BUY":
+                        releasable += Decimal(str(order.get("price") or 0)) * Decimal(str(order.get("origQty") or 0))
+                held_qty = sum((Decimal(str(level.get("held_qty") or 0))
+                    for level in self.db.get_grid_levels(int(replacing_grid_id))), Decimal(0))
+                if held_qty > 0 and include_held_proceeds:
+                    old_book = exchange.get_book_ticker(current.get("symbol", symbol))
+                    old_bid = Decimal(str(old_book.get("bid_price") or 0))
+                    if old_bid <= 0:
+                        return {"allowed": False, "reason": "no se puede estimar el efectivo Testnet de la venta actual"}
+                    releasable += held_qty * old_bid * Decimal("0.999")
+            required = sum((row.capital for row in buy_plans), Decimal(0))
+            if free + releasable < required:
+                return {"allowed": False, "reason": f"USDT libre tras liberar la pieza {free + releasable} < requerido {required}"}
+            return {"allowed": True, "reason": None, "bid": str(snapshot["bid_price"]),
+                    "ask": str(snapshot["ask_price"]), "mid": str(mid),
+                    "required_usdt": str(required)}
+        except Exception as exc:
+            return {"allowed": False, "reason": f"prevalidación Testnet: {type(exc).__name__}: {exc}"}
+
+    def _testnet_book_status(self, symbol):
+        try:
+            book = self.engine.exchange.get_book_ticker(symbol)
+            if not book_is_two_sided(book):
+                return {"state": "one_sided", "reason": (f"libro de Testnet unilateral: bid "
+                    f"{book.get('bid_price')}, ask {book.get('ask_price')}")}
+            return {"state": "two_sided", "reason": None}
+        except Exception as exc:
+            return {"state": "unavailable", "reason": f"libro de Testnet no disponible: {type(exc).__name__}"}
+
     def _candidate_alternatives(self, row, capital, target_usdt, cfg):
         self._analysis_timing.setdefault("advisor_cache_hits", 0)
         symbol = row["symbol"]
@@ -443,10 +563,14 @@ class MetaOperator:
             symbol = row.get("symbol")
             sigma = row.get("sigma_24h_open")
             reason = None
+            testnet_book = self._testnet_book_status(symbol) if symbol and row.get("eligible") else {
+                "state": "not_checked", "reason": None}
             if not row.get("eligible"):
                 reason = "; ".join(row.get("reasons") or [row.get("error") or "filtro duro Scanner"])
             elif str(symbol).upper() not in active:
                 reason = "moneda inactiva o ausente de Coin Registry"
+            elif testnet_book["state"] != "two_sided":
+                reason = f"alternativa no abrible en Testnet: {testnet_book['reason']}"
             else:
                 required_verifications = int(cfg.get("min_effective_verifications", 30))
                 model_ready = self._model_ready(symbol, required_verifications) if profile == "PRUDENTE" else False
@@ -456,6 +580,8 @@ class MetaOperator:
                 model_statistics = self._model_snapshot(symbol)
                 model_statistics["required_verifications"] = int(cfg.get("min_effective_verifications", 30))
                 prepared.append({**row, "scanner_eligible": True, "book_state": "two_sided",
+                                 "testnet_book_state": testnet_book["state"],
+                                 "testnet_book_reason": testnet_book["reason"],
                                  "model_statistics": model_statistics, "excluded_reason": None})
             else:
                 prepared.append({"symbol": symbol, "eligible": bool(row.get("eligible")),
@@ -463,6 +589,8 @@ class MetaOperator:
                                  "hard_filters": row.get("hard_filters", []),
                                  "sigma_24h": sigma, "score": row.get("score"),
                                  "book_state": "two_sided" if row.get("eligible") else "excluded",
+                                 "testnet_book_state": testnet_book["state"],
+                                 "testnet_book_reason": testnet_book["reason"],
                                  "model_statistics": ({**self._model_snapshot(symbol),
                                      "required_verifications": int(cfg.get("min_effective_verifications", 30))}
                                      if symbol else None),
@@ -491,7 +619,20 @@ class MetaOperator:
                         if cache_key not in option_cache:
                             options, comparisons = self._candidate_alternatives(row,
                                 capital * share / 100, target_piece, cfg)
-                            option_cache[cache_key] = rank_alternatives(options)
+                            valid_options = []
+                            testnet_reasons = []
+                            for option in options:
+                                piece_check = self._testnet_openability(option["pieces"][0], goal)
+                                option["testnet_openability"] = piece_check
+                                if piece_check["allowed"]:
+                                    valid_options.append(option)
+                                else:
+                                    testnet_reasons.append(piece_check["reason"])
+                            if not valid_options:
+                                row["excluded_reason"] = ("alternativa no abrible en Testnet: " +
+                                    (testnet_reasons[0] if testnet_reasons else "sin estructuras válidas"))
+                                row["testnet_openability"] = testnet_reasons
+                            option_cache[cache_key] = rank_alternatives(valid_options)
                             advisor_comparisons.extend(comparisons)
                         options = option_cache[cache_key]
                         if not options:
@@ -1166,6 +1307,11 @@ class MetaOperator:
         goal = self.core.get_goal(meta_id)
         cfg = goal.get("config_snapshot") or {}
         max_drift = float(cfg.get("plan_price_drift_pct", self.price_drift_pct))
+        if self.engine is not None:
+            for piece in plan.get("pieces", []):
+                openability = self._testnet_openability(piece, goal)
+                if not openability["allowed"]:
+                    raise ValueError(f"Plan vencido operativamente: alternativa no abrible en Testnet: {openability['reason']}. Solicite un análisis nuevo.")
         for symbol, planned in self._plan_prices(plan).items():
             current = self._book_ticker(symbol)
             mid = (float(current["bid_price"]) + float(current["ask_price"])) / 2
@@ -1231,6 +1377,7 @@ class MetaOperator:
         goal = self.core.get_goal(meta_id)
         value = self.core.valuation(meta_id)
         if goal["status"] != "ACTIVE" or value.get("status") != "KNOWN":
+            self._reset_rotation_streaks(meta_id, "meta no activa o valor desconocido")
             result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
             self._ledger(meta_id, "META_OPERATOR_NOOP", result)
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
@@ -1238,6 +1385,7 @@ class MetaOperator:
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
+            self._reset_rotation_streaks(meta_id, "bloqueo 75% del limite de perdida")
             result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida"}
             self._record_review(meta_id, result, value, None)
             return result
@@ -1246,6 +1394,7 @@ class MetaOperator:
         try:
             plan = self._build_plan(goal)
         except Exception as exc:
+            self._reset_rotation_streaks(meta_id, f"analisis no disponible: {exc}")
             result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}
             self._record_review(meta_id, result, value, None)
             return result
@@ -1253,10 +1402,13 @@ class MetaOperator:
             current_goal = self.core.get_goal(meta_id)
             current_value = self.core.valuation(meta_id)
             if current_goal["status"] != "ACTIVE" or current_value.get("status") != "KNOWN":
+                self._reset_rotation_streaks(meta_id, "meta cambio durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "meta dejó de estar activa o valor DESCONOCIDO durante el análisis"}
             elif float(current_value["result_pct"]) <= -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0)):
+                self._reset_rotation_streaks(meta_id, "bloqueo 75% durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida durante el análisis"}
             elif self._plan_price_moved(plan, current_goal):
+                self._reset_rotation_streaks(meta_id, "precio cambio durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "precio cambió durante el análisis; recalcular en la siguiente revisión"}
             else:
                 result = self._review_allocations(current_goal, current_value, plan=plan)
@@ -1288,6 +1440,113 @@ class MetaOperator:
             return True
         return False
 
+    def _meta_ledger_rows(self, meta_id):
+        reader = getattr(self.core, "ledger", None)
+        if callable(reader):
+            try:
+                return list(reader(int(meta_id)))
+            except Exception:
+                return []
+        rows = []
+        for args, kwargs in getattr(self.core, "events", []):
+            if len(args) >= 4 and int(args[0]) == int(meta_id):
+                rows.append({"event_type": args[2], "details": args[3] or {},
+                    "grid_id": kwargs.get("grid_id"), "ts": None})
+        return rows
+
+    @staticmethod
+    def _as_utc(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _alternative_key(alternative):
+        piece = (alternative.get("pieces") or [{}])[0]
+        numeric = lambda key: round(float(piece[key]), 4) if piece.get(key) is not None else ""
+        return "|".join(map(str, (piece.get("symbol", ""), piece.get("piece_type", ""),
+            piece.get("strategy", ""), numeric("floor"), numeric("ceiling"),
+            piece.get("n_levels", ""), numeric("capital_usdt"))))
+
+    def _rotation_gate(self, goal, grid, link, alternative, current_alternative, plan):
+        """Aplicar materialidad, dos revisiones persistidas y frenos temporales antes de rotar."""
+        cfg = goal.get("config_snapshot") or {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        new_est = alternative.get("estimate") or {}
+        old_est = current_alternative.get("estimate") if current_alternative else None
+        probability_delta = None
+        progress_delta = None
+        if old_est is not None:
+            probability_delta = (float(new_est.get("probability_replay", new_est.get("probability", 0)) or 0)
+                - float(old_est.get("probability_replay", old_est.get("probability", 0)) or 0)) * 100
+            old_progress = float(old_est.get("median_progress_pct") or 0)
+            new_progress = float(new_est.get("median_progress_pct") or 0)
+            progress_delta = ((new_progress / old_progress - 1) * 100 if old_progress > 0
+                              else (100.0 if new_progress > 0 else 0.0))
+        material = bool(old_est is not None and (
+            probability_delta >= float(cfg.get("rotation_min_probability_delta_pp", 5.0)) or
+            (abs(probability_delta) <= float(cfg.get("rotation_probability_tie_tolerance_pp", 2.0)) and
+             progress_delta >= float(cfg.get("rotation_min_progress_delta_pct", 10.0)))))
+        key = self._alternative_key(alternative)
+        rows = self._meta_ledger_rows(goal["id"])
+        evaluations = [row for row in rows if row.get("event_type") == "META_OPERATOR_ROTATION_EVALUATED"
+            and int(row.get("grid_id") or -1) == int(grid["id"])]
+        review_id = str(plan.get("decision_id") or uuid.uuid4().hex)
+        prior = evaluations[-1] if evaluations else None
+        prior_details = prior.get("details") or {} if prior else {}
+        streak = (int(prior_details.get("streak") or 0) + 1
+            if prior and prior_details.get("alternative_key") == key and prior_details.get("material")
+                and prior_details.get("review_id") != review_id and material else 1 if material else 0)
+        self._ledger(goal["id"], "META_OPERATOR_ROTATION_EVALUATED", {
+            "review_id": review_id, "alternative_key": key, "material": material,
+            "streak": streak, "probability_improvement_pp": probability_delta,
+            "progress_improvement_pct": progress_delta,
+            "alternative": alternative, "current": current_alternative,
+            "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
+        required_reviews = max(2, int(cfg.get("rotation_persistence_reviews", 2)))
+        if not material:
+            return {"allowed": False, "reason": "la mejora no alcanza la materialidad de rotación"}
+        if streak < required_reviews:
+            return {"allowed": False, "reason": f"la alternativa debe ganar en {required_reviews} revisiones seguidas ({streak}/{required_reviews})"}
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        opened_at = self._as_utc(link.get("created_at") or grid.get("created_at"))
+        cooldown = timedelta(hours=float(cfg.get("rotation_cooldown_hours", 1.0)))
+        if opened_at is None or now - opened_at < cooldown:
+            return {"allowed": False, "reason": "la pieza aún no cumple el enfriamiento de antigüedad"}
+        rotations = []
+        for row in rows:
+            if row.get("event_type") != "META_OPERATOR_ROTATION":
+                continue
+            stamp = self._as_utc(row.get("ts"))
+            if stamp and now - stamp <= timedelta(hours=24):
+                rotations.append(row)
+        if len(rotations) >= int(cfg.get("max_rotations_per_24h", 2)):
+            return {"allowed": False, "reason": "límite de rotaciones de la meta en 24 horas"}
+        last_piece_rotation = [self._as_utc(row.get("ts")) for row in rotations
+            if int(row.get("grid_id") or -1) == int(grid["id"]) and self._as_utc(row.get("ts"))]
+        if last_piece_rotation and now - max(last_piece_rotation) < cooldown:
+            return {"allowed": False, "reason": "la pieza está en enfriamiento tras una rotación"}
+        return {"allowed": True, "reason": None, "streak": streak,
+            "probability_improvement_pp": probability_delta,
+            "progress_improvement_pct": progress_delta}
+
+    def _reset_rotation_streaks(self, meta_id, reason):
+        try:
+            links = self.core._owned_grids(int(meta_id))
+        except Exception:
+            return
+        review_id = f"reset:{uuid.uuid4().hex}"
+        for link in links:
+            self._ledger(meta_id, "META_OPERATOR_ROTATION_EVALUATED", {
+                "review_id": review_id, "alternative_key": None, "material": False,
+                "streak": 0, "reason": reason}, grid_id=int(link["grid_id"]))
+
     def _review_allocations(self, goal, valuation, *, plan=None):
         """Compara alternativa y pieza activa; toda rotación liquida por el cierre verificado."""
         links = self.core._owned_grids(int(goal["id"]))
@@ -1301,6 +1560,7 @@ class MetaOperator:
                      if len(item.get("pieces", [])) == 1
                      and item["estimate"].get("evidence_sufficient")), None)
         if best is None:
+            self._reset_rotation_streaks(goal["id"], "evidencia independiente insuficiente")
             return {"decision": "no_hacer_nada", "reason": "evidencia independiente insuficiente"}
         scan_rows = {row.get("symbol"): row for row in plan["candidates"]}
         for link in links:
@@ -1322,11 +1582,15 @@ class MetaOperator:
             # Dos revisiones fuera habilitan la simulacion de recentrado; no fuerzan
             # por si solas cerrar/reabrir si mantener sigue siendo mejor.
             must_withdraw = self._hard_filter_misses[key] >= 2
+            current_alternative = next((item for item in plan["alternatives"]
+                if item["symbol"] == grid["symbol"] and item["strategy"] == grid["strategy"]
+                and len(item.get("pieces", [])) == 1), None)
+            is_alternative = best["symbol"] != grid["symbol"] or best["strategy"] != grid["strategy"]
+            rotation_gate = self._rotation_gate(goal, grid, link, best, current_alternative, plan)
             reconfiguration = self._consider_piece_reconfiguration(
                 goal, grid, levels, bid, plan, link, key)
             if reconfiguration is not None:
                 return reconfiguration
-            is_alternative = best["symbol"] != grid["symbol"] or best["strategy"] != grid["strategy"]
             loss = 0.0
             close_fee = 0.0
             if has_inventory and is_alternative:
@@ -1337,8 +1601,6 @@ class MetaOperator:
             expected = float(best["estimate"]["probability"]) * float(goal["target_usdt"])
             reopen_fee = float(grid["capital_total"]) * .001
             acceptable = loss_reallocation_allowed(expected, loss, close_fee, reopen_fee)
-            current_alternative = next((item for item in plan["alternatives"]
-                if item["symbol"] == grid["symbol"] and item["strategy"] == grid["strategy"]), None)
             current_p90 = math.inf if current_alternative is None else float(
                 current_alternative["estimate"].get("days_p90") or math.inf)
             time_faster = (best["estimate"].get("days_median") is not None and
@@ -1348,24 +1610,49 @@ class MetaOperator:
                       "alternativa estimada más rápida y ganancia esperada cubre pérdida y comisiones")
             if must_withdraw and has_inventory and (self._hard_filter_misses[key] >= 2 or
                                                      self._above_ceiling_count[key] >= 2):
+                openability = self._testnet_openability(best["pieces"][0], goal,
+                    replacing_grid_id=int(grid["id"]), include_held_proceeds=False)
+                if not openability["allowed"]:
+                    blocked = f"alternativa no abrible en Testnet: {openability['reason']}"
+                    self._ledger(goal["id"], "META_OPERATOR_ROTATION_REJECTED", {
+                        "reason": blocked, "alternative": best, "openability": openability}, grid_id=int(grid["id"]))
+                    return {"decision": "no_hacer_nada", "reason": blocked, "grid_id": int(grid["id"])}
+                if not rotation_gate["allowed"]:
+                    return {"decision": "no_hacer_nada", "reason": rotation_gate["reason"],
+                        "grid_id": int(grid["id"]), "rotation_gate": rotation_gate}
                 self.engine.cancel_grid_orders(int(grid["id"]), finalize=False, buy_only=True)
                 self._ledger(goal["id"], "META_OPERATOR_WITHDRAW", {"reason": reason,
                     "scanner": scan_row, "price_bid": bid,
-                    "decision": "cancelar_compras_conservar_ventas"}, grid_id=int(grid["id"]))
+                    "decision": "cancelar_compras_conservar_ventas",
+                    "alternative": best, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 self.alert("META_OPERATOR_WITHDRAW", goal["id"], {"symbol": grid["symbol"], "reason": reason})
+                self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
+                    "alternative": best, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 return {"decision": "retirar_con_ventas_vivas", "reason": reason,
                         "grid_id": int(grid["id"]), "capital_reusable": False}
             if must_withdraw and not has_inventory:
+                replacement = best
+                if self._above_ceiling_count[key] >= 2 and scan_row.get("eligible"):
+                    replacement = self._recenter_alternative(best, grid, bid)
+                openability = self._testnet_openability(replacement["pieces"][0], goal,
+                    replacing_grid_id=int(grid["id"]))
+                if not openability["allowed"]:
+                    blocked = f"alternativa no abrible en Testnet: {openability['reason']}"
+                    self._ledger(goal["id"], "META_OPERATOR_ROTATION_REJECTED", {
+                        "reason": blocked, "alternative": replacement, "openability": openability}, grid_id=int(grid["id"]))
+                    return {"decision": "no_hacer_nada", "reason": blocked, "grid_id": int(grid["id"])}
+                if not rotation_gate["allowed"]:
+                    return {"decision": "no_hacer_nada", "reason": rotation_gate["reason"],
+                        "grid_id": int(grid["id"]), "rotation_gate": rotation_gate}
                 close = self.engine.close_grid(int(grid["id"]), "cancel", close_reason="META_OPERATOR_WITHDRAW")
                 if close.get("status") != "CLOSED":
                     return {"decision": "no_hacer_nada", "reason": "el retiro verificado quedó pendiente",
                             "grid_id": int(grid["id"]), "close": close}
+                self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
+                    "alternative": replacement, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 self._ledger(goal["id"], "META_OPERATOR_WITHDRAW", {"reason": reason,
                     "scanner": scan_row, "price_bid": bid}, grid_id=int(grid["id"]))
                 self.alert("META_OPERATOR_WITHDRAW", goal["id"], {"symbol": grid["symbol"], "reason": reason})
-                replacement = best
-                if self._above_ceiling_count[key] >= 2 and scan_row.get("eligible"):
-                    replacement = self._recenter_alternative(best, grid, bid)
                 try:
                     opened = self._open_replacement(goal, replacement, float(grid["capital_total"]))
                 except Exception as exc:
@@ -1376,11 +1663,24 @@ class MetaOperator:
                 return {"decision": "retirar_y_abrir", "reason": reason, "closed_grid_id": int(grid["id"]),
                         "opened": opened}
             if has_inventory and is_alternative and time_faster and acceptable:
+                openability = self._testnet_openability(best["pieces"][0], goal,
+                    replacing_grid_id=int(grid["id"]))
+                if not openability["allowed"]:
+                    blocked = f"alternativa no abrible en Testnet: {openability['reason']}"
+                    self._ledger(goal["id"], "META_OPERATOR_ROTATION_REJECTED", {
+                        "reason": blocked, "alternative": best, "openability": openability}, grid_id=int(grid["id"]))
+                    return {"decision": "no_hacer_nada", "reason": blocked, "grid_id": int(grid["id"])}
+                if not rotation_gate["allowed"]:
+                    return {"decision": "no_hacer_nada", "reason": rotation_gate["reason"],
+                        "grid_id": int(grid["id"]), "rotation_gate": rotation_gate}
                 close = self.engine.close_grid(int(grid["id"]), "liquidate", close_reason="META_OPERATOR_ROTATION")
                 if close.get("status") != "CLOSED":
                     return {"decision": "no_hacer_nada", "reason": "cierre verificado pendiente",
                             "grid_id": int(grid["id"]), "close": close}
                 actual_allowed, actual_costs = actual_close_reallocation_allowed(expected, close, reopen_fee)
+                self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
+                    "alternative": best, "testnet_openability": openability,
+                    "rotation_gate": rotation_gate, "actual_costs": actual_costs}, grid_id=int(grid["id"]))
                 self._ledger(goal["id"], "META_OPERATOR_CLOSE", {"reason": reason,
                     "estimated_gain_usdt": expected, "estimated_realized_loss_usdt": loss,
                     "estimated_close_fee_usdt": close_fee, "reopen_fee_usdt": reopen_fee,
@@ -1404,7 +1704,7 @@ class MetaOperator:
                 return {"decision": "cerrar_y_reasignar", "reason": reason, "loss_usdt": loss,
                         "expected_gain_usdt": expected, "close_fee_usdt": close_fee,
                         "reopen_fee_usdt": reopen_fee, "opened": opened}
-        added = self._add_piece_from_free_cash(goal, links, plan)
+        added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation)
         if added is not None:
             return added
         return {"decision": "no_hacer_nada", "reason": "ninguna alternativa supera los límites de reasignación",
@@ -1521,7 +1821,7 @@ class MetaOperator:
         self._ledger(goal["id"], "META_OPERATOR_RECONFIGURE", details, grid_id=int(grid["id"]))
         return details
 
-    def _add_piece_from_free_cash(self, goal, links, plan):
+    def _add_piece_from_free_cash(self, goal, links, plan, *, valuation=None):
         cfg = goal.get("config_snapshot") or {}
         initial = float(goal["capital_initial"])
         active, used_by_symbol = [], {}
@@ -1532,7 +1832,15 @@ class MetaOperator:
             active.append((link, grid))
             used_by_symbol[grid["symbol"]] = used_by_symbol.get(grid["symbol"], 0.0) + float(grid["capital_total"])
         used = sum(float(grid["capital_total"]) for _, grid in active)
-        free = max(0.0, initial - used)
+        allocatable = max(0.0, initial - used)
+        if valuation is None and callable(getattr(self.core, "valuation", None)):
+            try:
+                valuation = self.core.valuation(int(goal["id"]))
+            except Exception:
+                valuation = None
+        attributable_cash = (float(valuation.get("cash_usdt")) if valuation is not None
+                             and valuation.get("cash_usdt") is not None else allocatable)
+        free = max(0.0, min(allocatable, attributable_cash))
         grids = sum(link["piece_type"] == "grid" for link, _ in active)
         bots = len(active) - grids
         if free < 5.5 or (grids >= int(cfg.get("max_grids", 0)) and bots >= int(cfg.get("max_bots", 0))):
@@ -1552,10 +1860,17 @@ class MetaOperator:
             needed = float(piece["capital_usdt"])
             if needed < 5.5 or needed > free + 1e-9 or needed > available_coin + 1e-9:
                 continue
+            openability = self._testnet_openability(piece, goal)
+            if not openability["allowed"]:
+                self._ledger(goal["id"], "META_OPERATOR_OPEN_REJECTED", {
+                    "reason": f"alternativa no abrible en Testnet: {openability['reason']}",
+                    "piece": piece, "testnet_openability": openability})
+                continue
             opened = self._open_replacement(goal, alternative, needed)
             decision = {"decision": "abrir_pieza_con_efectivo_libre",
                 "reason": "revisión de 15 minutos; hay capital atribuible libre",
-                "free_before_usdt": free, "piece": opened,
+                "free_before_usdt": free, "attributable_cash_usdt": attributable_cash,
+                "allocated_reserve_free_usdt": allocatable, "piece": opened,
                 "profile_limits": {"capital_per_coin_pct": cfg.get("capital_per_coin_pct"),
                     "max_grids": cfg.get("max_grids"), "max_bots": cfg.get("max_bots")}}
             self._ledger(goal["id"], "META_OPERATOR_OPEN", decision, grid_id=opened["grid_id"])

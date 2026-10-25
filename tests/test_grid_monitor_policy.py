@@ -143,7 +143,7 @@ def test_meta_piece_ignores_legacy_grid_target_and_max_days():
     engine, db, exchange = make_engine(fee_rate="0", fee_asset="USDT")
     old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
     grid = engine.create_grid("XRPUSDT", 90, 110, 5, capital=1000, strategy="smart",
-        params={"target_usdt": 0.01, "target_basis": "cash", "max_days": 1,
+        params={"target_usdt": 3.0, "target_basis": "cash", "max_days": 1,
                 "adjust_enabled": False})
     db.update_grid(grid["id"], created_at=old)
     with db.engine.begin() as conn:

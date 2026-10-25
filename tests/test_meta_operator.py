@@ -1,5 +1,6 @@
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from grid.meta_operator import (loss_reallocation_allowed, rank_alternatives,
                                 profile_candidate_exclusion, signal_adjusted_probability,
@@ -443,6 +444,8 @@ def test_plan_search_can_choose_two_distinct_coins_with_bounded_allocation(monke
                 "score": .8, "sigma_24h_open": .2}]}
 
     operator = MetaOperator(Core(), DB(), Scanner(), None, None)
+    operator._testnet_book_status = lambda _symbol: {"state": "two_sided", "reason": None}
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     def options(row, capital, target, _cfg):
         piece = {"symbol": row["symbol"], "strategy": "simple", "piece_type": "grid",
             "capital_usdt": capital, "n_levels": 4, "floor": 90, "ceiling": 110,
@@ -478,6 +481,16 @@ def test_plan_search_can_choose_two_distinct_coins_with_bounded_allocation(monke
         assert item["skipped_windows"] == 0
         assert item["loss_cut_windows"] == 0
         assert item["bot_windows_bought"] is None
+    operator._testnet_book_status = lambda symbol: ({"state": "one_sided", "reason": "sin ventas"}
+        if symbol == "BBBUSDT" else {"state": "two_sided", "reason": None})
+    filtered = operator._build_plan({"id": 5, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 10, "config_snapshot": {"capital_per_coin_pct": 70,
+        "max_grids": 4, "max_bots": 8, "max_days": 20, "min_margin_pct": .3,
+        "signal_weights": {}, "signal_logit_cap": 1}})
+    pepe = next(row for row in filtered["candidates"] if row["symbol"] == "BBBUSDT")
+    assert pepe["testnet_book_state"] == "one_sided"
+    assert "alternativa no abrible en Testnet" in pepe["excluded_reason"]
+    assert all("BBBUSDT" not in row["symbols"] for row in filtered["alternatives"])
 
 
 def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
@@ -508,6 +521,8 @@ def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
                 "score": .8, "sigma_24h_open": .2}]}
 
     operator = MetaOperator(Core(), DB(), Scanner(), None, None)
+    operator._testnet_book_status = lambda _symbol: {"state": "two_sided", "reason": None}
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     loss_cuts = {"AAAUSDT": 2, "BBBUSDT": 1}
 
     def options(row, capital, target, _cfg):
@@ -571,6 +586,7 @@ def test_review_can_add_one_piece_using_only_free_goal_cash():
             return {"status": "ACTIVE", "capital_total": 60, "symbol": "ADAUSDT"}
 
     operator = MetaOperator(Core(), DB(), None, None, None)
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     opened = []
     operator._open_replacement = lambda _goal, _alternative, cash: (
         opened.append(cash) or {"grid_id": 2, "capital_usdt": cash})
@@ -610,24 +626,26 @@ def test_review_withdrawal_requires_two_consecutive_hard_filter_or_ceiling_check
 
     core, engine = Core(), Engine()
     operator = MetaOperator(core, DB(), None, engine, None)
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     bad = trigger == "scanner"
     plan = {"candidates": [{"symbol": "AAAUSDT", "scanner_eligible": not bad,
         "eligible": not bad}], "alternatives": [{"symbol": "AAAUSDT", "strategy": "simple",
         "pieces": [{"piece_type": "grid", "symbol": "AAAUSDT"}],
         "estimate": {"evidence_sufficient": True, "probability": .7, "days_median": 3, "days_p90": 4}}]}
     operator._build_plan = lambda _goal: plan
-    operator._add_piece_from_free_cash = lambda *_args: None
+    operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None
     goal = {"id": 1, "target_usdt": 10, "config_snapshot": {}}
     assert operator._review_allocations(goal, {})["decision"] == "no_hacer_nada"
     result = operator._review_allocations(goal, {})
     if trigger == "scanner":
-        assert result["decision"] == "retirar_con_ventas_vivas"
-        assert engine.buy_only == [(7, {"finalize": False, "buy_only": True})]
+        assert result["decision"] == "no_hacer_nada"
+        assert "materialidad" in result["reason"]
+        assert engine.buy_only == []
     else:
         # Dos revisiones fuera habilitan evaluación; no retira sin mejora material.
         assert result["decision"] == "no_hacer_nada"
         assert engine.buy_only == []
-    assert any(event[0][2] == "META_OPERATOR_WITHDRAW" for event in core.events) is (trigger == "scanner")
+    assert not any(event[0][2] == "META_OPERATOR_WITHDRAW" for event in core.events)
 
 
 def test_review_does_not_add_piece_when_75_percent_or_unknown_blocks_it():
@@ -1019,7 +1037,8 @@ def _rotation_setup(liquidated_cells):
         def get_grid(self, _grid_id):
             return {"id": 7, "status": "ACTIVE", "symbol": "AAAUSDT", "strategy": "simple",
                     "capital_total": 40, "range_high": 110, "range_low": 90,
-                    "open_price": 100, "n_levels": 4}
+                    "open_price": 100, "n_levels": 4,
+                    "created_at": datetime.now(timezone.utc) - timedelta(hours=2)}
         def get_grid_levels(self, _grid_id):
             return [{"held_qty": 1, "entry_price": 120, "price": 120}]
 
@@ -1043,12 +1062,15 @@ def _rotation_setup(liquidated_cells):
                 {"symbol": "BBBUSDT", "strategy": "simple",
                  "pieces": [{"piece_type": "grid", "symbol": "BBBUSDT"}],
                  "estimate": {"evidence_sufficient": True, "probability": .9,
+                              "probability_replay": .9, "median_progress_pct": 40,
                               "days_median": 2, "days_p90": 3}},
                 {"symbol": "AAAUSDT", "strategy": "simple",
                  "pieces": [{"piece_type": "grid", "symbol": "AAAUSDT"}],
-                 "estimate": {"days_p90": 10}},
-            ]}
+                 "estimate": {"probability_replay": .5, "median_progress_pct": 20,
+                              "days_p90": 10}},
+            ], "decision_id": "rotation-review-1"}
     goal = {"id": 1, "target_usdt": 50, "config_snapshot": {}}
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     return core, engine, operator, plan, goal
 
 
@@ -1060,6 +1082,9 @@ def test_review_rotation_accepts_and_reopens_when_verified_gain_covers_loss_and_
     operator._open_replacement = lambda _goal, alternative, cash: (
         opened_calls.append((alternative["symbol"], cash)) or {"grid_id": 99, "capital_usdt": cash})
 
+    first = operator._review_allocations(goal, {}, plan=plan)
+    assert first["decision"] == "no_hacer_nada"
+    plan["decision_id"] = "rotation-review-2"
     result = operator._review_allocations(goal, {}, plan=plan)
 
     assert result["decision"] == "cerrar_y_reasignar"
@@ -1080,6 +1105,9 @@ def test_review_rotation_rejects_reopen_when_verified_loss_exceeds_expected_gain
         [{"pnl_realized": -100, "buy_fee_usdt": 0.3, "sell_fee_usdt": 0.3}])
     operator._open_replacement = lambda *_args: pytest.fail("no debía reabrir")
 
+    first = operator._review_allocations(goal, {}, plan=plan)
+    assert first["decision"] == "no_hacer_nada"
+    plan["decision_id"] = "rotation-review-2"
     result = operator._review_allocations(goal, {}, plan=plan)
 
     assert result["decision"] == "cerrar_sin_reasignar"
@@ -1091,6 +1119,76 @@ def test_review_rotation_rejects_reopen_when_verified_loss_exceeds_expected_gain
     assert details["reallocation_allowed_after_verified_close"] is False
     rejected_events = [event for event in core.events if event[0][2] == "META_OPERATOR_ROTATION_REJECTED"]
     assert rejected_events, "se espera un evento META_OPERATOR_ROTATION_REJECTED"
+
+
+def test_rotation_with_marginal_edge_and_one_sided_testnet_book_never_closes():
+    core, engine, operator, plan, goal = _rotation_setup(
+        [{"pnl_realized": -0.0814, "buy_fee_usdt": .04, "sell_fee_usdt": .04}])
+    plan["alternatives"][0]["estimate"].update({"probability": .51,
+        "probability_replay": .51, "median_progress_pct": 20})
+    plan["alternatives"][1]["estimate"].update({"probability": .50,
+        "probability_replay": .50, "median_progress_pct": 20})
+
+    class Testnet:
+        def get_book_ticker(self, symbol):
+            if symbol == "BBBUSDT":
+                return {"bid_price": "0.00000452", "ask_price": "0E-8"}
+            return {"bid_price": "100", "ask_price": "100.01"}
+
+    engine.exchange = Testnet()
+    engine._market_context = lambda symbol: (None, engine.exchange.get_book_ticker(symbol), Decimal("0"))
+    del operator._testnet_openability
+
+    result = operator._review_allocations(goal, {}, plan=plan)
+
+    assert result["decision"] == "no_hacer_nada"
+    assert "alternativa no abrible en Testnet" in result["reason"]
+    assert "libro de Testnet unilateral" in result["reason"]
+    assert engine.closed == []
+    assert any(event[0][2] == "META_OPERATOR_ROTATION_REJECTED" for event in core.events)
+
+
+def test_rotation_below_materiality_keeps_open_piece_even_with_two_review_candidate():
+    core, engine, operator, plan, goal = _rotation_setup(
+        [{"pnl_realized": -0.01, "buy_fee_usdt": 0, "sell_fee_usdt": 0}])
+    plan["alternatives"][0]["estimate"].update({"probability_replay": .51,
+        "median_progress_pct": 20})
+    plan["alternatives"][1]["estimate"].update({"probability_replay": .50,
+        "median_progress_pct": 20})
+
+    result = operator._review_allocations(goal, {}, plan=plan)
+
+    assert result["decision"] == "no_hacer_nada"
+    assert "materialidad" in result["reason"]
+    assert engine.closed == []
+
+
+def test_free_cash_after_realized_loss_uses_attributable_cash_amount():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self): self.events = []
+        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+        def valuation(self, _meta_id): return {"cash_usdt": "99.9186"}
+
+    class DB:
+        def get_grid(self, _grid_id):
+            return {"id": 7, "status": "CLOSED", "symbol": "AAAUSDT", "capital_total": 70}
+
+    operator = MetaOperator(Core(), DB(), None, None, None)
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
+    operator._open_replacement = lambda _goal, _alternative, amount: {
+        "grid_id": 8, "capital_usdt": amount}
+    goal = {"id": 1, "capital_initial": 100, "config_snapshot": {
+        "capital_per_coin_pct": 100, "max_grids": 2, "max_bots": 4}}
+    plan = {"alternatives": [{"pieces": [{"piece_type": "grid", "symbol": "XRPUSDT",
+        "capital_usdt": 99.9}], "estimate": {"probability": .5}}]}
+
+    result = operator._add_piece_from_free_cash(goal, [{"grid_id": 7, "piece_type": "grid"}], plan)
+
+    assert result["free_before_usdt"] == pytest.approx(99.9186)
+    assert result["attributable_cash_usdt"] == pytest.approx(99.9186)
+    assert result["allocated_reserve_free_usdt"] == pytest.approx(100)
 
 
 def test_review_once_opens_a_real_piece_on_the_fake_exchange_using_free_cash(tmp_path):
