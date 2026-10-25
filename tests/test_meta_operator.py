@@ -257,9 +257,19 @@ def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(t
 
 def test_prudent_requires_medium_sigma_and_complete_model_stats_rapid_does_not():
     assert profile_candidate_exclusion("PRUDENTE", .9, .2, .6, True) == "sigma fuera del tercil medio Prudente"
-    assert "50 verificaciones" in profile_candidate_exclusion("PRUDENTE", .4, .2, .6, False)
+    assert "30 verificaciones" in profile_candidate_exclusion("PRUDENTE", .4, .2, .6, False)
     assert profile_candidate_exclusion("RAPIDO", .9, .2, .6, False) is None
     assert profile_candidate_exclusion("RAPIDO", .9, None, None, False) is None
+
+
+def test_prudent_verification_threshold_is_reachable_with_current_model_window():
+    from grid.meta import DEFAULT_PROFILES
+    from models.volatility.model_stats import N_MIN, ROLLING_VERIFICATIONS
+
+    max_rows = max(ROLLING_VERIFICATIONS, N_MIN * 24)
+    maximum_effective_days = max_rows / 24
+    assert DEFAULT_PROFILES["PRUDENTE"]["min_effective_verifications"] == 30
+    assert maximum_effective_days >= DEFAULT_PROFILES["PRUDENTE"]["min_effective_verifications"]
 
 
 def test_meta_signal_formula_and_loss_reallocation_gate():

@@ -38,12 +38,21 @@
   // Precio con cifras significativas (no trunca monedas de precio muy bajo como PEPE).
   function fmtPrice(value) { return window.ASPLEFormat?.formatPrice?.(value) ?? fmtMoney(value, 6); }
   const BOOK_STATE_LABELS = { two_sided: 'Dos lados', one_sided: 'Un solo lado' };
+  const MODEL_READINESS_LABELS = {
+    lista: 'Lista', datos_insuficientes: 'Datos insuficientes',
+    descargando: 'Descargando', pendiente: 'Pendiente',
+  };
   function bookStateLabel(value) { return BOOK_STATE_LABELS[value] || 'Sin datos'; }
   function modelStatsLabel(stats) {
     if (!stats) return 'Sin datos';
-    const readiness = stats.readiness ? esc(stats.readiness) : 'sin estado';
-    const verifications = stats.effective_verifications != null ? Number(stats.effective_verifications).toFixed(1) : '0';
-    return `${readiness} · ${verifications} verif.`;
+    const state = String(stats.readiness || '').toLowerCase();
+    const readiness = MODEL_READINESS_LABELS[state] || (state ? esc(stats.readiness) : 'Sin estado');
+    const value = stats.effective_verifications != null ? Number(stats.effective_verifications) : 0;
+    const verifications = Number.isFinite(value)
+      ? value.toLocaleString('es-ES', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : '0,0';
+    const required = Number(stats.required_verifications ?? 30);
+    const denominator = Number.isFinite(required) ? required.toLocaleString('es-ES', { maximumFractionDigits: 0 }) : '30';
+    return `${readiness} · ${verifications} de ${denominator} días verificados`;
   }
   // "100 -> 110 USDT (+10)" o "(+10 %)" si la meta se creó en porcentaje; evita
   // que "100 -> 10 USDT" se lea como si la meta fuera bajar a 10.

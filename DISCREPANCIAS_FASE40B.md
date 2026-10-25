@@ -110,3 +110,16 @@ Suite completa tras 40b-4B: 1.462 passed, 1 skipped, 18 deselected, 55 warnings,
 - La señal permanece fuera de toda probabilidad y decisión (peso cero); aprender/calibrar su utilidad corresponde a 40d.
 
 Suite completa: 1.473 passed, 1 skipped, 18 deselected, 55 warnings, 305,22 s. Próxima fase: 40c.
+
+## 40b-6A — Prudente con 30 verificaciones
+
+### Cerrado
+
+- El gate de Prudente ya no exige 50 verificaciones; usa 30 por defecto, editable en `meta_profile_settings`. La capacidad mínima de la ventana vigente es 720 filas / 24 = 30 verificaciones efectivas.
+- La pantalla presenta el conteo requerido con decimal español y traduce los estados `datos_insuficientes` y readiness ausente.
+- Un readiness ausente significa que `get_readiness(symbol)` no encontró fila en `coin_readiness`, no que el modelo esté listo. `complete` sigue exigiendo estado `lista` y pronóstico reciente; la exclusión de Prudente permanece activa hasta cumplirlo.
+
+### Pendiente
+
+- No se inspeccionó una BD para certificar la historia concreta de onboarding de XRPUSDT. La causa observable en el código es que no existe una fila de readiness cuando la API devuelve `None`; el origen de esa ausencia requiere evidencia de la BD pertinente.
+- 40b-6B (reajuste activo de piezas abiertas) espera aprobación del diseño antes de implementar. No es una discrepancia de código en este commit.

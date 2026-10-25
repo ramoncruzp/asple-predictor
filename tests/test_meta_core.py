@@ -67,6 +67,13 @@ def test_attributable_cash_fixed_numbers():
     assert attributable_cash("100", "60", "70", "1") == Decimal("109")
 
 
+def test_prudent_verification_minimum_is_editable_in_profile_settings(tmp_path):
+    db, core = _core(tmp_path)
+    updated = core.set_config("PRUDENTE", {"min_effective_verifications": 32})
+    assert updated["min_effective_verifications"] == 32
+    assert core.config()["profiles"]["PRUDENTE"]["min_effective_verifications"] == 32
+
+
 def test_executable_value_consumes_depth_and_marks_partial_unknown_and_stale():
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     known = executable_value("3", [("10", "1"), ("9", "2")], .1, 1, now, now, 60)

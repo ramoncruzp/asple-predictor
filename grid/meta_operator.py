@@ -132,7 +132,7 @@ def allocation_vectors(piece_count, per_coin_cap_pct):
     return result
 
 
-def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready):
+def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready, min_verifications=30):
     """Retorna solo exclusiones propias del perfil; Scanner mantiene sus gates."""
     if sigma is None:
         return "sigma realizada no disponible"
@@ -142,7 +142,7 @@ def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready):
         if not float(q33) <= float(sigma) <= float(q67):
             return "sigma fuera del tercil medio Prudente"
         if not model_ready:
-            return "Prudente requiere readiness y al menos 50 verificaciones"
+            return f"Prudente requiere readiness y al menos {int(min_verifications)} verificaciones"
     return None
 
 
@@ -447,18 +447,24 @@ class MetaOperator:
             elif str(symbol).upper() not in active:
                 reason = "moneda inactiva o ausente de Coin Registry"
             else:
-                model_ready = self._model_ready(symbol) if profile == "PRUDENTE" else False
-                reason = profile_candidate_exclusion(profile, sigma, q33, q67, model_ready)
+                required_verifications = int(cfg.get("min_effective_verifications", 30))
+                model_ready = self._model_ready(symbol, required_verifications) if profile == "PRUDENTE" else False
+                reason = profile_candidate_exclusion(profile, sigma, q33, q67, model_ready,
+                                                     required_verifications)
             if reason is None:
+                model_statistics = self._model_snapshot(symbol)
+                model_statistics["required_verifications"] = int(cfg.get("min_effective_verifications", 30))
                 prepared.append({**row, "scanner_eligible": True, "book_state": "two_sided",
-                                 "model_statistics": self._model_snapshot(symbol), "excluded_reason": None})
+                                 "model_statistics": model_statistics, "excluded_reason": None})
             else:
                 prepared.append({"symbol": symbol, "eligible": bool(row.get("eligible")),
                                  "scanner_eligible": bool(row.get("eligible")),
                                  "hard_filters": row.get("hard_filters", []),
                                  "sigma_24h": sigma, "score": row.get("score"),
                                  "book_state": "two_sided" if row.get("eligible") else "excluded",
-                                 "model_statistics": self._model_snapshot(symbol) if symbol else None,
+                                 "model_statistics": ({**self._model_snapshot(symbol),
+                                     "required_verifications": int(cfg.get("min_effective_verifications", 30))}
+                                     if symbol else None),
                                  "excluded_reason": reason})
         eligible = [r for r in prepared if r.get("excluded_reason") is None]
         preparation_seconds = time.perf_counter() - preparation_started
@@ -727,13 +733,13 @@ class MetaOperator:
                 "complete": bool(readiness.get("state") == "lista" and latest is not None),
                 "volatility_forecasts": forecasts}
 
-    def _model_ready(self, symbol):
+    def _model_ready(self, symbol, minimum=30):
         data = self._model_snapshot(symbol)
         try:
             count = float(data.get("effective_verifications") or 0)
         except (TypeError, ValueError):
             count = 0
-        return data["complete"] and count >= 50
+        return data["complete"] and count >= float(minimum)
 
     def _symbol_filters(self, symbol):
         """Filtros reales del símbolo (tick, step, notional mínimo), para que el

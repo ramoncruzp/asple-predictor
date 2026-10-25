@@ -63,9 +63,12 @@ SYNTHETIC_PLAN = {
 QA_PLAN = {
     "candidates": [{"symbol": "XRPUSDT", "sigma_24h_open": 0.0234, "score": 0.81,
                      "book_state": "two_sided",
-                     "model_statistics": {"readiness": "lista", "effective_verifications": 12.0,
-                                          "complete": True}, "excluded_reason": None},
-                    {"symbol": "ADAUSDT", "excluded_reason": "fuera de banda de sigma"}],
+                     "model_statistics": {"readiness": None, "effective_verifications": 12.0,
+                                          "required_verifications": 30, "complete": True}, "excluded_reason": None},
+                    {"symbol": "ADAUSDT", "sigma_24h_open": 0.018, "score": 0.6,
+                     "book_state": "two_sided", "model_statistics": {
+                        "readiness": "datos_insuficientes", "effective_verifications": 9.5,
+                        "required_verifications": 30}, "excluded_reason": None}],
     "pieces": [{"symbol": "PEPEUSDT", "strategy": "simple", "piece_type": "grid",
                 "capital_usdt": 50, "n_levels": 4, "floor": 0.00000437, "ceiling": 0.00000441,
                 "mid_at_plan": 0.00000439, "margin_pct": 0.5, "loans_pct": 0},
@@ -312,6 +315,8 @@ def test_plan_details_show_translated_states_significant_prices_loans_and_warnin
 
     assert "Dos lados" in content
     assert "two_sided" not in content
+    assert "Sin estado · 12,0 de 30 días verificados" in content
+    assert "Datos insuficientes · 9,5 de 30 días verificados" in content
     # Defecto 2: sigma_24h_open (0.0234) con su unidad, no "—".
     assert "2.34%" in content
     # 0.00000437 / 0.00000441 no deben colapsar a "0.000004" (pierde el precio real).

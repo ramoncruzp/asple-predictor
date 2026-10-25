@@ -13,7 +13,7 @@
 
 ## Modelo de estimación y selección
 
-El análisis solicita al `GridScanService` las candidatas y los filtros duros, forma las bandas de sigma mediante los cuantiles editables `sigma_q33` y `sigma_q67` (mínimo tres candidatas), y compara Simple y Smart. Prudente requiere sigma en el tercil medio, readiness `lista` y al menos 50 verificaciones efectivas. Rápido no exige estadísticas de modelo ni restringe la banda, pero sí conserva los filtros duros del Scanner y el estado de libro bilateral.
+El análisis solicita al `GridScanService` las candidatas y los filtros duros, forma las bandas de sigma mediante los cuantiles editables `sigma_q33` y `sigma_q67` (mínimo tres candidatas), y compara Simple y Smart. Desde 40b-6A, Prudente requiere sigma en el tercil medio, readiness `lista` y el umbral de verificaciones efectivas editable por perfil (30 por defecto). Rápido no exige estadísticas de modelo ni restringe la banda, pero sí conserva los filtros duros del Scanner y el estado de libro bilateral.
 
 Para cada alternativa elegible (grid Simple/Smart o bot individual cuando el capital no alcanza para cuatro celdas de al menos 5,5 USDT) se construyen ventanas históricas de 30 días con avance de 7 días, sobre hasta 180 días de velas de 5 minutos. La simulación usa como objetivo el incremento absoluto de la meta en USDT. La probabilidad de replay es `número de ventanas que alcanzaron el objetivo / ventanas evaluadas`. Los días al objetivo se resumen en mediana y percentiles 10 y 90; se informa peor drawdown, ventanas totales e independientes. Se cuentan como independientes `floor(N / ceil(30/7))`; la evidencia es suficiente con tres o más. Bajo 25 % se marca como poco probable. Las alternativas se ordenan por probabilidad y luego por mediana de días. El resultado se etiqueta como estimación histórica, no promesa.
 
@@ -230,3 +230,23 @@ Suite completa final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests
 ### Límite de medición
 
 El análisis expone la duración real del paso `touch_signal` para que el medidor de S1 la compare con `replays`. Esta fase no ejecutó el análisis con mercado real ni en S1; por ello el aumento relativo respecto al replay y el objetivo aproximado de 5 % todavía no están certificados. El cache diario reduce el coste de alternativas repetidas y del precálculo, pero no sustituye esa medición.
+
+## 40b-6A — Prudente con 30 verificaciones
+
+### Implementado
+
+- `grid/meta.py:19, 30` incorpora `min_effective_verifications: 30` a ambos perfiles. La configuración sigue siendo editable mediante `meta_profile_settings` y la API de ajustes del perfil (`grid/meta.py:158-190`); no se altera la validación global de estadísticas de modelo.
+- `grid/meta_operator.py:135, 450-466, 736-743` usa el umbral guardado en la instantánea de perfil. La ventana de 24 h retiene `max(168, N_MIN × 24) = 720` filas base (`database/db_manager.py:1052-1054`); `720 / 24 = 30` verificaciones efectivas, así que el umbral de Prudente es alcanzable. La consulta conserva además filas de margen para maduración.
+- `frontend/metas.js:42-59` presenta el conteo como “12,0 de 30 días verificados”, usa coma decimal y traduce `datos_insuficientes` y la ausencia de estado a “Datos insuficientes” y “Sin estado”.
+- XRPUSDT puede mostrar “Sin estado” cuando no hay fila para él en `coin_readiness`: `database/db_manager.py:1298-1310` devuelve `None` en ese caso y `_model_snapshot` (`grid/meta_operator.py:696-725`) deja `readiness` en `None`. Esto no lo marca como modelo completo: el gate también requiere estado `lista` y pronóstico reciente. Es consistente con una moneda del Coin Registry aún no procesada por onboarding; no consulté BD local ni la de S1, así que no atribuyo a XRP una causa de ingestión más específica.
+- `tests/test_meta_operator.py:265-272` comprueba la cota 720/24 y evita que el umbral por defecto supere la capacidad; `tests/test_meta_core.py:70-74` comprueba que se puede editar; `tests/ui/test_metas_ui.py:64-72, 318-319` verifica ambos textos traducidos.
+
+### Pruebas
+
+- Enfoque final: `tests/test_meta_operator.py tests/test_meta_core.py tests/ui/test_metas_ui.py -m "not live" -q` — **83 passed, 6 warnings, 32,92 s**.
+- Suite completa: `ASPLE_OFFLINE=1 .\\venv\\Scripts\\python.exe -m pytest tests -m "not live" -q --basetemp <carpeta nueva en $env:TEMP>` — **1.504 passed, 1 skipped, 18 deselected, 56 warnings, 504,27 s**, código de salida 0.
+- `node --check frontend/metas.js` y `git diff --check` pasaron. Playwright no registró hosts externos; sin Testnet, `.env` ni BD real.
+
+### Parte B pendiente de aprobación
+
+40b-6B no está implementada. El diseño propuesto al final de esta revisión cubrirá los tipos de reajuste, simulación, costes, frenos, `ops_lock`, bitácora y pruebas solicitados; espero la aprobación de Ramón antes de modificar código de producción.

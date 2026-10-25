@@ -4,6 +4,8 @@
 **Estado:** (corregido 2026-10-21: el perfil solo fija límites; el objetivo de ambos es la rapidez) especificación aprobada en conversación, decisiones D1–D5 cerradas (2026-10-21). La especificación describe el módulo final; su construcción se divide en 40a (núcleo), 40b (operador) y 40c (pantalla).
 **Ámbito:** solo Binance Spot **Testnet**. Nada de dinero real.
 
+**Actualización de alcance (Ramón, 2026-10-25):** el operador activo puede reajustar las piezas Meta abiertas —rango, niveles/bots, margen y capital— cuando los datos y simulaciones lo justifiquen. Los frenos, costes y criterios se definirán en 40b-6B; no autoriza cambios a grids normales ni a ajustes globales.
+
 ---
 
 ## 1. Qué es
@@ -67,7 +69,7 @@ resultado % = (valor_ejecutable − capital inicial) / capital inicial × 100
 | Ciclo | Frecuencia | Qué hace |
 |---|---|---|
 | **Vigilancia de pérdida** | Cada **1 minuto** | Calcula el valor ejecutable (§3). Dos cruces consecutivos del límite → cierre total (§6). Al 75 % → alerta y bloqueo de piezas nuevas. |
-| **Revisión del plan** | Cada **15 minutos** | Analiza mercado (Scanner, σ, modelos) y decide abrir / ajustar / cerrar piezas. |
+| **Revisión del plan** | Cada **15 minutos** | Analiza mercado (Scanner, σ, modelos) y decide mantener, abrir, retirar, reajustar o cerrar piezas Meta según datos y simulaciones. La ejecución debe respetar bloqueo de la meta, límites del perfil y protecciones de inventario; los criterios de 40b-6B requieren diseño aprobado. |
 
 La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con el monitor existente. Registrar en cada corrida cuánto se pasó del límite en el momento del cierre (deslizamiento).
 
@@ -79,6 +81,7 @@ La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con 
 - La meta se cumple cuando el **USDT libre realizado** de la meta ≥ capital inicial + meta (ej. ≥ 110 USDT).
 - En ese momento el operador se **desactiva**: no abre compras nuevas ni piezas nuevas; cancela las órdenes de **compra** vivas.
 - **Posiciones sobrantes (D1):** los bots que aún tengan monedas conservan su orden de **venta** y **venden solo cuando tengan ganancia** (al precio de su nivel de venta). No se venden con pérdida, no tienen plazo y el límite de pérdida de la meta ya no las cierra. Lo que se venda es **ganancia extra** y se reporta **aparte**; mientras no se venda, se muestra su valor actual a precio bid. Ramón puede cerrarlas en cualquier momento con el botón Cancelar (§6).
+- El reajuste autorizado el 2026-10-25 aplica mientras el operador mantiene una meta activa. Al cumplirla, el operador se desactiva y las posiciones sobrantes siguen la regla de venta con ganancia de este apartado; no se reactivan para reajustarlas.
 
 ---
 
@@ -101,6 +104,8 @@ La vigilancia de 1 minuto debe ser liviana (saldos + precios) y no competir con 
 4. Queda registrado en la bitácora y en la corrida (opción elegida, valor al cancelar).
 
 Los stop-loss por celda de cada pieza siguen funcionando según el interruptor global (`STOPLOSS_ENABLED`); el límite de pérdida de la meta va **por encima** de ellos.
+
+El reajuste autorizado para el operador activo no sustituye estos cierres verificados ni permite que un reajuste venda inventario con pérdida. Los detalles de coste, simulación y frenos para reajustar se definirán en 40b-6B antes de implementarse.
 
 ---
 
