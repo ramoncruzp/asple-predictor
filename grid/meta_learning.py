@@ -187,13 +187,21 @@ def extract_learning_features(signals, weights_by_symbol=None):
     values, present = {}, set()
     if not isinstance(signals, dict):
         return values, present
+    version = signals.get("signals_version", 0)
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        version = 0
+    # v1 arrastraba volatility, break_prob y direction constantes por el defecto de escala/signo.
+    legacy_unreliable = {"volatility", "break_prob", "direction"} if version < 2 else set()
     live = signals.get("signals_used")
     if isinstance(live, list):
         for item in live:
             if not isinstance(item, dict):
                 continue
             name, value = str(item.get("name") or ""), item.get("normalized")
-            if name in LEARNING_SIGNALS and isinstance(value, (int, float)) and np.isfinite(value):
+            if (name in LEARNING_SIGNALS and name not in legacy_unreliable and
+                    isinstance(value, (int, float)) and np.isfinite(value)):
                 values[name] = float(np.clip(value, -1.0, 1.0))
                 present.add(name)
     historical = signals.get("point_in_time_by_symbol")

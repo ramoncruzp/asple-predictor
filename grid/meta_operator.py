@@ -127,6 +127,28 @@ def combine_aligned_replays(alternatives, target_usdt, window_days):
     return summarize_replays(rows, independent_window_days=window_days, target_usdt=target_usdt), rows
 
 
+def combine_piece_signals(combination):
+    """Combina señales por capital y conserva valor y diagnóstico de cada pieza."""
+    from grid.meta_learning import LEARNING_SIGNALS
+    combined = []
+    for name in LEARNING_SIGNALS:
+        values = [(float(item["pieces"][0]["capital_usdt"]), item["pieces"][0].get("symbol"), signal)
+            for item in combination for signal in item.get("signals_used", []) if signal.get("name") == name]
+        if not values:
+            continue
+        denominator = sum(amount for amount, _, _ in values)
+        normalized = sum(amount * float(signal["normalized"]) for amount, _, signal in values) / denominator
+        numeric = [(amount, float(signal["value"])) for amount, _, signal in values
+            if isinstance(signal.get("value"), (int, float))]
+        value = (sum(amount * raw for amount, raw in numeric) / sum(amount for amount, _ in numeric)
+            if numeric else None)
+        combined.append({"name": name, "value": value, "normalized": normalized,
+            "value_by_piece": [signal.get("value") for _, _, signal in values],
+            "diagnostic_by_piece": [{"symbol": symbol, "diagnostic": signal.get("diagnostic")}
+                for _, symbol, signal in values]})
+    return combined
+
+
 def allocation_vectors(piece_count, per_coin_cap_pct):
     """Repartos en pasos de 10 % y acotados al capital máximo por moneda."""
     cap = int(float(per_coin_cap_pct) // 10) * 10
@@ -1014,16 +1036,7 @@ class MetaOperator:
                         int(cfg.get("max_days", 20)))
                     if not combined_rows:
                         continue
-                    signals = []
-                    for name in LEARNING_SIGNALS:
-                        values = [(float(item["pieces"][0]["capital_usdt"]), signal)
-                            for item in combination for signal in item.get("signals_used", [])
-                            if signal["name"] == name]
-                        if values:
-                            denominator = sum(amount for amount, _ in values)
-                            signals.append({"name": name, "normalized": sum(amount * signal["normalized"]
-                                for amount, signal in values) / denominator,
-                                "value_by_piece": [signal.get("value") for _, signal in values]})
+                    signals = combine_piece_signals(combination)
                     replay_probability = estimate["probability"]
                     cap = float(cfg.get("signal_logit_cap", 1.0))
                     probability = (signal_adjusted_probability(replay_probability, signals,
@@ -1272,7 +1285,8 @@ class MetaOperator:
             if not pieces:
                 continue
             sample_key = hashlib.sha256(f"live:{decision_id}:{alt_id}".encode()).hexdigest()
-            signals = {"signals_used": alternative.get("signals_used", []),
+            signals = {"signals_version": 2,
+                "signals_used": alternative.get("signals_used", []),
                 "touch_signal": alternative.get("touch_signal"),
                 "shadow_signals": alternative.get("shadow_signals", [])}
             replay_raw = alternative.get("replay_probability")
@@ -1346,7 +1360,8 @@ class MetaOperator:
                         "training_exclusion_reason": ("sin base suficiente" if
                             int(alternative.get("independent_windows") or 0) < 3 else None),
                         "parameters_json": json.dumps(params, sort_keys=True, default=str),
-                        "signals_json": json.dumps({"signals_used": alternative.get("signals_used", []),
+                        "signals_json": json.dumps({"signals_version": 1,
+                            "signals_used": alternative.get("signals_used", []),
                             "touch_signal": alternative.get("touch_signal"),
                             "shadow_signals": alternative.get("shadow_signals", [])}, sort_keys=True, default=str),
                         "provenance_json": json.dumps({"source": "legacy_meta_ledger",
@@ -1664,7 +1679,8 @@ class MetaOperator:
                         "recalculate_base": False,
                         "training_exclusion_reason": item.get("training_exclusion_reason"),
                         "parameters_json": json.dumps(params, sort_keys=True, default=str),
-                        "signals_json": json.dumps(item["signals"], sort_keys=True, default=str),
+                        "signals_json": json.dumps({**item["signals"], "signals_version": 2},
+                            sort_keys=True, default=str),
                         "provenance_json": json.dumps(item["provenance"], sort_keys=True),
                         "created_at": datetime.now(timezone.utc)}
                     counters["historical_samples_created"] += int(self._store_learning_sample(values))
@@ -1827,7 +1843,7 @@ class MetaOperator:
 
     def _load_candles(self, symbol):
         """Carga velas públicas una vez por símbolo y día UTC."""
-        candle_key = (str(symbol).upper(), self.clock() // 86400)
+        candle_key = (symbol, self.clock() // 86400)
         candles = self._candles_cache.get(candle_key)
         if candles is not None:
             return candles

@@ -1766,3 +1766,140 @@ def test_model_snapshot_converts_hourly_forecast_to_24h_sigma():
     assert forecast["sigma_per_hour"] == pytest.approx(.01)
     assert forecast["sigma_24h"] == pytest.approx(.01 * math.sqrt(24))
     assert forecast["used"] is True
+
+
+def test_intelligence_uses_24h_sigma_and_bearish_direction_as_negative(monkeypatch):
+    from datetime import datetime, timezone
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    class DB:
+        def get_latest_prediction(self, *_args):
+            return {"probability_up": .70, "predicted_at": datetime.now(timezone.utc)}
+    operator = MetaOperator(object(), DB(), None, None, None)
+    sigma_seen = []
+    monkeypatch.setattr(module, "break_prob", lambda _price, _low, _high, sigma, _params:
+        (sigma_seen.append(sigma) or .4, None, None, None))
+    model = {"volatility_forecasts": {"model_a": {"used": True,
+        "sigma_per_hour": .02 / 24 ** .5, "sigma_24h": .02}}}
+    alternative = {"replay_probability": .5,
+        "estimate": {"evidence_sufficient": True}, "pieces": [{"capital_usdt": 100}]}
+    operator._apply_intelligence(alternative, {"symbol": "XRPUSDT", "sigma_24h_open": .02,
+        "model_statistics": model, "score": None}, 100, 90, 110, {"signal_weights": {}})
+    signals = {signal["name"]: signal for signal in alternative["signals_used"]}
+    assert signals["volatility"]["normalized"] == pytest.approx(0, abs=1e-12)
+    assert signals["volatility"]["diagnostic"]["forecast_unit"] == "sigma_24h"
+    assert signals["volatility"]["diagnostic"]["sigma_per_hour"] == pytest.approx(.02 / 24 ** .5)
+    assert signals["break_prob"]["normalized"] == pytest.approx(.2)
+    assert sigma_seen == pytest.approx([.02])
+    assert signals["direction"]["value"] == signals["direction"]["p_down"] == .70
+    assert signals["direction"]["normalized"] == -1
+
+
+def test_touch_loads_candles_when_replay_did_not_populate_cache(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    from types import SimpleNamespace
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    cut = 39 * 86400
+    timestamps = np.arange(0, cut + 1, 300, dtype=np.int64)
+    frame = pd.DataFrame({"timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
+        "open": 100., "high": np.where(np.arange(len(timestamps)) % 100 == 0, 102., 100.2),
+        "low": np.where(np.arange(len(timestamps)) % 100 == 50, 98., 100.), "close": 100.})
+    class Client:
+        calls = 0
+        def get_historical_klines(self, *_args):
+            self.calls += 1
+            return frame
+    client = Client()
+    class DB:
+        def get_latest_prediction(self, *_args): return None
+    operator = MetaOperator(object(), DB(), SimpleNamespace(client=client), None, None,
+        clock=lambda: cut)
+    operator._model_snapshot = lambda _symbol: {"volatility_forecasts": {}}
+    monkeypatch.setattr(module, "break_prob", lambda *_args: (.5, None, None, None))
+    alt = {"replay_probability": .5, "estimate": {"probability": .5, "evidence_sufficient": True},
+        "pieces": [{"capital_usdt": 100, "floor": 99, "ceiling": 101}]}
+    operator._apply_intelligence(alt, {"symbol": "XRPUSDT", "score": .5,
+        "sigma_24h_open": .02, "model_statistics": {}}, 100, 90, 110, {"signal_weights": {}})
+    assert client.calls == 1
+    assert any(signal["name"] == "touch_buy_to_sell" for signal in alt["signals_used"])
+
+
+def test_combined_piece_signal_keeps_weighted_value_and_diagnostics():
+    from grid.meta_operator import combine_piece_signals
+    pieces = [
+        {"pieces": [{"symbol": "AAAUSDT", "capital_usdt": 25}], "signals_used": [
+            {"name": "volatility", "value": .02, "normalized": -.2,
+             "diagnostic": {"forecast_unit": "sigma_24h"}}]},
+        {"pieces": [{"symbol": "BBBUSDT", "capital_usdt": 75}], "signals_used": [
+            {"name": "volatility", "value": .04, "normalized": .6,
+             "diagnostic": {"forecast_unit": "sigma_24h"}}]}]
+    signal = combine_piece_signals(pieces)[0]
+    assert signal["value"] == pytest.approx(.035)
+    assert signal["normalized"] == pytest.approx(.4)
+    assert signal["value_by_piece"] == [.02, .04]
+    assert [row["symbol"] for row in signal["diagnostic_by_piece"]] == ["AAAUSDT", "BBBUSDT"]
+    assert all(row["diagnostic"]["forecast_unit"] == "sigma_24h"
+        for row in signal["diagnostic_by_piece"])
+
+
+def test_controlled_regression_matches_24f2ba7_except_three_repaired_signals(monkeypatch):
+    import math
+    import numpy as np
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+    from grid.policy import DEFAULT_SMART_PARAMS, break_prob
+    from grid.meta_learning import causal_touch_buy_to_sell
+
+    cut = 39 * 86400
+    timestamps = np.arange(0, cut + 1, 300, dtype=np.int64)
+    candles = SimpleNamespace(timestamp=timestamps, open=np.full(len(timestamps), 100.),
+        high=np.where(np.arange(len(timestamps)) % 100 == 0, 102., 100.2),
+        low=np.where(np.arange(len(timestamps)) % 100 == 50, 98., 100.),
+        close=np.full(len(timestamps), 100.))
+    class DB:
+        def get_latest_prediction(self, *_args):
+            return {"probability_up": .70, "predicted_at": datetime.now(timezone.utc)}
+    operator = MetaOperator(object(), DB(), None, None, None, clock=lambda: cut)
+    operator._candles_cache[("XRPUSDT", cut // 86400)] = candles
+    per_hour, reference = .04, .04 * math.sqrt(24)
+    alternative = {"replay_probability": .5, "estimate": {"evidence_sufficient": True},
+        "pieces": [{"symbol": "XRPUSDT", "capital_usdt": 100, "floor": 99, "ceiling": 101}]}
+    row = {"symbol": "XRPUSDT", "sigma_24h_open": reference, "score": .6,
+        "model_statistics": {"volatility_forecasts": {"model_a": {"used": True,
+            "sigma_per_hour": per_hour, "sigma_24h": reference}}}}
+    advisor = {"net_per_cycle_after_dust_usdt": 2}
+    operator._apply_intelligence(alternative, row, 108, 90, 108,
+        {"signal_weights": {name: .25 for name in ("volatility", "break_prob", "direction", "scanner", "advisor", "touch_buy_to_sell")}},
+        advisor_result=advisor)
+    current = {signal["name"]: signal for signal in alternative["signals_used"]}
+
+    # Reference formulas copied from 24f2ba7 for the controlled comparison.
+    old_params = dict(DEFAULT_SMART_PARAMS)
+    old_params["min_free_cells"] = min(old_params["min_free_cells"], 1)
+    old_break = break_prob(108, 90, 108, per_hour, old_params)[0]
+    old_signals = [dict(signal) for signal in alternative["signals_used"]]
+    old_by_name = {signal["name"]: signal for signal in old_signals}
+    old_by_name["volatility"]["normalized"] = max(-1., min(1., math.log(per_hour / reference)))
+    old_by_name["break_prob"]["normalized"] = max(-1., min(1., 1 - 2 * old_break))
+    old_by_name["direction"]["normalized"] = 1.0
+    weights = {name: .25 for name in ("volatility", "break_prob", "direction", "scanner", "advisor", "touch_buy_to_sell")}
+    old_probability = module.signal_adjusted_probability(.5, old_signals, weights)
+
+    assert alternative["replay_probability"] == .5
+    for name in ("scanner", "advisor", "touch_buy_to_sell"):
+        assert current[name] == old_by_name[name]
+    assert old_by_name["volatility"]["normalized"] == -1
+    assert current["volatility"]["normalized"] == pytest.approx(0, abs=1e-12)
+    assert old_by_name["break_prob"]["normalized"] > .95
+    assert current["break_prob"]["normalized"] == pytest.approx(-.2139847, abs=1e-5)
+    assert old_by_name["direction"]["normalized"] == 1
+    assert current["direction"]["normalized"] == -1
+    new_probability = module.signal_adjusted_probability(.5, alternative["signals_used"], weights)
+    assert alternative["estimate"]["probability_adjusted"] == pytest.approx(new_probability)
+    assert new_probability < old_probability

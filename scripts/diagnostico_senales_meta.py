@@ -100,6 +100,10 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
     grouped = defaultdict(lambda: {"raw": [], "normalized": [], "references": []})
     sample_symbols = defaultdict(int)
     present = defaultdict(int)
+    version_counts = Counter()
+    distinct_values = defaultdict(set)
+    version_sample_counts = defaultdict(Counter)
+    version_present = defaultdict(Counter)
     for symbol, raw_json in rows:
         symbol = str(symbol or "?")
         sample_symbols[symbol] += 1
@@ -107,17 +111,27 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
             payload = json.loads(raw_json or "{}")
         except (TypeError, ValueError):
             continue
+        try:
+            version = int(payload.get("signals_version") or 1)
+        except (TypeError, ValueError):
+            version = 1
+        version_counts["v2" if version >= 2 else "v1"] += 1
+        version_label = "v2" if version >= 2 else "v1"
+        version_sample_counts[symbol][version_label] += 1
         for signal in payload.get("signals_used") or []:
             name = signal.get("name")
             if name not in SIGNALS:
                 continue
             raw, normalized = signal.get("value"), signal.get("normalized")
-            if raw is None or normalized is None:
+            if normalized is None:
                 continue
             key = (symbol, name)
-            grouped[key]["raw"].append(float(raw))
+            if raw is not None:
+                grouped[key]["raw"].append(float(raw))
             grouped[key]["normalized"].append(float(normalized))
+            distinct_values[key].add(float(normalized))
             present[key] += 1
+            version_present[(symbol, name)][version_label] += 1
             if name == "volatility":
                 diagnostic = signal.get("diagnostic") or {}
                 reference = diagnostic.get("reference_sigma_24h")
@@ -141,6 +155,7 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
                 if item.get("name") == "touch_buy_to_sell":
                     touch_omissions[(symbol, str(item.get("reason") or "sin motivo guardado"))] += 1
     print(f"Diagnóstico Meta: {total} muestras live de los últimos {days:g} días; BD abierta mode=ro.")
+    print(f"Versiones de señales: v1={version_counts['v1']}, v2={version_counts['v2']}")
     if profile:
         print(f"Perfil: {profile.upper()}")
     if not rows:
@@ -154,6 +169,13 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
             coverage = present[(symbol, name)]
             print(f"  {LABELS[name]}: cobertura {coverage}/{sample_symbols[symbol]} "
                   f"({(100*coverage/sample_symbols[symbol]):.1f} %)")
+            v1_total = version_sample_counts[symbol]["v1"]
+            v2_total = version_sample_counts[symbol]["v2"]
+            print(f"    cobertura por versión: v1 {version_present[(symbol, name)]['v1']}/{v1_total}; "
+                  f"v2 {version_present[(symbol, name)]['v2']}/{v2_total}")
+            unique = sorted(distinct_values[(symbol, name)])
+            print("    valores normalizados distintos: " +
+                  (", ".join(f"{value:.6g}" for value in unique) if unique else "ninguno"))
             print("    crudo min/p10/mediana/p90/max: " + "/".join(
                 "—" if raw_stats[k] is None else f"{raw_stats[k]:.6g}"
                 for k in ("min", "p10", "median", "p90", "max")))

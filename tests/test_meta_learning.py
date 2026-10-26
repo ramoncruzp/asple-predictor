@@ -334,6 +334,35 @@ def test_historical_features_rebuild_only_available_normalized_signals():
     assert present == {"volatility", "direction"}
 
 
+@pytest.mark.parametrize(("p_down", "expected"), [(.70, -1.0), (.55, 0.0), (.40, 0.0)])
+def test_direction_probability_is_never_positive(p_down, expected):
+    from grid.meta_learning import normalize_down_probability
+    assert normalize_down_probability(p_down) == pytest.approx(expected)
+
+
+def test_legacy_features_ignore_three_broken_signals_but_keep_other_signals():
+    payload = {"signals_version": 1, "signals_used": [
+        {"name": "volatility", "normalized": -1},
+        {"name": "break_prob", "normalized": 1},
+        {"name": "direction", "normalized": 1},
+        {"name": "scanner", "normalized": .2},
+        {"name": "advisor", "normalized": .3},
+        {"name": "touch_buy_to_sell", "normalized": .4}]}
+    values, present = extract_learning_features(payload)
+    assert present == {"scanner", "advisor", "touch_buy_to_sell"}
+    assert values["scanner"] == .2 and values["touch_buy_to_sell"] == .4
+
+
+def test_version_two_live_features_use_volatility_break_and_direction():
+    payload = {"signals_version": 2, "signals_used": [
+        {"name": "volatility", "normalized": .1},
+        {"name": "break_prob", "normalized": -.2},
+        {"name": "direction", "normalized": -.3}]}
+    values, present = extract_learning_features(payload)
+    assert present == {"volatility", "break_prob", "direction"}
+    assert values == {"volatility": .1, "break_prob": -.2, "direction": -.3}
+
+
 def test_absent_signal_stays_at_prior_and_reported_without_evidence():
     base = datetime(2025, 1, 1, tzinfo=timezone.utc)
     rows = []
@@ -341,7 +370,7 @@ def test_absent_signal_stays_at_prior_and_reported_without_evidence():
         rows.append({"id": i, "symbol": f"COIN{i % 5}",
             "sample_at": base + timedelta(days=i * 3), "base_probability": .5,
             "base_probability_smoothed": .5, "base_window_count": 5,
-            "signals": {"signals_used": [{"name": "volatility", "normalized": .8}]},
+            "signals": {"signals_version": 2, "signals_used": [{"name": "volatility", "normalized": .8}]},
             "label": {"reached": bool(i % 2)}})
     validation = [{**row, "label": {"reached": bool(row["id"] % 2)}} for row in rows[-10:]]
     result = fit_signal_weights(rows, validation_rows=validation, min_effective=30,
@@ -373,7 +402,7 @@ def test_weight_update_is_significant_holm_adjusted_and_limited_to_005():
                 "sample_at": base + timedelta(days=day * 3),
             "base_probability": .5, "base_probability_smoothed": .5,
             "base_window_count": 5, "base_independent_windows": 5,
-                "signals": {"signals_used": [{"name": "volatility", "normalized": signal}]},
+                "signals": {"signals_version": 2, "signals_used": [{"name": "volatility", "normalized": signal}]},
                 "label": {"reached": signal > 0}}
             identifier += 1
             (training if day < 126 else validation).append(row)
@@ -395,7 +424,7 @@ def test_weight_that_fails_later_validation_is_not_applied():
                 "sample_at": base + timedelta(days=day * 3),
                 "base_probability": .5, "base_probability_smoothed": .5,
                 "base_window_count": 5, "base_independent_windows": 5,
-                "signals": {"signals_used": [{"name": "volatility", "normalized": signal}]},
+                "signals": {"signals_version": 2, "signals_used": [{"name": "volatility", "normalized": signal}]},
                 "label": {"reached": signal > 0}}
             identifier += 1
             if day >= 126:

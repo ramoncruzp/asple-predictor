@@ -1,7 +1,7 @@
 # Modo Meta — Decisiones y rumbo
 
 **Para qué es este archivo:** tener en un solo lugar qué estamos construyendo, qué se decidió y por qué, para no perder el camino. Si algo de otro documento o prompt choca con esto, manda este archivo (y la especificación `ESPEC_FASE40_MODO_META.md`).
-**Última actualización:** 2026-10-25.
+**Última actualización:** 2026-10-26.
 
 ---
 
@@ -115,9 +115,10 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Cerrada en 40d-6: inventario de velas, calibración y conteos persistidos |
 | 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
 | 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; 40d-6B restaura los frenos de reajuste real previos al refactor |
-| 40d-7A | Diagnóstico de saturación de señales, sin cambiar la decisión real | Diagnóstico local implementado; corrección de unidades/signo propuesta, pendiente de aprobación y medición en S1 |
+| 40d-7A | Diagnóstico de saturación de señales | Correcciones de unidades, signo, cobertura y trazabilidad aplicadas directamente en Fase 41a |
 | 40d-7B | Inteligencia legible, aciertos en sombra y defectos de Metas/Inteligencia | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
+| 41a | Corrección directa de señales Meta, trazabilidad y diagnóstico | Implementada y verificada offline; commit por partes, sin despliegue |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -265,3 +266,11 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - B10 resume evidencia observada para dirección, volatilidad, toque compra→venta, p_replay y alternativas elegidas. La muestra menor de 30 se identifica como escasa; son métricas descriptivas y no cambian pesos ni decisiones.
 - Metas lista solo piezas vivas y expresa el avance como fracción del objetivo; el backend expone el estado del grid junto a la valoración.
 - Estado: implementación y pruebas focalizadas terminadas; commit de 40d-7B pendiente. S1 y despliegue no forman parte de esta fase.
+
+## 24. Fase 41a — corrección directa de señales (2026-10-26)
+
+- Arreglo directo por decisión de Ramón: los defectos se corrigen sin sombra ni interruptor nuevo.
+- Los pronósticos por hora se expresan como sigma 24 h antes de comparar volatilidad o llamar a `break_prob`; la reconstrucción histórica comparte la conversión.
+- `probability_up` de `model_a_down` se interpreta como P(baja); su señal normalizada nunca es positiva.
+- Las alternativas usan el cargador de velas causal también para toque, y las señales combinadas conservan valor y diagnóstico por pieza.
+- Las muestras nuevas llevan `signals_version: 2`; las muestras v1 (o sin versión) no entrenan volatilidad, ruptura ni dirección porque esos valores estaban defectuosos.
