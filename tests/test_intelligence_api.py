@@ -45,15 +45,34 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     client = TestClient(app)
     assert client.get('/api/intelligence').status_code == 403
     with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(capital_initial=100, target_usdt=10,
+            target_input_type='usdt', target_input_value=10, profile='RAPIDO', status='ACTIVE',
+            environment='TESTNET', created_at=datetime.now(timezone.utc).replace(tzinfo=None))).inserted_primary_key[0]
         conn.execute(db.predictions.insert().values(prediction_id='p1', symbol='XRPUSDT', interval='1h',
             model_name='model_a', predicted_at=datetime.now(timezone.utc),
             verify_at=datetime.now(timezone.utc), probability_up=.6, signal='UP', confidence='high',
             price_at_prediction=1.0))
+        conn.execute(db.outcomes.insert().values(prediction_id='p1', verified_at=datetime.now(timezone.utc),
+            price_at_verification=1.1, price_change_pct=10, actual_direction='UP', was_correct=1))
+        conn.execute(db.vol_forecasts.insert().values(symbol='XRPUSDT', horizon_h=24, model_name='vol_a',
+            forecast_at=datetime.now(timezone.utc), made_at=datetime.now(timezone.utc),
+            pred_logvol_raw=.02, pred_logvol_cal=.02, var_factor=1, is_champion=1,
+            realized_logvol=.03, verified_at=datetime.now(timezone.utc)))
         conn.execute(db.meta_learning_runs.insert().values(started_at=datetime.now(timezone.utc),
             finished_at=datetime.now(timezone.utc), status='completed', summary_json=json.dumps({
                 'candle_inventory_at': '2026-10-26T00:00:00+00:00',
                 'candle_inventory': {'XRPUSDT': {'count': 12, 'interval_seconds': 300, 'gaps': 1}},
                 'replay_windows_new': 8, 'replay_windows_cached': 4, 'cuts_processed': 2})))
+        conn.execute(db.meta_signal_observations.insert().values(meta_id=goal_id, decision_id='d1',
+            alternative_id='a1', symbol='XRPUSDT', piece_type='grid', cell_index=0,
+            window_start='2026-10-01', horizon='72h', buy_relative=-.01, sell_relative=.01,
+            stats_json=json.dumps({'touches': 2, 'sold_within_horizon': 1, 'sell_rate': .5}),
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        for index in range(2):
+            conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
+                ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type='META_OPERATOR_REVIEW_DECISION',
+                details=json.dumps({'decision_choices': {'real': {'decision': 'mantener',
+                    'alternative_id': f'a{index}', 'symbol': 'XRPUSDT', 'probability': .6}}})))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -64,6 +83,22 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['switches']['RAPIDO']['enabled'] is False
     assert payload['signals']['touch_buy_to_sell']['sample_coverage'] == 0
     assert payload['signals']['touch_buy_to_sell']['coverage_pct'] == 0
+    assert payload['data']['meta_signal_counts'] == {'touch_buy_to_sell': 1}
+    assert payload['data']['meta_signal_counts_by_symbol'] == [
+        {'signal': 'touch_buy_to_sell', 'symbol': 'XRPUSDT', 'count': 1}]
+    assert 'alternativas' in payload['data']['summary_text']
+    assert payload['replay']['chart'] and len(payload['replay']['chart']) == 10
+    assert 'direction' in payload['hits'] and 'volatility' in payload['hits']
+    assert 'replay_calibration' in payload['hits']
+    direction_hit = payload['hits']['direction'][0]
+    assert direction_hit['n'] == 1 and direction_hit['accuracy'] == 1
+    assert direction_hit['few_samples'] is True and direction_hit['wilson95'][0] < 1 and direction_hit['wilson95'][1] <= 1
+    assert payload['hits']['volatility'][0]['n'] == 1
+    page = client.get(f'/api/intelligence?meta_id={goal_id}&page_size=1',
+        headers={'X-API-Token':'intelligence-secret'}).json()['decisions']
+    assert page['total'] == 2 and len(page['recent']) == 1
+    assert page['recent'][0]['choices']['real']['symbol'] == 'XRPUSDT'
+    assert page['recent'][0]['details']['decision_choices']['real']['decision'] == 'mantener'
     assert payload['replay']['last_run']['replay_windows_new'] == 8
     assert payload['replay']['last_run']['candle_inventory']['XRPUSDT']['gaps'] == 1
     after = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()

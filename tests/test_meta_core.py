@@ -183,6 +183,7 @@ def test_valuation_uses_piece_cash_bid_and_estimated_sell_fee(tmp_path):
     assert Decimal(value["value_usdt"]) == Decimal("118.990")
     assert Decimal(value["value_best_bid"]) == Decimal("118.990")
     assert Decimal(value["result_pct"]) == Decimal("18.9900")
+    assert value["pieces"][0]["grid_status"] == "ACTIVE"
 
 
 def test_one_sided_book_returns_unknown_and_records_alert(tmp_path):

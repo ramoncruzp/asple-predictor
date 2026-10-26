@@ -481,7 +481,7 @@ class MetaCore:
                                         if int(level["level_idx"]) in mapped_ids]
                 held = sum((_d(level.get("held_qty")) for level in inventory_levels), Decimal(0))
                 pieces.append({"symbol": grid["symbol"], "grid_id": int(link["grid_id"]),
-                               "qty": held, "levels": inventory_levels})
+                               "grid_status": grid.get("status"), "qty": held, "levels": inventory_levels})
                 quantities_by_symbol[grid["symbol"]] += held
             cash = attributable_cash(goal["capital_initial"], delivered, returned, commissions)
             cfg_raw = goal.get("config_snapshot") or {}

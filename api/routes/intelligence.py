@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import math
 import statistics
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -59,7 +60,8 @@ def _metrics_improved(summary):
 
 
 @router.get("")
-def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
+def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+                         meta_id: int | None = Query(None, ge=1)):
     _authorize(request)
     db = getattr(request.app.state, "db", None)
     if db is None:
@@ -82,7 +84,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             func.max(db.meta_signal_observations.c.created_at).label("last_at")).group_by(
                 db.meta_signal_observations.c.symbol)).mappings().all()
         observation_json = conn.execute(select(db.meta_signal_observations.c.symbol,
-            db.meta_signal_observations.c.stats_json)).all()
+            db.meta_signal_observations.c.decision_id, db.meta_signal_observations.c.alternative_id,
+            db.meta_signal_observations.c.stats_json, db.meta_signal_observations.c.created_at)).all()
         ledger = conn.execute(select(db.meta_ledger.c.meta_id, db.meta_ledger.c.event_type,
             func.count().label("count")).group_by(db.meta_ledger.c.meta_id,
                 db.meta_ledger.c.event_type).order_by(db.meta_ledger.c.meta_id,
@@ -93,6 +96,13 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             func.max(db.meta_learning_samples.c.sample_at).label("last_at")).group_by(
                 db.meta_learning_samples.c.profile, db.meta_learning_samples.c.source_kind,
                 db.meta_learning_samples.c.symbol)).mappings().all()
+        alternatives_today = conn.execute(select(func.count()).select_from(db.meta_learning_samples).where(
+            db.meta_learning_samples.c.sample_at >= datetime.now(timezone.utc).replace(hour=0, minute=0,
+                second=0, microsecond=0))).scalar_one()
+        plans_today = conn.execute(select(db.meta_ledger.c.details).where(
+            db.meta_ledger.c.event_type == "META_PLAN_EVALUATED",
+            db.meta_ledger.c.ts >= datetime.now(timezone.utc).replace(hour=0, minute=0,
+                second=0, microsecond=0))).all()
         exclusions = conn.execute(select(db.meta_learning_samples.c.training_exclusion_reason,
             func.count().label("count")).where(db.meta_learning_samples.c.training_exclusion_reason.is_not(None),
                 db.meta_learning_samples.c.training_exclusion_reason != "").group_by(
@@ -120,21 +130,49 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             db.meta_learning_weight_versions.c.id.desc()).offset((page - 1) * page_size).limit(page_size)).mappings().all()
         switch_rows = conn.execute(select(db.meta_learning_switch_events).order_by(
             db.meta_learning_switch_events.c.id.desc()).limit(20)).mappings().all()
-        ledger_events = conn.execute(select(db.meta_ledger.c.ts, db.meta_ledger.c.meta_id,
+        ledger_stmt = select(db.meta_ledger.c.id, db.meta_ledger.c.ts, db.meta_ledger.c.meta_id,
             db.meta_ledger.c.event_type, db.meta_ledger.c.details).where(
                 db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION"))
-            ).order_by(db.meta_ledger.c.id.desc()).offset((page - 1) * page_size).limit(page_size)).mappings().all()
+            )
+        if meta_id is not None:
+            ledger_stmt = ledger_stmt.where(db.meta_ledger.c.meta_id == meta_id)
+        ledger_events = conn.execute(ledger_stmt.order_by(db.meta_ledger.c.id.desc()).offset(
+            (page - 1) * page_size).limit(page_size)).mappings().all()
+        ledger_total = conn.execute(select(func.count()).select_from(db.meta_ledger).where(
+            db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION")),
+            *([db.meta_ledger.c.meta_id == meta_id] if meta_id is not None else []))).scalar_one()
+        all_decision_events = conn.execute(select(db.meta_ledger.c.details).where(
+            db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION")))).all()
+        outcome_rows = conn.execute(select(db.predictions.c.symbol, db.predictions.c.model_name,
+            db.predictions.c.predicted_at, db.predictions.c.probability_up, db.predictions.c.signal,
+            db.outcomes.c.was_correct, db.outcomes.c.price_change_pct, db.outcomes.c.verified_at)
+            .select_from(db.predictions.join(db.outcomes,
+                db.predictions.c.prediction_id == db.outcomes.c.prediction_id))
+            .where(db.outcomes.c.was_correct.is_not(None))).all()
+        vol_rows = conn.execute(select(db.vol_forecasts.c.symbol, db.vol_forecasts.c.model_name,
+            db.vol_forecasts.c.forecast_at, db.vol_forecasts.c.pred_logvol_cal,
+            db.vol_forecasts.c.realized_logvol).where(db.vol_forecasts.c.realized_logvol.is_not(None))).all()
+        touch_stmt = select(db.meta_learning_samples.c.symbol,
+            db.meta_learning_samples.c.sample_at, db.meta_learning_samples.c.signals_json,
+            db.meta_signal_observations.c.stats_json).select_from(db.meta_signal_observations.join(
+                db.meta_learning_samples, (db.meta_learning_samples.c.decision_id == db.meta_signal_observations.c.decision_id)
+                & (db.meta_learning_samples.c.alternative_id == db.meta_signal_observations.c.alternative_id)))
+        touch_sample_rows = conn.execute(touch_stmt).all()
+        label_detail_rows = conn.execute(select(db.meta_learning_samples.c.id,
+            db.meta_learning_samples.c.symbol, db.meta_learning_samples.c.profile,
+            db.meta_learning_samples.c.sample_at, db.meta_learning_samples.c.alternative_id,
+            db.meta_learning_labels.c.horizon, db.meta_learning_labels.c.label_json)
+            .select_from(db.meta_learning_samples.join(db.meta_learning_labels,
+                db.meta_learning_samples.c.id == db.meta_learning_labels.c.sample_id))).all()
         last_plan_row = conn.execute(select(db.meta_ledger.c.details).where(
             db.meta_ledger.c.event_type == "META_PLAN_EVALUATED").order_by(
                 db.meta_ledger.c.id.desc()).limit(1)).first()
 
     observation_counts = Counter()
     observation_counts_by_symbol = Counter()
-    for symbol, raw in observation_json:
-        stats = _json(raw)
-        for name in stats:
-            observation_counts[name] += 1
-            observation_counts_by_symbol[(name, symbol)] += 1
+    for symbol, _decision_id, _alternative_id, _raw, _created_at in observation_json:
+        observation_counts["touch_buy_to_sell"] += 1
+        observation_counts_by_symbol[("touch_buy_to_sell", symbol)] += 1
     label_summary = Counter()
     labels_by_sample = {}
     for sample_id, horizon, raw in label_rows:
@@ -184,6 +222,116 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         signal_stats[name]["high_success_rate"] = statistics.fmean(high) if high else None
         signal_stats[name]["low_success_rate"] = statistics.fmean(low) if low else None
 
+    # Resumen verbal y B3: intervalos de diez puntos, medias cruda/suavizada y ventanas.
+    sample_n = len(sample_rows)
+    distinct_symbols = len({str(row[3]) for row in sample_rows})
+    plan_alternatives_today = sum(len(_json(row[0]).get("alternatives") or []) for row in plans_today)
+    alternatives_today = int(plan_alternatives_today or alternatives_today or 0)
+    models_by_symbol = {}
+    for row in forecasts:
+        models_by_symbol.setdefault(str(row["symbol"]), set()).add(str(row["model_name"]))
+    strongest_forecast_symbol = max(models_by_symbol, key=lambda symbol: len(models_by_symbol[symbol]), default=None)
+    latest_run_at = str(latest_run["finished_at"] or latest_run["started_at"]) if latest_run else None
+    replay_chart = []
+    for low in range(0, 100, 10):
+        group = [row for row in sample_rows if row[5] is not None and
+                 low <= min(99, int(float(row[5]) * 100)) < low + 10]
+        smooth = [float(row[6]) for row in group if row[6] is not None]
+        replay_chart.append({"bin": f"{low}–{low+10}%", "count": len(group),
+            "raw_mean": statistics.fmean(float(row[5]) for row in group) if group else None,
+            "smoothed_mean": statistics.fmean(smooth) if smooth else None,
+            "windows_mean": statistics.fmean(int(row[4] or 0) for row in group) if group else 0})
+
+    def wilson(successes, n, z=1.959963984540054):
+        if not n: return None
+        p = successes / n; denom = 1 + z*z/n
+        center = (p + z*z/(2*n))/denom
+        margin = z*math.sqrt((p*(1-p)+z*z/(4*n))/n)/denom
+        return [max(0.0, center-margin), min(1.0, center+margin)]
+
+    now_utc = datetime.now(timezone.utc)
+    def in_days(value, days):
+        if value is None: return False
+        if getattr(value, "tzinfo", None) is None: value = value.replace(tzinfo=timezone.utc)
+        return value >= now_utc - timedelta(days=days)
+    direction_accuracy = []
+    direction_groups = {}
+    for row in outcome_rows:
+        for days in (7, 30):
+            if in_days(row[2], days):
+                key = (str(row[1]), str(row[0]), days)
+                bucket = direction_groups.setdefault(key, [0, 0])
+                bucket[0] += int(bool(row[5])); bucket[1] += 1
+    for (model, symbol, days), (hits, n) in sorted(direction_groups.items()):
+        direction_accuracy.append({"model": model, "symbol": symbol, "days": days,
+            "n": n, "accuracy": hits/n, "wilson95": wilson(hits, n), "few_samples": n < 30})
+    volatility_accuracy = []
+    vol_groups = {}
+    for row in vol_rows:
+        for days in (7, 30):
+            if in_days(row[2], days):
+                key = (str(row[1]), str(row[0]), days)
+                bucket = vol_groups.setdefault(key, [[], 0])
+                err = abs(float(row[3]) - float(row[4])); bucket[0].append(err)
+                bucket[1] += int(abs(math.exp(float(row[4])-float(row[3])) - 1) <= .20)
+    for (model, symbol, days), (errors, within) in sorted(vol_groups.items()):
+        volatility_accuracy.append({"model": model, "symbol": symbol, "days": days,
+            "n": len(errors), "mae_log": statistics.fmean(errors), "within_20_pct": within/len(errors),
+            "few_samples": len(errors) < 30})
+    touch_bins = {}
+    for symbol, sample_at, signal_raw, stats_raw in touch_sample_rows:
+        stats = _json(stats_raw); signals = _json(signal_raw).get("signals_used", [])
+        pred = next((float(item.get("normalized")) for item in signals if item.get("name") == "touch_buy_to_sell"
+                     and item.get("normalized") is not None), None)
+        if pred is None or stats.get("sell_rate") is None: continue
+        predicted_rate = max(0.0, min(1.0, (pred + 1) / 2))
+        bin_start = min(80, int(predicted_rate * 5) * 20)
+        bucket_name = f"{bin_start}–{bin_start+20}%"
+        bucket = touch_bins.setdefault(bucket_name, [[], []])
+        bucket[0].append((pred+1)/2); bucket[1].append(float(stats["sell_rate"]))
+    touch_calibration = [{"bin": key, "n": len(pair[0]), "predicted": statistics.fmean(pair[0]),
+        "observed": statistics.fmean(pair[1]), "few_samples": len(pair[0]) < 30}
+        for key, pair in sorted(touch_bins.items())]
+    replay_groups = {}
+    for sample in sample_rows:
+        probability = sample[6] if sample[6] is not None else sample[5]
+        if probability is None: continue
+        for horizon in ("72h", "20d", "45d"):
+            label = labels_by_sample.get((int(sample[0]), horizon), {})
+            if label.get("status") != "labeled" or label.get("reached") is None: continue
+            value = max(0.0, min(.999999, float(probability)))
+            low = int(value * 10) * 10
+            bucket = replay_groups.setdefault((horizon, low), [[], []])
+            bucket[0].append(value); bucket[1].append(int(bool(label["reached"])))
+    replay_calibration = [{"horizon": horizon, "bin": f"{low}–{low+10}%", "n": len(values[0]),
+        "predicted": statistics.fmean(values[0]), "observed": statistics.fmean(values[1]),
+        "few_samples": len(values[0]) < 30}
+        for (horizon, low), values in sorted(replay_groups.items())]
+    label_lookup = {}
+    for sid, symbol, profile, sample_at, alt_id, horizon, raw in label_detail_rows:
+        label = _json(raw); label_lookup[(str(alt_id), str(horizon))] = (label, profile)
+    decision_success = {name: {h: [0, 0] for h in ("72h", "20d", "45d")}
+        for name in ("real", "scanner_advisor", "learned")}
+    for event in all_decision_events:
+        choices = _json(event[0]).get("decision_choices", {})
+        for name in decision_success:
+            choice = choices.get(name) or {}
+            alt_id = choice.get("alternative_id")
+            if not alt_id: continue
+            for horizon in decision_success[name]:
+                found = label_lookup.get((str(alt_id), horizon))
+                if found and found[0].get("status") == "labeled" and found[0].get("reached") is not None:
+                    decision_success[name][horizon][0] += int(bool(found[0]["reached"]))
+                    decision_success[name][horizon][1] += 1
+    decision_rates = {name: {h: {"successes": pair[0], "n": pair[1],
+        "rate": pair[0]/pair[1] if pair[1] else None, "few_samples": pair[1] < 30}
+        for h, pair in horizons.items()} for name, horizons in decision_success.items()}
+    eval_msg = f"Hoy se evaluaron {alternatives_today} alternativas; hay {sample_n} muestras de aprendizaje"
+    coverage_msg = (f" en {distinct_symbols} monedas" if distinct_symbols else "")
+    forecast_msg = (f"; hay pronósticos de {len(models_by_symbol[strongest_forecast_symbol])} modelos para {strongest_forecast_symbol}"
+        if strongest_forecast_symbol else "; aún no hay pronósticos de volatilidad")
+    learning_msg = f"; última corrida del aprendizaje: {latest_run_at}" if latest_run_at else "; el aprendizaje todavía no tiene corridas"
+
     latest_versions = {}
     for row in version_rows:
         latest_versions.setdefault(row["profile"], row)
@@ -202,7 +350,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "smart_direction_filter_enabled") if settings is not None and hasattr(settings, name)}
 
     return {"updated_at": datetime.now(timezone.utc).isoformat(),
-        "data": {"candles": {"available": False,
+        "data": {"summary_text": eval_msg + coverage_msg + forecast_msg + learning_msg,
+            "candles": {"available": False,
             "reason": "La base de datos de la aplicación no conserva velas; el análisis usa el proveedor histórico existente."},
             "volatility_forecasts": [dict(row) for row in forecasts],
             "direction_predictions": [dict(row) for row in predictions],
@@ -219,17 +368,26 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
                 for name, detail in (profile_learning.get(profile, {}).get("signals") or {}).items()}
                 for profile in ("RAPIDO", "PRUDENTE")}},
         "replay": {"window_histogram": dict(windows), "raw_probability_bins": dict(replay_bins),
+            "chart": replay_chart,
+            "interpretation": (f"La mayoría de las {sample_n} muestras queda por debajo de 20 % de probabilidad histórica."
+                if sample_n and sum(1 for row in sample_rows if row[5] is not None and float(row[5]) < .2) > sample_n/2
+                else f"El gráfico compara {sample_n} muestras por probabilidad histórica; las ventanas indican el soporte de cada muestra."),
             "cache_entries": _cache_count(request.app.state.db),
             "last_analysis": _json(last_plan_row[0]) if last_plan_row else None,
             "last_run": _json(latest_run["summary_json"]) if latest_run else None},
         "signals": signal_stats,
+        "hits": {"direction": direction_accuracy, "volatility": volatility_accuracy,
+            "touch_calibration": touch_calibration, "replay_calibration": replay_calibration,
+            "decision_rates": decision_rates},
         "regressions": {"versions": [{"id": int(row["id"]), "profile": row["profile"],
             "source": row["source_kind"], "status": row["status"], "created_at": str(row["created_at"]),
             "summary": _json(row["summary_json"])} for row in version_rows],
             "profiles": profile_learning},
-        "decisions": {"profiles": profile_learning, "recent": [{"at": str(row["ts"]),
-            "meta_id": int(row["meta_id"]), "event_type": row["event_type"],
-            "choices": _json(row["details"]).get("decision_choices", {})} for row in ledger_events]},
+        "decisions": {"profiles": profile_learning, "total": int(ledger_total),
+            "page": page, "page_size": page_size, "meta_filter": meta_id,
+            "recent": [{"at": str(row["ts"]), "meta_id": int(row["meta_id"]),
+            "event_type": row["event_type"], "choices": _json(row["details"]).get("decision_choices", {}),
+            "details": _json(row["details"])} for row in ledger_events]},
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],

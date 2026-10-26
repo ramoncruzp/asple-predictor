@@ -87,3 +87,11 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - Cerrados los límites de comparación incompleta y falta de observabilidad. La comparación v2 corre la política compartida para reajustes y rotaciones, con materialidad, persistencia, enfriamiento y límite diario; cada sombra conserva su propio estado.
 - Inventario y calibración se guardan como agregados/resúmenes, nunca como velas. Las corridas separan ventanas simuladas, aciertos de caché y cortes procesados.
 - No se encontraron otras discrepancias dentro del alcance. Verificado solo offline con las pruebas focalizadas; S1, Testnet y la BD real no se usaron.
+
+## 40d-7B
+
+- B10 usa los resultados ya guardados y calcula sus tasas al abrir Inteligencia. Si outcomes, pron?sticos verificados, etiquetas maduras, se?ales de toque o decisiones comparables no existen, las tablas quedan vac?as; no se sustituyen por estimaciones ni se a?adieron c?lculos de mercado retrospectivos.
+- La precisi?n del resumen de actividad se limita a alternativas persistidas en etiquetas/muestras y eventos `META_PLAN_EVALUATED`; no intenta contar an?lisis que no dejaron registro.
+- La calibraci?n de direcci?n refleja `outcomes.was_correct`; la de volatilidad compara `pred_logvol_cal` con `realized_logvol` en el mismo registro. La tasa del toque usa la predicci?n guardada en la muestra ligada a las observaciones.
+- Las piezas sin `grid_status` se conservan visibles por compatibilidad con respuestas antiguas; la API vigente ya entrega el estado y filtra cierres correctamente.
+- Sin otras discrepancias conocidas en los puntos B, C y D. Los resultados reales de S1 no se consultaron.

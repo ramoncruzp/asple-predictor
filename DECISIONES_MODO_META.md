@@ -258,3 +258,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - En `model_a_down`, `probability_up` se calcula sobre la clase positiva que representa retorno negativo; equivale a P(baja). La señal actual la normaliza como positiva. Se propone invertir el signo para reflejar evidencia bajista, pero requiere aprobación porque cambia decisiones.
 - El toque se omite si no hay velas previas disponibles o la estadística causal de 30 días no ofrece tasa. `scripts/diagnostico_senales_meta.py` muestra los motivos persistidos y la cobertura en una BD SQLite de solo lectura. Ejecutarlo en S1 queda pendiente; no se consultó S1 ni la BD real.
 - No se modificaron fórmulas de señales ni pesos; los campos añadidos a volatilidad son telemetría sin uso decisorio. Pruebas locales focalizadas: 63 passed.
+
+## 23. Fase 40d-7B - observabilidad legible y resultados en sombra
+
+- Inteligencia presenta actividad y replay en lenguaje claro; sus tablas t?cnicas se despliegan a petici?n. Las decisiones muestran lado a lado Real, Scanner + Advisor y Aprendida, con filtro por meta y p?ginas. El JSON de una decisi?n permanece bajo expansi?n manual.
+- B10 resume evidencia observada para direcci?n, volatilidad, toque compra?venta, p_replay y alternativas elegidas. La muestra menor de 30 se identifica como escasa; son m?tricas descriptivas y no cambian pesos ni decisiones.
+- Metas lista solo piezas vivas y expresa el avance como fracci?n del objetivo; el backend expone el estado del grid junto a la valoraci?n.
+- Estado: implementaci?n y pruebas focalizadas terminadas; commit de 40d-7B pendiente. S1 y despliegue no forman parte de esta fase.

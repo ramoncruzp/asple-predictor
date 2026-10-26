@@ -374,7 +374,7 @@
     const maxLoss = Number(cfg.max_loss_pct || 0);
     const lossPct = resultPct != null && resultPct < 0 ? Math.max(0, Math.min(100, (Math.abs(resultPct) / maxLoss) * 100)) : 0;
     return `<div class="metas-progress">
-      <div class="metas-progress-row"><span>Hacia la meta (${fmtPct(resultPct)})</span>
+      <div class="metas-progress-row"><span>Hacia la meta (${fmtPct(targetPct)})</span>
         <div class="metas-bar"><div class="metas-bar-fill metas-bar-target" style="width:${targetPct}%"></div></div></div>
       <div class="metas-progress-row"><span>Hacia el límite de pérdida</span>
         <div class="metas-bar"><div class="metas-bar-fill metas-bar-loss" style="width:${lossPct}%"></div><div class="metas-bar-mark" style="left:75%"></div></div></div>
@@ -382,8 +382,11 @@
   }
 
   function piecesLinkList(valuation) {
-    return `<ul class="metas-pieces-list">${(valuation.pieces || []).map(p =>
-      `<li>${esc(p.symbol)} — ${GRID_STATUS_LABELS[p.status] || esc(p.status)} <a href="#grids/${p.grid_id}">ver grid #${p.grid_id}</a></li>`).join('') || '<li class="muted">Sin piezas ligadas aún.</li>'}</ul>`;
+    const liveStatuses = new Set(['OPENING', 'ACTIVE', 'PAUSED', 'CLOSING', 'HOLDING']);
+    const live = (valuation.pieces || []).filter(p => p.grid_status == null || liveStatuses.has(p.grid_status));
+    const closedCount = (valuation.pieces || []).length - live.length;
+    return `${closedCount ? `<p class="muted">${closedCount} pieza(s) cerrada(s) no aparecen en la lista de piezas vivas.</p>` : ''}<ul class="metas-pieces-list">${live.map(p =>
+      `<li>${esc(p.symbol)} — ${GRID_STATUS_LABELS[p.grid_status] || GRID_STATUS_LABELS[p.status] || esc(p.grid_status || p.status)} <a href="#grids/${p.grid_id}">ver grid #${p.grid_id}</a></li>`).join('') || '<li class="muted">Sin piezas vivas ligadas aún.</li>'}</ul>`;
   }
 
   function remainingDays(goal, profile) {
