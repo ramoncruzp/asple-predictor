@@ -17,3 +17,10 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - **Procedencia de señales:** la reconstrucción histórica genera volatilidad normalizada y dirección cuando hay fuentes fechadas equivalentes a las del operador. Scanner, Advisor y `break_prob` no existían causalmente en esas fechas; valen cero en el logit y no cuentan como evidencia para esos pesos. No se usan valores actuales para completar el pasado.
 - **Medición y evidencia real pendientes:** no se contó muestra de BD real ni se midió el job en S1. El aprendizaje queda en sombra y no cambia decisiones; la suite completa no se corrió porque esta fase autorizó solamente los tres archivos enfocados más las pruebas nuevas.
 - **Fuera del alcance:** sin vista ni interruptor de pesos aprendidos, sin cambiar decisiones del operador o grids normales, y sin incluir aún la señal de toques.
+
+
+## 40d-3A
+
+- La duraci?n se mide como l?mite de pared de la fase de reconstrucci?n, sin interrumpir una simulaci?n ya iniciada; el job termina esa ventana y guarda pendientes para la siguiente corrida.
+- El estimador de costo usa un supuesto configurable de segundos por ventana (0,05 s por defecto) y 60 cortes de 72 h en 180 d?as; es una proyecci?n previa, no una medici?n de S1. La ejecuci?n del estimador no se realiz?.
+- El l?mite de tiempo y plantillas est? editable por API autenticada; valor inicial 30 plantillas y 20 minutos.

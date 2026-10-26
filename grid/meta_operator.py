@@ -1138,12 +1138,13 @@ class MetaOperator:
             return {"status": "disabled", "reason": "Modo Meta apagado"}
         if not self._learning_guard.acquire(blocking=False):
             return {"status": "skipped", "reason": "aprendizaje anterior sigue activo"}
-        from grid.meta_learning import replay_alternative_labels, reconstruct_historical_samples
+        from grid.meta_learning import (replay_alternative_labels, reconstruct_historical_samples,
+            stable_template)
         started = datetime.now(timezone.utc)
         timings = {"legacy_import_s": 0.0, "market_history_s": 0.0,
                    "historical_reconstruction_s": 0.0,
                    "label_simulation_s": 0.0, "persistence_s": 0.0,
-                   "weight_training_s": 0.0}
+                   "weight_training_s": 0.0, "yield_s": 0.0}
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
                     "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0}
         priority_lowered = False
@@ -1182,28 +1183,51 @@ class MetaOperator:
                             counters["symbols_failed"] += 1
                             candles_by_symbol[symbol] = None
             timings["market_history_s"] = time.perf_counter() - t
-            templates, seen_templates = [], set()
+            templates_by_id = {}
             for sample in sorted(samples, key=lambda row: row["sample_at"], reverse=True):
                 if sample["source_kind"] != "live":
                     continue
                 params = json.loads(sample["parameters_json"])
-                shape = json.dumps({"profile": sample["profile"], "pieces": [
-                    {key: piece.get(key) for key in ("symbol", "piece_type", "strategy", "n_levels",
-                        "capital_usdt", "floor", "ceiling", "mid_at_plan")}
-                    for piece in params.get("pieces", [])]}, sort_keys=True, default=str)
-                if shape not in seen_templates:
-                    seen_templates.add(shape)
-                    templates.append({"sample_key": sample["sample_key"], "parameters": params})
-            if templates:
+                template_id, canonical = stable_template(params,
+                    meta_capital_usdt=params.get("capital_usdt"))
+                if template_id not in templates_by_id:
+                    templates_by_id[template_id] = {"template_id": template_id,
+                        "sample_key": sample["sample_key"], "parameters": params,
+                        "canonical": canonical, "sample_at": sample["sample_at"]}
+            global_settings = {}
+            with self.db.engine.connect() as conn:
+                setting = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                    self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+                if setting:
+                    global_settings = json.loads(setting)
+            max_templates = max(1, int(global_settings.get("learning_max_templates_per_run", 30)))
+            budget_seconds = max(1.0, float(global_settings.get("learning_time_budget_minutes", 20)) * 60)
+            ordered_templates = sorted(templates_by_id.values(), key=lambda row: row["sample_at"], reverse=True)
+            selected_templates = ordered_templates[:max_templates]
+            pending_ids = [row["template_id"] for row in ordered_templates[max_templates:]]
+            if selected_templates:
                 t = time.perf_counter()
-                reconstructed = reconstruct_historical_samples(templates,
+                with self.db.engine.connect() as conn:
+                    existing_cuts = {str(row[0]) for row in conn.execute(select(
+                        self.db.meta_learning_samples.c.sample_key).where(
+                        self.db.meta_learning_samples.c.source_kind == "historical_reconstructed"))}
+                    template_ids = [row["template_id"] for row in selected_templates]
+                    cached_rows = conn.execute(select(self.db.meta_learning_replay_cache.c.template_id,
+                        self.db.meta_learning_replay_cache.c.window_start,
+                        self.db.meta_learning_replay_cache.c.reached).where(
+                        self.db.meta_learning_replay_cache.c.template_id.in_(template_ids))).all()
+                replay_cache = {(str(row[0]), int(row[1])): bool(row[2]) for row in cached_rows}
+                reconstruct_result = reconstruct_historical_samples(selected_templates,
                     candles_by_symbol={key: value for key, value in candles_by_symbol.items()
                                        if value is not None},
-                    source_rows_by_symbol=sources, now=datetime.now(timezone.utc), lookback_days=180)
+                    source_rows_by_symbol=sources, now=datetime.now(timezone.utc), lookback_days=180,
+                    existing_cuts=existing_cuts, window_cache=replay_cache,
+                    deadline=time.monotonic() + budget_seconds, pause_callback=lambda: time.sleep(.01))
+                reconstructed = reconstruct_result["samples"]
+                pending_ids.extend(reconstruct_result["pending_templates"])
                 for item in reconstructed:
                     params = item["parameters"]
-                    key = hashlib.sha256(("historical:" + str(item["template_sample_key"])
-                        + ":" + str(item["sample_at"])).encode()).hexdigest()
+                    key = item["stable_sample_key"]
                     sample_at = datetime.fromtimestamp(int(item["sample_at"]), timezone.utc)
                     values = {"sample_key": key, "meta_id": None, "decision_id": None,
                         "alternative_id": None, "symbol": item["symbol"], "profile": item["profile"],
@@ -1220,7 +1244,18 @@ class MetaOperator:
                         "provenance_json": json.dumps(item["provenance"], sort_keys=True),
                         "created_at": datetime.now(timezone.utc)}
                     counters["historical_samples_created"] += int(self._store_learning_sample(values))
+                with self.db.engine.begin() as conn:
+                    for (template_id, window_start), reached in replay_cache.items():
+                        present = conn.execute(select(self.db.meta_learning_replay_cache.c.template_id).where(
+                            self.db.meta_learning_replay_cache.c.template_id == template_id,
+                            self.db.meta_learning_replay_cache.c.window_start == window_start)).first()
+                        if present is None:
+                            conn.execute(self.db.meta_learning_replay_cache.insert().values(
+                                template_id=template_id, window_start=window_start, reached=bool(reached),
+                                created_at=datetime.now(timezone.utc)))
                 timings["historical_reconstruction_s"] = time.perf_counter() - t
+                pending_ids = sorted(set(pending_ids))
+                counters["pending_templates"] = len(pending_ids)
                 with self.db.engine.connect() as conn:
                     samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
                     labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
@@ -1260,7 +1295,9 @@ class MetaOperator:
             t = time.perf_counter()
             counters["weight_versions_saved"] = self._train_learning_weights(samples)
             timings["weight_training_s"] = time.perf_counter() - t
-            summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
+            summary = {**counters, "pending_template_ids": pending_ids,
+                "limits": {"max_templates": max_templates, "time_budget_minutes": budget_seconds / 60},
+                "timings_s": {key: round(value, 3) for key, value in timings.items()},
                 "sample_count": len(samples), "symbols": len(candles_by_symbol),
                 "priority": "baja" if priority_lowered else "baja_best_effort_no_os_thread_priority",
                 "ops_lock": False}

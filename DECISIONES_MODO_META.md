@@ -200,3 +200,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - A1 comprobado con `target_usdt=3.0` heredado: el monitor ignora `TARGET` y `MAX_DAYS` en grid Meta; el estado permanece ACTIVE sin iniciar cierre individual (`tests/test_grid_monitor_policy.py`).
 - Verificación local posterior A6–A8 (offline, sin Testnet): **1517 passed, 1 skipped, 18 deselected, 56 warnings, 497,29 s**. Trabajo aún sin commit ni despliegue.
 - A4–A5 y B1–B4 de presentación/control se detallan en `REPORTE_FASE40C.md`, §18. La suite offline del trabajo fue 1512 passed, 1 skipped, 18 deselected.
+
+
+### Fase 40d-3A ? costo del backfill
+
+- Plantillas de aprendizaje por forma relativa y cach? de replay por inicio semanal UTC fijo. El replay vivo conserva el anclaje a la fecha actual; la diferencia m?xima de anclaje es 7 d?as.
+- L?mites iniciales editables: 30 plantillas y 20 minutos por corrida. El job guarda trabajo pendiente y lo retoma en corridas posteriores; cede entre bloques de tres cortes.
+- El script `scripts/estimar_costo_aprendizaje_meta.py` requiere una URL indicada expl?citamente y solo lee la base; estima costo sin acceder al mercado ni escribir.

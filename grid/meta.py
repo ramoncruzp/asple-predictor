@@ -160,6 +160,9 @@ class MetaCore:
         profiles = self._profile_settings()
         return {"enabled": bool(getattr(self.settings, "meta_mode_enabled", False)),
                 "max_active": int(profiles.get("GLOBAL", {}).get("max_active", 1)),
+                "learning_limits": {"max_templates_per_run": int(profiles.get("GLOBAL", {}).get(
+                    "learning_max_templates_per_run", 30)), "time_budget_minutes": float(
+                    profiles.get("GLOBAL", {}).get("learning_time_budget_minutes", 20))},
                 "profiles": {k: v for k, v in profiles.items() if k in DEFAULT_PROFILES}}
 
     def set_max_active(self, value):
@@ -170,7 +173,10 @@ class MetaCore:
         with self.db.engine.begin() as conn:
             present = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
                 self.db.meta_profile_settings.c.profile == "GLOBAL")).first()
-            values = {"max_active": value}
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["max_active"] = value
             if present:
                 conn.execute(self.db.meta_profile_settings.update().where(
                     self.db.meta_profile_settings.c.profile == "GLOBAL").values(
@@ -179,6 +185,28 @@ class MetaCore:
                 conn.execute(self.db.meta_profile_settings.insert().values(
                     profile="GLOBAL", settings=json.dumps(values), updated_at=self._now()))
         return value
+
+    def set_learning_limits(self, *, max_templates_per_run, time_budget_minutes):
+        from sqlalchemy import select
+        maximum, minutes = int(max_templates_per_run), float(time_budget_minutes)
+        if not 1 <= maximum <= 500 or not 1 <= minutes <= 240:
+            raise ValueError("Límites de aprendizaje fuera de rango (1–500 plantillas, 1–240 minutos).")
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values.update({"learning_max_templates_per_run": maximum,
+                "learning_time_budget_minutes": minutes})
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == "GLOBAL").values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=self._now()))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile="GLOBAL",
+                    settings=json.dumps({"max_active": 1, **values}, sort_keys=True), updated_at=self._now()))
+        return {"max_templates_per_run": maximum, "time_budget_minutes": minutes}
 
     def set_config(self, profile: str, values: dict):
         from sqlalchemy import select

@@ -19,6 +19,7 @@ from grid.meta_learning import (
     point_in_time_signals,
     replay_alternative_labels,
     temporal_learning_split,
+    stable_template,
 )
 from grid.meta_operator import MetaOperator
 from grid.sim.data import CandleData
@@ -190,6 +191,76 @@ def test_replay_probability_smoothing_handles_zero_and_one_windows(monkeypatch):
     no_logit = fit_signal_weights([{"sample_at": datetime.now(timezone.utc), "symbol": "XRPUSDT",
         "base_probability": 0.0, "base_window_count": 1, "label": {"reached": False}}])
     assert no_logit["status"] == "insufficient"
+
+
+def test_learning_template_uses_relative_shape_and_capital_fraction():
+    first = {"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 100,
+        "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid", "strategy": "simple",
+            "n_levels": 5, "floor": 90, "ceiling": 110, "mid_at_plan": 100,
+            "capital_usdt": 50}]}
+    second = {**first, "capital_usdt": 200,
+        "pieces": [{**first["pieces"][0], "floor": 180, "ceiling": 220,
+            "mid_at_plan": 200, "capital_usdt": 100}]}
+    first_id, first_shape = stable_template(first, meta_capital_usdt=100)
+    second_id, second_shape = stable_template(second, meta_capital_usdt=200)
+    assert first_id == second_id
+    assert first_shape == second_shape
+    assert "floor_mid_q" in first_shape["pieces"][0]
+    assert "mid_at_plan" not in json.dumps(first_shape)
+    assert "mid_at_plan" not in json.dumps(first_shape)
+
+
+def test_replay_window_cache_is_shared_without_changing_result(monkeypatch):
+    import grid.meta_learning as learning
+    step = 300
+    candles = _candles(np.arange(0, 160 * 86400 + step, step, dtype=np.int64))
+    calls = []
+    def fake_replay(_market, *, start_ts, parameters, include_horizons):
+        calls.append(start_ts)
+        return {"20d": {"status": "labeled", "reached": start_ts % (14 * 86400) == 0}}
+    monkeypatch.setattr(learning, "replay_alternative_labels", fake_replay)
+    params = {"profile_days": 20, "pieces": [{"symbol": "XRPUSDT"}]}
+    cache = {}
+    first = causal_replay_probability({"XRPUSDT": candles}, at=120 * 86400,
+        parameters=params, fixed_week_anchor=True, window_cache=cache, template_key="same")
+    first_calls = len(calls)
+    second = causal_replay_probability({"XRPUSDT": candles}, at=127 * 86400,
+        parameters=params, fixed_week_anchor=True, window_cache=cache, template_key="same")
+    assert len(calls) - first_calls < first_calls
+    without_cache = causal_replay_probability({"XRPUSDT": candles}, at=127 * 86400,
+        parameters=params, fixed_week_anchor=True, window_cache={}, template_key="same")
+    assert second == without_cache
+
+
+def test_historical_backfill_skips_existing_cut_and_respects_budget(monkeypatch):
+    import hashlib
+    import grid.meta_learning as learning
+    step = 300
+    timestamps = np.arange(0, 200 * 86400 + step, step, dtype=np.int64)
+    candles = _candles(timestamps)
+    template = {"template_id": "template-a", "parameters": {"profile": "RAPIDO",
+        "profile_days": 20, "capital_usdt": 100, "pieces": [{"symbol": "XRPUSDT",
+            "piece_type": "individual_bot_grid", "strategy": "simple", "n_levels": 1,
+            "capital_usdt": 100, "floor": 99, "ceiling": 101, "mid_at_plan": 100}]}}
+    starts = learning.non_overlapping_72h_starts(timestamps, start=20 * 86400, end=190 * 86400)
+    first_key = hashlib.sha256(("historical:template-a:" + str(starts[0])).encode()).hexdigest()
+    calls = []
+    monkeypatch.setattr(learning, "causal_replay_probability", lambda *_a, **_k:
+        calls.append(1) or {"raw_probability": .5, "smoothed_probability": .5,
+            "window_count": 3, "independent_windows": 3, "training_exclusion_reason": None})
+    skipped = learning.reconstruct_historical_samples([template], candles_by_symbol={"XRPUSDT": candles},
+        source_rows_by_symbol={}, now=190 * 86400, lookback_days=180,
+        existing_cuts={first_key}, max_new_cuts=1)
+    assert len(skipped["samples"]) == 1
+    assert skipped["samples"][0]["sample_at"] != starts[0]
+    assert skipped["pending_templates"] == ["template-a"]
+    assert len(calls) == 1
+    next_run = learning.reconstruct_historical_samples([template],
+        candles_by_symbol={"XRPUSDT": candles}, source_rows_by_symbol={},
+        now=190 * 86400, lookback_days=180,
+        existing_cuts={first_key, skipped["samples"][0]["stable_sample_key"]}, max_new_cuts=1)
+    assert len(next_run["samples"]) == 1
+    assert next_run["samples"][0]["sample_at"] not in {starts[0], skipped["samples"][0]["sample_at"]}
 
 
 def test_effective_samples_and_temporal_split_prevent_overlapping_or_mixed_dates():

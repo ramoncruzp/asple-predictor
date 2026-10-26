@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 import numpy as np
 
 
@@ -10,6 +12,36 @@ HOURS_72 = 72
 BACKFILL_DAYS = 180
 REPLAY_METHOD_VERSION = "rolling_7d_v2"
 LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor")
+REPLAY_CACHE_STEP = 0.0025
+
+
+def stable_template(parameters, *, meta_capital_usdt):
+    """Forma relativa de la cartera, sin precios ni capital absolutos."""
+    pieces = []
+    denominator = max(float(meta_capital_usdt or parameters.get("capital_usdt") or 0), 1e-12)
+    for piece in parameters.get("pieces") or []:
+        mid = max(float(piece.get("mid_at_plan") or 0), 1e-12)
+        floor = float(piece.get("floor", piece.get("range_low", 0))) / mid
+        ceiling = float(piece.get("ceiling", piece.get("range_high", 0))) / mid
+        pieces.append({"symbol": str(piece.get("symbol") or "").upper(),
+            "piece_type": str(piece.get("piece_type") or "grid"),
+            "strategy": str(piece.get("strategy") or "simple"), "n_levels": int(piece.get("n_levels") or 1),
+            "floor_mid_q": round(round(floor / REPLAY_CACHE_STEP) * REPLAY_CACHE_STEP, 4),
+            "ceiling_mid_q": round(round(ceiling / REPLAY_CACHE_STEP) * REPLAY_CACHE_STEP, 4),
+            "capital_fraction": round(float(piece.get("capital_usdt") or 0) / denominator, 4)})
+    canonical = {"profile": str(parameters.get("profile") or "RAPIDO").upper(),
+        "profile_days": int(parameters.get("profile_days") or 20), "pieces": sorted(pieces,
+            key=lambda p: (p["symbol"], p["piece_type"], p["strategy"], p["n_levels"],
+                           p["floor_mid_q"], p["ceiling_mid_q"], p["capital_fraction"]))}
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest(), canonical
+
+
+def monday_utc_window_starts(earliest, latest, *, step_days=7):
+    """Ventanas en una rejilla fija de lunes 00:00 UTC."""
+    step, anchor = int(step_days) * 86400, 4 * 86400  # 1970-01-05 fue lunes.
+    first = anchor + max(0, (int(earliest) - anchor + step - 1) // step) * step
+    return range(first, int(latest) + 1, step)
 
 
 def _utc_seconds(value):
@@ -66,7 +98,8 @@ def make_learning_label(*, horizon, net_advance_usdt, target_usdt,
     }
 
 
-def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_days=BACKFILL_DAYS):
+def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_days=BACKFILL_DAYS,
+                              fixed_week_anchor=False, window_cache=None, template_key=None):
     """Estima p_replay con ventanas del plazo y paso de siete días, antes del corte."""
     at_s = _utc_seconds(at)
     days = max(1, int(parameters.get("profile_days", 20)))
@@ -76,17 +109,25 @@ def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_day
     step = 7 * 86400
     # La misma cadencia que build_windows en el operador. El ancla queda en
     # el primer timestamp disponible para que los cortes sean reproducibles.
-    anchor = max((int(c.timestamp[0]) for c in candles_by_symbol.values()), default=earliest)
+    anchor = (4 * 86400 if fixed_week_anchor else
+        max((int(c.timestamp[0]) for c in candles_by_symbol.values()), default=earliest))
     first = anchor + max(0, (earliest - anchor + step - 1) // step) * step
     starts = range(first, at_s - width, step)
     outcomes = []
     label_key = f"{days}d"
     for start_s in starts:
+        cache_key = (str(template_key or ""), int(start_s))
+        cached = window_cache.get(cache_key) if window_cache is not None else None
+        if cached is not None:
+            outcomes.append(bool(cached))
+            continue
         labels = replay_alternative_labels(candles_by_symbol, start_ts=start_s,
             parameters=parameters, include_horizons=(label_key,))
         label = labels.get(label_key, {})
         if label.get("status") == "labeled":
             outcomes.append(bool(label.get("reached")))
+            if window_cache is not None:
+                window_cache[cache_key] = bool(label.get("reached"))
     count = len(outcomes)
     raw = (sum(outcomes) / count) if count else None
     return {"probability": raw, "raw_probability": raw,
@@ -416,7 +457,9 @@ def point_in_time_signals(*, at, candles, buy_price=None, sell_price=None,
 
 
 def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_by_symbol,
-                                   now=None, lookback_days=BACKFILL_DAYS):
+                                   now=None, lookback_days=BACKFILL_DAYS, existing_cuts=None,
+                                   window_cache=None, max_new_cuts=None, deadline=None,
+                                   pause_callback=None):
     """Reconstruye snapshots contrafactuales; cada feature queda cortada en su fecha.
 
     La geometría sirve solo como plantilla de la alternativa. Valores de Scanner,
@@ -426,8 +469,12 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
     earliest = now_s - int(lookback_days) * 86400
     output = []
     seen = set()
+    existing_cuts = existing_cuts or set()
+    pending = []
+    new_count = 0
     for template in templates:
         params = template["parameters"]
+        template_id = str(template.get("template_id") or template.get("sample_key") or "")
         pieces = list(params.get("pieces") or [])
         if not pieces:
             continue
@@ -438,6 +485,13 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
         starts = non_overlapping_72h_starts(primary_candles.timestamp,
             start=max(earliest, int(primary_candles.timestamp[0])), end=now_s)
         for start_s in starts:
+            sample_key = hashlib.sha256(("historical:" + template_id + ":" + str(start_s)).encode()).hexdigest()
+            if sample_key in existing_cuts:
+                continue
+            if ((max_new_cuts is not None and new_count >= max_new_cuts) or
+                    (deadline is not None and __import__("time").monotonic() >= deadline)):
+                pending.append(template_id)
+                break
             key = (primary, params.get("profile"), tuple(sorted(
                 (str(p.get("symbol")), str(p.get("piece_type")), str(p.get("strategy")),
                  int(p.get("n_levels", 1)), round(float(p.get("floor", 0)) /
@@ -475,9 +529,9 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
                 continue
             historical_params = {**params, "pieces": rebuilt_pieces}
             baseline = causal_replay_probability(candles_by_symbol, at=start_s,
-                                                 parameters=historical_params,
-                                                 lookback_days=lookback_days)
-            output.append({"template_sample_key": template.get("sample_key"),
+                parameters=historical_params, lookback_days=lookback_days,
+                fixed_week_anchor=True, window_cache=window_cache, template_key=template_id)
+            output.append({"template_sample_key": template_id, "stable_sample_key": sample_key,
                 "profile": str(params.get("profile", "RAPIDO")).upper(),
                 "symbol": primary, "sample_at": start_s, "parameters": historical_params,
                 "base_probability": baseline["raw_probability"],
@@ -493,11 +547,15 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
                         for symbol in snapshots},
                     "omitted": ["scanner", "advisor", "break_prob"]},
                 "provenance": {"source_kind": "historical_reconstructed",
-                    "signal_cutoff_ts": start_s, "template_sample_key": template.get("sample_key"),
+                    "signal_cutoff_ts": start_s, "template_sample_key": template_id,
                     "base_replay": baseline,
                     "template_is_counterfactual": True,
                     "note": "Señales reconstruidas solo con registros y velas anteriores al corte."}})
-    return output
+            new_count += 1
+            if pause_callback is not None and new_count % 3 == 0:
+                pause_callback()
+    return {"samples": output, "pending_templates": sorted(set(pending)),
+            "processed_cuts": new_count}
 
 
 def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, include_horizons=None):

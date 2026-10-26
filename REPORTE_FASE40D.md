@@ -53,3 +53,19 @@
 - El piso adicional de 5 muestras efectivas en validación no estaba fijado numéricamente en el prompt; se agregó para evitar mover pesos con métricas de validación demasiado pequeñas. Sigue siendo un freno interno, no un parámetro global.
 - La regresión usa las cinco señales de los perfiles actuales. La señal de toques permanece fuera del modelo hasta que se defina su inclusión en una fase posterior.
 - No se implementaron sombra aprendida en decisiones, interruptor ni vista; corresponden a 40d-3. No se cambió el comportamiento de grids ni del operador.
+
+
+## 40d-3A ? Costo acotado del aprendizaje
+
+### Implementado
+
+- `grid/meta_learning.py:18-52,101-142,459-565` crea identidad estable por perfil, moneda, tipo, estrategia, niveles, piso/medio y techo/medio cuantizados en pasos 0,0025 y fracci?n de capital. El backfill comprueba la clave plantilla+corte antes de reconstruir y reusa resultados de replay por plantilla+inicio de ventana.
+- Las ventanas hist?ricas se anclan a lunes 00:00 UTC con paso de 7 d?as. El replay operativo sigue anclado a la fecha de an?lisis; el desfase de fase puede ser de hasta 7 d?as. No se cambi? el m?todo del replay operativo.
+- `database/db_manager.py:367-371,406` agrega `meta_learning_replay_cache`. `grid/meta_operator.py:1134-1290` lee y persiste esa cach?, limita a las 30 plantillas m?s recientes por corrida y a 20 minutos por defecto, guarda IDs pendientes en `meta_learning_runs.summary_json` y cede 10 ms cada tres cortes. Los l?mites se editan mediante `meta_profile_settings` y `PUT /api/metas/config/learning-limits` (`grid/meta.py:156-207`, `api/routes/metas.py:97-102`).
+- `scripts/estimar_costo_aprendizaje_meta.py:1-100` estima plantillas, cortes, ventanas y tiempo usando una URL expl?cita, con conexi?n de solo lectura. No se ejecut? contra ninguna base ni mercado.
+
+### Pruebas y resultado
+
+- Corrida enfocada final de A: `tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py` ? **95 passed, 5 warnings, 6,97 s**, salida 0. Una corrida previa tuvo un fallo ?nicamente en una aserci?n demasiado amplia del nombre de clave; ajustada y el archivo afectado qued? en **16 passed, 0,70 s** antes de la corrida final.
+- Se cubren forma relativa con precios/capital escalados, cache hit entre cortes, igualdad del resultado con cach? y sin cach?, saltar cortes existentes, presupuesto con pendientes y continuaci?n en la siguiente corrida.
+- `py_compile` pas? para los m?dulos Python del n?cleo y el estimador. No se consult? S1/Testnet, `.env` ni la BD real; no se corri? la suite completa.

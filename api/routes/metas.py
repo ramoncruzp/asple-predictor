@@ -60,6 +60,12 @@ class MaxActive(BaseModel):
     value: int = Field(ge=1, le=10)
 
 
+class LearningLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_templates_per_run: int = Field(ge=1, le=500)
+    time_budget_minutes: float = Field(ge=1, le=240)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -86,6 +92,14 @@ def update_profile(request: Request, body: ProfileSettings):
 @router.put("/config/max-active")
 def update_max_active(request: Request, body: MaxActive):
     return {"max_active": _call(_core(request).set_max_active, body.value)}
+
+
+@router.put("/config/learning-limits")
+def update_learning_limits(request: Request, body: LearningLimits):
+    _authorize(request)
+    return _call(_core(request).set_learning_limits,
+        max_templates_per_run=body.max_templates_per_run,
+        time_budget_minutes=body.time_budget_minutes)
 
 
 @router.get("")

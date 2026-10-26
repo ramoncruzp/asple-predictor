@@ -364,6 +364,11 @@ class DBManager:
             Column("started_at", DateTime(timezone=True), nullable=False),
             Column("finished_at", DateTime(timezone=True)), Column("status", String(24), nullable=False),
             Column("summary_json", Text, nullable=False, default="{}"))
+        self.meta_learning_replay_cache = Table("meta_learning_replay_cache", self.metadata,
+            Column("template_id", String(64), primary_key=True),
+            Column("window_start", Integer, primary_key=True),
+            Column("reached", Boolean, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False))
         self.meta_learning_weight_versions = Table("meta_learning_weight_versions", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("created_at", DateTime(timezone=True), nullable=False),
@@ -398,6 +403,7 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_signal_observations_decision ON meta_signal_observations(decision_id, alternative_id, horizon)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_learning_samples_symbol_time ON meta_learning_samples(symbol, sample_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_learning_labels_horizon ON meta_learning_labels(horizon, labeled_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_learning_replay_cache_created ON meta_learning_replay_cache(created_at)"))
 
     def _seed_meta_profile_settings(self) -> None:
         """Seed editable Meta profile defaults without replacing operator values."""
@@ -414,7 +420,19 @@ class DBManager:
                 self.meta_profile_settings.c.profile == "GLOBAL")).first()
             if present is None:
                 conn.execute(self.meta_profile_settings.insert().values(
-                    profile="GLOBAL", settings=json.dumps({"max_active": 1}), updated_at=now))
+                    profile="GLOBAL", settings=json.dumps({"max_active": 1,
+                        "learning_max_templates_per_run": 30,
+                        "learning_time_budget_minutes": 20}, sort_keys=True), updated_at=now))
+            else:
+                row = conn.execute(select(self.meta_profile_settings.c.settings).where(
+                    self.meta_profile_settings.c.profile == "GLOBAL")).scalar_one()
+                global_values = json.loads(row or "{}")
+                global_values.setdefault("max_active", 1)
+                global_values.setdefault("learning_max_templates_per_run", 30)
+                global_values.setdefault("learning_time_budget_minutes", 20)
+                conn.execute(self.meta_profile_settings.update().where(
+                    self.meta_profile_settings.c.profile == "GLOBAL").values(
+                        settings=json.dumps(global_values, sort_keys=True), updated_at=now))
 
     def _migrate_meta_columns(self) -> None:
         """Add repository lineage fields for pre-existing Meta core databases."""
