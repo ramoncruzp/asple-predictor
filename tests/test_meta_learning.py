@@ -74,6 +74,10 @@ def test_point_in_time_reconstruction_ignores_future_candles_forecasts_and_predi
     snapshot = point_in_time_signals(at=at, candles=candles, buy_price=99,
         sell_price=101, volatility_forecasts=forecasts, direction_predictions=predictions)
     assert snapshot["signals"]["volatility_forecasts"][0]["model"] == "past"
+    forecast = snapshot["signals"]["volatility_forecasts"][0]
+    assert forecast["sigma_per_hour"] == pytest.approx(np.exp(-3.0))
+    assert forecast["sigma_24h"] == pytest.approx(np.exp(-3.0) * np.sqrt(24))
+    assert forecast["sigma"] == pytest.approx(forecast["sigma_24h"])
     assert snapshot["signals"]["direction_predictions"][0]["signal"] == "ALCISTA"
     assert "touch_buy_to_sell" in snapshot["signals"]
 

@@ -1764,6 +1764,7 @@ class MetaOperator:
             self._learning_guard.release()
 
     def _model_snapshot(self, symbol):
+        from grid.meta_learning import VOL_FORECAST_HORIZON_H
         readiness = self.db.get_readiness(symbol) or {}
         query = getattr(self.db, "get_latest_vol_model_stats_forecast_at", None)
         latest = query(symbol, 24) if query else None
@@ -1781,8 +1782,12 @@ class MetaOperator:
             age = (now - when).total_seconds()
             name = str(item.get("model_name"))
             if name not in forecasts or when > forecasts[name]["_when"]:
-                forecasts[name] = {"sigma_24h": (math.exp(float(item["pred_logvol_cal"]))
-                                   if item.get("pred_logvol_cal") is not None else None),
+                sigma_per_hour = (math.exp(float(item["pred_logvol_cal"]))
+                                  if item.get("pred_logvol_cal") is not None else None)
+                sigma_24h = (sigma_per_hour * math.sqrt(VOL_FORECAST_HORIZON_H)
+                             if sigma_per_hour is not None else None)
+                forecasts[name] = {"sigma_per_hour": sigma_per_hour,
+                                   "sigma_24h": sigma_24h,
                                    "forecast_at": when.isoformat(), "age_seconds": age,
                                    "is_champion": bool(item.get("is_champion")), "_when": when}
         for item in forecasts.values():
@@ -2078,7 +2083,11 @@ class MetaOperator:
                             "models": model.get("volatility_forecasts"),
                             "diagnostic": {"reference_sigma_24h": realized,
                                 "forecast_horizon_h": 24,
-                                "forecast_unit": "sigma_por_hora"}})
+                                "forecast_unit": "sigma_24h",
+                                "median_sigma_per_hour": float(np.median([
+                                    float(value["sigma_per_hour"])
+                                    for value in (model.get("volatility_forecasts") or {}).values()
+                                    if value.get("used") and value.get("sigma_per_hour") is not None]))}})
         else:
             stale = [name for name, value in (model.get("volatility_forecasts") or {}).items()
                      if not value.get("used")]

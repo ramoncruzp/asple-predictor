@@ -9,6 +9,7 @@ import numpy as np
 
 
 HOURS_72 = 72
+VOL_FORECAST_HORIZON_H = 24
 BACKFILL_DAYS = 180
 REPLAY_METHOD_VERSION = "rolling_7d_v2"
 LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor",
@@ -433,9 +434,14 @@ def point_in_time_signals(*, at, candles, buy_price=None, sell_price=None,
         forecasts = []
         provenance = []
         for (_model, _horizon), (observed_at, row) in sorted(forecasts_by_model.items()):
+            sigma_per_hour = (float(np.exp(row["pred_logvol_cal"]))
+                if row.get("pred_logvol_cal") is not None else None)
             forecast = {"model": row.get("model_name"), "value": row.get("pred_logvol_cal"),
-                "sigma": (float(np.exp(row["pred_logvol_cal"]))
-                    if row.get("pred_logvol_cal") is not None else None),
+                "sigma_per_hour": sigma_per_hour,
+                "sigma": (sigma_per_hour * np.sqrt(VOL_FORECAST_HORIZON_H)
+                    if sigma_per_hour is not None else None),
+                "sigma_24h": (sigma_per_hour * np.sqrt(VOL_FORECAST_HORIZON_H)
+                    if sigma_per_hour is not None else None),
                 "horizon_h": row.get("horizon_h")}
             forecasts.append(forecast)
             provenance.append({"source": "vol_forecasts", "forecast_at": row.get("forecast_at"),

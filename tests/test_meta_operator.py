@@ -1745,3 +1745,24 @@ def test_reconfiguration_shadows_use_real_policy_thresholds_without_open_age_gat
         if persistence == 2:
             second = operator._active_review_choices(plan, result, 4)
             assert second["learned"]["decision"] == second["scanner_advisor"]["decision"] == "reajustar"
+
+
+def test_model_snapshot_converts_hourly_forecast_to_24h_sigma():
+    import math
+    from datetime import datetime, timezone
+    from grid.meta_operator import MetaOperator
+
+    now = datetime.now(timezone.utc)
+
+    class DB:
+        def get_readiness(self, _symbol): return {"state": "lista"}
+        def get_latest_vol_model_stats_forecast_at(self, *_args): return now
+        def get_vol_model_stats_rows(self, *_args):
+            return [{"forecast_at": now, "model_name": "model_a", "pred_logvol_cal": math.log(.01),
+                "realized_logvol": 0.0, "verified_at": now, "is_champion": True}]
+
+    snapshot = MetaOperator(object(), DB(), None, None, None)._model_snapshot("XRPUSDT")
+    forecast = snapshot["volatility_forecasts"]["model_a"]
+    assert forecast["sigma_per_hour"] == pytest.approx(.01)
+    assert forecast["sigma_24h"] == pytest.approx(.01 * math.sqrt(24))
+    assert forecast["used"] is True
