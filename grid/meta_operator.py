@@ -288,6 +288,8 @@ class MetaOperator:
         self._cache = {}
         self._advisor_cache = {}
         self._candles_cache = {}
+        self._candles_failure_cache = {}
+        self._touch_result_cache = {}
         self._above_ceiling_count = {}
         self._outside_range_count = {}
         self._hard_filter_misses = {}
@@ -1262,7 +1264,7 @@ class MetaOperator:
             "advisor_comparisons": plan.get("advisor_comparisons"),
             "combinations_evaluated": plan.get("combinations_evaluated"),
             "shadow_decision": plan.get("shadow_decision"), "selected": compact_selected,
-            "sigma_bands": plan.get("sigma_bands")}
+            "sigma_bands": plan.get("sigma_bands"), "timings_s": plan.get("timings_s")}
 
     @staticmethod
     def _compact_review_result(result):
@@ -1901,7 +1903,18 @@ class MetaOperator:
         candles = self._candles_cache.get(candle_key)
         if candles is not None:
             return candles
-        candles_raw = self.scanner.client.get_historical_klines(symbol, "5m", 180)
+        now = float(self.clock())
+        failure = self._candles_failure_cache.get(symbol)
+        if failure and now < failure[0]:
+            raise RuntimeError(failure[1])
+        if failure:
+            self._candles_failure_cache.pop(symbol, None)
+        try:
+            candles_raw = self.scanner.client.get_historical_klines(symbol, "5m", 180)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._candles_failure_cache[symbol] = (now + 15 * 60, message)
+            raise
         from grid.sim.data import CandleData
         import pandas as pd
         frame = candles_raw if isinstance(candles_raw, pd.DataFrame) else pd.DataFrame(candles_raw)
@@ -1910,6 +1923,7 @@ class MetaOperator:
                              high=frame["high"].to_numpy(float), low=frame["low"].to_numpy(float),
                              close=frame["close"].to_numpy(float), gaps=0)
         self._candles_cache[candle_key] = candles
+        self._candles_failure_cache.pop(symbol, None)
         return candles
 
     def _evaluate(self, row, strategy, capital, target_usdt, low, high, n, cfg, *,
@@ -2146,7 +2160,10 @@ class MetaOperator:
         return result["summary"], result["observations"]
 
     def _apply_intelligence(self, alternative, row, price, low, high, cfg, *, advisor_result=None):
-        """Ajuste logit aditivo: logit(p_meta)=logit(p_replay)+sum(peso*señal)."""
+        """Ajuste logit aditivo con las señales disponibles."""
+        self._analysis_timing = getattr(self, "_analysis_timing", {})
+        self._analysis_timing.setdefault("touch_signal_s", 0.0)
+        self._analysis_timing.setdefault("touch_signal_cache_hits", 0)
         signals, omitted = [], []
         model = row.get("model_statistics") or self._model_snapshot(row["symbol"])
         usable_sigmas = [float(value["sigma_24h"]) for value in (model.get("volatility_forecasts") or {}).values()
@@ -2215,8 +2232,24 @@ class MetaOperator:
             try:
                 from grid.meta_learning import causal_touch_buy_to_sell
                 piece = (alternative.get("pieces") or [{}])[0]
-                touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,
-                    buy_price=piece.get("floor", low), sell_price=piece.get("ceiling", high))
+                buy_price = float(piece.get("floor", low))
+                sell_price = float(piece.get("ceiling", high))
+                # 0,01 % relativo conserva la geometría práctica y permite
+                # reutilizar el mismo cálculo dentro del plan y durante el día.
+                reference = max(float(price), 1e-12)
+                touch_key = (str(row["symbol"]).upper(), self.clock() // 86400,
+                    round(buy_price / reference * 10000), round(sell_price / reference * 10000))
+                touch = self._touch_result_cache.get(touch_key)
+                if touch is None:
+                    touch_started = time.perf_counter()
+                    touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,
+                        buy_price=buy_price, sell_price=sell_price)
+                    self._analysis_timing["touch_signal_s"] = self._analysis_timing.get(
+                        "touch_signal_s", 0.0) + time.perf_counter() - touch_started
+                    self._touch_result_cache[touch_key] = touch
+                else:
+                    self._analysis_timing["touch_signal_cache_hits"] = self._analysis_timing.get(
+                        "touch_signal_cache_hits", 0) + 1
                 rate = touch.get("sell_rate")
                 if rate is not None:
                     signals.append({"name": "touch_buy_to_sell", "value": float(rate),
@@ -2493,7 +2526,7 @@ class MetaOperator:
         if goal["status"] != "ACTIVE" or value.get("status") != "KNOWN":
             self._reset_rotation_streaks(meta_id, "meta no activa o valor desconocido")
             result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
-            self._ledger(meta_id, "META_OPERATOR_NOOP", result)
+            self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, None))
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "ledger_schema_version": 2, "plan_decision_id": None,
                 "decision": self._compact_review_result(result), "shadow_decision": None, "valuation": value,
@@ -2546,7 +2579,7 @@ class MetaOperator:
                 "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
                 for item in (plan or {}).get("alternatives", [])]})
         if result.get("decision") == "no_hacer_nada":
-            self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
+            self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, (plan or {}).get("decision_id")))
         return result
 
     def _record_review(self, meta_id, result, value, shadow, plan=None):
@@ -2555,7 +2588,12 @@ class MetaOperator:
             "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
             "decision_choices": self._active_review_choices(plan, result, meta_id),
             "comparison_version": 2})
-        self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
+        self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, (plan or {}).get("decision_id")))
+
+    @classmethod
+    def _noop_payload(cls, result, valuation, plan_decision_id):
+        return {**cls._compact_review_result(result), "ledger_schema_version": 2,
+                "valuation": valuation, "plan_decision_id": plan_decision_id}
 
     def _plan_price_moved(self, plan, goal):
         max_drift = float((goal.get("config_snapshot") or {}).get("plan_price_drift_pct", self.price_drift_pct))

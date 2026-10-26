@@ -126,6 +126,73 @@ def test_touch_signal_omission_distinguishes_candle_loading_from_calculation(mon
     assert touch["reason"] == "error al calcular toque: geometría inválida"
 
 
+def test_load_candles_failure_is_cached_for_fifteen_minutes():
+    from grid.meta_operator import MetaOperator
+    calls = []
+    class Client:
+        def get_historical_klines(self, *args):
+            calls.append(args)
+            raise OSError("fuente lenta no disponible")
+    now = [1_800_000_000]
+    operator = MetaOperator(object(), object(), type("Scanner", (), {"client": Client()})(),
+        None, None, clock=lambda: now[0])
+    for _ in range(4):
+        with pytest.raises((OSError, RuntimeError), match="fuente lenta no disponible"):
+            operator._load_candles("AAAUSDT")
+    assert len(calls) == 1
+    now[0] += 901
+    with pytest.raises(OSError, match="fuente lenta no disponible"):
+        operator._load_candles("AAAUSDT")
+    assert len(calls) == 2
+
+
+def test_touch_result_cache_preserves_causal_result(monkeypatch):
+    import grid.meta_learning as learning
+    from grid.meta_operator import MetaOperator
+    calls = []
+    result = {"sell_rate": .375, "provenance": {"through_ts": 123, "stats": {"touches": 8}}}
+    monkeypatch.setattr(learning, "causal_touch_buy_to_sell", lambda **kwargs: (calls.append(kwargs) or result))
+    class DB:
+        def get_latest_prediction(self, *_args): return None
+    class Client:
+        def get_historical_klines(self, *_args): return object()
+    operator = MetaOperator(object(), DB(), type("Scanner", (), {"client": Client()})(),
+        None, None, clock=lambda: 1_800_000_000)
+    operator._model_snapshot = lambda _symbol: {"volatility_forecasts": {}}
+    operator._load_candles = lambda _symbol: object()
+    import grid.meta_operator as module
+    monkeypatch.setattr(module, "break_prob", lambda *_args: (.5, None, None, None))
+    def run():
+        alt = {"pieces": [{"symbol": "AAAUSDT", "capital_usdt": 10, "floor": 99.5, "ceiling": 100.5}],
+            "estimate": {"probability": .5, "evidence_sufficient": True}, "replay_probability": .5}
+        row = {"symbol": "AAAUSDT", "sigma_24h_open": .02, "score": .5, "model_statistics": {}}
+        operator._apply_intelligence(alt, row, 100, 99, 101, {"signal_weights": {}})
+        return next(item for item in alt["signals_used"] if item["name"] == "touch_buy_to_sell")
+    first, second = run(), run()
+    assert first == second
+    assert len(calls) == 1
+    assert operator._analysis_timing["touch_signal_cache_hits"] == 1
+
+
+def test_noop_payload_compacts_review_result_and_links_plan():
+    import json
+    from grid.meta_operator import MetaOperator
+    large = {"decision": "no_hacer_nada", "reason": "sin alternativa", "plan": {"alternatives": [0] * 10000}}
+    payload = MetaOperator._noop_payload(large, {"status": "KNOWN"}, "plan-123")
+    assert payload["ledger_schema_version"] == 2
+    assert payload["decision"] == "no_hacer_nada"
+    assert payload["reason"] == "sin alternativa"
+    assert payload["plan_decision_id"] == "plan-123"
+    assert len(json.dumps(payload, separators=(",", ":")).encode()) < 15 * 1024
+
+
+def test_plan_ledger_payload_keeps_timings():
+    from grid.meta_operator import MetaOperator
+    plan = {"timings_s": {"touch_signal": .02, "touch_signal_cache_hits": 3}}
+    payload = MetaOperator._plan_ledger_payload(plan, [], {"symbol": "AAAUSDT"}, plan_kind="revision")
+    assert payload["timings_s"] == plan["timings_s"]
+
+
 def test_individual_bot_replay_sells_once_and_never_rebuys():
     import numpy as np
     from grid.sim.data import CandleData
