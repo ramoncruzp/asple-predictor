@@ -51,15 +51,23 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 ## 40d-4B - Inteligencia
 
 - No hay tabla persistente de velas en el esquema de la aplicación. La pestaña informa que ese inventario no está disponible desde la BD y no escanea `data/` ni consulta la red.
-- Las versiones guardadas no incluyen deciles de calibración ni un contador separado de simulaciones nuevas por evaluación. Se informa esa falta de persistencia; no se ejecuta cálculo pesado al abrir la vista.
+- Cerrado en 40d-6: versiones guardadas incluyen deciles de calibración y las corridas incluyen inventario de velas y conteos separados de replay/caché. La vista sigue siendo de solo lectura.
 - El API limita a 10.000 filas la muestra de aprendizaje usada para estadísticas descriptivas; los totales por perfil/origen/moneda y los conteos de exclusiones se agregan en SQL.
-- La comparación activa de 40d-4A sigue pendiente de evaluar el contrafactual completo de los frenos de materialidad/persistencia/cooldown para candidatos que la política real rechazó. La ordenación del plan y la equivalencia de `mantener` sí están cubiertas.
+- Cerrado en 40d-6: política pura compartida para reajustes/rotaciones y estado independiente de persistencia y cooldown para cada sombra.
 - Listo para encender: el medidor usa la última versión guardada por perfil, pero la pantalla no propone activar automáticamente el interruptor.
 
 ## 40d-5
 
 - Sin discrepancia en el cálculo causal: el backfill ya usaba `point_in_time_signals` y persistía la tasa bruta de `touch_stats`; se refactorizó esa rutina a `causal_touch_buy_to_sell` y ambos caminos usan ahora la normalización `2 × sell_rate − 1`. No se marcaron muestras para recálculo porque las existentes con el campo ya corresponden al mismo método.
 - Las muestras antiguas sin `touch_buy_to_sell` permanecen guardadas, neutrales y ausentes de la máscara de presencia; su conteo efectivo para esa señal es cero.
-- Límite heredado de 40d-4B: no hay deciles de calibración almacenados. Inteligencia presenta la nueva señal en cobertura, regresión y tasas de éxito por grupo alto/bajo, pero no puede presentar deciles de calibración por señal sin persistencia adicional.
+- Límite cerrado en 40d-6: ahora se persiste calibración por deciles para el modelo y solo p_replay, en el conjunto de validación.
 - No se consultó la BD productiva para medir cuántas filas históricas incluyen la señal; la verificación fue con pruebas locales y los caminos de código.
 - Ajuste del harness de UI: la prueba de reajuste reciente asumía que el contenedor ya estaba en el DOM. Se espera explícitamente el selector y se conserva la misma aserción de texto; la corrida enfocada final pasa.
+
+
+
+## 40d-6
+
+- Cerrados los límites de comparación incompleta y falta de observabilidad. La comparación v2 corre la política compartida para reajustes y rotaciones, con materialidad, persistencia, enfriamiento y límite diario; cada sombra conserva su propio estado.
+- Inventario y calibración se guardan como agregados/resúmenes, nunca como velas. Las corridas separan ventanas simuladas, aciertos de caché y cortes procesados.
+- No se encontraron otras discrepancias dentro del alcance. Verificado solo offline con las pruebas focalizadas; S1, Testnet y la BD real no se usaron.

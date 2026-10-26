@@ -253,7 +253,10 @@ def test_replay_window_cache_is_shared_without_changing_result(monkeypatch):
     assert len(calls) - first_calls < first_calls
     without_cache = causal_replay_probability({"XRPUSDT": candles}, at=127 * 86400,
         parameters=params, fixed_week_anchor=True, window_cache={}, template_key="same")
-    assert second == without_cache
+    assert {key: value for key, value in second.items() if key not in {"cached_windows", "simulated_windows"}} == {
+        key: value for key, value in without_cache.items() if key not in {"cached_windows", "simulated_windows"}}
+    assert second["cached_windows"] > 0
+    assert second["simulated_windows"] < without_cache["simulated_windows"]
 
 
 def test_historical_backfill_skips_existing_cut_and_respects_budget(monkeypatch):
@@ -401,3 +404,13 @@ def test_weight_that_fails_later_validation_is_not_applied():
     assert result["improves"] is False
     assert result["weights"]["volatility"] == .25
     assert result["signals"]["volatility"]["reason"] == "validación no mejora a solo p_replay"
+
+
+def test_validation_calibration_persists_model_and_replay_deciles():
+    from grid.meta_operator import validation_calibration
+    rows = [{"base_probability_smoothed": .1 + index * .04,
+        "signals": {}, "label": {"reached": index >= 10}} for index in range(20)]
+    result = validation_calibration(rows, {}, logit_cap=1)
+    assert len(result["model"]) == len(result["replay_only"]) == 10
+    assert sum(row["samples"] for row in result["model"]) == 20
+    assert all("predicted_mean" in row and "success_rate" in row for row in result["replay_only"])

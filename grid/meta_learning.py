@@ -121,18 +121,22 @@ def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_day
     first = anchor + max(0, (earliest - anchor + step - 1) // step) * step
     starts = range(first, at_s - width, step)
     outcomes = []
+    cached_count = 0
+    simulated_count = 0
     label_key = f"{days}d"
     for start_s in starts:
         cache_key = (str(template_key or ""), int(start_s))
         cached = window_cache.get(cache_key) if window_cache is not None else None
         if cached is not None:
             outcomes.append(bool(cached))
+            cached_count += 1
             continue
         labels = replay_alternative_labels(candles_by_symbol, start_ts=start_s,
             parameters=parameters, include_horizons=(label_key,))
         label = labels.get(label_key, {})
         if label.get("status") == "labeled":
             outcomes.append(bool(label.get("reached")))
+            simulated_count += 1
             if window_cache is not None:
                 window_cache[cache_key] = bool(label.get("reached"))
     count = len(outcomes)
@@ -141,6 +145,7 @@ def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_day
             "smoothed_probability": ((sum(outcomes) + 1) / (count + 2)) if count else None,
             "independent_windows": min(count, (count * 7) // days),
             "window_count": count, "successes": sum(outcomes), "step_days": 7,
+            "cached_windows": cached_count, "simulated_windows": simulated_count,
             "method_version": REPLAY_METHOD_VERSION, "window_days": days, "through_ts": at_s,
             "training_exclusion_reason": "sin base suficiente" if (count * 7) // days < 3 else None}
 
@@ -590,7 +595,9 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
             if pause_callback is not None and new_count % 3 == 0:
                 pause_callback()
     return {"samples": output, "pending_templates": sorted(set(pending)),
-            "processed_cuts": new_count}
+            "processed_cuts": new_count,
+            "cached_windows": sum(int((row.get("provenance", {}).get("base_replay") or {}).get("cached_windows") or 0) for row in output),
+            "simulated_windows": sum(int((row.get("provenance", {}).get("base_replay") or {}).get("simulated_windows") or 0) for row in output)}
 
 
 def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, include_horizons=None):

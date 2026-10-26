@@ -49,6 +49,11 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             model_name='model_a', predicted_at=datetime.now(timezone.utc),
             verify_at=datetime.now(timezone.utc), probability_up=.6, signal='UP', confidence='high',
             price_at_prediction=1.0))
+        conn.execute(db.meta_learning_runs.insert().values(started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc), status='completed', summary_json=json.dumps({
+                'candle_inventory_at': '2026-10-26T00:00:00+00:00',
+                'candle_inventory': {'XRPUSDT': {'count': 12, 'interval_seconds': 300, 'gaps': 1}},
+                'replay_windows_new': 8, 'replay_windows_cached': 4, 'cuts_processed': 2})))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -59,5 +64,7 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['switches']['RAPIDO']['enabled'] is False
     assert payload['signals']['touch_buy_to_sell']['sample_coverage'] == 0
     assert payload['signals']['touch_buy_to_sell']['coverage_pct'] == 0
+    assert payload['replay']['last_run']['replay_windows_new'] == 8
+    assert payload['replay']['last_run']['candle_inventory']['XRPUSDT']['gaps'] == 1
     after = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     assert before == after == []

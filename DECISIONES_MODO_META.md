@@ -98,7 +98,7 @@ Los números son punto de partida y se ajustan con los resultados.
 
 ## 8. Fases
 
-| Fase | Qué | Estado (2026-10-25) |
+| Fase | Qué | Estado (2026-10-26) |
 |---|---|---|
 | 40a | Núcleo: datos, valoración, vigilancia, límites, cierres, Cancelar, API | Hecha, en main (`a5e6d1e`) y desplegada en S1 |
 | 40b | Operador: análisis, plan, Iniciar, revisión cada 15 min, bots individuales, inteligencia completa | Parcial (2026-10-22): faltan cartera de varias piezas, préstamos, Advisor real, agregar piezas en la revisión y pruebas integradas → 40b-2 (hecho, en main). Medición real en S1 (2026-10-22): análisis de 25,6 min y bloqueo del monitor durante la revisión → 40b-3 (hecha, `9a49a2b`: el monitor ya no se bloquea; caché diario; desempate) |
@@ -111,9 +111,11 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
 | 40d-3 | Caché acotada, decisiones en sombra, pesos efectivos y vista de evidencia | Implementada y verificada offline; sin despliegue |
 | 40d-3C | Interruptores por perfil en Laboratorio, aprendizaje global en Metas y recarga parcial | Implementada y verificada offline; sin despliegue |
-| 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Parcial; pruebas enfocadas aprobadas; falta evaluar frenos contrafactuales completos en revisiones activas |
-| 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Parcial; vista y API verificadas offline; B1 velas, simulaciones nuevas y deciles de calibración no están persistidos |
-| 40d | Aprendizaje continuo de pesos por señal | Partes 1–3 implementadas y verificadas offline; interruptor apagado por defecto |
+| 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Cerrada en 40d-6: política contrafactual v2 con persistencia y cooldown propios |
+| 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Cerrada en 40d-6: inventario de velas, calibración y conteos persistidos |
+| 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
+| 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; pruebas focalizadas offline |
+| 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -232,3 +234,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - El switch continúa apagado por defecto. Sin un peso de toque aceptado no influye aunque se encienda; las estadísticas sombra de 40b-5 continúan separadas.
 - Las muestras históricas que ya guardaban la tasa causal se leen sin cambiar ni borrar versiones. Las filas antiguas que no la guardan no aportan muestra para toque.
 - Pendiente heredado: Inteligencia aún no persiste deciles de calibración; las tasas de éxito por valor alto/bajo son descriptivas y no las reemplazan.
+
+## 20. Fase 40d-6 - comparación completa y telemetría de aprendizaje
+
+- La comparación activa usa contrato v2 y solo agrega registros v2; la pantalla indica desde cuándo hay datos bajo esa versión. Las sombras aprendida y Scanner + Advisor mantienen persistencia, cooldown y límite diario separados de la política real.
+- La política pura compartida gobierna los gates reales de reajuste y rotación. El cierre de pérdida permanece en la protección de 40a.
+- meta_learning_runs.summary_json guarda inventario por moneda de velas y conteos de ventanas simuladas, caché y cortes; las versiones de pesos guardan deciles de calibración para el modelo y p_replay. No se guardan velas ni se añaden tablas.
+- Pendientes de 40d-6: ninguno conocido en el alcance. El aprendizaje sigue en sombra salvo activación explícita por perfil.

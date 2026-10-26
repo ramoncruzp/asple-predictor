@@ -17,5 +17,7 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'setInterval' not in js
     assert 'href="#models"' in js and 'href="#battle"' in js
     assert 'item.label' in js and 'Recolectando datos' in (ROOT / 'api' / 'routes' / 'intelligence.py').read_text(encoding='utf-8')
+    assert 'calibration_deciles' in js and 'candle_inventory' in js
+    assert 'replay_windows_new' in js and 'decision_comparison_since' in js
     assert 'Toque compra→venta' in js
     assert 'signalLabel(name)' in js

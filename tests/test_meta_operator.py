@@ -299,7 +299,10 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     class Core:
         def __init__(self): self.events, self.rows = [], []
         def ledger(self, _meta_id): return list(self.rows)
-        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+        def _ledger(self, *args, **kwargs):
+            self.events.append((args, kwargs))
+            self.rows.append({"event_type": args[2], "details": args[3] or {},
+                "grid_id": kwargs.get("grid_id"), "ts": datetime.fromtimestamp(1_800_000_000, timezone.utc)})
 
     class Engine:
         def __init__(self): self.calls = []
@@ -328,6 +331,9 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
         return core, engine, operator, grid, levels, plan
 
     core, engine, operator, grid, levels, plan = inputs()
+    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"
@@ -337,12 +343,18 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     assert event[3]["estimated_probability_improvement_pp"] == pytest.approx(6)
 
     core, engine, operator, grid, levels, plan = inputs(probability=.53)
+    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result is None  # 3 pp no supera la materialidad de 5 pp.
     assert engine.calls == []
 
     core, engine, operator, grid, levels, plan = inputs(probability=.51, new_progress=22)
+    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"  # empate ±2 pp y avance mediano +10 %.
@@ -351,6 +363,9 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     assert operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 84, plan, {"piece_type": "grid"}, (1, 7)) is None
     operator._outside_range_count[(1, 7)] = 2
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 84, plan, {"piece_type": "grid"}, (1, 7))
+    assert result is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 84, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"  # dos revisiones, desplazamiento > un nivel.
@@ -371,6 +386,9 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     assert result is None and engine.calls == []  # máximo de cuatro en 24 h.
 
     core, engine, operator, grid, levels, plan = inputs("individual_bot_grid")
+    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
+    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"
@@ -1523,3 +1541,85 @@ def test_replay_cache_reused_for_subquantum_price_move_and_missed_past_the_step(
     row_c = {"symbol": "XRPUSDT", "book": {"bid_price": 101.0, "ask_price": 101.02}}  # +1%
     operator._evaluate(row_c, "simple", 100, 10, 90, 110, 4, cfg)
     assert len(build_calls) == 2, "un movimiento que cruza el paso de cuantización debe recalcular"
+
+
+def test_pure_policy_requires_two_material_reviews_and_matches_across_policies():
+    from grid.meta_operator import counterfactual_policy_decision
+
+    current = {"probability": .50, "median_progress_pct": 10}
+    candidate = {"probability": .56, "median_progress_pct": 10,
+        "alternative_key": "XRP|simple|new-range", "destination": "XRPUSDT", "action": "rotar"}
+    histories = {name: [] for name in ("real", "scanner_advisor", "learned")}
+    sequences = {name: [] for name in histories}
+    for tick in (1000, 1900):
+        for name in histories:
+            result = counterfactual_policy_decision(current, [candidate], histories[name],
+                {}, now=tick, required_reviews=2)
+            sequences[name].append(result)
+            histories[name].append({"material": result["material"],
+                "alternative_key": result["alternative_key"]})
+    assert sequences["real"] == sequences["learned"] == sequences["scanner_advisor"]
+    assert [row["action"] for row in sequences["real"]] == ["mantener", "rotar"]
+
+
+def test_pure_policy_counterfactual_cooldown_blocks_otherwise_material_rotation():
+    from grid.meta_operator import counterfactual_policy_decision
+
+    candidate = {"probability": .60, "median_progress_pct": 20,
+        "alternative_key": "PEPE|simple|range", "destination": "PEPEUSDT", "action": "rotar"}
+    history = [{"material": True, "alternative_key": "PEPE|simple|range"}]
+    result = counterfactual_policy_decision({"probability": .50, "median_progress_pct": 10},
+        [candidate], history, {"last_action_at": 900, "actions_24h": 0},
+        now=1000, cooldown_seconds=3600, required_reviews=2)
+    assert result["action"] == "mantener"
+    assert result["reason"] == "pieza en enfriamiento"
+
+
+def test_learning_candle_inventory_counts_gaps_without_persisting_candles():
+    import numpy as np
+    from types import SimpleNamespace
+    from grid.meta_operator import MetaOperator
+    candles = SimpleNamespace(timestamp=np.array([0, 300, 600, 1200], dtype=np.int64))
+    inventory = MetaOperator._candle_inventory(candles)
+    assert inventory["count"] == 4
+    assert inventory["interval_seconds"] == 300
+    assert inventory["gaps"] == 1
+    assert inventory["first_at"].startswith("1970-01-01T00:00:00")
+    assert inventory["last_at"].startswith("1970-01-01T00:20:00")
+
+
+def test_shadow_counterfactual_states_are_independent_and_persisted():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        monitor = None
+        def __init__(self): self.rows = []
+        def get_goal(self, _meta_id): return {"id": 4, "config_snapshot": {}}
+        def ledger(self, _meta_id): return list(self.rows)
+        def _ledger(self, meta_id, run_id, event_type, details, **kwargs):
+            self.rows.append({"meta_id": meta_id, "event_type": event_type, "details": details,
+                "grid_id": kwargs.get("grid_id"), "ts": datetime.fromtimestamp(1_800_000_000, timezone.utc)})
+    class DB:
+        def get_grid(self, _grid_id): return {"id": 10, "symbol": "XRPUSDT", "strategy": "simple",
+            "created_at": datetime.fromtimestamp(1_800_000_000 - 7200, timezone.utc)}
+
+    core = Core()
+    operator = MetaOperator(core, DB(), None, None, None, clock=lambda: 1_800_000_000)
+    def alternative(alt_id, floor, probability, symbol="XRPUSDT"):
+        return {"alternative_id": alt_id, "symbol": symbol, "strategy": "simple",
+            "pieces": [{"symbol": symbol, "piece_type": "grid", "strategy": "simple",
+                "floor": floor, "ceiling": floor + 20, "n_levels": 4, "capital_usdt": 50}],
+            "estimate": {"probability_replay": probability, "median_progress_pct": 10,
+                "evidence_sufficient": True}, "shadow_probability": probability,
+            "learned_probability": probability}
+    plan = {"alternatives": [alternative("current", 90, .50), alternative("next", 92, .56, "PEPEUSDT")],
+        "decision_choices": {"scanner_advisor": {"alternative_id": "next", "probability": .56},
+            "learned": {"alternative_id": "next", "probability": .56}}}
+    result = {"decision": "no_hacer_nada", "grid_id": 10}
+    first = operator._active_review_choices(plan, result, 4)
+    second = operator._active_review_choices(plan, result, 4)
+    states = [row["details"] for row in core.rows if row["event_type"] == "META_OPERATOR_COUNTERFACTUAL_STATE"]
+    assert first["learned"]["decision"] == first["scanner_advisor"]["decision"] == "mantener"
+    assert second["learned"]["decision"] == second["scanner_advisor"]["decision"] == "rotar"
+    assert {row["policy"] for row in states} == {"learned", "scanner_advisor"}
+    assert all(row["streak"] in {1, 2} for row in states)

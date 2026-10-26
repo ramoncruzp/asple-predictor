@@ -154,3 +154,16 @@ La comparación solo crece a medida que maduran etiquetas y depende de que haya 
 ### Límite conocido
 
 La pantalla Inteligencia no tiene deciles de calibración persistidos (ya documentado en 40d-4B). Esta fase muestra toque en cobertura, regresión y tasas de acierto alta/baja disponibles; no inventa deciles ni escribe una migración nueva.
+
+
+## 40d-6 - Contrafactual completo, calibración y conteos persistidos
+
+- Se añadió counterfactual_policy_decision, función pura compartida. La decisión real la usa en el gate de rotación y en reajustes; conserva materialidad, dos revisiones, cooldown y límites diarios. Los cierres de pérdida siguen bajo el guardián de 40a.
+- Las sombras aprendida y Scanner + Advisor evalúan por pieza con estado independiente guardado en META_OPERATOR_COUNTERFACTUAL_STATE; guardan persistencia, cooldown, contador diario, decisión y destino contrafactual.
+- comparison_version pasa a 2. La agregación de Aprendizaje cuenta solo revisiones v2 y expone decision_comparison_since; la vista Inteligencia muestra desde cuándo se acumula.
+- Cada corrida guarda por moneda cantidad, primera y última fecha, intervalo mediano y huecos de velas en meta_learning_runs.summary_json. No persiste velas.
+- Cada versión de pesos conserva deciles de validación del modelo y de solo p_replay: probabilidad predicha media, tasa real de éxito y n.
+- Las corridas registran ventanas replay simuladas, ventanas leídas de caché y cortes históricos procesados por separado. Los resúmenes existentes (summary_json) evitan una migración.
+- Archivos: grid/meta_operator.py, grid/meta_learning.py, frontend/intelligence.js; pruebas en tests/test_meta_operator.py, tests/test_meta_learning.py, tests/test_meta_learning_api.py, tests/test_intelligence_api.py y tests/ui/test_intelligence_ui.py.
+- Verificación final: 89 passed, 10 warnings; node --check frontend/intelligence.js pasó. Sin suite completa, S1, Testnet, .env ni base real.
+- Sin discrepancias funcionales conocidas en el alcance de 40d-6.

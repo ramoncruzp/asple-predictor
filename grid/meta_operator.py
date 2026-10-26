@@ -7,6 +7,7 @@ import hashlib
 import math
 import logging
 import os
+import statistics
 import threading
 import time
 import uuid
@@ -157,6 +158,87 @@ def profile_candidate_exclusion(profile, sigma, q33, q67, model_ready, min_verif
     return None
 
 
+def counterfactual_policy_decision(current, alternatives, history=(), state=None, *,
+        required_reviews=2, cooldown_seconds=3600, max_actions_per_24h=4, now=None):
+    """Política pura compartida: aplica materialidad, persistencia y frenos temporales."""
+    state = state or {}
+    current = current or {}
+    options = [dict(row) for row in (alternatives or []) if row.get("probability") is not None]
+    if not options:
+        return {"action": "mantener", "destination": None, "reason": "sin alternativa evaluable", "streak": 0}
+    best = max(options, key=lambda row: (float(row.get("probability") or 0),
+        float(row.get("median_progress_pct") or 0)))
+    old_p = float(current.get("probability") or 0)
+    new_p = float(best.get("probability") or 0)
+    delta_pp = (new_p - old_p) * 100
+    old_progress = float(current.get("median_progress_pct") or 0)
+    new_progress = float(best.get("median_progress_pct") or 0)
+    progress_delta = (new_progress / old_progress - 1) * 100 if old_progress > 0 else (100 if new_progress > 0 else 0)
+    material = (delta_pp >= float(best.get("min_probability_delta_pp", 5)) or
+        (abs(delta_pp) <= float(best.get("probability_tie_tolerance_pp", 2)) and
+         progress_delta >= float(best.get("min_progress_delta_pct", 10))))
+    key = str(best.get("alternative_key") or best.get("alternative_id") or best.get("destination") or "")
+    prior_streak = 0
+    for row in reversed(list(history)):
+        if row.get("material") and row.get("alternative_key") == key:
+            prior_streak += 1
+        else:
+            break
+    streak = prior_streak + 1 if material else 0
+    opened_at = state.get("opened_at")
+    if not material:
+        reason = "mejora inferior a la materialidad"
+    elif streak < max(1, int(required_reviews)):
+        reason = "persistencia insuficiente"
+    elif "opened_at" in state and opened_at is None:
+        reason = "pieza sin fecha de apertura"
+    elif opened_at is not None and (now is None or float(now) - float(opened_at) < cooldown_seconds):
+        reason = "pieza aún no cumple la antigüedad mínima"
+    elif state.get("last_action_at") is not None and now is not None and float(now) - float(state["last_action_at"]) < cooldown_seconds:
+        reason = "pieza en enfriamiento"
+    elif int(state.get("actions_24h") or 0) >= max_actions_per_24h:
+        reason = "límite diario alcanzado"
+    else:
+        reason = "alternativa material y persistente"
+    return {"action": str(best.get("action") or "rotar") if reason == "alternativa material y persistente" else "mantener",
+        "destination": best.get("destination") if reason == "alternativa material y persistente" else None,
+        "alternative_key": key, "material": material, "streak": streak,
+        "probability_improvement_pp": delta_pp, "progress_improvement_pct": progress_delta,
+        "reason": reason}
+
+
+def validation_calibration(rows, weights, logit_cap=1.0):
+    """Deciles de calibración en validación para el modelo y p_replay puro."""
+    from grid.meta_learning import extract_learning_features
+    scored = {"model": [], "replay_only": []}
+    for row in rows or []:
+        base = row.get("base_probability_smoothed", row.get("base_probability"))
+        label = row.get("label") or {}
+        if base is None or "reached" not in label:
+            continue
+        p = max(1e-6, min(1 - 1e-6, float(base)))
+        features, _present = extract_learning_features(row.get("signals") or row.get("signals_json") or {},
+            row.get("feature_weights"))
+        evidence = sum(float(weights.get(name, 0)) * float(value) for name, value in features.items())
+        logit = math.log(p / (1 - p)) + max(-logit_cap, min(logit_cap, evidence))
+        adjusted = 1 / (1 + math.exp(-max(-30, min(30, logit))))
+        scored["model"].append((adjusted, int(bool(label["reached"]))))
+        scored["replay_only"].append((p, int(bool(label["reached"]))))
+    output = {}
+    for name, values in scored.items():
+        values.sort(key=lambda item: item[0])
+        groups = []
+        for decile in range(10):
+            start, end = round(decile * len(values) / 10), round((decile + 1) * len(values) / 10)
+            chunk = values[start:end]
+            if chunk:
+                groups.append({"decile": decile + 1,
+                    "predicted_mean": statistics.fmean(item[0] for item in chunk),
+                    "success_rate": statistics.fmean(item[1] for item in chunk), "samples": len(chunk)})
+        output[name] = groups
+    return output
+
+
 class MetaOperator:
     """Planes de cinco minutos, análisis asíncrono y revisiones de quince minutos."""
     PLAN_TTL_SECONDS = 600  # Fase 40c-3: Ramón subió el vencimiento de 5 a 10 min; editable por perfil (plan_ttl_seconds)
@@ -300,10 +382,15 @@ class MetaOperator:
                     self.db.meta_learning_switch_events.c.id.desc()).limit(1)).mappings().first()
             goal_ids = [int(row[0]) for row in conn.execute(select(self.db.meta_goals.c.id).where(
                 self.db.meta_goals.c.profile == profile)).all()]
-            ledger_rows = (conn.execute(select(self.db.meta_ledger.c.details).where(
+            ledger_rows = (conn.execute(select(self.db.meta_ledger.c.ts, self.db.meta_ledger.c.details).where(
                 self.db.meta_ledger.c.meta_id.in_(goal_ids),
                 self.db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION"))).order_by(
                     self.db.meta_ledger.c.id.desc()).limit(500)).all() if goal_ids else [])
+            comparison_first = (conn.execute(select(self.db.meta_ledger.c.ts).where(
+                self.db.meta_ledger.c.meta_id.in_(goal_ids),
+                self.db.meta_ledger.c.event_type == "META_OPERATOR_REVIEW_DECISION",
+                self.db.meta_ledger.c.details.like('%"comparison_version": 2%')).order_by(
+                    self.db.meta_ledger.c.id.asc()).limit(1)).first() if goal_ids else None)
             sample_rows = conn.execute(select(self.db.meta_learning_samples.c.id,
                 self.db.meta_learning_samples.c.alternative_id,
                 self.db.meta_learning_samples.c.parameters_json).where(
@@ -320,12 +407,13 @@ class MetaOperator:
             "72h": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0},
             "profile": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0}}
             for key in ("real", "scanner_advisor", "learned")}
-        for raw_event, in ledger_rows:
+        comparison_since = str(comparison_first[0]) if comparison_first else None
+        for raw_ts, raw_event in ledger_rows:
             event = json.loads(raw_event or "{}")
             choices = event.get("decision_choices") or {}
             # Solo se cuentan comparaciones nuevas con contrato explícito.
             # Los eventos previos permanecen intactos como evidencia histórica.
-            if int(choices.get("comparison_version") or 0) != 1:
+            if int(choices.get("comparison_version") or 0) != 2:
                 continue
             real_choice = choices.get("real") or {}
             real_id = (choices.get("real") or {}).get("alternative_id")
@@ -338,7 +426,7 @@ class MetaOperator:
                     continue
                 comparison[name]["decisions"] += 1
                 differs = decision != real_decision
-                if decision == "seleccionar_alternativa" and real_decision == "seleccionar_alternativa":
+                if decision in {"seleccionar_alternativa", "rotar", "reajustar", "cerrar"} and decision == real_decision:
                     differs = alt_id != real_id
                 comparison[name]["different_from_real"] += int(name != "real" and differs)
                 if not alt_id:
@@ -403,6 +491,7 @@ class MetaOperator:
                 "conditions": readiness_conditions, "signals": summary_signals},
             "signals": signals, "version_ids": versions,
             "decision_comparison": comparison,
+            "decision_comparison_since": comparison_since,
             "validation": {"model": validation.get("model"), "replay_only": baseline.get("baseline")},
             "weight_versions": [{"id": int(row["id"]), "source": row["source_kind"],
                 "status": row["status"], "created_at": str(row["created_at"]),
@@ -1041,7 +1130,7 @@ class MetaOperator:
         for index, item in enumerate(alternatives):
             item["alternative_id"] = f"{decision_id}:{index}"
         decision_choices = {
-            "comparison_version": 1,
+            "comparison_version": 2,
             "real": {"decision": "seleccionar_alternativa", "alternative_id": best.get("alternative_id"), "symbol": best["symbol"],
                 "strategy": best["strategy"], "probability": best["estimate"].get("probability")},
             "scanner_advisor": {"decision": "seleccionar_alternativa", "alternative_id": shadow.get("alternative_id"), "symbol": shadow["symbol"],
@@ -1285,6 +1374,18 @@ class MetaOperator:
             open=frame["open"].to_numpy(float), high=frame["high"].to_numpy(float),
             low=frame["low"].to_numpy(float), close=frame["close"].to_numpy(float), gaps=0)
 
+    @staticmethod
+    def _candle_inventory(candles):
+        if candles is None or len(candles.timestamp) == 0:
+            return None
+        stamps = sorted(int(value) for value in candles.timestamp)
+        deltas = [right - left for left, right in zip(stamps, stamps[1:]) if right > left]
+        interval = int(statistics.median(deltas)) if deltas else None
+        gaps = sum(1 for delta in deltas if interval and delta > interval * 1.5)
+        iso = lambda value: datetime.fromtimestamp(value, timezone.utc).isoformat()
+        return {"count": len(stamps), "first_at": iso(stamps[0]), "last_at": iso(stamps[-1]),
+            "interval_seconds": interval, "gaps": gaps}
+
     def _learning_history_rows(self, symbol):
         from sqlalchemy import select
         with self.db.engine.connect() as conn:
@@ -1319,6 +1420,7 @@ class MetaOperator:
         """Actualiza bases históricas obsoletas sin borrar ni reemplazar muestras."""
         from grid.meta_learning import causal_replay_probability, REPLAY_METHOD_VERSION
         changed = 0
+        replay_windows_new = 0
         for sample in samples:
             if sample.get("source_kind") != "historical_reconstructed":
                 continue
@@ -1331,6 +1433,7 @@ class MetaOperator:
                 continue
             at = sample["sample_at"]
             baseline = causal_replay_probability(market, at=at, parameters=params)
+            replay_windows_new += int(baseline.get("simulated_windows") or 0)
             provenance = json.loads(sample["provenance_json"] or "{}")
             provenance["base_replay"] = baseline
             provenance["base_replay_method_version"] = REPLAY_METHOD_VERSION
@@ -1346,6 +1449,7 @@ class MetaOperator:
                         training_exclusion_reason=exclusion,
                         provenance_json=json.dumps(provenance, sort_keys=True)))
             changed += 1
+        self._last_base_recalculation_windows = replay_windows_new
         return changed
 
     def _train_learning_weights(self, samples):
@@ -1422,6 +1526,9 @@ class MetaOperator:
                 result["training_cutoff"] = str(split_at) if split_at is not None else None
                 result["training_sample_ids"] = [int(row["id"]) for row in training]
                 result["validation_sample_ids"] = [int(row["id"]) for row in validation]
+                result["calibration_deciles"] = validation_calibration(
+                    [{**row, "label": row.get("profile_label")} for row in validation],
+                    result.get("weights", current), logit_cap=float(cfg.get("signal_logit_cap", 1.0)))
                 # Registrar intentos y frenos por separado para cada origen.
                 with self.db.engine.begin() as conn:
                     conn.execute(self.db.meta_learning_weight_versions.insert().values(
@@ -1449,7 +1556,8 @@ class MetaOperator:
                    "label_simulation_s": 0.0, "persistence_s": 0.0,
                    "weight_training_s": 0.0, "yield_s": 0.0}
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
-                    "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0}
+                    "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0,
+                    "replay_windows_new": 0, "replay_windows_cached": 0, "cuts_processed": 0}
         priority_lowered = False
         run_id = None
         try:
@@ -1486,6 +1594,8 @@ class MetaOperator:
                             counters["symbols_failed"] += 1
                             candles_by_symbol[symbol] = None
             timings["market_history_s"] = time.perf_counter() - t
+            candle_inventory = {symbol: self._candle_inventory(candles)
+                for symbol, candles in candles_by_symbol.items() if candles is not None}
             templates_by_id = {}
             for sample in sorted(samples, key=lambda row: row["sample_at"], reverse=True):
                 if sample["source_kind"] != "live":
@@ -1535,6 +1645,9 @@ class MetaOperator:
                     existing_cuts=existing_cuts, window_cache=replay_cache,
                     deadline=run_monotonic + budget_seconds, pause_callback=lambda: time.sleep(.01))
                 reconstructed = reconstruct_result["samples"]
+                counters["replay_windows_new"] += int(reconstruct_result.get("simulated_windows") or 0)
+                counters["replay_windows_cached"] += int(reconstruct_result.get("cached_windows") or 0)
+                counters["cuts_processed"] += int(reconstruct_result.get("processed_cuts") or 0)
                 pending_ids.extend(reconstruct_result["pending_templates"])
                 for item in reconstructed:
                     params = item["parameters"]
@@ -1574,6 +1687,7 @@ class MetaOperator:
                 existing = {(int(row[0]), str(row[1])) for row in labels}
             t = time.perf_counter()
             counters["bases_recalculated"] = self._recalculate_learning_bases(samples, candles_by_symbol)
+            counters["replay_windows_new"] += int(getattr(self, "_last_base_recalculation_windows", 0))
             timings["base_recalculation_s"] = time.perf_counter() - t
             with self.db.engine.connect() as conn:
                 samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
@@ -1619,6 +1733,8 @@ class MetaOperator:
                 except Exception:
                     logging.getLogger(__name__).exception("No se pudo comparar decisiones aprendidas Meta")
             summary = {**counters, "pending_template_ids": pending_ids,
+                "candle_inventory": candle_inventory,
+                "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
                 "limits": {"max_templates": max_templates, "time_budget_minutes": budget_seconds / 60},
                 "learned_vs_real": learned_vs_real,
                 "timings_s": {key: round(value, 3) for key, value in timings.items()},
@@ -1633,6 +1749,8 @@ class MetaOperator:
             return {"status": "completed", "run_id": run_id, **summary}
         except Exception as exc:
             summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
+                       "candle_inventory": locals().get("candle_inventory", {}),
+                       "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
                        "error": str(exc)}
             if run_id is not None:
                 with self.db.engine.begin() as conn:
@@ -2205,21 +2323,69 @@ class MetaOperator:
         if decision == "abrir_pieza_con_efectivo_libre": return "abrir"
         return decision or "mantener"
 
-    def _active_review_choices(self, plan, result):
+    def _active_review_choices(self, plan, result, meta_id=None):
         choices = json.loads(json.dumps((plan or {}).get("decision_choices") or {}))
-        choices["comparison_version"] = 1
+        choices["comparison_version"] = 2
         real_label = self._review_choice_label(result)
         real_id = (result or {}).get("alternative_id")
         choices["real"] = {"decision": real_label, "alternative_id": real_id,
             "symbol": (result or {}).get("symbol"), "probability": (result or {}).get("probability")}
+        grid_id = result.get("grid_id")
+        grid = self.db.get_grid(int(grid_id)) if grid_id is not None else None
+        current = next((row for row in (plan or {}).get("alternatives", []) if grid and
+            row.get("symbol") == grid.get("symbol") and row.get("strategy") == grid.get("strategy") and
+            len(row.get("pieces", [])) == 1), None)
+        current_est = (current or {}).get("estimate") or {}
+        meta_id = int(meta_id or result.get("meta_id") or 0)
+        cfg = (self.core.get_goal(meta_id) or {}).get("config_snapshot") or {} if meta_id else {}
+        now = float(self.clock())
+        ledger = self._meta_ledger_rows(meta_id) if meta_id else []
         for name in ("scanner_advisor", "learned"):
-            alternative = choices.get(name) or {}
-            if real_label == "mantener":
-                choices[name] = {"decision": "mantener", "alternative_id": None}
-            elif real_id and alternative.get("alternative_id") == real_id:
-                choices[name] = {**alternative, "decision": real_label}
-            else:
-                choices[name] = {"decision": "mantener", "alternative_id": None}
+            proposed = choices.get(name) or {}
+            candidate = next((row for row in (plan or {}).get("alternatives", [])
+                if row.get("alternative_id") == proposed.get("alternative_id")), None)
+            is_actionable = bool(candidate and grid and proposed.get("alternative_id") and
+                proposed.get("alternative_id") != current.get("alternative_id" if current else ""))
+            desired = ("reajustar" if grid and candidate and candidate.get("symbol") == grid.get("symbol")
+                and candidate.get("strategy") == grid.get("strategy") else "rotar")
+            key = f"{name}:{int(grid_id or 0)}"
+            prior_rows = [row for row in ledger if row.get("event_type") == "META_OPERATOR_COUNTERFACTUAL_STATE"
+                and int(row.get("grid_id") or -1) == int(grid_id or -2)
+                and (row.get("details") or {}).get("policy") == name]
+            prior_details = [(row.get("details") or {}) for row in prior_rows]
+            last_action = next((row.get("action_at") for row in reversed(prior_details)
+                if row.get("action_at") is not None), None)
+            recent_actions = [row for row in prior_details if row.get("action_at") is not None
+                and now - float(row["action_at"]) <= 86400]
+            choice = counterfactual_policy_decision(
+                {"probability": current_est.get("probability_replay", current_est.get("probability", 0)),
+                 "median_progress_pct": current_est.get("median_progress_pct")},
+                ([{"probability": ((candidate or {}).get("learned_probability") if name == "learned" else
+                        (candidate or {}).get("shadow_probability", (candidate or {}).get("estimate", {}).get("probability_replay"))),
+                    "median_progress_pct": ((candidate or {}).get("estimate") or {}).get("median_progress_pct"),
+                    "alternative_id": (candidate or {}).get("alternative_id"),
+                    "alternative_key": self._alternative_key(candidate) if candidate else "",
+                    "destination": (candidate or {}).get("alternative_id"), "action": desired,
+                    "min_probability_delta_pp": cfg.get("rotation_min_probability_delta_pp", 5),
+                    "probability_tie_tolerance_pp": cfg.get("rotation_probability_tie_tolerance_pp", 2),
+                    "min_progress_delta_pct": cfg.get("rotation_min_progress_delta_pct", 10)}]
+                    if is_actionable else []),
+                prior_details, {"opened_at": (self._as_utc(grid.get("created_at")).timestamp()
+                    if grid and self._as_utc(grid.get("created_at")) else None),
+                    "last_action_at": last_action, "actions_24h": len(recent_actions)},
+                required_reviews=int(cfg.get("rotation_persistence_reviews", 2)),
+                cooldown_seconds=float(cfg.get("rotation_cooldown_hours", 1)) * 3600,
+                max_actions_per_24h=int(cfg.get("max_rotations_per_24h", 2)), now=now)
+            choice.update({"decision": choice["action"], "probability": proposed.get("probability"),
+                "alternative_id": choice.get("destination"), "symbol": proposed.get("symbol"),
+                "counterfactual": True})
+            choices[name] = choice
+            if grid_id is not None:
+                self._ledger(meta_id, "META_OPERATOR_COUNTERFACTUAL_STATE",
+                    {"policy": name, "alternative_key": choice.get("alternative_key"),
+                     "material": choice.get("material"), "streak": choice.get("streak"),
+                     "decision": choice["action"], "reason": choice["reason"],
+                     "action_at": now if choice["action"] != "mantener" else None}, grid_id=int(grid_id))
         return choices
 
     def _review_once_locked(self, meta_id):
@@ -2231,7 +2397,7 @@ class MetaOperator:
             self._ledger(meta_id, "META_OPERATOR_NOOP", result)
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "decision": result, "shadow_decision": None, "valuation": value,
-                "decision_choices": {"comparison_version": 1,
+                "decision_choices": {"comparison_version": 2,
                     "real": {"decision": "mantener", "alternative_id": None},
                     "scanner_advisor": {"decision": "mantener", "alternative_id": None},
                     "learned": {"decision": "mantener", "alternative_id": None}}})
@@ -2269,11 +2435,11 @@ class MetaOperator:
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": getattr(self, "_last_review_shadow", None),
             "valuation": value, "touch_decision_id": (plan or {}).get("decision_id"),
-            "decision_choices": {**self._active_review_choices(plan, result),
+                "decision_choices": {**self._active_review_choices(plan, result, meta_id),
                 "real_result": result, "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
                 "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", []),
-                "comparison_version": 1},
+                "comparison_version": 2},
             "touch_alternatives": [{"alternative_id": item.get("alternative_id"),
                 "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
                 for item in (plan or {}).get("alternatives", [])]})
@@ -2284,8 +2450,8 @@ class MetaOperator:
     def _record_review(self, meta_id, result, value, shadow, plan=None):
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": shadow, "valuation": value,
-            "decision_choices": self._active_review_choices(plan, result),
-            "comparison_version": 1})
+            "decision_choices": self._active_review_choices(plan, result, meta_id),
+            "comparison_version": 2})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
 
     def _plan_price_moved(self, plan, goal):
@@ -2340,6 +2506,8 @@ class MetaOperator:
             cfg = json.loads(cfg)
         new_est = alternative.get("estimate") or {}
         old_est = current_alternative.get("estimate") if current_alternative else None
+        if old_est is None:
+            return {"allowed": False, "reason": "no hay estimación comparable de la pieza actual"}
         probability_delta = None
         progress_delta = None
         if old_est is not None:
@@ -2370,15 +2538,9 @@ class MetaOperator:
             "alternative": alternative, "current": current_alternative,
             "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
         required_reviews = max(2, int(cfg.get("rotation_persistence_reviews", 2)))
-        if not material:
-            return {"allowed": False, "reason": "la mejora no alcanza la materialidad de rotación"}
-        if streak < required_reviews:
-            return {"allowed": False, "reason": f"la alternativa debe ganar en {required_reviews} revisiones seguidas ({streak}/{required_reviews})"}
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
         opened_at = self._as_utc(link.get("created_at") or grid.get("created_at"))
         cooldown = timedelta(hours=float(cfg.get("rotation_cooldown_hours", 1.0)))
-        if opened_at is None or now - opened_at < cooldown:
-            return {"allowed": False, "reason": "la pieza aún no cumple el enfriamiento de antigüedad"}
         rotations = []
         for row in rows:
             if row.get("event_type") != "META_OPERATOR_ROTATION":
@@ -2386,15 +2548,35 @@ class MetaOperator:
             stamp = self._as_utc(row.get("ts"))
             if stamp and now - stamp <= timedelta(hours=24):
                 rotations.append(row)
-        if len(rotations) >= int(cfg.get("max_rotations_per_24h", 2)):
-            return {"allowed": False, "reason": "límite de rotaciones de la meta en 24 horas"}
         last_piece_rotation = [self._as_utc(row.get("ts")) for row in rotations
             if int(row.get("grid_id") or -1) == int(grid["id"]) and self._as_utc(row.get("ts"))]
-        if last_piece_rotation and now - max(last_piece_rotation) < cooldown:
-            return {"allowed": False, "reason": "la pieza está en enfriamiento tras una rotación"}
+        # Árbitro puro compartido con las políticas contrafactuales.
+        prior_streak = []
+        for row in reversed(evaluations):
+            details = row.get("details") or {}
+            if details.get("alternative_key") != key or not details.get("material"):
+                break
+            if details.get("review_id") != review_id:
+                prior_streak.append(details)
+        policy = counterfactual_policy_decision(
+            {"probability": (old_est or {}).get("probability_replay", (old_est or {}).get("probability", 0)),
+             "median_progress_pct": (old_est or {}).get("median_progress_pct")},
+            [{"probability": new_est.get("probability_replay", new_est.get("probability", 0)),
+              "median_progress_pct": new_est.get("median_progress_pct"), "alternative_key": key,
+              "destination": alternative.get("alternative_id"), "action": "rotar",
+              "min_probability_delta_pp": cfg.get("rotation_min_probability_delta_pp", 5.0),
+              "probability_tie_tolerance_pp": cfg.get("rotation_probability_tie_tolerance_pp", 2.0),
+              "min_progress_delta_pct": cfg.get("rotation_min_progress_delta_pct", 10.0)}],
+            prior_streak, {"opened_at": opened_at.timestamp() if opened_at else None,
+                "last_action_at": max((stamp.timestamp() for stamp in last_piece_rotation), default=None),
+                "actions_24h": len(rotations)}, required_reviews=required_reviews,
+            cooldown_seconds=cooldown.total_seconds(),
+            max_actions_per_24h=int(cfg.get("max_rotations_per_24h", 2)), now=now.timestamp())
+        if policy["action"] == "mantener":
+            return {"allowed": False, "reason": policy["reason"], "policy": policy}
         return {"allowed": True, "reason": None, "streak": streak,
             "probability_improvement_pp": probability_delta,
-            "progress_improvement_pct": progress_delta}
+            "progress_improvement_pct": progress_delta, "policy": policy}
 
     def _reset_rotation_streaks(self, meta_id, reason):
         try:
@@ -2623,23 +2805,43 @@ class MetaOperator:
         candidate, prob_delta, progress_delta = max(material_candidates,
             key=lambda row: (float(row[0]["estimate"].get("probability") or 0),
                              float(row[0]["estimate"].get("median_progress_pct") or 0)))
-        now = datetime.fromtimestamp(self.clock(), timezone.utc).replace(tzinfo=None)
-        recent = []
-        for row in self.core.ledger(int(goal["id"])):
-            stamp = row.get("ts")
-            if row.get("event_type") != "META_OPERATOR_RECONFIGURE" or stamp is None:
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        recent, evaluations = [], []
+        for row in self._meta_ledger_rows(int(goal["id"])):
+            stamp = self._as_utc(row.get("ts"))
+            if stamp is None or now - stamp > timedelta(hours=24):
                 continue
-            stamp = stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
-            if stamp.replace(tzinfo=None) >= now - timedelta(hours=24):
+            if int(row.get("grid_id") or -1) != int(grid["id"]):
+                continue
+            if row.get("event_type") == "META_OPERATOR_RECONFIGURE":
                 recent.append(row)
-        same_piece = [row for row in recent if int(row.get("grid_id") or -1) == int(grid["id"])]
-        last_stamp = (same_piece[-1]["ts"].replace(tzinfo=timezone.utc)
-                      if same_piece and same_piece[-1]["ts"].tzinfo is None
-                      else same_piece[-1]["ts"] if same_piece else None)
-        cooled = bool(last_stamp and (datetime.fromtimestamp(self.clock(), timezone.utc)
-                                      - last_stamp).total_seconds() < 3600)
-        if len(recent) >= 4 or cooled:
+            elif row.get("event_type") == "META_OPERATOR_RECONFIGURE_EVALUATED":
+                evaluations.append(row.get("details") or {})
+        key = self._alternative_key(candidate)
+        selected = candidate["estimate"]
+        policy = counterfactual_policy_decision(
+            {"probability": old_est.get("probability_replay", old_est.get("probability", 0)),
+             "median_progress_pct": old_est.get("median_progress_pct")},
+            [{"probability": selected.get("probability_replay", selected.get("probability", 0)),
+              "median_progress_pct": selected.get("median_progress_pct"), "alternative_key": key,
+              "destination": candidate.get("alternative_id"), "action": "reajustar",
+              "min_probability_delta_pp": cfg.get("reconfig_min_probability_delta_pp", 5),
+              "probability_tie_tolerance_pp": cfg.get("reconfig_probability_tie_tolerance_pp", 2),
+              "min_progress_delta_pct": cfg.get("reconfig_min_progress_delta_pct", 10)}],
+            evaluations, {"last_action_at": max((stamp.timestamp() for stamp in
+                (self._as_utc(row.get("ts")) for row in recent) if stamp), default=None),
+                "actions_24h": len(recent)}, required_reviews=int(cfg.get("reconfig_persistence_reviews", 2)),
+            cooldown_seconds=float(cfg.get("reconfig_cooldown_hours", 1)) * 3600,
+            max_actions_per_24h=int(cfg.get("max_reconfigurations_per_24h", 4)), now=now.timestamp())
+        self._ledger(goal["id"], "META_OPERATOR_RECONFIGURE_EVALUATED", {
+            "alternative_key": key, "material": policy["material"], "streak": policy["streak"],
+            "decision": policy["action"], "reason": policy["reason"],
+            "probability_improvement_pp": policy["probability_improvement_pp"],
+            "progress_improvement_pct": policy["progress_improvement_pct"]}, grid_id=int(grid["id"]))
+        if policy["action"] != "reajustar":
             return None
+        prob_delta = policy["probability_improvement_pp"]
+        progress_delta = policy["progress_improvement_pct"]
         piece = candidate["pieces"][0]
         reason = ("precio fuera dos revisiones y desplazado mas de un nivel" if outside
                   else "precio a un nivel o menos del piso o techo")
@@ -2676,7 +2878,8 @@ class MetaOperator:
             "old": {"floor": grid["range_low"], "ceiling": grid["range_high"], "n_levels": grid["n_levels"]},
             "new": {"floor": piece["floor"], "ceiling": piece["ceiling"],
                     "n_levels": piece.get("n_levels", 1)},
-            "reason": reason, "estimated_probability_improvement_pp": prob_delta,
+            "reason": reason, "alternative_key": key, "policy": policy,
+            "estimated_probability_improvement_pp": prob_delta,
             "estimated_progress_improvement_pct": progress_delta,
             "alternatives_evaluated": [{"alternative_id": row.get("alternative_id"),
                 "floor": row["pieces"][0].get("floor"), "ceiling": row["pieces"][0].get("ceiling"),
