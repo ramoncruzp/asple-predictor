@@ -47,3 +47,36 @@ Incluye conversión de escala horaria a 24 h en operador e histórico, normaliza
 - Las filas live históricas ya guardadas no se reescriben. Las filas antiguas sin versión se interpretan como v1 y no aportan las señales de volatilidad, ruptura y dirección al entrenamiento.
 - La medida de 1153 muestras live y los valores reportados desde S1 son antecedentes proporcionados por Ramón; no se consultó S1 para esta corrección.
 - No se ejecutó la suite completa ni se modificaron pantallas, rutas de API, política global Smart o grids normales.
+
+## 25. Fase 41b — medición previa y consumidores (antes de producción)
+
+### Tamaño de referencia
+
+Medición en memoria con JSON UTF-8 compacto; no se abrió ninguna base de datos. El caso sintético contiene tres monedas, siete carteras (tres de una pieza, tres de dos y una de tres), recomendaciones completas de Advisor para tres márgenes, comparaciones Smart/Simple, ventanas de replay, señales y resultados. La revisión incluye el plan y alternativas dentro de `decision` y otra copia en `decision_choices.real_result`, como en el formato actual.
+
+| Evento actual | Bytes | KiB | Duplicación identificada |
+|---|---:|---:|---|
+| `META_PLAN_EVALUATED` | 69.995 | 68,4 | 28.283 bytes de `advisor_recommendations` repetidas dentro de las alternativas; Advisor completo también aparece una vez por comparación |
+| `META_OPERATOR_REVIEW_DECISION` | 150.743 | 147,2 | el plan anidado en `decision` ocupa 69.995 bytes; `real_result` vuelve a duplicar resultado, alternativa y plan |
+
+El tamaño es una medición del fixture sintético documentado, no un promedio de producción. Se usa como línea base para comparar la serialización v2.
+
+### Mapa de lecturas de la bitácora
+
+| Lector | Archivo:línea | Datos consultados / compatibilidad requerida |
+|---|---|---|
+| Estado de aprendizaje y comparación | `grid/meta_operator.py:409-435` | Lee eventos de plan/revisión, `decision_choices` y versiones; conservar IDs, elecciones y resultados v1/v2. |
+| Importación de muestras live desde planes históricos | `grid/meta_operator.py:1321-1368` | Lee `META_PLAN_EVALUATED.alternatives`, `decision_id`, piezas, estimación y señales; se mantienen esas claves y su significado. |
+| Construcción de alternativas y recomendaciones | `grid/meta_operator.py:993-1077` | Cada cartera adjunta `advisor_recommendations`; la respuesta de análisis debe continuar completa. |
+| Persistencia del evento del plan | `grid/meta_operator.py:1206-1218` | Escribe alternativas, decisiones, Advisor comparado, combinaciones, sombra, selección y bandas sigma. |
+| Selección de elecciones de revisión | `grid/meta_operator.py:2361-2429` | Usa alternativas del plan para calcular real, Scanner + Advisor y aprendida. No depende del evento ya persistido. |
+| Escritura de revisión | `grid/meta_operator.py:2432-2498` | Actualmente persiste decisión, valoración, sombra, `decision_choices.real_result` y toque; v2 debe conservar la elección referenciada sin duplicar el plan. |
+| Cobertura y datos recientes de Inteligencia | `api/routes/intelligence.py:103-175`, `api/routes/intelligence.py:389-393` | Cuenta señales y devuelve `decision_choices` y el detalle de eventos; mantener compatibilidad con eventos antiguos y exponer claves v2. |
+| Resultados de elecciones contra etiquetas | `api/routes/intelligence.py:316-330` | Cruza `decision_choices` con etiquetas usando `alternative_id`; debe seguir resolviendo versiones previas y nuevas. |
+| Diagnóstico de omisiones de toque | `scripts/diagnostico_senales_meta.py:91-100`, `scripts/diagnostico_senales_meta.py:145-157` | Lee alternativas y `signals_omitted`; ambas se conservan en eventos v2. |
+| Bitácora en Metas | `frontend/metas.js:402-430` | Renderiza tipo, símbolo/capital, pieza, decisión, motivo y sombra; no despliega alternativas completas. |
+| Decisiones en Inteligencia | `frontend/intelligence.js` (bloque de decisiones y visor JSON) | Muestra elecciones y permite expandir el objeto `details`; el plan completo no es presentado como pantalla de alternativas ahí. |
+
+No se encontró un renderizador de la lista completa de alternativas de la bitácora: el análisis HTTP continúa entregando el plan completo al operador/UI, mientras que el ledger genérico expone el JSON expandible. La v2 evita cambiar los campos visibles habituales y mantiene los campos que usa aprendizaje y diagnóstico.
+
+Estado de esta parte: revisión y medición documentadas; todavía no se ha cambiado código de producción.

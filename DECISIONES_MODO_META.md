@@ -119,6 +119,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-7B | Inteligencia legible, aciertos en sombra y defectos de Metas/Inteligencia | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 | 41a | Corrección directa de señales Meta, trazabilidad y diagnóstico | Implementada y verificada offline; commit por partes, sin despliegue |
+| 41b | Bitácora compacta v2 para planes y decisiones, recomendaciones guardadas una vez y decisiones ligadas por ID; lectores compatibles con v1 | En curso; medición sintética e inventario de consumidores registrados antes de modificar producción |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
