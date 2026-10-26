@@ -55,3 +55,11 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - El API limita a 10.000 filas la muestra de aprendizaje usada para estadísticas descriptivas; los totales por perfil/origen/moneda y los conteos de exclusiones se agregan en SQL.
 - La comparación activa de 40d-4A sigue pendiente de evaluar el contrafactual completo de los frenos de materialidad/persistencia/cooldown para candidatos que la política real rechazó. La ordenación del plan y la equivalencia de `mantener` sí están cubiertas.
 - Listo para encender: el medidor usa la última versión guardada por perfil, pero la pantalla no propone activar automáticamente el interruptor.
+
+## 40d-5
+
+- Sin discrepancia en el cálculo causal: el backfill ya usaba `point_in_time_signals` y persistía la tasa bruta de `touch_stats`; se refactorizó esa rutina a `causal_touch_buy_to_sell` y ambos caminos usan ahora la normalización `2 × sell_rate − 1`. No se marcaron muestras para recálculo porque las existentes con el campo ya corresponden al mismo método.
+- Las muestras antiguas sin `touch_buy_to_sell` permanecen guardadas, neutrales y ausentes de la máscara de presencia; su conteo efectivo para esa señal es cero.
+- Límite heredado de 40d-4B: no hay deciles de calibración almacenados. Inteligencia presenta la nueva señal en cobertura, regresión y tasas de éxito por grupo alto/bajo, pero no puede presentar deciles de calibración por señal sin persistencia adicional.
+- No se consultó la BD productiva para medir cuántas filas históricas incluyen la señal; la verificación fue con pruebas locales y los caminos de código.
+- Ajuste del harness de UI: la prueba de reajuste reciente asumía que el contenedor ya estaba en el DOM. Se espera explícitamente el selector y se conserva la misma aserción de texto; la corrida enfocada final pasa.

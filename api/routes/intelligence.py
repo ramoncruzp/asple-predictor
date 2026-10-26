@@ -22,6 +22,7 @@ def _json(value, default=None):
 
 
 def _ready(weight_rows):
+    from grid.meta_learning import DEFAULT_SIGNAL_WEIGHTS
     rows = list(weight_rows)
     result = {}
     for profile in ("RAPIDO", "PRUDENTE"):
@@ -32,7 +33,8 @@ def _ready(weight_rows):
         conditions = {
             "muestra": best >= 30,
             "significancia_y_cambio": any(float(v.get("p_value_holm") or 1) < .05
-                and abs(float(v.get("weight", .25)) - .25) > 1e-9 for v in signals.values()),
+                and abs(float(v.get("weight", DEFAULT_SIGNAL_WEIGHTS.get(name, .25))) -
+                    DEFAULT_SIGNAL_WEIGHTS.get(name, .25)) > 1e-9 for name, v in signals.items()),
             "validacion": int(summary.get("validation_effective") or 0) >= 5,
             "mejora": bool(summary.get("improves")) and _metrics_improved(summary),
         }
@@ -44,7 +46,7 @@ def _ready(weight_rows):
             status, label = "amarillo", "Hay datos, sin señal útil todavía"
         result[profile] = {"status": status, "label": label, "best_effective_samples": best,
             "remaining": max(0, 30 - best), "conditions": conditions,
-            "signals": [{"name": name, "weight": detail.get("weight", .25),
+            "signals": [{"name": name, "weight": detail.get("weight", DEFAULT_SIGNAL_WEIGHTS.get(name, .25)),
                 "effective_samples": detail.get("effective_samples", 0)} for name, detail in signals.items()]}
     return result
 
@@ -145,7 +147,10 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     replay_bins = {kind: dict(Counter("sin base" if row[index] is None else
         f"{min(9, int(float(row[index])*10)) * 10}–{min(9, int(float(row[index])*10)) * 10 + 10}%"
         for row in sample_rows)) for kind, index in (("raw", 5), ("suavizada", 6))}
-    signal_stats = {name: {"observations": count} for name, count in observation_counts.items()}
+    from grid.meta_learning import LEARNING_SIGNALS
+    signal_stats = {name: {"observations": observation_counts.get(name, 0)} for name in LEARNING_SIGNALS}
+    for name, count in observation_counts.items():
+        signal_stats.setdefault(name, {"observations": count})
     all_signals = Counter()
     feature_values = {}
     try:

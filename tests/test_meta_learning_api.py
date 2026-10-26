@@ -28,9 +28,10 @@ def test_effective_weights_choose_live_then_historical_then_prior(tmp_path):
     now = datetime.now(timezone.utc)
     with db.engine.begin() as conn:
         for source, weights, signal_samples in (
-            ('live', {'volatility': .4, 'direction': .3}, {'volatility': 30, 'direction': 10}),
-            ('historical_reconstructed', {'volatility': .6, 'direction': -.2},
-             {'volatility': 40, 'direction': 35})):
+            ('live', {'volatility': .4, 'direction': .3, 'touch_buy_to_sell': .4},
+             {'volatility': 30, 'direction': 10, 'touch_buy_to_sell': 10}),
+            ('historical_reconstructed', {'volatility': .6, 'direction': -.2, 'touch_buy_to_sell': .2},
+             {'volatility': 40, 'direction': 35, 'touch_buy_to_sell': 35})):
             conn.execute(db.meta_learning_weight_versions.insert().values(
                 created_at=now, profile='RAPIDO', source_kind=source, status='updated',
                 weights_json=json.dumps(weights), summary_json=json.dumps({'signals': {
@@ -40,6 +41,7 @@ def test_effective_weights_choose_live_then_historical_then_prior(tmp_path):
     assert weights['volatility'] == .4 and sources['volatility'] == 'live'
     assert weights['direction'] == -.2 and sources['direction'] == 'historical_reconstructed'
     assert weights['scanner'] == .25 and sources['scanner'] == 'sin evidencia'
+    assert weights['touch_buy_to_sell'] == .2 and sources['touch_buy_to_sell'] == 'historical_reconstructed'
 
 
 def test_switch_requires_confirmation_records_actor_and_does_not_auto_enable(tmp_path):
@@ -74,7 +76,7 @@ def test_learning_api_requires_token_and_switch_endpoint_confirmation(tmp_path):
 
 
 def test_signal_contribution_is_capped_even_with_learned_weights():
-    weights = {name: 1.0 for name in ('volatility', 'break_prob', 'direction', 'scanner', 'advisor')}
+    weights = {name: 1.0 for name in ('volatility', 'break_prob', 'direction', 'scanner', 'advisor', 'touch_buy_to_sell')}
     signals = [{'name': name, 'normalized': 1.0} for name in weights]
     probability = signal_adjusted_probability(.1, signals, weights, max_abs_logit=1.0)
     assert probability < .24

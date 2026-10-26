@@ -128,3 +128,29 @@ La comparación solo crece a medida que maduran etiquetas y depende de que haya 
 - La base de la aplicación no persiste velas. B1 lo informa; no se leen archivos de `data/` ni se descargan velas. La caché muestra entradas y aciertos registrados en la última evaluación, pero el contador de simulaciones nuevas y los deciles de calibración no están persistidos y se muestran como no disponibles.
 - Pruebas: `tests/test_intelligence_api.py:12-` (token, agregados, solo lectura y medidor gris/amarillo/verde, con cada freno) y `tests/ui/test_intelligence_ui.py:7-` (navegación, lectura y actualización manual). Corrida enfocada: `ASPLE_OFFLINE=1 python -m pytest tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py tests/test_meta_learning_api.py tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py -q --basetemp <carpeta nueva en TEMP>`: **108 passed, 10 warnings, 0 failed, 4,81 s**, código 0.
 - `node --check` pasó para `frontend/app.js`, `frontend/metas.js` y `frontend/intelligence.js`. Sin suite completa, S1, Testnet, `.env` ni BD real.
+
+## 40d-5 - Señal de toque compra→venta en el aprendizaje
+
+### Implementado
+
+- `grid/meta_learning.py:14-17` agrega `touch_buy_to_sell` como sexta variable y define pesos base: 0,25 para las cinco anteriores y 0 para toque.
+- `grid/meta_learning.py:173-225` lee el `sell_rate` histórico guardado en `point_in_time_signals`, lo normaliza con `2 × tasa − 1` a [-1, 1] y combina piezas por capital asignado. La extracción en vivo usa el mismo campo `normalized` y la misma máscara de presencia; una fila antigua sin la señal no suma muestra.
+- `grid/meta_learning.py:388-400,470-485` hace que `point_in_time_signals` y el operador vivo llamen a `causal_touch_buy_to_sell`: `touch_stats` sobre hasta 30 días de velas con timestamp no posterior al corte y la geometría compra/venta de la pieza. El valor bruto persistido sigue siendo la tasa de venta; la normalización se aplica igual al extraer muestras históricas y vivas.
+- `grid/meta_operator.py:793,929-934,2002-2018` calcula la señal viva desde la caché de velas usada por el análisis, agrega las seis señales de cartera ponderadas por capital y conserva por separado `touch_signal`/`meta_signal_observations` de 40b-5. No se usa el puntaje retrospectivo de 40b-5 para entrenar.
+- `grid/meta_learning.py:239-345` incorpora seis columnas a la regresión, amplía Holm a seis contrastes y regulariza toque hacia 0 (las otras cinco variables hacia 0,25). Se mantienen el mínimo de 30, errores agrupados, límite de 0,05 por versión y tope total del logit de ±1.
+- `grid/meta_operator.py:99-103,210-250,367-390` usa cero como prior de toque en ejecución y medidor. Con el interruptor apagado, la nueva señal no altera la probabilidad; encendido, solo aplica un peso que la resolución acepta con muestra suficiente.
+- `api/routes/intelligence.py:25-50,150-185`, `frontend/metas.js:543-544,565-579,615-621` y `frontend/intelligence.js:14-16,22-29` muestran la fila traducida en Metas e Inteligencia. Inteligencia incluye toque en cobertura, coeficientes de regresión y tasas de resultado por valor alto/bajo; el medidor reconoce su base 0. No se borraron versiones anteriores y no se necesitó migración.
+- La reconstrucción histórica previa ya guardaba `sell_rate` y procedencia causal desde `point_in_time_signals`, con la misma ventana y geometría. No se marcaron esas filas para recálculo ni se borraron. Las muestras previas sin la señal quedan neutrales al construir la matriz y no cuentan en el mínimo de toque.
+
+### Pruebas y verificación
+
+- Pruebas nuevas: `tests/test_meta_learning.py:87-106,310-315,330-353`; `tests/test_meta_operator.py:602-640`; `tests/test_meta_learning_api.py:26-44,78-81`; `tests/test_intelligence_api.py:38-62`; UI: `tests/ui/test_metas_ui.py:286,340-342`, `tests/ui/test_intelligence_ui.py:20-21`.
+- Archivos ejecutados: `tests/test_meta_learning.py`, `tests/test_meta_operator.py`, `tests/test_meta_learning_api.py`, `tests/test_intelligence_api.py`, `tests/ui/test_metas_ui.py`, `tests/ui/test_intelligence_ui.py`.
+- Corrida enfocada final, `ASPLE_OFFLINE=1`, con carpeta temporal nueva bajo `%TEMP%`: **99 passed, 12 warnings, 40,45 s**, código 0.
+- Corrida inicial del mismo conjunto: **92 passed, 3 failed** por `LEARNING_SIGNALS` no importada dentro de `_build_plan`; se añadió el import local y `tests/test_meta_operator.py` pasó 53/53 en comprobación intermedia. Tras la última corrección al peso base cuando el switch está apagado, ese archivo pasó **54 passed, 4 warnings, 8,10 s**. Una corrida posterior tuvo una carrera de carga en `tests/ui/test_metas_ui.py:340-342` (selector de reajustes consultado antes de aparecer); se esperó explícitamente el contenedor, el caso aislado pasó y la corrida enfocada conjunta final quedó verde: **99 passed, 12 warnings, 40,45 s**.
+- `node --check frontend/metas.js` y `node --check frontend/intelligence.js`: pasaron.
+- No se ejecutó la suite completa. No se usaron S1, Testnet, `.env` ni la base real; no hubo despliegue ni red.
+
+### Límite conocido
+
+La pantalla Inteligencia no tiene deciles de calibración persistidos (ya documentado en 40d-4B). Esta fase muestra toque en cobertura, regresión y tasas de acierto alta/baja disponibles; no inventa deciles ni escribe una migración nueva.

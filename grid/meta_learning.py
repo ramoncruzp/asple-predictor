@@ -11,7 +11,10 @@ import numpy as np
 HOURS_72 = 72
 BACKFILL_DAYS = 180
 REPLAY_METHOD_VERSION = "rolling_7d_v2"
-LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor")
+LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor",
+                    "touch_buy_to_sell")
+DEFAULT_SIGNAL_WEIGHTS = {name: .25 for name in LEARNING_SIGNALS}
+DEFAULT_SIGNAL_WEIGHTS["touch_buy_to_sell"] = 0.0
 REPLAY_CACHE_STEP = 0.0025
 
 
@@ -182,7 +185,7 @@ def extract_learning_features(signals, weights_by_symbol=None):
                 values[name] = float(np.clip(value, -1.0, 1.0))
                 present.add(name)
     historical = signals.get("point_in_time_by_symbol")
-    volatility_values, direction_values = [], []
+    volatility_values, direction_values, touch_values = [], [], []
     if isinstance(historical, dict):
         weights_by_symbol = weights_by_symbol or signals.get("point_in_time_weights") or {}
         for symbol, snapshot in historical.items():
@@ -190,6 +193,9 @@ def extract_learning_features(signals, weights_by_symbol=None):
             if not piece_weight:
                 continue
             source = (snapshot or {}).get("signals", {})
+            touch_rate = source.get("touch_buy_to_sell")
+            if touch_rate is not None and np.isfinite(float(touch_rate)):
+                touch_values.append((float(np.clip(2 * float(touch_rate) - 1, -1, 1)), piece_weight))
             realized = source.get("realized_volatility_24h")
             forecasts = [float(row["sigma"]) for row in source.get("volatility_forecasts", [])
                 if row.get("sigma") is not None and float(row["sigma"]) > 0]
@@ -212,14 +218,18 @@ def extract_learning_features(signals, weights_by_symbol=None):
         values["direction"] = float(np.average([v for v, _ in direction_values],
             weights=[w for _, w in direction_values]))
         present.add("direction")
+    if touch_values:
+        values["touch_buy_to_sell"] = float(np.average([v for v, _ in touch_values],
+            weights=[w for _, w in touch_values]))
+        present.add("touch_buy_to_sell")
     return values, present
 
 
-def holm_adjust(p_values):
+def holm_adjust(p_values, *, family_size=None):
     """Valores p ajustados por Holm, conservando las claves originales."""
     ordered = sorted((float(p), key) for key, p in p_values.items())
     adjusted, running = {}, 0.0
-    total = len(ordered)
+    total = max(len(ordered), int(family_size or len(ordered)))
     for index, (p_value, key) in enumerate(ordered):
         running = max(running, min(1.0, p_value * (total - index)))
         adjusted[key] = running
@@ -234,7 +244,8 @@ def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
     from scipy.special import expit, logit
     from scipy.stats import norm
 
-    current = {key: float((current_weights or {}).get(key, .25)) for key in LEARNING_SIGNALS}
+    current = {key: float((current_weights or {}).get(key, DEFAULT_SIGNAL_WEIGHTS[key]))
+        for key in LEARNING_SIGNALS}
     parsed = []
     for row in rows:
         base = row.get("base_probability_smoothed")
@@ -250,8 +261,13 @@ def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
         parsed.append({**row, "base": float(np.clip(base, 1e-6, 1 - 1e-6)),
             "label": int(bool(label["reached"])), "features": feature_values,
             "present": present})
+    parsed_counts = {name: sum(name in item["present"] for item in parsed)
+        for name in LEARNING_SIGNALS}
     if len(parsed) < 2:
-        return {"status": "insufficient", "weights": current, "signals": {},
+        return {"status": "insufficient", "weights": current,
+                "signals": {name: {"weight": current[name], "candidate": current[name],
+                    "effective_samples": parsed_counts[name], "reason": "sin evidencia suficiente"}
+                    for name in LEARNING_SIGNALS},
                 "reason": "sin base suficiente"}
     names = list(LEARNING_SIGNALS)
     X = np.array([[item["features"].get(name, 0.0) for name in names] for item in parsed])
@@ -278,7 +294,8 @@ def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
         probs = expit(logits)
         loss = -np.sum(y * np.log(np.maximum(probs, 1e-12)) +
             (1-y) * np.log(np.maximum(1-probs, 1e-12)))
-        return loss + .5 * regularization * float(np.sum((beta - .25) ** 2))
+        priors = np.array([DEFAULT_SIGNAL_WEIGHTS[active_names[i]] for i in range(len(active_names))])
+        return loss + .5 * regularization * float(np.sum((beta - priors) ** 2))
     result = minimize(objective, initial, method="L-BFGS-B",
         bounds=[(-max_abs_weight, max_abs_weight)] * len(active))
     candidate = fixed.copy()
@@ -310,7 +327,7 @@ def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
     se = np.sqrt(np.maximum(0.0, np.diag(covariance)))
     p_values = {name: float(2 * norm.sf(abs(result.x[i]) / max(se[i], 1e-12)))
         for i, name in enumerate(active_names)}
-    corrected = holm_adjust(p_values)
+    corrected = holm_adjust(p_values, family_size=len(names))
     signals = {}
     for j, name in enumerate(names):
         if j not in active:
@@ -442,22 +459,35 @@ def point_in_time_signals(*, at, candles, buy_price=None, sell_price=None,
 
     # No se reutiliza la tasa de toques retrospectiva de 40b-5: se deriva solo
     # del tramo anterior al corte y la geometría relativa de la alternativa.
-    if end and buy_price is not None and sell_price is not None and float(buy_price) < float(sell_price):
-        touch_start = int(np.searchsorted(times, at_s - 30 * 86400, side="left"))
-        from grid.sim.data import CandleData
-        from grid.sim.touch_stats import touch_stats
-        touch_sample = CandleData(timestamp=times[touch_start:end],
-            open=np.asarray(candles.open, dtype=float)[touch_start:end],
-            high=highs[touch_start:end], low=lows[touch_start:end],
-            close=closes[touch_start:end], gaps=0)
-        stats = touch_stats(touch_sample, float(buy_price), float(sell_price),
-                            min(24 * 12, max(1, len(touch_sample.timestamp) - 1)))
-        if stats.get("sell_rate") is not None:
-            result["signals"]["touch_buy_to_sell"] = float(stats["sell_rate"])
-            result["provenance"]["touch_buy_to_sell"] = {
-                "source": "velas previas", "lookback_days": 30,
-                "through_ts": int(prior_times[-1]), "stats": stats}
+    touch = causal_touch_buy_to_sell(at=at_s, candles=candles,
+        buy_price=buy_price, sell_price=sell_price)
+    if touch["sell_rate"] is not None:
+        result["signals"]["touch_buy_to_sell"] = touch["sell_rate"]
+        result["provenance"]["touch_buy_to_sell"] = touch["provenance"]
     return result
+
+
+def causal_touch_buy_to_sell(*, at, candles, buy_price, sell_price):
+    """Tasa compra→venta sobre 30 días previos, sin velas posteriores al corte."""
+    at_s = _utc_seconds(at)
+    times = np.asarray(candles.timestamp, dtype=np.int64)
+    end = int(np.searchsorted(times, at_s, side="right"))
+    if not end or buy_price is None or sell_price is None or float(buy_price) >= float(sell_price):
+        return {"sell_rate": None, "provenance": {"source": "velas previas",
+            "lookback_days": 30, "through_ts": None, "stats": None}}
+    touch_start = int(np.searchsorted(times, at_s - 30 * 86400, side="left"))
+    from grid.sim.data import CandleData
+    from grid.sim.touch_stats import touch_stats
+    sample = CandleData(timestamp=times[touch_start:end],
+        open=np.asarray(candles.open, dtype=float)[touch_start:end],
+        high=np.asarray(candles.high, dtype=float)[touch_start:end],
+        low=np.asarray(candles.low, dtype=float)[touch_start:end],
+        close=np.asarray(candles.close, dtype=float)[touch_start:end], gaps=0)
+    stats = touch_stats(sample, float(buy_price), float(sell_price),
+        min(24 * 12, max(1, len(sample.timestamp) - 1)))
+    return {"sell_rate": stats.get("sell_rate"), "provenance": {
+        "source": "velas previas", "lookback_days": 30,
+        "through_ts": int(times[end - 1]), "stats": stats}}
 
 
 def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_by_symbol,

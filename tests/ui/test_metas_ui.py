@@ -283,6 +283,7 @@ def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):
     assert page.locator("[data-learning-switch]").count() == 0
     assert page.locator("[data-learning-actor]").count() == 0
     assert page.locator("[data-learning-profile='RAPIDO']").inner_text().count("0,25") >= 1
+    assert "Toque compra→venta" in page.locator("[data-learning-profile='RAPIDO']").inner_text()
 
 
 def test_learning_switches_live_in_lab_and_require_actor(metas_page):
@@ -337,7 +338,8 @@ def test_active_meta_shows_recent_reconfiguration_in_plain_spanish(metas_page):
         "estimated_progress_improvement_pct": 12}, grid_id=grid["id"])
     page.goto(f"{server.url}/#metas")
     recent = page.locator("[data-recent-adjustments]")
-    page.wait_for_function("document.querySelector('[data-recent-adjustments]').innerText.includes('precio cerca del techo')")
+    page.wait_for_selector("[data-recent-adjustments]")
+    page.wait_for_function("() => document.querySelector('[data-recent-adjustments]')?.innerText.includes('precio cerca del techo')")
     assert "Pieza" in recent.inner_text()
     assert "Mejora estimada" in recent.inner_text()
 

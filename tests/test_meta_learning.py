@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from database.db_manager import DBManager
 from grid.meta_learning import (
+    causal_touch_buy_to_sell,
     causal_replay_probability,
     effective_sample_rows,
     fit_signal_weights,
@@ -81,6 +82,29 @@ def test_point_in_time_reconstruction_ignores_future_candles_forecasts_and_predi
     again = point_in_time_signals(at=at, candles=changed, buy_price=99,
         sell_price=101, volatility_forecasts=forecasts, direction_predictions=predictions)
     assert again == snapshot
+
+
+def test_touch_learning_uses_same_causal_rate_and_normalization_live_and_historical():
+    timestamps = np.arange(0, 40 * 24 * 12 * 300, 300, dtype=np.int64)
+    lows = np.full(len(timestamps), 100.0)
+    highs = np.full(len(timestamps), 100.2)
+    lows[10::100] = 98.0
+    highs[20::100] = 102.0
+    candles = _candles(timestamps, lows=lows, highs=highs)
+    cut = int(timestamps[-10])
+    live = causal_touch_buy_to_sell(at=cut, candles=candles, buy_price=99, sell_price=101)
+    snapshot = point_in_time_signals(at=cut, candles=candles, buy_price=99, sell_price=101)
+    assert live["sell_rate"] == snapshot["signals"]["touch_buy_to_sell"]
+    historical_features, historical_present = extract_learning_features({"point_in_time_by_symbol": {
+        "XRPUSDT": snapshot}, "point_in_time_weights": {"XRPUSDT": 100}})
+    live_features, live_present = extract_learning_features({"signals_used": [{
+        "name": "touch_buy_to_sell", "normalized": 2 * live["sell_rate"] - 1}]})
+    assert historical_features["touch_buy_to_sell"] == pytest.approx(live_features["touch_buy_to_sell"])
+    assert "touch_buy_to_sell" in historical_present & live_present
+    changed = _candles(timestamps, lows=np.where(timestamps > cut, 1, lows),
+        highs=np.where(timestamps > cut, 10000, highs))
+    assert causal_touch_buy_to_sell(at=cut, candles=changed, buy_price=99,
+        sell_price=101)["sell_rate"] == live["sell_rate"]
 
 
 def test_synthetic_forward_replay_labels_known_bot_sale_at_72h():
@@ -283,6 +307,15 @@ def test_holm_correction_is_monotonic_and_controls_familywise_threshold():
         "c": pytest.approx(.06)}
 
 
+def test_touch_is_sixth_holm_family_member_with_zero_prior():
+    from grid.meta_learning import DEFAULT_SIGNAL_WEIGHTS, LEARNING_SIGNALS
+    assert len(LEARNING_SIGNALS) == 6
+    assert DEFAULT_SIGNAL_WEIGHTS["touch_buy_to_sell"] == 0
+    adjusted = holm_adjust({name: .01 for name in LEARNING_SIGNALS})
+    assert len(adjusted) == 6 and adjusted["touch_buy_to_sell"] == pytest.approx(.06)
+    assert holm_adjust({"volatility": .01}, family_size=6)["volatility"] == pytest.approx(.06)
+
+
 def test_historical_features_rebuild_only_available_normalized_signals():
     values, present = extract_learning_features({"point_in_time_by_symbol": {
         "XRPUSDT": {"signals": {"realized_volatility_24h": .01,
@@ -309,8 +342,16 @@ def test_absent_signal_stays_at_prior_and_reported_without_evidence():
     assert result["signals"]["scanner"]["weight"] == .25
     assert result["signals"]["scanner"]["reason"] == "sin evidencia suficiente"
     assert result["signals"]["scanner"]["effective_samples"] == 0
-    assert result["signals"]["volatility"]["effective_samples"] == 45
-    assert result["improves"] is False
+    assert result["signals"]["touch_buy_to_sell"]["weight"] == 0
+    assert result["signals"]["touch_buy_to_sell"]["effective_samples"] == 0
+
+
+def test_insufficient_base_still_reports_all_six_signals():
+    result = fit_signal_weights([{"sample_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        "symbol": "XRPUSDT", "base_probability": None, "signals": {}}])
+    assert len(result["signals"]) == 6
+    assert result["signals"]["touch_buy_to_sell"]["weight"] == 0
+    assert result["signals"]["volatility"]["effective_samples"] == 0
     assert result["weights"]["volatility"] == .25
 
 

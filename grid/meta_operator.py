@@ -96,8 +96,9 @@ def actual_close_reallocation_allowed(expected_gain_usdt, close_result, reopen_f
 
 def signal_adjusted_probability(replay_probability, signals, weights, max_abs_logit=1.0):
     """logit(p_meta)=logit(p_replay)+sum(peso_i*señal_i normalizada)."""
+    from grid.meta_learning import DEFAULT_SIGNAL_WEIGHTS
     p0 = max(.01, min(.99, float(replay_probability)))
-    evidence = sum(float(weights.get(row["name"], 0.25)) * float(row["normalized"])
+    evidence = sum(float(weights.get(row["name"], DEFAULT_SIGNAL_WEIGHTS.get(row["name"], .25))) * float(row["normalized"])
                    for row in signals)
     cap = max(0.0, float(max_abs_logit))
     evidence = max(-cap, min(cap, evidence))
@@ -206,7 +207,7 @@ class MetaOperator:
     def _effective_learned_weights(self, profile):
         """Resuelve por señal: live suficiente, luego histórico aceptado, luego prior."""
         from sqlalchemy import select
-        from grid.meta_learning import LEARNING_SIGNALS
+        from grid.meta_learning import LEARNING_SIGNALS, DEFAULT_SIGNAL_WEIGHTS
         with self.db.engine.connect() as conn:
             versions = conn.execute(select(self.db.meta_learning_weight_versions).where(
                 self.db.meta_learning_weight_versions.c.profile == str(profile).upper()).order_by(
@@ -233,7 +234,8 @@ class MetaOperator:
                     chosen = (historical, item, "historical_reconstructed")
             if chosen:
                 version, item, source = chosen
-                weights[signal] = float(json.loads(version["weights_json"] or "{}").get(signal, .25))
+                weights[signal] = float(json.loads(version["weights_json"] or "{}").get(
+                    signal, DEFAULT_SIGNAL_WEIGHTS[signal]))
                 sources[signal] = source
                 details[signal] = {**item, "version_id": int(version["id"])}
             else:
@@ -243,7 +245,7 @@ class MetaOperator:
                     if candidate_detail:
                         latest_signal = candidate_detail
                         break
-                weights[signal], sources[signal] = .25, "sin evidencia"
+                weights[signal], sources[signal] = DEFAULT_SIGNAL_WEIGHTS[signal], "sin evidencia"
                 details[signal] = {**latest_signal, "effective_samples": max(
                     [int(((json.loads(row["summary_json"] or "{}").get("signals") or {}).get(signal, {})).get("effective_samples") or 0)
                      for row in versions], default=0),
@@ -365,7 +367,8 @@ class MetaOperator:
                     metric["log_loss"] /= metric["n"]
                     metric["brier"] /= metric["n"]
         enabled = bool(config.get("use_learned_weights", False))
-        signals = {name: {"current_weight": weights[name] if enabled else .25, "learned_weight": weights[name],
+        from grid.meta_learning import DEFAULT_SIGNAL_WEIGHTS
+        signals = {name: {"current_weight": weights[name] if enabled else DEFAULT_SIGNAL_WEIGHTS[name], "learned_weight": weights[name],
             "source": sources[name], "effective_samples": details[name].get("effective_samples", 0),
             "p_value_holm": details[name].get("p_value_holm"),
             "reason": details[name].get("reason", "peso aceptado"),
@@ -379,8 +382,9 @@ class MetaOperator:
         readiness_conditions = {
             "muestra": best_effective >= 30,
             "significancia_y_cambio": any(float(item.get("p_value_holm") or 1) < .05
-                and abs(float(item.get("weight", .25)) - .25) > 1e-9
-                for item in summary_signals.values()),
+                and abs(float(item.get("weight", DEFAULT_SIGNAL_WEIGHTS.get(name, .25))) -
+                    DEFAULT_SIGNAL_WEIGHTS.get(name, .25)) > 1e-9
+                for name, item in summary_signals.items()),
             "validacion": int(latest_summary.get("validation_effective") or 0) >= 5,
             "mejora": bool(latest_summary.get("improves")) and bool(
                 validation.get("model") and baseline.get("baseline") and
@@ -787,6 +791,7 @@ class MetaOperator:
         return alternatives, [{"symbol": symbol, **item} for item in advisor_rows]
 
     def _build_plan(self, goal, *, record=True):
+        from grid.meta_learning import LEARNING_SIGNALS
         timing_started = time.perf_counter()
         decision_id = uuid.uuid4().hex
         self._analysis_timing = {"advisor_s": 0.0, "replay_s": 0.0,
@@ -824,6 +829,9 @@ class MetaOperator:
             "learned_weight_version_ids": learned_versions})
         if use_learned:
             cfg["signal_weights"] = learned_weights
+        else:
+            cfg["signal_weights"] = dict(scanner_advisor_weights)
+            cfg["signal_weights"]["touch_buy_to_sell"] = 0.0
         sigma_cfg = cfg.get("sigma_quantiles") or [cfg.get("sigma_q33", 1/3), cfg.get("sigma_q67", 2/3)]
         q33, q67 = (np.quantile(sigmas, sigma_cfg).tolist() if len(sigmas) >= 3 else (None, None))
         prepared = []
@@ -918,7 +926,7 @@ class MetaOperator:
                     if not combined_rows:
                         continue
                     signals = []
-                    for name in ("volatility", "break_prob", "direction", "scanner", "advisor"):
+                    for name in LEARNING_SIGNALS:
                         values = [(float(item["pieces"][0]["capital_usdt"]), signal)
                             for item in combination for signal in item.get("signals_used", [])
                             if signal["name"] == name]
@@ -1343,8 +1351,8 @@ class MetaOperator:
     def _train_learning_weights(self, samples):
         """Ajusta versiones en sombra; no modifica pesos usados por el operador."""
         from sqlalchemy import select
-        from grid.meta_learning import (effective_sample_rows, fit_signal_weights,
-            temporal_learning_split, LEARNING_SIGNALS)
+        from grid.meta_learning import (effective_sample_rows, extract_learning_features,
+            fit_signal_weights, temporal_learning_split, LEARNING_SIGNALS)
         with self.db.engine.connect() as conn:
             label_rows = conn.execute(select(self.db.meta_learning_labels)).mappings().all()
             setting_rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
@@ -1387,13 +1395,16 @@ class MetaOperator:
                     for row in rows), 20))
                 training = effective_sample_rows(training, horizon_days=3)
                 validation = effective_sample_rows(validation, horizon_days=days)
-                current = {key: float((latest.get((profile, source_kind)) or {}).get(key, .25))
+                from grid.meta_learning import DEFAULT_SIGNAL_WEIGHTS
+                current = {key: float((latest.get((profile, source_kind)) or {}).get(
+                    key, DEFAULT_SIGNAL_WEIGHTS[key]))
                     for key in LEARNING_SIGNALS}
                 if (len(training) < int(cfg.get("learning_min_effective_samples", 30))
                         or len(validation) < 5):
                     result = {"status": "insufficient", "weights": current,
                         "signals": {key: {"weight": current[key], "reason": "sin evidencia suficiente",
-                            "effective_samples": sum(1 for row in training if key in row["signals"])}
+                            "effective_samples": sum(1 for row in training if key in
+                                extract_learning_features(row["signals"], row.get("feature_weights"))[1])}
                             for key in LEARNING_SIGNALS},
                         "reason": "sin entrenamiento y validación temporal suficientes",
                         "training_effective": len(training), "validation_effective": len(validation)}
@@ -1987,6 +1998,24 @@ class MetaOperator:
                             "normalized": max(-1.0, min(1.0, float(advisor_value) / 2.0))})
         else:
             omitted.append({"name": "advisor", "reason": "recomendación sin margen neto"})
+        try:
+            from grid.meta_learning import causal_touch_buy_to_sell
+            candle_key = (row["symbol"], self.clock() // 86400)
+            candles = self._candles_cache.get(candle_key)
+            piece = (alternative.get("pieces") or [{}])[0]
+            touch = (causal_touch_buy_to_sell(at=self.clock(), candles=candles,
+                buy_price=piece.get("floor", low), sell_price=piece.get("ceiling", high))
+                if candles is not None else {"sell_rate": None})
+            rate = touch.get("sell_rate")
+            if rate is not None:
+                signals.append({"name": "touch_buy_to_sell", "value": float(rate),
+                    "normalized": max(-1.0, min(1.0, 2 * float(rate) - 1)),
+                    "source": "velas previas", "lookback_days": 30})
+            else:
+                omitted.append({"name": "touch_buy_to_sell",
+                    "reason": "sin tasa de venta causal disponible"})
+        except (TypeError, ValueError, KeyError, IndexError) as exc:
+            omitted.append({"name": "touch_buy_to_sell", "reason": str(exc)})
         weights = (cfg.get("signal_weights") or {})
         enough_evidence = bool(alternative["estimate"].get("evidence_sufficient"))
         logit_cap = float(cfg.get("signal_logit_cap", 1.0))

@@ -541,7 +541,7 @@
   }
 
   const LEARNING_SIGNAL_LABELS = { volatility: 'Volatilidad', break_prob: 'Probabilidad de ruptura',
-    direction: 'Dirección', scanner: 'Scanner', advisor: 'Advisor' };
+    direction: 'Dirección', scanner: 'Scanner', advisor: 'Advisor', touch_buy_to_sell: 'Toque compra→venta' };
   const LEARNING_SOURCE_LABELS = { live: 'En vivo', historical_reconstructed: 'Histórico reconstruido',
     'sin evidencia': 'Sin evidencia suficiente' };
   const LEARNING_DECISION_LABELS = { real: 'Operador actual', scanner_advisor: 'Scanner + Advisor', learned: 'Pesos aprendidos' };
@@ -575,7 +575,7 @@
       ` &middot; pendientes ${esc((data.last_run.pending || []).length)}` : 'Sin corridas del aprendizaje.';
     return `<p>Interruptor: <b>${data.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; se cambia en <a href="#lab">Laboratorio &rarr; Reglas globales</a></p>
       ${learningReadinessMarkup(data.readiness, data.enabled)}
-      <p>${data.enabled ? 'Pesos aplicados: aprendidos' : 'Pesos aplicados: 0,25 por se\u00f1al'} &middot; \u00faltima versi\u00f3n ${esc((data.version_ids || []).join(', ') || 'sin evidencia')}</p>
+      <p>${data.enabled ? 'Pesos aplicados: aprendidos' : 'Pesos aplicados: 0,25 por se\u00f1al (Toque compra→venta: 0)'} &middot; \u00faltima versi\u00f3n ${esc((data.version_ids || []).join(', ') || 'sin evidencia')}</p>
       <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Se\u00f1al</th><th>Peso actual</th><th>Aprendido</th><th>Fuente</th><th>Muestras efectivas</th><th>p Holm</th><th>Freno</th></tr></thead><tbody>${rows}</tbody></table></div>
       <p>Validaci\u00f3n: log-loss ${fmtMoney(data.validation?.model?.log_loss, 3)} y Brier ${fmtMoney(data.validation?.model?.brier, 3)}; solo p_replay: ${fmtMoney(data.validation?.replay_only?.log_loss, 3)} / ${fmtMoney(data.validation?.replay_only?.brier, 3)}.</p>
       <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Decisi\u00f3n</th><th>Diferencias vs real</th><th>Resultado 72 h</th><th>Resultado al plazo</th></tr></thead><tbody>${compareRows}</tbody></table></div><p class="muted">${runText}</p>`;
@@ -615,10 +615,10 @@
         const evidence = Object.values(item.signals || {}).some(signal => Number(signal.effective_samples || 0) >= 30 && signal.source !== 'sin evidencia');
         const change = item.last_switch ? `${esc(item.last_switch.actor)} &middot; ${esc(item.last_switch.changed_at)} &middot; versi\u00f3n ${esc(item.last_switch.weight_version_id || 'sin versi\u00f3n')}` : 'Nunca encendido';
         return `<article class="global-flag-row" data-meta-learning-switch="${profile}"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
-          <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al y el aprendizaje sigue solo en sombra.</p>
+          <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al (Toque compra\u2192venta: 0) y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
           ${learningReadinessMarkup(item.readiness, enabled)}
-          ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (todas las se\u00f1ales siguen en 0,25)</p>' : ''}
+          ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (las se\u00f1ales conservan sus pesos base: 0,25; Toque compra\u2192venta: 0)</p>' : ''}
           <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
           <button class="button secondary" type="button" data-switch-open>${enabled ? 'Apagar' : 'Encender'}</button></article>`;

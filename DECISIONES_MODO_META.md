@@ -223,3 +223,12 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 - Los interruptores de pesos aprendidos se cambian por perfil en Laboratorio → Reglas globales; la confirmación exige quién confirma y no se bloquea por falta de evidencia.
 - Metas muestra el aprendizaje de todas las metas del perfil, sin depender de una meta activa. La actualización es manual; el refresco de 30 segundos solo toca los datos vivos.
+
+## 19. Fase 40d-5 - señal de toque en el aprendizaje
+
+- `touch_buy_to_sell` es la sexta señal del modelo Meta. Usa `touch_stats.sell_rate` en una ventana causal de 30 días y la geometría de la alternativa evaluada. La misma función calcula el dato en vivo y en reconstrucción histórica.
+- Normalización: `2 × sell_rate − 1`, limitada a [-1, 1], agregada por capital asignado en carteras. El valor neutral de una señal ausente no se imputa ni cuenta para el mínimo efectivo.
+- Peso base y prior de regularización de toque: 0. Las otras cinco señales conservan 0,25. Holm incluye seis señales. Tope de logit, muestra mínima, errores agrupados y límite por actualización siguen sin cambios.
+- El switch continúa apagado por defecto. Sin un peso de toque aceptado no influye aunque se encienda; las estadísticas sombra de 40b-5 continúan separadas.
+- Las muestras históricas que ya guardaban la tasa causal se leen sin cambiar ni borrar versiones. Las filas antiguas que no la guardan no aportan muestra para toque.
+- Pendiente heredado: Inteligencia aún no persiste deciles de calibración; las tasas de éxito por valor alto/bajo son descriptivas y no las reemplazan.

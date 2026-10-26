@@ -599,6 +599,48 @@ def test_advisor_signal_comes_from_advisor_result_not_scanner_structure(monkeypa
     assert signal["normalized"] == 1
 
 
+def test_touch_weight_zero_keeps_real_probability_unchanged_when_switch_is_off():
+    from grid.meta_operator import signal_adjusted_probability
+    existing = [{"name": "volatility", "normalized": .2},
+        {"name": "scanner", "normalized": -.3}]
+    with_touch = existing + [{"name": "touch_buy_to_sell", "normalized": 1.0}]
+    base_weights = {"volatility": .25, "scanner": .25}
+    assert signal_adjusted_probability(.4, with_touch, base_weights) == pytest.approx(
+        signal_adjusted_probability(.4, existing, base_weights))
+
+
+def test_live_operator_signal_uses_causal_touch_helper(monkeypatch):
+    from grid.meta_operator import MetaOperator
+    import grid.meta_operator as module
+    from grid.meta_learning import causal_touch_buy_to_sell
+    import numpy as np
+    from types import SimpleNamespace
+
+    class DB:
+        def get_latest_prediction(self, *_args): return None
+
+    cut = 39 * 86400
+    timestamps = np.arange(0, cut + 1, 300, dtype=np.int64)
+    candles = SimpleNamespace(timestamp=timestamps, open=np.full(len(timestamps), 100.),
+        high=np.where(np.arange(len(timestamps)) % 100 == 0, 102., 100.2),
+        low=np.where(np.arange(len(timestamps)) % 100 == 50, 98., 100.),
+        close=np.full(len(timestamps), 100.))
+    operator = MetaOperator(object(), DB(), None, None, None)
+    operator.clock = lambda: cut
+    operator._candles_cache[('XRPUSDT', cut // 86400)] = candles
+    operator._model_snapshot = lambda _symbol: {"volatility_forecasts": {}}
+    monkeypatch.setattr(module, "break_prob", lambda *_args: (.5, None, None, None))
+    alt = {"replay_probability": .5, "estimate": {"probability": .5, "evidence_sufficient": True},
+        "pieces": [{"capital_usdt": 100, "floor": 99, "ceiling": 101}]}
+    operator._apply_intelligence(alt, {"symbol": "XRPUSDT", "score": .5,
+        "sigma_24h_open": .02, "model_statistics": {}}, 100, 90, 110, {"signal_weights": {}})
+    signal = next(item for item in alt["signals_used"] if item["name"] == "touch_buy_to_sell")
+    expected = causal_touch_buy_to_sell(at=cut, candles=candles, buy_price=99,
+        sell_price=101)["sell_rate"]
+    assert signal["value"] == pytest.approx(expected)
+    assert signal["normalized"] == pytest.approx(2 * expected - 1)
+
+
 def test_review_can_add_one_piece_using_only_free_goal_cash():
     from grid.meta_operator import MetaOperator
 
