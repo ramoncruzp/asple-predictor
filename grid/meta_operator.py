@@ -2485,11 +2485,12 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
             self._ledger(meta_id, "META_OPERATOR_NOOP", result)
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
-                "decision": result, "shadow_decision": None, "valuation": value,
+                "ledger_schema_version": 2, "plan_decision_id": None,
+                "decision": self._compact_review_result(result), "shadow_decision": None, "valuation": value,
                 "decision_choices": {"comparison_version": 2,
                     "real": {"decision": "mantener", "alternative_id": None},
                     "scanner_advisor": {"decision": "mantener", "alternative_id": None},
-                    "learned": {"decision": "mantener", "alternative_id": None}}})
+                    "learned": {"decision": "mantener", "alternative_id": None}}, "comparison_version": 2})
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
@@ -2522,10 +2523,12 @@ class MetaOperator:
                 result = self._review_allocations(current_goal, current_value, plan=plan)
             value = current_value
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
-            "decision": result, "shadow_decision": getattr(self, "_last_review_shadow", None),
-            "valuation": value, "touch_decision_id": (plan or {}).get("decision_id"),
+            "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
+            "decision": self._compact_review_result(result),
+            "shadow_decision": getattr(self, "_last_review_shadow", None),
+            "valuation": value,
                 "decision_choices": {**self._active_review_choices(plan, result, meta_id),
-                "real_result": result, "learned_weights_enabled": bool(
+                "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
                 "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", []),
                 "comparison_version": 2},
@@ -2538,7 +2541,8 @@ class MetaOperator:
 
     def _record_review(self, meta_id, result, value, shadow, plan=None):
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
-            "decision": result, "shadow_decision": shadow, "valuation": value,
+            "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
+            "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
             "decision_choices": self._active_review_choices(plan, result, meta_id),
             "comparison_version": 2})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})

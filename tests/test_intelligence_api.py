@@ -69,10 +69,13 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             stats_json=json.dumps({'touches': 2, 'sold_within_horizon': 1, 'sell_rate': .5}),
             created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
         for index in range(2):
+            details = {'decision_choices': {'real': {'decision': 'mantener',
+                'alternative_id': f'a{index}', 'symbol': 'XRPUSDT', 'probability': .6}}}
+            if index == 1:
+                details.update({'ledger_schema_version': 2, 'plan_decision_id': 'plan-v2'})
             conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
                 ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type='META_OPERATOR_REVIEW_DECISION',
-                details=json.dumps({'decision_choices': {'real': {'decision': 'mantener',
-                    'alternative_id': f'a{index}', 'symbol': 'XRPUSDT', 'probability': .6}}})))
+                details=json.dumps(details)))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -94,11 +97,13 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert direction_hit['n'] == 1 and direction_hit['accuracy'] == 1
     assert direction_hit['few_samples'] is True and direction_hit['wilson95'][0] < 1 and direction_hit['wilson95'][1] <= 1
     assert payload['hits']['volatility'][0]['n'] == 1
-    page = client.get(f'/api/intelligence?meta_id={goal_id}&page_size=1',
+    page = client.get(f'/api/intelligence?meta_id={goal_id}&page_size=10',
         headers={'X-API-Token':'intelligence-secret'}).json()['decisions']
-    assert page['total'] == 2 and len(page['recent']) == 1
-    assert page['recent'][0]['choices']['real']['symbol'] == 'XRPUSDT'
-    assert page['recent'][0]['details']['decision_choices']['real']['decision'] == 'mantener'
+    assert page['total'] == 2 and len(page['recent']) == 2
+    legacy, v2 = sorted(page['recent'], key=lambda event: event['details'].get('ledger_schema_version', 1))
+    assert legacy['choices']['real']['symbol'] == v2['choices']['real']['symbol'] == 'XRPUSDT'
+    assert legacy['details']['decision_choices']['real']['decision'] == 'mantener'
+    assert v2['details']['ledger_schema_version'] == 2 and v2['details']['plan_decision_id'] == 'plan-v2'
     assert payload['replay']['last_run']['replay_windows_new'] == 8
     assert payload['replay']['last_run']['candle_inventory']['XRPUSDT']['gaps'] == 1
     after = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()

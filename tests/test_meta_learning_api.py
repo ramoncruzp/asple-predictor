@@ -124,7 +124,7 @@ def test_review_ledger_saves_real_scanner_advisor_and_learned_choices(tmp_path):
         'comparison_version': 2,
         'real': {'alternative_id': 'a-real'}, 'scanner_advisor': {'alternative_id': 'a-shadow'},
         'learned': {'alternative_id': 'a-learned'}}, 'learning': {'enabled': False, 'version_ids': []}}
-    operator._build_plan = lambda _goal: plan
+    operator._build_plan = lambda _goal, **_kwargs: plan
     operator._plan_price_moved = lambda *_args: False
     operator._review_allocations = lambda *_args, **_kwargs: {'decision': 'no_hacer_nada', 'reason': 'test'}
     operator._review_once_locked(7)
@@ -134,6 +134,10 @@ def test_review_ledger_saves_real_scanner_advisor_and_learned_choices(tmp_path):
     assert event['decision_choices']['learned']['decision'] == 'mantener'
     assert event['decision_choices']['comparison_version'] == 2
     assert event['decision_choices']['learned_weights_enabled'] is False
+    assert event['ledger_schema_version'] == 2
+    assert event['plan_decision_id'] == 'decision-1'
+    assert 'real_result' not in event['decision_choices']
+    assert event['decision']['decision'] == 'no_hacer_nada'
 
 
 def test_learning_comparison_counts_only_version_two_and_maintain_matches(tmp_path):

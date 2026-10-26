@@ -67,3 +67,25 @@ def test_diagnostic_counts_normalized_signal_without_raw_value_and_versions(tmp_
     assert "cobertura 2/2" in output
     assert "v1 1/1; v2 1/1" in output
     assert "valores normalizados distintos: -0.5, 0" in output
+
+
+def test_diagnostic_reads_touch_omissions_from_ledger_v1_and_v2(tmp_path, capsys):
+    database = tmp_path / "diagnostic-ledger-schemas.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE meta_learning_samples "
+            "(symbol TEXT, source_kind TEXT, sample_at TEXT, profile TEXT, signals_json TEXT)")
+        connection.execute("CREATE TABLE meta_goals (id INTEGER PRIMARY KEY, profile TEXT)")
+        connection.execute("CREATE TABLE meta_ledger "
+            "(id INTEGER PRIMARY KEY, meta_id INTEGER, ts TEXT, event_type TEXT, details TEXT)")
+        connection.execute("INSERT INTO meta_goals VALUES (1, 'RAPIDO')")
+        for version in (None, 2):
+            details = {"decision_id": f"plan-{version}", "alternatives": [{"symbol": "XRPUSDT",
+                "signals_omitted": [{"name": "touch_buy_to_sell", "reason": "velas no disponibles"}]}]}
+            if version is not None:
+                details["ledger_schema_version"] = version
+                details["advisor_comparisons"] = []
+            connection.execute("INSERT INTO meta_ledger (meta_id, ts, event_type, details) VALUES (?, ?, ?, ?)",
+                (1, "2026-10-26T00:00:00+00:00", "META_PLAN_EVALUATED", json.dumps(details)))
+    diagnose(database, days=36500, profile="RAPIDO")
+    output = capsys.readouterr().out
+    assert "XRPUSDT: 2 alternativas — velas no disponibles" in output
