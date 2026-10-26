@@ -1,6 +1,7 @@
 import pytest
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 from grid.policy import DEFAULT_SMART_PARAMS, break_prob
 from scripts.diagnostico_senales_meta import compare_volatility_scales, diagnose, summarize
@@ -49,6 +50,18 @@ def test_diagnostic_reads_sqlite_without_writing(tmp_path, capsys):
     assert "probability_up de model_a_down = P(baja)" in output
     assert "cobertura 1/1" in output
     assert database.read_bytes() == before
+
+
+def test_diagnostic_counts_same_day_space_timestamp_for_short_window(tmp_path, capsys):
+    database = tmp_path / "same-day.sqlite"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE meta_learning_samples "
+            "(symbol TEXT, source_kind TEXT, sample_at TEXT, profile TEXT, signals_json TEXT)")
+        connection.execute("INSERT INTO meta_learning_samples VALUES (?, ?, ?, ?, ?)",
+            ("XRPUSDT", "live", stamp, "RAPIDO", json.dumps({"signals_used": []})))
+    diagnose(database, days=.03)
+    assert "1 muestras live" in capsys.readouterr().out
 
 
 def test_diagnostic_counts_normalized_signal_without_raw_value_and_versions(tmp_path, capsys):

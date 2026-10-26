@@ -78,7 +78,7 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
         if "meta_learning_samples" not in tables:
             raise RuntimeError("la BD no tiene la tabla meta_learning_samples")
         params = [cutoff]
-        clause = "source_kind='live' AND sample_at>=?"
+        clause = "source_kind='live' AND datetime(sample_at)>=datetime(?)"
         if profile:
             clause += " AND profile=?"
             params.append(profile.upper())
@@ -88,7 +88,7 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
         if "meta_ledger" in tables:
             omission_sql = """SELECT ledger.details FROM meta_ledger AS ledger
                 JOIN meta_goals AS goal ON goal.id=ledger.meta_id
-                WHERE ledger.event_type='META_PLAN_EVALUATED' AND ledger.ts>=?"""
+                WHERE ledger.event_type='META_PLAN_EVALUATED' AND datetime(ledger.ts)>=datetime(?)"""
             omission_params = [cutoff]
             if profile and "meta_goals" in tables:
                 omission_sql += " AND goal.profile=?"
@@ -205,7 +205,7 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
                     SUM(CASE WHEN p.probability_up >= 0.60 THEN 1 ELSE 0 END),
                     MIN(p.probability_up), MAX(p.probability_up)
                     FROM predictions p WHERE p.model_name='model_a_down' AND p.interval='1h'
-                    AND p.predicted_at>=? GROUP BY p.symbol ORDER BY p.symbol""", (cutoff,)).fetchall()
+                    AND datetime(p.predicted_at)>=datetime(?) GROUP BY p.symbol ORDER BY p.symbol""", (cutoff,)).fetchall()
             print("\nPredicciones model_a_down 1h (probability_up representa P(baja)): ")
             for symbol, n, qualifying, minimum, maximum in result:
                 print(f"  {symbol}: {qualifying}/{n} con P(baja) ≥ 0,60; min {minimum}; max {maximum}")
