@@ -23,6 +23,8 @@
 - El aprendizaje se mide a sí mismo: decisión real vs. decisión con pesos aprendidos vs. solo Scanner + Advisor. Si no mejora, se ve.
 - Usar los pesos aprendidos lo decide Ramón con la evidencia a la vista; el sistema no se activa solo.
 
+- **Después de 40d (decidido 2026-10-25): revisión completa de la capa de inteligencia** como un mini sistema de aprendizaje, de punta a punta: cómo recopila los datos, cómo los estudia, qué modelos estadísticos usa, cómo mide la volatilidad y la dirección, cómo almacena los datos, cómo aprende automáticamente de las decisiones, cómo corrige sus decisiones y cómo toma la decisión final.
+
 ## 2. Perfiles: solo cambian el riesgo, no el objetivo
 
 - Los dos perfiles buscan lo mismo: llegar lo más rápido posible.
