@@ -480,13 +480,12 @@
         <button type="button" class="button secondary" data-cancel-op="${goal.id}">Cancelar operación</button>
       </div>
       ${statusNote}
-      ${valuationBlock(goal, valuation)}
-      <div class="metas-live-facts"><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
+      <div data-live-valuation>${valuationBlock(goal, valuation)}</div>
+      <div class="metas-live-facts" data-live-facts><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
         <span>Efectivo libre para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
         <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span></div>
-      ${progressBars(goal, valuation, profile)}
-      <div class="metas-pieces"><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
-      <section class="metas-learning"><h3>Aprendizaje</h3><div data-learning-slot><p class="muted">Cargando aprendizaje…</p></div></section>
+      <div data-live-progress>${progressBars(goal, valuation, profile)}</div>
+      <div class="metas-pieces" data-live-pieces><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
       <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
       <div class="metas-ledger">
         <h3>Bitácora</h3>
@@ -532,7 +531,6 @@
   function wireActivePanel(container, goalId, profile) {
     container.querySelector(`[data-cancel-op]`)?.addEventListener('click', e => confirmCancel(container, e.target.dataset.cancelOp));
     wireLedgerControls(container, goalId);
-    renderLearning(container, profile);
     renderRecentAdjustments(container, goalId);
     renderLedger(container, goalId);
   }
@@ -553,43 +551,90 @@
     historical_reconstruction_s: 'Reconstrucción', label_simulation_s: 'Etiquetas',
     persistence_s: 'Guardado', weight_training_s: 'Pesos' };
 
-  async function renderLearning(container, profile) {
-    const slot = container.querySelector('[data-learning-slot]');
+  function learningMarkup(data, profile) {
+    const rows = Object.entries(data.signals || {}).map(([name, item]) => `<tr><td>${esc(LEARNING_SIGNAL_LABELS[name] || name)}</td>
+      <td>${fmtMoney(item.current_weight, 2)}</td><td>${fmtMoney(item.learned_weight, 3)}</td>
+      <td>${esc(LEARNING_SOURCE_LABELS[item.source] || item.source)}</td><td>${esc(item.effective_samples)}</td>
+      <td>${item.p_value_holm == null ? '&mdash;' : fmtMoney(item.p_value_holm, 4)}</td><td>${esc(item.reason || '')}</td></tr>`).join('');
+    const comparisons = data.decision_comparison || {};
+    const compareRows = Object.entries(comparisons).map(([name, item]) => `<tr><td>${esc(LEARNING_DECISION_LABELS[name] || name)}</td>
+      <td>${esc(item.different_from_real || 0)}</td><td>${learningMetric(item['72h'])}</td><td>${learningMetric(item.profile)}</td></tr>`).join('');
+    const timings = data.last_run?.summary || {};
+    const runText = data.last_run ? `Corrida ${esc(data.last_run.id)}: ${esc(LEARNING_RUN_LABELS[data.last_run.status] || data.last_run.status)} &middot; ` +
+      Object.entries(timings).map(([key, value]) => `${esc(LEARNING_TIMING_LABELS[key] || key)} ${fmtMoney(value, 2)} s`).join(' &middot; ') +
+      ` &middot; pendientes ${esc((data.last_run.pending || []).length)}` : 'Sin corridas del aprendizaje.';
+    return `<p>Interruptor: <b>${data.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; se cambia en <a href="#lab">Laboratorio &rarr; Reglas globales</a></p>
+      <p>${data.enabled ? 'Pesos aplicados: aprendidos' : 'Pesos aplicados: 0,25 por se\u00f1al'} &middot; \u00faltima versi\u00f3n ${esc((data.version_ids || []).join(', ') || 'sin evidencia')}</p>
+      <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Se\u00f1al</th><th>Peso actual</th><th>Aprendido</th><th>Fuente</th><th>Muestras efectivas</th><th>p Holm</th><th>Freno</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p>Validaci\u00f3n: log-loss ${fmtMoney(data.validation?.model?.log_loss, 3)} y Brier ${fmtMoney(data.validation?.model?.brier, 3)}; solo p_replay: ${fmtMoney(data.validation?.replay_only?.log_loss, 3)} / ${fmtMoney(data.validation?.replay_only?.brier, 3)}.</p>
+      <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Decisi\u00f3n</th><th>Diferencias vs real</th><th>Resultado 72 h</th><th>Resultado al plazo</th></tr></thead><tbody>${compareRows}</tbody></table></div><p class="muted">${runText}</p>`;
+  }
+
+  async function loadLearningProfile(container, profile) {
+    const slot = container.querySelector(`[data-learning-profile="${profile}"]`);
     if (!slot) return;
-    profile = String(profile || 'RAPIDO').toUpperCase();
     try {
       const data = await apiGet(`/api/metas/learning?profile=${profile}`);
-      const rows = Object.entries(data.signals || {}).map(([name, item]) => `<tr><td>${esc(LEARNING_SIGNAL_LABELS[name] || name)}</td>
-        <td>${fmtMoney(item.current_weight, 2)}</td><td>${fmtMoney(item.learned_weight, 3)}</td>
-        <td>${esc(LEARNING_SOURCE_LABELS[item.source] || item.source)}</td><td>${esc(item.effective_samples)}</td>
-        <td>${item.p_value_holm == null ? '—' : fmtMoney(item.p_value_holm, 4)}</td><td>${esc(item.reason || '')}</td></tr>`).join('');
-      const comparisons = data.decision_comparison || {};
-      const compareRows = Object.entries(comparisons).map(([name, item]) => `<tr><td>${esc(LEARNING_DECISION_LABELS[name] || name)}</td>
-        <td>${esc(item.different_from_real || 0)}</td><td>${learningMetric(item['72h'])}</td>
-        <td>${learningMetric(item.profile)}</td></tr>`).join('');
-      const timings = data.last_run?.summary || {};
-      const runText = data.last_run ? `Corrida ${esc(data.last_run.id)}: ${esc(LEARNING_RUN_LABELS[data.last_run.status] || data.last_run.status)} · ` +
-        Object.entries(timings).map(([key, value]) => `${esc(LEARNING_TIMING_LABELS[key] || key)} ${fmtMoney(value, 2)} s`).join(' · ') +
-        ` · pendientes ${esc((data.last_run.pending || []).length)}` : 'Sin corridas del aprendizaje.';
-      slot.innerHTML = `${data.enabled ? '' : '<p class="metas-learning-shadow">Experimento en sombra</p>'}
-        <p>Pesos aplicados: ${data.enabled ? 'aprendidos' : '0,25 por señal'} · última versión ${esc((data.version_ids || []).join(', ') || 'sin evidencia')}</p>
-        <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Señal</th><th>Peso actual</th><th>Aprendido</th><th>Fuente</th><th>Muestras efectivas</th><th>p Holm</th><th>Freno</th></tr></thead><tbody>${rows}</tbody></table></div>
-        <p>Validación: log-loss ${fmtMoney(data.validation?.model?.log_loss, 3)} y Brier ${fmtMoney(data.validation?.model?.brier, 3)}; solo p_replay: ${fmtMoney(data.validation?.replay_only?.log_loss, 3)} / ${fmtMoney(data.validation?.replay_only?.brier, 3)}.</p>
-        <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Decisión</th><th>Diferencias vs real</th><th>Resultado 72 h</th><th>Resultado al plazo</th></tr></thead><tbody>${compareRows}</tbody></table></div>
-        <p class="muted">${runText}</p><label>Quién confirma <input data-learning-actor maxlength="80" value="${esc(data.last_switch?.actor || 'Ramón')}"></label>
-        <button type="button" class="button secondary" data-learning-switch>${data.enabled ? 'Desactivar pesos aprendidos' : 'Activar pesos aprendidos'}</button>`;
-      slot.querySelector('[data-learning-switch]')?.addEventListener('click', () => {
-        const enabled = !data.enabled;
-        const actor = slot.querySelector('[data-learning-actor]')?.value?.trim() || data.last_switch?.actor || 'Ramón';
-        const body = `<p>Confirma ${enabled ? 'activar' : 'desactivar'} los pesos aprendidos para ${esc(profile)}. Las protecciones del operador siguen activas.</p><label>Quién confirma <input data-learning-confirm-actor maxlength="80" value="${esc(actor)}"></label>`;
-        const modal = showActionDialog('Confirmar pesos aprendidos', body, async () => {
-          const actor = modal.querySelector('[data-learning-confirm-actor]')?.value?.trim();
-          await apiPut('/api/metas/learning/switch', { profile, enabled, confirm: true, actor });
-          await renderLearning(container, profile);
-        }, enabled ? 'Activar' : 'Desactivar');
-      });
+      slot.innerHTML = learningMarkup(data, profile);
+      const stamp = container.querySelector(`[data-learning-updated="${profile}"]`);
+      if (stamp) { stamp.dataset.updatedAt = String(Date.now()); stamp.textContent = 'Actualizado hace menos de un minuto'; }
     } catch (error) { slot.innerHTML = `<p class="metas-error">No se pudo cargar Aprendizaje: ${esc(error.message)}</p>`; }
   }
+
+  async function loadAllLearning(container) {
+    await Promise.all(['RAPIDO', 'PRUDENTE'].map(profile => loadLearningProfile(container, profile)));
+  }
+
+  function renderLearningSection() {
+    return `<section class="card metas-learning" data-learning-section><h2>Aprendizaje (todas las metas)</h2>
+      <p>Aprende de todas las metas del perfil y del hist\u00f3rico reconstruido.</p>
+      <div class="metas-learning-profile"><h3>R\u00e1pido</h3><p class="muted" data-learning-updated="RAPIDO">Cargando&hellip;</p><div data-learning-profile="RAPIDO"><p class="muted">Cargando aprendizaje&hellip;</p></div></div>
+      <div class="metas-learning-profile"><h3>Prudente</h3><p class="muted" data-learning-updated="PRUDENTE">Cargando&hellip;</p><div data-learning-profile="PRUDENTE"><p class="muted">Cargando aprendizaje&hellip;</p></div></div>
+      <button type="button" class="button secondary" data-learning-refresh>Actualizar</button></section>`;
+  }
+
+  async function loadLearningSwitches(host) {
+    if (!host) return;
+    const profiles = ['RAPIDO', 'PRUDENTE'];
+    try {
+      const data = await Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`)));
+      const rows = data.map((item, index) => {
+        const profile = profiles[index], label = profile === 'RAPIDO' ? 'Meta R\u00e1pido' : 'Meta Prudente';
+        const enabled = Boolean(item.enabled);
+        const evidence = Object.values(item.signals || {}).some(signal => Number(signal.effective_samples || 0) >= 30 && signal.source !== 'sin evidencia');
+        const change = item.last_switch ? `${esc(item.last_switch.actor)} &middot; ${esc(item.last_switch.changed_at)} &middot; versi\u00f3n ${esc(item.last_switch.weight_version_id || 'sin versi\u00f3n')}` : 'Nunca encendido';
+        return `<article class="global-flag-row" data-meta-learning-switch="${profile}"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
+          <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al y el aprendizaje sigue solo en sombra.</p>
+          <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
+          ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (todas las se\u00f1ales siguen en 0,25)</p>' : ''}
+          <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
+            <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
+          <button class="button secondary" type="button" data-switch-open>${enabled ? 'Apagar' : 'Encender'}</button></article>`;
+      }).join('');
+      host.querySelector('.meta-learning-switches')?.remove();
+      host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
+      host.querySelectorAll('[data-switch-open]').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('[data-meta-learning-switch]'), confirm = row.querySelector('[data-switch-confirm]');
+        confirm.hidden = false; button.disabled = true; confirm.querySelector('[data-switch-actor]').focus();
+      }));
+      host.querySelectorAll('[data-switch-cancel]').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('[data-meta-learning-switch]'); row.querySelector('[data-switch-confirm]').hidden = true; row.querySelector('[data-switch-open]').disabled = false;
+      }));
+      host.querySelectorAll('[data-switch-save]').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('[data-meta-learning-switch]'), profile = row.dataset.metaLearningSwitch;
+        const actor = row.querySelector('[data-switch-actor]').value.trim(), status = row.querySelector('[role="status"]');
+        if (!actor) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe qui\u00e9n confirma el cambio.'; return; }
+        button.disabled = true;
+        try {
+          const currentlyEnabled = row.querySelector('small b').textContent === 'ENCENDIDO';
+          await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
+          await loadLearningSwitches(host);
+        } catch (error) { status.textContent = error.message; button.disabled = false; }
+      }));
+    } catch (error) { host.insertAdjacentHTML('beforeend', `<p class="cuenta-error">No se pudieron cargar los interruptores del aprendizaje: ${esc(error.message)}</p>`); }
+  }
+
+  window.ASPLEMetaLearning = { loadSwitches: loadLearningSwitches };
 
   async function renderRecentAdjustments(container, goalId) {
     const slot = container.querySelector('[data-recent-adjustments]');
@@ -661,7 +706,7 @@
       container.innerHTML = `<p class="metas-error">No se pudo cargar Metas: ${esc(error.message)}</p>`;
       return;
     }
-    if (!config.enabled) { container.innerHTML = renderDisabled(); return; }
+    if (!config.enabled) { container.innerHTML = renderDisabled() + renderLearningSection(); loadAllLearning(container); container.querySelector('[data-learning-refresh]')?.addEventListener('click', () => loadAllLearning(container)); return; }
     const activeStatuses = ['ACTIVE', 'PIECES_BLOCKED', 'CLOSING', 'TARGET_CLOSING'];
     const active = goals.find(g => activeStatuses.includes(g.status));
     const surplus = goals.find(g => g.status === 'SURPLUS_WAIT');
@@ -681,6 +726,7 @@
       if (drafts.length) html += `<div class="metas-drafts">${drafts.map(renderDraftCard).join('')}</div>`;
       html += renderCreateForm(config);
     }
+    html += renderLearningSection();
     html += renderHistorySection(goals);
     container.innerHTML = html;
 
@@ -691,10 +737,39 @@
     if (pending && drafts.some(g => Number(g.id) === Number(pending.metaId))) pollAnalysis(container, pending);
     else if (pending) clearJob();
     if (active) wireActivePanel(container, active.id, active.profile);
+    loadAllLearning(container);
+    container.querySelector('[data-learning-refresh]')?.addEventListener('click', () => loadAllLearning(container));
     container.querySelector('[data-show-discarded]')?.addEventListener('change', e => {
       container.querySelectorAll('.metas-discarded').forEach(el => el.classList.toggle('hidden', !e.target.checked));
     });
     container.querySelectorAll('[data-history-slot]').forEach(slot => renderHistory(slot, slot.dataset.goalId));
+  }
+
+  async function refreshLiveMeta(container) {
+    const panel = container.querySelector('.metas-active[data-meta-id]');
+    if (!panel) return;
+    const scrollY = window.scrollY;
+    const goalId = panel.dataset.metaId;
+    const [goalsResult, config, valuation] = await Promise.all([
+      apiGet('/api/metas'), apiGet('/api/metas/config'), apiGet(`/api/metas/${goalId}/valuation`)
+    ]);
+    const goal = (goalsResult.metas || []).find(item => String(item.id) === String(goalId));
+    if (!goal) return;
+    const profile = (config.profiles || {})[goal.profile] || {};
+    panel.querySelector('[data-live-valuation]').innerHTML = valuationBlock(goal, valuation);
+    panel.querySelector('[data-live-facts]').innerHTML = `<span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
+      <span>Efectivo libre para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
+      <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>`;
+    panel.querySelector('[data-live-progress]').innerHTML = progressBars(goal, valuation, profile);
+    panel.querySelector('[data-live-pieces]').innerHTML = `<h3>Piezas</h3>${piecesLinkList(valuation)}`;
+    await Promise.all([renderRecentAdjustments(panel, goalId), renderLedger(panel, goalId)]);
+    window.scrollTo(0, scrollY);
+  }
+
+  function relativeUpdatedAt(timestamp) {
+    if (!timestamp) return 'menos de un minuto';
+    const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+    return minutes < 1 ? 'menos de un minuto' : `${minutes} min`;
   }
 
   function stopAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
@@ -705,7 +780,10 @@
       if (document.visibilityState !== 'visible') return;
       if ((location.hash || '').split('/')[0] !== '#metas') return;
       if (analysisPollTimer || planVisible) return;
-      render(container, currentHash);
+      if (document.activeElement?.matches('input[type="text"], input:not([type]), textarea, select')) return;
+      if (document.querySelector('#meta-action-dialog:not([hidden]), #global-flag-dialog[open]')) return;
+      container.querySelectorAll('[data-learning-updated][data-updated-at]').forEach(el => { el.textContent = `Actualizado hace ${relativeUpdatedAt(Number(el.dataset.updatedAt))}`; });
+      refreshLiveMeta(container).catch(() => {});
     }, 30000);
   }
 

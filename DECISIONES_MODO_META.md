@@ -109,7 +109,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C), `897f0d1` (A) y `3a513dc` (40c-3: defectos de presentación de la prueba de QA en S1); siguiente fase 40d |
 | 40d-1 | Etiquetas 72 h/plazo, backfill causal y almacenamiento separado `live`/`historical_reconstructed` | Implementada y verificada offline en esta entrega; sin S1 ni despliegue |
 | 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
-| 40d-3 | Caché acotada, decisiones en sombra, pesos efectivos, interruptor y vista | Implementada y verificada offline; commits separados, sin despliegue |
+| 40d-3 | Caché acotada, decisiones en sombra, pesos efectivos y vista de evidencia | Implementada y verificada offline; sin despliegue |
+| 40d-3C | Interruptores por perfil en Laboratorio, aprendizaje global en Metas y recarga parcial | Implementada y verificada offline; sin despliegue |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1–3 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
@@ -214,3 +215,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Los pesos efectivos se eligen por señal y perfil (live suficiente, histórico aceptado, si no 0,25). El ajuste total al logit conserva el tope ±1,0. La selección en sombra no mueve órdenes.
 - El switch «Usar pesos aprendidos» se cambia manualmente por perfil con token, confirmación y actor; queda apagado y no se activa automáticamente. Las protecciones operativas no cambian.
 - La vista muestra evidencia disponible, etiquetas maduras y frenos. La muestra real aún es insuficiente para recomendar activación.
+
+
+### Fase 40d-3C - ubicación del interruptor y vista global
+
+- Los interruptores de pesos aprendidos se cambian por perfil en Laboratorio → Reglas globales; la confirmación exige quién confirma y no se bloquea por falta de evidencia.
+- Metas muestra el aprendizaje de todas las metas del perfil, sin depender de una meta activa. La actualización es manual; el refresco de 30 segundos solo toca los datos vivos.

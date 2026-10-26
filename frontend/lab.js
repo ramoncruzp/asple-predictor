@@ -34,5 +34,6 @@
   }
   window.loadLabPage = async function () {
     await Promise.all([window.ASPLEGlobalFlags?.load('lab-global-settings-content'), loadStats()]);
+    await window.ASPLEMetaLearning?.loadSwitches(document.getElementById('lab-global-settings-content'));
   };
 })();

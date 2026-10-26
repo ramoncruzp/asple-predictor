@@ -75,7 +75,7 @@
 
 ### Implementado
 
-- `grid/meta_operator.py:199-245` resuelve el peso por perfil y señal: versión live aceptada con al menos 30 observaciones efectivas; si falta, versión histórica reconstruida aceptada; en otro caso conserva 0,25. Devuelve la procedencia, el motivo/freno, p ajustado por Holm y la versión usada. El ajuste del logit sigue limitado por `signal_logit_cap` (?1,0).
+- `grid/meta_operator.py:199-245` resuelve el peso por perfil y señal: versión live aceptada con al menos 30 observaciones efectivas; si falta, versión histórica reconstruida aceptada; en otro caso conserva 0,25. Devuelve la procedencia, el motivo/freno, p ajustado por Holm y la versión usada. El ajuste del logit sigue limitado por `signal_logit_cap` (±1,0).
 - `grid/meta_operator.py:747-760,895-925,962-1008,2131-2195` calcula junto a las alternativas existentes la selección por pesos aprendidos y Scanner+Advisor. Con el interruptor apagado, la elección real conserva la ruta de ranking previa; con él encendido se ordena por la probabilidad aprendida. Las compuertas de materialidad, cooldown, bloqueo, capital y revalidación permanecen en las rutas existentes. Cada revisión escribe las tres alternativas con `alternative_id` en `META_OPERATOR_REVIEW_DECISION`; la sombra Scanner+Advisor conserva sus pesos previos aunque el interruptor se active.
 - `database/db_manager.py:378-382` crea `meta_learning_switch_events` con perfil, valor, actor, fecha y versión. `grid/meta_operator.py:247-275` exige confirmación, registra quién pidió el cambio y nunca activa el interruptor automáticamente. `grid/meta.py:16-57` lo define apagado por defecto en ambos perfiles.
 - `api/routes/metas.py:114-122` ofrece `GET /api/metas/learning?profile=...` y `PUT /api/metas/learning/switch`; ambos requieren `X-API-Token` (o loopback según la regla API existente), y el cambio exige confirmación explícita y actor. La respuesta incluye pesos/fuentes/muestras/p Holm/motivos, validación frente a replay, alternativas reales/sombra/aprendida y última corrida.
@@ -93,3 +93,20 @@
 ### Evidencia pendiente
 
 La comparación solo crece a medida que maduran etiquetas y depende de que haya alternativas seleccionadas y pesos aceptados suficientes. No hay todavía muestra de producción verificada ni fundamento para recomendar activar los pesos. El interruptor sigue apagado por defecto.
+
+
+## 40d-3C - Interruptor en Laboratorio y aprendizaje global
+
+### Implementado
+
+- `frontend/metas.js:554-638` muestra el aprendizaje como bloque global para Rápido y Prudente, aun sin meta activa. Conserva la tabla de señales, validación, comparación de las tres decisiones y última corrida; cada perfil se consulta al entrar o al pulsar Actualizar, no con el refresco periódico.
+- `frontend/metas.js:596-637` y `frontend/lab.js:35-38` colocan dos interruptores en Laboratorio → Reglas globales. Cada uno presenta el estado, el último actor/fecha/versión o Nunca encendido, el aviso cuando falta evidencia y una confirmación dentro de la página con Quién confirma obligatorio. Ambos usan `PUT /api/metas/learning/switch`. Se quitaron el botón y el campo de actor de Metas.
+- `frontend/metas.js:748-784` limita la recarga de 30 segundos a valoración, efectivo, piezas, reajustes recientes y bitácora. Mantiene la posición vertical; se pausa con foco en campos de texto/select, confirmación abierta, análisis en curso o plan visible.
+- `frontend/metas.css:81` añade estilos del bloque global por perfil.
+- Pruebas UI en `tests/ui/test_metas_ui.py:273-326` cubren la sección con ambos perfiles y sin control de edición en Metas, además del cambio confirmado en Laboratorio.
+
+### Pruebas y resultado
+
+- Corrida enfocada final: `ASPLE_OFFLINE=1 python -m pytest tests/ui/test_metas_ui.py tests/test_meta_learning_api.py tests/ui/test_laboratorio.py tests/test_app_settings_api.py -q --basetemp <carpeta nueva en TEMP>` - **33 passed, 16 warnings, 46,86 s**, código de salida 0.
+- `node --check frontend/metas.js`, `node --check frontend/lab.js` y `node --check frontend/global_flags.js` pasaron.
+- No se ejecutó la suite completa. No se usaron S1, Testnet, `.env` ni la base real; no hubo despliegue.

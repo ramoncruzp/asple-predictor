@@ -32,3 +32,10 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - La alerta de deterioro usa las etiquetas contrafactuales existentes de 72 h para las alternativas real y aprendida. La versión se considera distinta cuando cambian los IDs de pesos efectivos guardados en la corrida diaria; si faltan etiquetas para ambas alternativas no se alerta. No desactiva el switch.
 - El reporte de comparación de plazo solo tiene datos cuando existe la etiqueta madura para el horizonte del perfil. Ninguna simulación adicional se lanza para producir la vista.
 - 40d-3A se committeó antes que 40d-3B como pidió Ramón; un ajuste de identidad de caché hallado al revisar la interacción quedó en el commit de 40d-3B y está descrito en `REPORTE_FASE40D.md`.
+
+
+## 40d-3C
+
+- El interruptor de pesos aprendidos vive en Laboratorio → Reglas globales y se confirma allí con actor obligatorio; hay un switch independiente por perfil. La ausencia de evidencia se informa, pero no bloquea la acción.
+- Metas muestra aprendizaje global de ambos perfiles, con carga al entrar y actualización manual. La recarga periódica solo actualiza los datos vivos y se pausa mientras se edita un campo o hay confirmación, análisis o plan visible.
+- Estado: implementada y verificada offline con las pruebas enfocadas; sin despliegue.

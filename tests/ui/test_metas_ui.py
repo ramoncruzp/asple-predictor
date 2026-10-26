@@ -270,22 +270,59 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
 
 
-def test_learning_section_starts_in_shadow_and_requires_confirmed_switch(metas_page):
+def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):
+    page, server = metas_page
+    page.goto(f"{server.url}/#metas")
+    learning = page.locator("[data-learning-section]")
+    page.wait_for_selector("[data-learning-profile='RAPIDO'] .metas-learning-scroll")
+    page.wait_for_selector("[data-learning-profile='PRUDENTE'] .metas-learning-scroll")
+    assert "Aprendizaje (todas las metas)" in learning.inner_text()
+    assert "Aprende de todas las metas del perfil y del hist\u00f3rico reconstruido." in learning.inner_text()
+    assert "se cambia en Laboratorio" in learning.inner_text()
+    assert page.locator("[data-learning-refresh]").count() == 1
+    assert page.locator("[data-learning-switch]").count() == 0
+    assert page.locator("[data-learning-actor]").count() == 0
+    assert page.locator("[data-learning-profile='RAPIDO']").inner_text().count("0,25") >= 1
+
+
+def test_learning_switches_live_in_lab_and_require_actor(metas_page):
+    page, server = metas_page
+    page.goto(f"{server.url}/#lab")
+    row = page.locator("[data-meta-learning-switch='RAPIDO']")
+    page.wait_for_selector("[data-meta-learning-switch='PRUDENTE']")
+    assert "Sin evidencia todav\u00eda" in row.inner_text()
+    assert "APAGADO" in row.inner_text()
+    page.click("[data-meta-learning-switch='RAPIDO'] [data-switch-open]")
+    page.click("[data-meta-learning-switch='RAPIDO'] [data-switch-save]")
+    assert "Escribe qui\u00e9n confirma" in row.inner_text()
+    page.fill("[data-meta-learning-switch='RAPIDO'] [data-switch-actor]", "Prueba local")
+    page.click("[data-meta-learning-switch='RAPIDO'] [data-switch-save]")
+    page.wait_for_function("() => document.querySelector('[data-meta-learning-switch=RAPIDO]')?.innerText.includes('ENCENDIDO')")
+    assert server.operator.learning_status('RAPIDO')['enabled'] is True
+
+
+
+def test_auto_refresh_updates_live_blocks_without_replacing_meta_panel(metas_page):
     page, server = metas_page
     goal = server.core.create_goal(150, 10, profile="RAPIDO")
     server.core.start_goal(goal["id"])
     grid = server.engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
     server.core.link_grid(goal["id"], grid["id"])
+    page.add_init_script("""(() => {
+      const native = window.setInterval.bind(window);
+      window.setInterval = (fn, ms, ...args) => {
+        if (ms === 30000) window.__metasRefresh = fn;
+        return native(fn, ms, ...args);
+      };
+    })()""")
     page.goto(f"{server.url}/#metas")
-    learning = page.locator(".metas-learning")
-    page.wait_for_selector(".metas-learning-shadow")
-    assert "Experimento en sombra" in learning.inner_text()
-    assert "sin evidencia" in learning.inner_text()
-    page.click("[data-learning-switch]")
-    page.wait_for_selector("#meta-action-dialog:not([hidden])")
-    page.click("#meta-action-dialog [data-action-confirm]")
-    page.wait_for_function("() => document.querySelector('.metas-learning')?.innerText.includes('Pesos aplicados: aprendidos')")
-
+    page.wait_for_selector(".metas-active[data-meta-id]")
+    page.evaluate("window.__panelBefore = document.querySelector('.metas-active')")
+    with page.expect_response(lambda response: f"/api/metas/{goal['id']}/valuation" in response.url):
+        page.evaluate("window.__metasRefresh()")
+    page.wait_for_function("document.querySelector('[data-live-valuation] .metas-valuation') !== null")
+    assert page.evaluate("document.querySelector('.metas-active') === window.__panelBefore")
+    assert page.locator("[data-learning-refresh]").count() == 1
 
 def test_active_meta_shows_recent_reconfiguration_in_plain_spanish(metas_page):
     page, server = metas_page
