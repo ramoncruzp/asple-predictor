@@ -1825,6 +1825,23 @@ class MetaOperator:
         self._symbol_filters_cache[symbol] = filters
         return filters
 
+    def _load_candles(self, symbol):
+        """Carga velas públicas una vez por símbolo y día UTC."""
+        candle_key = (str(symbol).upper(), self.clock() // 86400)
+        candles = self._candles_cache.get(candle_key)
+        if candles is not None:
+            return candles
+        candles_raw = self.scanner.client.get_historical_klines(symbol, "5m", 180)
+        from grid.sim.data import CandleData
+        import pandas as pd
+        frame = candles_raw if isinstance(candles_raw, pd.DataFrame) else pd.DataFrame(candles_raw)
+        timestamps = pd.to_datetime(frame["timestamp"], utc=True).astype("int64").to_numpy() // 1_000_000_000
+        candles = CandleData(timestamp=timestamps.astype("int64"), open=frame["open"].to_numpy(float),
+                             high=frame["high"].to_numpy(float), low=frame["low"].to_numpy(float),
+                             close=frame["close"].to_numpy(float), gaps=0)
+        self._candles_cache[candle_key] = candles
+        return candles
+
     def _evaluate(self, row, strategy, capital, target_usdt, low, high, n, cfg, *,
                   margin_pct=None):
         symbol = row["symbol"]
@@ -1835,18 +1852,7 @@ class MetaOperator:
             # (comportamiento anterior); no se cae el análisis por esto.
             symbol_filters = None
         # Historial público del Scanner; la ventana sigue el plazo del perfil y avanza 7d.
-        candle_key = (symbol, self.clock() // 86400)
-        candles = self._candles_cache.get(candle_key)
-        if candles is None:
-            candles_raw = self.scanner.client.get_historical_klines(symbol, "5m", 180)
-            from grid.sim.data import CandleData
-            import pandas as pd
-            frame = candles_raw if isinstance(candles_raw, pd.DataFrame) else pd.DataFrame(candles_raw)
-            timestamps = pd.to_datetime(frame["timestamp"], utc=True).astype("int64").to_numpy() // 1_000_000_000
-            candles = CandleData(timestamp=timestamps.astype("int64"), open=frame["open"].to_numpy(float),
-                                 high=frame["high"].to_numpy(float), low=frame["low"].to_numpy(float),
-                                 close=frame["close"].to_numpy(float), gaps=0)
-            self._candles_cache[candle_key] = candles
+        candles = self._load_candles(symbol)
         window_days = int(cfg.get("max_days", 20))
         book = row.get("book") or {}
         try:
@@ -2133,12 +2139,10 @@ class MetaOperator:
             omitted.append({"name": "advisor", "reason": "recomendación sin margen neto"})
         try:
             from grid.meta_learning import causal_touch_buy_to_sell
-            candle_key = (row["symbol"], self.clock() // 86400)
-            candles = self._candles_cache.get(candle_key)
+            candles = self._load_candles(row["symbol"])
             piece = (alternative.get("pieces") or [{}])[0]
-            touch = (causal_touch_buy_to_sell(at=self.clock(), candles=candles,
+            touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,
                 buy_price=piece.get("floor", low), sell_price=piece.get("ceiling", high))
-                if candles is not None else {"sell_rate": None})
             rate = touch.get("sell_rate")
             if rate is not None:
                 signals.append({"name": "touch_buy_to_sell", "value": float(rate),
@@ -2147,8 +2151,8 @@ class MetaOperator:
             else:
                 omitted.append({"name": "touch_buy_to_sell",
                     "reason": "sin tasa de venta causal disponible"})
-        except (TypeError, ValueError, KeyError, IndexError) as exc:
-            omitted.append({"name": "touch_buy_to_sell", "reason": str(exc)})
+        except Exception as exc:
+            omitted.append({"name": "touch_buy_to_sell", "reason": f"velas no disponibles: {exc}"})
         weights = (cfg.get("signal_weights") or {})
         enough_evidence = bool(alternative["estimate"].get("evidence_sufficient"))
         logit_cap = float(cfg.get("signal_logit_cap", 1.0))
