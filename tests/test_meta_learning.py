@@ -324,13 +324,13 @@ def test_touch_is_sixth_holm_family_member_with_zero_prior():
 
 
 def test_historical_features_rebuild_only_available_normalized_signals():
-    values, present = extract_learning_features({"point_in_time_by_symbol": {
+    values, present = extract_learning_features({"signals_version": 2, "point_in_time_by_symbol": {
         "XRPUSDT": {"signals": {"realized_volatility_24h": .01,
             "volatility_forecasts": [{"sigma": .02}],
             "direction_predictions": [{"model": "model_a_down", "interval": "1h",
                 "probability_up": .8}]}}}})
     assert values["volatility"] == pytest.approx(np.log(2))
-    assert values["direction"] == 1.0
+    assert values["direction"] == -1.0
     assert present == {"volatility", "direction"}
 
 

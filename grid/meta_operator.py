@@ -2084,7 +2084,7 @@ class MetaOperator:
                             "diagnostic": {"reference_sigma_24h": realized,
                                 "forecast_horizon_h": 24,
                                 "forecast_unit": "sigma_24h",
-                                "median_sigma_per_hour": float(np.median([
+                                "sigma_per_hour": float(np.median([
                                     float(value["sigma_per_hour"])
                                     for value in (model.get("volatility_forecasts") or {}).values()
                                     if value.get("used") and value.get("sigma_per_hour") is not None]))}})
@@ -2110,9 +2110,12 @@ class MetaOperator:
             predicted_at = predicted_at.replace(tzinfo=timezone.utc) if predicted_at.tzinfo is None else predicted_at
             fresh_direction = 0 <= (datetime.now(timezone.utc) - predicted_at).total_seconds() <= 7200
         if fresh_direction and prediction.get("probability_up") is not None:
-            p_up = float(prediction["probability_up"])
-            direction = max(-1.0, min(1.0, (p_up - .5) / .1)) if p_up >= .60 else 0.0
-            signals.append({"name": "direction", "value": p_up, "threshold": .60, "normalized": direction})
+            # En model_a_down, probability_up representa P(baja), no P(subida).
+            p_down = float(prediction["probability_up"])
+            from grid.meta_learning import normalize_down_probability
+            direction = normalize_down_probability(p_down)
+            signals.append({"name": "direction", "value": p_down, "p_down": p_down,
+                "threshold": .60, "normalized": direction})
         else:
             omitted.append({"name": "direction", "reason": "predicción ausente o con más de 2 h"})
         score = row.get("score")

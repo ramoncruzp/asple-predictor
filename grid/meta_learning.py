@@ -19,6 +19,12 @@ DEFAULT_SIGNAL_WEIGHTS["touch_buy_to_sell"] = 0.0
 REPLAY_CACHE_STEP = 0.0025
 
 
+def normalize_down_probability(p_down, threshold=0.60):
+    """Normaliza P(baja) de model_a_down como señal no positiva para compra spot."""
+    probability = float(p_down)
+    return -min(1.0, max(0.0, (probability - 0.5) / 0.1)) if probability >= threshold else 0.0
+
+
 def stable_template(parameters, *, meta_capital_usdt):
     """Forma relativa de la cartera, sin precios ni capital absolutos."""
     pieces = []
@@ -205,17 +211,15 @@ def extract_learning_features(signals, weights_by_symbol=None):
             realized = source.get("realized_volatility_24h")
             forecasts = [float(row["sigma"]) for row in source.get("volatility_forecasts", [])
                 if row.get("sigma") is not None and float(row["sigma"]) > 0]
-            if realized is not None and float(realized) > 0 and forecasts:
+            if version >= 2 and realized is not None and float(realized) > 0 and forecasts:
                 normalized = float(np.clip(np.log(float(np.median(forecasts)) / float(realized)), -1, 1))
                 volatility_values.append((normalized, piece_weight))
-            for row in source.get("direction_predictions", []):
+            for row in source.get("direction_predictions", []) if version >= 2 else []:
                 if str(row.get("model") or "").lower() != "model_a_down" or str(row.get("interval") or "") != "1h":
                     continue
-                probability_up = row.get("probability_up")
-                if probability_up is not None and float(probability_up) >= .60:
-                    probability_up = float(probability_up)
-                    direction_values.append((float(np.clip((probability_up - .5) / .1, -1, 1)),
-                        piece_weight))
+                probability_down = row.get("probability_up")
+                if probability_down is not None:
+                    direction_values.append((normalize_down_probability(probability_down), piece_weight))
     if volatility_values:
         values["volatility"] = float(np.average([v for v, _ in volatility_values],
             weights=[w for _, w in volatility_values]))
