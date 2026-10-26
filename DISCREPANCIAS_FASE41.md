@@ -19,9 +19,9 @@
 - No se encontraron otros consumidores fuera del Modo Meta que traten de forma confirmada sigma horaria como sigma 24 h. El proveedor de volatilidad y la ruta `/api/volatility` ya convierten por horizonte.
 - No se ejecutó la suite completa. Se corrieron solamente los tres archivos dirigidos solicitados.
 
-## Continuaci?n 41b (2026-10-26)
+## Continuación 41b (2026-10-26)
 
-- La telemetr?a previa al cambio fue un microbenchmark del c?lculo causal de toque con 51.840 velas; no se midieron por separado Advisor, replay, conversi?n de `_load_candles` ni el tiempo total de `_build_plan`. Tampoco se compar? el plan integral contra `24f2ba7` ni se cronometr? el cliente artificial con 2 s de demora. No se atribuye la demora reportada en S1 exclusivamente al toque y no se afirma cumplido el objetivo ?2 min.
-- La cach? de toque cuantiza geometr?a en pasos relativos de 0,01 % como permite el pedido. Una diferencia inferior a esa resoluci?n puede reutilizar el ?ltimo valor causal; queda pendiente medir en el arn?s integral el impacto num?rico agregado frente a una corrida sin cach?.
-- `META_OPERATOR_ROTATION_EVALUATED` conserva los datos decisorios necesarios para persistencia y auditor?a breve, mientras que el detalle extenso queda representado por la evaluaci?n vinculada. La pantalla no consum?a sus alternativas completas.
-- La suite completa no se ejecut?; la verificaci?n fue solo sobre cinco archivos enfocados.
+- La telemetría previa al cambio fue un microbenchmark del cálculo causal de toque con 51.840 velas; no se midieron por separado Advisor, replay, conversión de `_load_candles` ni el tiempo total de `_build_plan`. Tampoco se comparó el plan integral contra `24f2ba7` ni se cronometró el cliente artificial con 2 s de demora. No se atribuye la demora reportada en S1 exclusivamente al toque y no se afirma cumplido el objetivo ≤2 min.
+- La caché de toque cuantiza geometría en pasos relativos de 0,01 % como permite el pedido. Una diferencia inferior a esa resolución puede reutilizar el último valor causal; queda pendiente medir en el arnés integral el impacto numérico agregado frente a una corrida sin caché.
+- `META_OPERATOR_ROTATION_EVALUATED` conserva los datos decisorios necesarios para persistencia y auditoría breve, mientras que el detalle extenso queda representado por la evaluación vinculada. La pantalla no consumía sus alternativas completas.
+- La suite completa no se ejecutó; la verificación fue solo sobre cinco archivos enfocados.

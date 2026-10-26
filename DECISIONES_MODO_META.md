@@ -276,9 +276,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Las alternativas usan el cargador de velas causal también para toque, y las señales combinadas conservan valor y diagnóstico por pieza.
 - Las muestras nuevas llevan `signals_version: 2`; las muestras v1 (o sin versión) no entrenan volatilidad, ruptura ni dirección porque esos valores estaban defectuosos.
 
-## Actualizaci?n Fase 41b ? rendimiento, NOOP y diagn?stico
+## Actualización Fase 41b — rendimiento, NOOP y diagnóstico
 
-- El operador cachea resultados de toque por s?mbolo, d?a UTC y geometr?a relativa de 0,01 %, y fallos al descargar velas por s?mbolo durante 15 minutos. Los fallos dejan de generar una llamada por alternativa en el mismo intervalo.
-- Las nuevas filas de `META_OPERATOR_NOOP` guardan los campos visibles de decisi?n en el nivel superior, la valoraci?n, `plan_decision_id` y esquema 2. La evaluaci?n de rotaci?n no duplica planes completos.
-- El diagn?stico de muestras, eventos y predicciones convierte los timestamps a `datetime` de SQLite antes de comparar.
-- Pendiente de certificaci?n: medir Advisor, replay, descarga lenta y `_build_plan` completos frente a `24f2ba7`, con el escenario sint?tico especificado. Las cifras de toque aislado no representan el tiempo de una revisi?n.
+- El operador cachea resultados de toque por símbolo, día UTC y geometría relativa de 0,01 %, y fallos al descargar velas por símbolo durante 15 minutos. Los fallos dejan de generar una llamada por alternativa en el mismo intervalo.
+- Las nuevas filas de `META_OPERATOR_NOOP` guardan los campos visibles de decisión en el nivel superior, la valoración, `plan_decision_id` y esquema 2. La evaluación de rotación no duplica planes completos.
+- El diagnóstico de muestras, eventos y predicciones convierte los timestamps a `datetime` de SQLite antes de comparar.
+- Pendiente de certificación: medir Advisor, replay, descarga lenta y `_build_plan` completos frente a `24f2ba7`, con el escenario sintético especificado. Las cifras de toque aislado no representan el tiempo de una revisión.

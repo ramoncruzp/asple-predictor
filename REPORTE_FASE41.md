@@ -110,38 +110,38 @@ Resultado final de la suite enfocada: **82 passed, 10 warnings, 0 failed**, 10,6
 
 Sin push. No se usó S1, Testnet, `.env` ni base real.
 
-## Continuaci?n 41b ? tiempos, eventos livianos y diagn?stico (2026-10-26)
+## Continuación 41b — tiempos, eventos livianos y diagnóstico (2026-10-26)
 
-### Medici?n previa al cambio
+### Medición previa al cambio
 
-Se usaron 51.840 velas sint?ticas de 5 minutos (180 d?as), con precios deterministas y tres geometr?as representativas. El microbenchmark aislado de `causal_touch_buy_to_sell` tard? 0,0029 s para tres llamadas en la primera geometr?a (incluye calentamiento de importaci?n), 0,0002 s y 0,0001 s en las siguientes; sus resultados fueron tasas 0,25, 0 y `None`, respectivamente. La funci?n existe en `24f2ba7:grid/meta_learning.py` y la ruta hist?rica ya ten?a el c?lculo causal directo por alternativa.
+Se usaron 51.840 velas sintéticas de 5 minutos (180 días), con precios deterministas y tres geometrías representativas. El microbenchmark aislado de `causal_touch_buy_to_sell` tardó 0,0029 s para tres llamadas en la primera geometría (incluye calentamiento de importación), 0,0002 s y 0,0001 s en las siguientes; sus resultados fueron tasas 0,25, 0 y `None`, respectivamente. La función existe en `24f2ba7:grid/meta_learning.py` y la ruta histórica ya tenía el cálculo causal directo por alternativa.
 
 | Paso solicitado | Resultado disponible antes del cambio |
 |---|---:|
 | Velas generadas | 51.840 |
-| Toque causal, geometr?a 1 (3 llamadas) | 0,0029 s |
-| Toque causal, geometr?a 2 (3 llamadas) | 0,0002 s |
-| Toque causal, geometr?a 3 (3 llamadas) | 0,0001 s |
-| `_load_candles`, replays, Advisor, `_build_plan` integrales | No medidos en un arn?s comparable |
-| Cliente artificial con espera de 2 s y descarga fallida | No se complet? el conteo temporal comparativo antes/despu?s |
-| Comparaci?n integral `24f2ba7` vs revisi?n actual | Pendiente; no se afirma paridad de rendimiento |
+| Toque causal, geometría 1 (3 llamadas) | 0,0029 s |
+| Toque causal, geometría 2 (3 llamadas) | 0,0002 s |
+| Toque causal, geometría 3 (3 llamadas) | 0,0001 s |
+| `_load_candles`, replays, Advisor, `_build_plan` integrales | No medidos en un arnés comparable |
+| Cliente artificial con espera de 2 s y descarga fallida | No se completó el conteo temporal comparativo antes/después |
+| Comparación integral `24f2ba7` vs revisión actual | Pendiente; no se afirma paridad de rendimiento |
 
-Por tanto, el microbenchmark no confirma que el toque explique la duraci?n real observada de 16?17 minutos ni permite certificar el objetivo de revisi?n ?2 minutos. S? identifica que el toque aislado es barato en este fixture; los costes de Advisor/replay y el tratamiento de una descarga fallida requieren medir el plan completo en un arn?s equivalente. Esta limitaci?n queda abierta, no se sustituye por una cifra inventada.
+Por tanto, el microbenchmark no confirma que el toque explique la duración real observada de 16–17 minutos ni permite certificar el objetivo de revisión ≤2 minutos. Sí identifica que el toque aislado es barato en este fixture; los costes de Advisor/replay y el tratamiento de una descarga fallida requieren medir el plan completo en un arnés equivalente. Esta limitación queda abierta, no se sustituye por una cifra inventada.
 
 ### Cambios
 
-- `grid/meta_operator.py:286-289, 1903-1930`: resultado causal de toque cacheado por moneda, d?a UTC y geometr?a cuantizada a 0,01 % relativo; fallos de descarga cacheados por moneda durante 15 minutos. La cach? negativa conserva el error para el diagn?stico y vuelve a intentar al vencer.
-- `grid/meta_operator.py:1267`: el payload v2 de `META_PLAN_EVALUATED` ahora conserva `timings_s`, incluidos tiempo de toque y aciertos de cach? que el plan ya calculaba.
-- `grid/meta_operator.py:2529-2595`: los `META_OPERATOR_NOOP` se compactan con `_compact_review_result`, valoraci?n, `plan_decision_id` y esquema 2. Se mantienen `decision` y `reason` arriba para el lector actual de `frontend/metas.js:417-430`.
-- `grid/meta_operator.py:2676-2683`: `META_OPERATOR_ROTATION_EVALUATED` conserva ?nicamente identificadores, s?mbolo, estrategia y estimaci?n de las alternativas en vez de guardar planes completos. Los lectores de persistencia usan `alternative_key`, `material`, `streak` y `review_id`.
-- `scripts/diagnostico_senales_meta.py:81,92,208`: muestras, bit?cora y predicciones comparan fechas con `datetime(...)` de SQLite; acepta marcas con espacio o `T`.
+- `grid/meta_operator.py:286-289, 1903-1930`: resultado causal de toque cacheado por moneda, día UTC y geometría cuantizada a 0,01 % relativo; fallos de descarga cacheados por moneda durante 15 minutos. La caché negativa conserva el error para el diagnóstico y vuelve a intentar al vencer.
+- `grid/meta_operator.py:1267`: el payload v2 de `META_PLAN_EVALUATED` ahora conserva `timings_s`, incluidos tiempo de toque y aciertos de caché que el plan ya calculaba.
+- `grid/meta_operator.py:2529-2595`: los `META_OPERATOR_NOOP` se compactan con `_compact_review_result`, valoración, `plan_decision_id` y esquema 2. Se mantienen `decision` y `reason` arriba para el lector actual de `frontend/metas.js:417-430`.
+- `grid/meta_operator.py:2676-2683`: `META_OPERATOR_ROTATION_EVALUATED` conserva únicamente identificadores, símbolo, estrategia y estimación de las alternativas en vez de guardar planes completos. Los lectores de persistencia usan `alternative_key`, `material`, `streak` y `review_id`.
+- `scripts/diagnostico_senales_meta.py:81,92,208`: muestras, bitácora y predicciones comparan fechas con `datetime(...)` de SQLite; acepta marcas con espacio o `T`.
 
 ### Pruebas
 
 Comando final: `$testBase = Join-Path $env:TEMP 'asple-fase41b-continuacion-20261026-03'; New-Item -ItemType Directory -Path $testBase | Out-Null; $env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_operator.py tests/test_meta_signal_diagnostics.py tests/test_intelligence_api.py tests/test_meta_learning_api.py tests/ui/test_metas_ui.py -q --basetemp $testBase`
 
-Resultado: **102 passed, 12 warnings, 0 failed, 29,66 s**. Una corrida previa detect? cinco fallos de harness/c?digo nuevo; se corrigieron antes de la corrida final. Las pruebas nuevas cubren cach? negativa y su vencimiento, igualdad de se?al al reutilizar la cach?, payload NOOP menor de 15 KiB, conservaci?n de `timings_s` y timestamp del mismo d?a con formato espacio. No se ejecut? suite completa. No se us? S1, Testnet, `.env` ni la base real.
+Resultado: **102 passed, 12 warnings, 0 failed, 29,66 s**. Una corrida previa detectó cinco fallos de harness/código nuevo; se corrigieron antes de la corrida final. Las pruebas nuevas cubren caché negativa y su vencimiento, igualdad de señal al reutilizar la caché, payload NOOP menor de 15 KiB, conservación de `timings_s` y timestamp del mismo día con formato espacio. No se ejecutó suite completa. No se usó S1, Testnet, `.env` ni la base real.
 
 ### Estado y limitaciones
 
-Implementaci?n y pruebas dirigidas: hechas. Comparaci?n completa de `_build_plan` con `24f2ba7`, medici?n de llamadas con retraso artificial de 2 s y certificaci?n del l?mite de 2 minutos: no hechas; deben medirse antes de considerar cerrado el objetivo de rendimiento.
+Implementación y pruebas dirigidas: hechas. Comparación completa de `_build_plan` con `24f2ba7`, medición de llamadas con retraso artificial de 2 s y certificación del límite de 2 minutos: no hechas; deben medirse antes de considerar cerrado el objetivo de rendimiento.
