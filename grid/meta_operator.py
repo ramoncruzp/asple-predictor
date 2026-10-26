@@ -2075,7 +2075,10 @@ class MetaOperator:
             realized = float(row["sigma_24h_open"])
             signals.append({"name": "volatility", "value": forecast_sigma,
                             "normalized": max(-1.0, min(1.0, math.log(max(1e-9, forecast_sigma / realized)))),
-                            "models": model.get("volatility_forecasts")})
+                            "models": model.get("volatility_forecasts"),
+                            "diagnostic": {"reference_sigma_24h": realized,
+                                "forecast_horizon_h": 24,
+                                "forecast_unit": "sigma_por_hora"}})
         else:
             stale = [name for name, value in (model.get("volatility_forecasts") or {}).items()
                      if not value.get("used")]

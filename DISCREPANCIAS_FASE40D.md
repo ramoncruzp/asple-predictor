@@ -73,6 +73,14 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - Pruebas enfocadas: `tests/test_meta_operator.py`, 60 passed, 4 warnings, 3,28 s. Sin suite completa, S1, Testnet, `.env` ni BD real.
 
 
+## 40d-7A
+
+- Las causas de saturación se derivaron del contrato de datos y del código local, sin medir las 765 muestras de S1. La diferencia probable de volatilidad por hora vs sigma de 24 h explica el −1; el mismo factor √24 llega a `break_prob`. La semántica del campo `probability_up` de `model_a_down` confirma que representa probabilidad de baja, mientras que el operador actual lo usa con signo positivo.
+- Para toque compra→venta, el runtime condiciona su presencia a velas previas disponibles y tasa no nula. La frecuencia exacta de cada motivo para las 724 muestras sin señal requiere correr el script en S1; la fase no accedió a S1 ni a una BD real. La bitácora puede proporcionar motivos guardados si existen para el período consultado.
+- La conversión de unidades y la inversión de signo de dirección se entregan como propuestas; ninguna se aplicó. Solo se añadió metadata de diagnóstico que no participa en la probabilidad real.
+- Verificación local: 63 passed, 4 warnings; no se ejecutó la suite completa.
+
+
 
 ## 40d-6
 

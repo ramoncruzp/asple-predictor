@@ -115,6 +115,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Cerrada en 40d-6: inventario de velas, calibración y conteos persistidos |
 | 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
 | 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; 40d-6B restaura los frenos de reajuste real previos al refactor |
+| 40d-7A | Diagnóstico de saturación de señales, sin cambiar la decisión real | Diagnóstico local implementado; corrección de unidades/signo propuesta, pendiente de aprobación y medición en S1 |
+| 40d-7B | Inteligencia legible, aciertos en sombra y defectos de Metas/Inteligencia | Pendiente |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
@@ -249,3 +251,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Scanner + Advisor y la sombra aprendida evalúan reajustes con los mismos umbrales de materialidad, persistencia, cooldown y límite diario que la decisión real; cada política conserva su estado separado.
 - Si la migración encuentra el valor 2 persistido, lo restablece a 1 y registra el cambio en la bitácora de la Meta más reciente del perfil.
 - Estado: implementada y verificada con `tests/test_meta_operator.py` (60 passed); commit 40d-6B pendiente de esta entrega.
+
+## 22. Fase 40d-7A - diagnóstico de señales
+
+- Causa probable de Volatilidad y Ruptura: el pronóstico de volatilidad `horizon_h=24` es RMS por barra horaria (`exp(pred_logvol_cal)`), mientras que el Scanner y `break_prob` esperan sigma acumulada de 24 horas. Falta convertir por `√24`; un ejemplo (0,01/h frente a 0,05/24 h) lleva la señal actual a −1 y quedaría en −0,020 con horizonte comparable.
+- En `model_a_down`, `probability_up` se calcula sobre la clase positiva que representa retorno negativo; equivale a P(baja). La señal actual la normaliza como positiva. Se propone invertir el signo para reflejar evidencia bajista, pero requiere aprobación porque cambia decisiones.
+- El toque se omite si no hay velas previas disponibles o la estadística causal de 30 días no ofrece tasa. `scripts/diagnostico_senales_meta.py` muestra los motivos persistidos y la cobertura en una BD SQLite de solo lectura. Ejecutarlo en S1 queda pendiente; no se consultó S1 ni la BD real.
+- No se modificaron fórmulas de señales ni pesos; los campos añadidos a volatilidad son telemetría sin uso decisorio. Pruebas locales focalizadas: 63 passed.
