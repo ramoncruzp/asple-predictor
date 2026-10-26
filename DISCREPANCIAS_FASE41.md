@@ -18,3 +18,10 @@
 - Las 1153 muestras live y el máximo observado de P(baja)=0,533 provienen del diagnóstico de S1 informado por Ramón; no se verificaron ni se consultaron S1 en esta ejecución.
 - No se encontraron otros consumidores fuera del Modo Meta que traten de forma confirmada sigma horaria como sigma 24 h. El proveedor de volatilidad y la ruta `/api/volatility` ya convierten por horizonte.
 - No se ejecutó la suite completa. Se corrieron solamente los tres archivos dirigidos solicitados.
+
+## Continuaci?n 41b (2026-10-26)
+
+- La telemetr?a previa al cambio fue un microbenchmark del c?lculo causal de toque con 51.840 velas; no se midieron por separado Advisor, replay, conversi?n de `_load_candles` ni el tiempo total de `_build_plan`. Tampoco se compar? el plan integral contra `24f2ba7` ni se cronometr? el cliente artificial con 2 s de demora. No se atribuye la demora reportada en S1 exclusivamente al toque y no se afirma cumplido el objetivo ?2 min.
+- La cach? de toque cuantiza geometr?a en pasos relativos de 0,01 % como permite el pedido. Una diferencia inferior a esa resoluci?n puede reutilizar el ?ltimo valor causal; queda pendiente medir en el arn?s integral el impacto num?rico agregado frente a una corrida sin cach?.
+- `META_OPERATOR_ROTATION_EVALUATED` conserva los datos decisorios necesarios para persistencia y auditor?a breve, mientras que el detalle extenso queda representado por la evaluaci?n vinculada. La pantalla no consum?a sus alternativas completas.
+- La suite completa no se ejecut?; la verificaci?n fue solo sobre cinco archivos enfocados.
