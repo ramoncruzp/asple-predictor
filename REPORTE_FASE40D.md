@@ -110,3 +110,11 @@ La comparación solo crece a medida que maduran etiquetas y depende de que haya 
 - Corrida enfocada final: `ASPLE_OFFLINE=1 python -m pytest tests/ui/test_metas_ui.py tests/test_meta_learning_api.py tests/ui/test_laboratorio.py tests/test_app_settings_api.py -q --basetemp <carpeta nueva en TEMP>` - **33 passed, 16 warnings, 46,86 s**, código de salida 0.
 - `node --check frontend/metas.js`, `node --check frontend/lab.js` y `node --check frontend/global_flags.js` pasaron.
 - No se ejecutó la suite completa. No se usaron S1, Testnet, `.env` ni la base real; no hubo despliegue.
+
+
+## 40d-4A - Comparación consistente de decisiones
+
+- `grid/meta_operator.py:57-72` comparte `rank_alternatives` entre real, Scanner + Advisor y aprendida: ventanas rodantes disponibles, probabilidad de cada decisión y los mismos desempates por avance, días y peor caída.
+- `grid/meta_operator.py:321-342` solo agrega a la comparación eventos con `comparison_version=1`; conserva los eventos antiguos sin contarlos bajo el contrato nuevo. Las revisiones sin acción registran mantener para las tres decisiones, evitando diferencias ficticias por `alternative_id=None`.
+- Pruebas enfocadas: `tests/test_meta_operator.py` y `tests/test_meta_learning_api.py`: **60 passed, 9 warnings, 0 failed**, 10,30 s. `ASPLE_OFFLINE=1`; carpeta temporal nueva. Sin suite completa, S1, Testnet, `.env` ni BD real.
+- Alcance de la comparación activa: el registro compara acción y destino cuando la revisión produce una acción; el cálculo contrafactual de reajustes/rotaciones bloqueados por materialidad o persistencia sigue dependiendo de las alternativas evaluadas en esa revisión.

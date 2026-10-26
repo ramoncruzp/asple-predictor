@@ -57,11 +57,18 @@ def summarize_replays(rows, independent_window_days=30, target_usdt=None):
             "low_likelihood": (len(hits) / len(rows) if rows else 0.0) < .25}
 
 
-def rank_alternatives(alternatives):
+def rank_alternatives(alternatives, probability_key="probability_replay"):
     """Probabilidad de replay, avance mediano, días y drawdown."""
+    def probability(row):
+        if probability_key in row:
+            return float(row.get(probability_key) or 0)
+        estimate = row.get("estimate") or {}
+        return float(estimate.get(probability_key,
+            estimate.get("probability_replay", estimate.get("probability", 0))) or 0)
+
     return sorted(alternatives, key=lambda row: (
         0 if int(row["estimate"].get("rolling_windows", 1) or 0) > 0 else 1,
-        -float(row["estimate"].get("probability_replay", row["estimate"].get("probability", 0))),
+        -probability(row),
         -float(row["estimate"].get("median_progress_pct") or 0),
         float(row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf),
         float(row["estimate"].get("worst_drawdown_pct") or 0)))
@@ -293,7 +300,7 @@ class MetaOperator:
                 self.db.meta_goals.c.profile == profile)).all()]
             ledger_rows = (conn.execute(select(self.db.meta_ledger.c.details).where(
                 self.db.meta_ledger.c.meta_id.in_(goal_ids),
-                self.db.meta_ledger.c.event_type == "META_OPERATOR_REVIEW_DECISION").order_by(
+                self.db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION"))).order_by(
                     self.db.meta_ledger.c.id.desc()).limit(500)).all() if goal_ids else [])
             sample_rows = conn.execute(select(self.db.meta_learning_samples.c.id,
                 self.db.meta_learning_samples.c.alternative_id,
@@ -314,14 +321,26 @@ class MetaOperator:
         for raw_event, in ledger_rows:
             event = json.loads(raw_event or "{}")
             choices = event.get("decision_choices") or {}
+            # Solo se cuentan comparaciones nuevas con contrato explícito.
+            # Los eventos previos permanecen intactos como evidencia histórica.
+            if int(choices.get("comparison_version") or 0) != 1:
+                continue
+            real_choice = choices.get("real") or {}
             real_id = (choices.get("real") or {}).get("alternative_id")
+            real_decision = real_choice.get("decision")
             for name in comparison:
                 choice = choices.get(name) or {}
                 alt_id = choice.get("alternative_id")
-                if not alt_id:
+                decision = choice.get("decision")
+                if not decision:
                     continue
                 comparison[name]["decisions"] += 1
-                comparison[name]["different_from_real"] += int(name != "real" and alt_id != real_id)
+                differs = decision != real_decision
+                if decision == "seleccionar_alternativa" and real_decision == "seleccionar_alternativa":
+                    differs = alt_id != real_id
+                comparison[name]["different_from_real"] += int(name != "real" and differs)
+                if not alt_id:
+                    continue
                 saved = alt_samples.get(str(alt_id))
                 if saved is None:
                     continue
@@ -937,20 +956,14 @@ class MetaOperator:
         if not alternatives:
             raise ValueError("No hay estructuras del Advisor para comparar.")
         if use_learned:
-            alternatives.sort(key=lambda row: (0 if int(row["estimate"].get("rolling_windows", 1) or 0) > 0 else 1,
-                -float(row.get("learned_probability", row["replay_probability"])),
-                -float(row["estimate"].get("median_progress_pct") or 0),
-                float(row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf),
-                float(row["estimate"].get("worst_drawdown_pct") or 0)))
+            alternatives = rank_alternatives(alternatives, probability_key="learned_probability")
             for row in alternatives:
                 row["estimate"]["probability"] = row.get("learned_probability", row["replay_probability"])
                 row["estimate"]["probability_adjusted"] = row["estimate"]["probability"]
         else:
             alternatives = rank_alternatives(alternatives)
-        shadow = sorted(alternatives, key=lambda row: (-row["shadow_probability"],
-            row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf))[0]
-        learned_choice = max(alternatives, key=lambda row: (float(row.get("learned_probability", row["replay_probability"])),
-            float(row["estimate"].get("median_progress_pct") or 0)))
+        shadow = rank_alternatives(alternatives, probability_key="shadow_probability")[0]
+        learned_choice = rank_alternatives(alternatives, probability_key="learned_probability")[0]
         best = alternatives[0]
         pieces = best["pieces"]
         capital_used = sum(float(piece["capital_usdt"]) for piece in pieces)
@@ -997,11 +1010,12 @@ class MetaOperator:
         for index, item in enumerate(alternatives):
             item["alternative_id"] = f"{decision_id}:{index}"
         decision_choices = {
-            "real": {"alternative_id": best.get("alternative_id"), "symbol": best["symbol"],
+            "comparison_version": 1,
+            "real": {"decision": "seleccionar_alternativa", "alternative_id": best.get("alternative_id"), "symbol": best["symbol"],
                 "strategy": best["strategy"], "probability": best["estimate"].get("probability")},
-            "scanner_advisor": {"alternative_id": shadow.get("alternative_id"), "symbol": shadow["symbol"],
+            "scanner_advisor": {"decision": "seleccionar_alternativa", "alternative_id": shadow.get("alternative_id"), "symbol": shadow["symbol"],
                 "strategy": shadow["strategy"], "probability": shadow.get("shadow_probability")},
-            "learned": {"alternative_id": learned_choice.get("alternative_id"),
+            "learned": {"decision": "seleccionar_alternativa", "alternative_id": learned_choice.get("alternative_id"),
                 "symbol": learned_choice["symbol"], "strategy": learned_choice["strategy"],
                 "probability": learned_choice.get("learned_probability")}}
         selected_public = []
@@ -1062,6 +1076,7 @@ class MetaOperator:
         if record:
             self._ledger(goal["id"], "META_PLAN_EVALUATED", {"decision_id": decision_id,
                           "alternatives": public_alternatives,
+                          "decision_choices": decision_choices,
                           "advisor_comparisons": advisor_comparisons,
                           "combinations_evaluated": evaluated_combinations,
                           "shadow_decision": plan["shadow_decision"],
@@ -2128,6 +2143,33 @@ class MetaOperator:
         finally:
             self._review_guard.release()
 
+    @staticmethod
+    def _review_choice_label(result):
+        decision = str((result or {}).get("decision") or "")
+        if decision == "no_hacer_nada": return "mantener"
+        if decision == "reajustar_pieza": return "reajustar"
+        if decision in {"retirar_con_ventas_vivas", "retirar_y_abrir", "cerrar_y_reasignar"}: return "rotar"
+        if decision in {"cerrar_sin_reasignar", "cerrar"}: return "cerrar"
+        if decision == "abrir_pieza_con_efectivo_libre": return "abrir"
+        return decision or "mantener"
+
+    def _active_review_choices(self, plan, result):
+        choices = json.loads(json.dumps((plan or {}).get("decision_choices") or {}))
+        choices["comparison_version"] = 1
+        real_label = self._review_choice_label(result)
+        real_id = (result or {}).get("alternative_id")
+        choices["real"] = {"decision": real_label, "alternative_id": real_id,
+            "symbol": (result or {}).get("symbol"), "probability": (result or {}).get("probability")}
+        for name in ("scanner_advisor", "learned"):
+            alternative = choices.get(name) or {}
+            if real_label == "mantener":
+                choices[name] = {"decision": "mantener", "alternative_id": None}
+            elif real_id and alternative.get("alternative_id") == real_id:
+                choices[name] = {**alternative, "decision": real_label}
+            else:
+                choices[name] = {"decision": "mantener", "alternative_id": None}
+        return choices
+
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
         value = self.core.valuation(meta_id)
@@ -2137,8 +2179,10 @@ class MetaOperator:
             self._ledger(meta_id, "META_OPERATOR_NOOP", result)
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "decision": result, "shadow_decision": None, "valuation": value,
-                "decision_choices": {"real": {"decision": result["decision"], "alternative_id": None},
-                    "scanner_advisor": {"alternative_id": None}, "learned": {"alternative_id": None}}})
+                "decision_choices": {"comparison_version": 1,
+                    "real": {"decision": "mantener", "alternative_id": None},
+                    "scanner_advisor": {"decision": "mantener", "alternative_id": None},
+                    "learned": {"decision": "mantener", "alternative_id": None}}})
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
@@ -2173,10 +2217,11 @@ class MetaOperator:
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": getattr(self, "_last_review_shadow", None),
             "valuation": value, "touch_decision_id": (plan or {}).get("decision_id"),
-            "decision_choices": {**((plan or {}).get("decision_choices") or {}),
+            "decision_choices": {**self._active_review_choices(plan, result),
                 "real_result": result, "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
-                "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", [])},
+                "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", []),
+                "comparison_version": 1},
             "touch_alternatives": [{"alternative_id": item.get("alternative_id"),
                 "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
                 for item in (plan or {}).get("alternatives", [])]})
@@ -2184,11 +2229,11 @@ class MetaOperator:
             self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
         return result
 
-    def _record_review(self, meta_id, result, value, shadow):
+    def _record_review(self, meta_id, result, value, shadow, plan=None):
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": shadow, "valuation": value,
-            "decision_choices": {"real": {"decision": result.get("decision"), "alternative_id": None},
-                "scanner_advisor": {"alternative_id": None}, "learned": {"alternative_id": None}}})
+            "decision_choices": self._active_review_choices(plan, result),
+            "comparison_version": 1})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
 
     def _plan_price_moved(self, plan, goal):
@@ -2392,6 +2437,7 @@ class MetaOperator:
                 self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
                     "alternative": best, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 return {"decision": "retirar_con_ventas_vivas", "reason": reason,
+                        "alternative_id": best.get("alternative_id"), "symbol": best.get("symbol"),
                         "grid_id": int(grid["id"]), "capital_reusable": False}
             if must_withdraw and not has_inventory:
                 replacement = best
@@ -2423,7 +2469,9 @@ class MetaOperator:
                         "piece": replacement.get("pieces", [None])[0], "error": str(exc)}, grid_id=int(grid["id"]))
                     return {"decision": "retirada_sin_reapertura", "reason": reason,
                             "error": str(exc), "closed_grid_id": int(grid["id"])}
-                return {"decision": "retirar_y_abrir", "reason": reason, "closed_grid_id": int(grid["id"]),
+                return {"decision": "retirar_y_abrir", "reason": reason,
+                        "alternative_id": replacement.get("alternative_id"), "symbol": replacement.get("symbol"),
+                        "closed_grid_id": int(grid["id"]),
                         "opened": opened}
             if has_inventory and is_alternative and time_faster and acceptable:
                 openability = self._testnet_openability(best["pieces"][0], goal,
@@ -2456,6 +2504,7 @@ class MetaOperator:
                         "actual_costs": actual_costs, "expected_gain_usdt": expected,
                     }, grid_id=int(grid["id"]))
                     return {"decision": "cerrar_sin_reasignar", "reason": reason,
+                            "alternative_id": best.get("alternative_id"), "symbol": best.get("symbol"),
                             "actual_costs": actual_costs, "expected_gain_usdt": expected}
                 try:
                     opened = self._open_replacement(goal, best, float(grid["capital_total"]))
@@ -2464,7 +2513,8 @@ class MetaOperator:
                         "piece": best.get("pieces", [None])[0], "error": str(exc)}, grid_id=int(grid["id"]))
                     return {"decision": "cierre_sin_reapertura", "reason": reason,
                             "error": str(exc), "closed_grid_id": int(grid["id"])}
-                return {"decision": "cerrar_y_reasignar", "reason": reason, "loss_usdt": loss,
+                return {"decision": "cerrar_y_reasignar", "reason": reason,
+                        "alternative_id": best.get("alternative_id"), "symbol": best.get("symbol"), "loss_usdt": loss,
                         "expected_gain_usdt": expected, "close_fee_usdt": close_fee,
                         "reopen_fee_usdt": reopen_fee, "opened": opened}
         added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation)
@@ -2570,6 +2620,7 @@ class MetaOperator:
         if not outcome.get("ok") or not outcome.get("changed", outcome.get("ok")):
             return None
         details = {"decision": "reajustar_pieza", "piece_type": piece_type,
+            "alternative_id": candidate.get("alternative_id"), "symbol": piece.get("symbol"),
             "old": {"floor": grid["range_low"], "ceiling": grid["range_high"], "n_levels": grid["n_levels"]},
             "new": {"floor": piece["floor"], "ceiling": piece["ceiling"],
                     "n_levels": piece.get("n_levels", 1)},
@@ -2631,6 +2682,7 @@ class MetaOperator:
                 continue
             opened = self._open_replacement(goal, alternative, needed)
             decision = {"decision": "abrir_pieza_con_efectivo_libre",
+                "alternative_id": alternative.get("alternative_id"), "symbol": piece.get("symbol"),
                 "reason": "revisión de 15 minutos; hay capital atribuible libre",
                 "free_before_usdt": free, "attributable_cash_usdt": attributable_cash,
                 "allocated_reserve_free_usdt": allocatable, "piece": opened,

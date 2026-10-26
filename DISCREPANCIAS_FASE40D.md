@@ -39,3 +39,10 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - El interruptor de pesos aprendidos vive en Laboratorio → Reglas globales y se confirma allí con actor obligatorio; hay un switch independiente por perfil. La ausencia de evidencia se informa, pero no bloquea la acción.
 - Metas muestra aprendizaje global de ambos perfiles, con carga al entrar y actualización manual. La recarga periódica solo actualiza los datos vivos y se pausa mientras se edita un campo o hay confirmación, análisis o plan visible.
 - Estado: implementada y verificada offline con las pruebas enfocadas; sin despliegue.
+
+
+## 40d-4A - Comparación de decisiones
+
+- La comparación nueva usa `comparison_version=1`; los registros anteriores se conservan y no se incorporan al conteo bajo el esquema nuevo.
+- El ranking comparte las mismas claves y desempates entre las decisiones real, Scanner + Advisor y aprendida. Las revisiones sin acción registran las tres como mantener.
+- Límite pendiente: las revisiones activas que sí ejecutan una alternativa comparan acción y destino registrados, pero todavía no reproducen de manera independiente todos los frenos de materialidad, persistencia y enfriamiento para una acción contrafactual que la política real rechazó. La comparación de diferencias para esas decisiones no debe interpretarse como evaluación completa de política.

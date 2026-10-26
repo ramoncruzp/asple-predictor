@@ -110,6 +110,31 @@ def test_replay_probability_remains_the_primary_ranking_signal():
     assert rank_alternatives(rows)[0]["symbol"] == "MORE_PROBABLE"
 
 
+def test_learned_and_real_ranking_share_all_tie_breakers():
+    rows = [
+        {"symbol": "NO_WINDOWS", "learned_probability": .9, "estimate": {
+            "rolling_windows": 0, "probability_replay": .25, "median_progress_pct": 99}},
+        {"symbol": "WITH_WINDOWS", "learned_probability": .25, "estimate": {
+            "rolling_windows": 4, "probability_replay": .25, "median_progress_pct": 10,
+            "days_median": 5, "worst_drawdown_pct": 1}},
+    ]
+    assert rank_alternatives(rows)[0]["symbol"] == "WITH_WINDOWS"
+    assert rank_alternatives(rows, probability_key="learned_probability")[0]["symbol"] == "WITH_WINDOWS"
+
+
+def test_learned_non_default_probability_can_change_shared_ranking():
+    rows = [
+        {"symbol": "BASE", "learned_probability": .2, "estimate": {
+            "rolling_windows": 5, "probability_replay": .6, "median_progress_pct": 20,
+            "days_median": 5, "worst_drawdown_pct": 1}},
+        {"symbol": "LEARNED", "learned_probability": .7, "estimate": {
+            "rolling_windows": 5, "probability_replay": .5, "median_progress_pct": 20,
+            "days_median": 5, "worst_drawdown_pct": 1}},
+    ]
+    assert rank_alternatives(rows)[0]["symbol"] == "BASE"
+    assert rank_alternatives(rows, probability_key="learned_probability")[0]["symbol"] == "LEARNED"
+
+
 def test_public_binance_client_book_ticker_shape_is_supported():
     from grid.meta_operator import MetaOperator
 

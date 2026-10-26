@@ -119,6 +119,7 @@ def test_review_ledger_saves_real_scanner_advisor_and_learned_choices(tmp_path):
             events.append((event_type, details))
     operator = MetaOperator(Core(), db, None, None, SimpleNamespace(meta_mode_enabled=True))
     plan = {'decision_id': 'decision-1', 'alternatives': [], 'decision_choices': {
+        'comparison_version': 1,
         'real': {'alternative_id': 'a-real'}, 'scanner_advisor': {'alternative_id': 'a-shadow'},
         'learned': {'alternative_id': 'a-learned'}}, 'learning': {'enabled': False, 'version_ids': []}}
     operator._build_plan = lambda _goal: plan
@@ -126,10 +127,33 @@ def test_review_ledger_saves_real_scanner_advisor_and_learned_choices(tmp_path):
     operator._review_allocations = lambda *_args, **_kwargs: {'decision': 'no_hacer_nada', 'reason': 'test'}
     operator._review_once_locked(7)
     event = next(details for name, details in events if name == 'META_OPERATOR_REVIEW_DECISION')
-    assert event['decision_choices']['real']['alternative_id'] == 'a-real'
-    assert event['decision_choices']['scanner_advisor']['alternative_id'] == 'a-shadow'
-    assert event['decision_choices']['learned']['alternative_id'] == 'a-learned'
+    assert event['decision_choices']['real']['decision'] == 'mantener'
+    assert event['decision_choices']['scanner_advisor']['decision'] == 'mantener'
+    assert event['decision_choices']['learned']['decision'] == 'mantener'
+    assert event['decision_choices']['comparison_version'] == 1
     assert event['decision_choices']['learned_weights_enabled'] is False
+
+
+def test_learning_comparison_counts_only_explicit_version_one_and_maintain_matches(tmp_path):
+    db, operator, _client = _operator(tmp_path)
+    now = datetime.now(timezone.utc)
+    with db.engine.begin() as conn:
+        meta_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type='USDT', target_input_value=10, profile='RAPIDO',
+            status='ACTIVE', environment='TESTNET', created_at=now)).inserted_primary_key[0]
+        for version in (None, 1):
+            choices = {'real': {'decision': 'mantener', 'alternative_id': None},
+                'scanner_advisor': {'decision': 'mantener', 'alternative_id': None},
+                'learned': {'decision': 'mantener', 'alternative_id': None}}
+            if version is not None:
+                choices['comparison_version'] = version
+            conn.execute(db.meta_ledger.insert().values(meta_id=meta_id, ts=now,
+                event_type='META_OPERATOR_REVIEW_DECISION', details=json.dumps({
+                    'decision_choices': choices})))
+    comparison = operator.learning_status('RAPIDO')['decision_comparison']
+    assert comparison['real']['decisions'] == 1
+    assert comparison['learned']['decisions'] == 1
+    assert comparison['learned']['different_from_real'] == 0
 
 
 def test_learned_switch_does_not_bypass_existing_75_percent_block(tmp_path):
