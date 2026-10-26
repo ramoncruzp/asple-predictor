@@ -415,19 +415,50 @@ class DBManager:
         from grid.meta import DEFAULT_PROFILES
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.begin() as conn:
+            global_raw = conn.execute(select(self.meta_profile_settings.c.settings).where(
+                self.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            global_values = json.loads(global_raw or "{}")
+            migration_done = bool(global_values.get("reconfig_persistence_40d6b_migrated", False))
+            migration_pending = False
             for profile, values in DEFAULT_PROFILES.items():
                 present = conn.execute(select(self.meta_profile_settings.c.profile).where(
                     self.meta_profile_settings.c.profile == profile)).first()
                 if present is None:
                     conn.execute(self.meta_profile_settings.insert().values(
                         profile=profile, settings=json.dumps(values, sort_keys=True), updated_at=now))
+                    continue
+                raw = conn.execute(select(self.meta_profile_settings.c.settings).where(
+                    self.meta_profile_settings.c.profile == profile)).scalar_one()
+                stored = json.loads(raw or "{}")
+                old_persistence = stored.get("reconfig_persistence_reviews")
+                if old_persistence is not None and int(old_persistence) == 2 and not migration_done:
+                    goal_id = conn.execute(select(self.meta_goals.c.id).where(
+                        self.meta_goals.c.profile == profile).order_by(
+                            self.meta_goals.c.id.desc()).limit(1)).scalar_one_or_none()
+                    if goal_id is not None:
+                        stored["reconfig_persistence_reviews"] = 1
+                        conn.execute(self.meta_ledger.insert().values(
+                            meta_id=int(goal_id), ts=now,
+                            event_type="META_PROFILE_SETTING_MIGRATED",
+                            reason="Restauración del comportamiento original de reajuste",
+                            details=json.dumps({"profile": profile,
+                                "setting": "reconfig_persistence_reviews", "old_value": 2,
+                                "new_value": 1, "cause": "Fase 40d-6B"}, ensure_ascii=False,
+                                sort_keys=True)))
+                    else:
+                        migration_pending = True
+                stored.setdefault("reconfig_persistence_reviews", 1)
+                conn.execute(self.meta_profile_settings.update().where(
+                    self.meta_profile_settings.c.profile == profile).values(
+                        settings=json.dumps(stored, sort_keys=True), updated_at=now))
             present = conn.execute(select(self.meta_profile_settings.c.profile).where(
                 self.meta_profile_settings.c.profile == "GLOBAL")).first()
             if present is None:
                 conn.execute(self.meta_profile_settings.insert().values(
                     profile="GLOBAL", settings=json.dumps({"max_active": 1,
                         "learning_max_templates_per_run": 30,
-                        "learning_time_budget_minutes": 20}, sort_keys=True), updated_at=now))
+                        "learning_time_budget_minutes": 20,
+                        "reconfig_persistence_40d6b_migrated": True}, sort_keys=True), updated_at=now))
             else:
                 row = conn.execute(select(self.meta_profile_settings.c.settings).where(
                     self.meta_profile_settings.c.profile == "GLOBAL")).scalar_one()
@@ -435,6 +466,8 @@ class DBManager:
                 global_values.setdefault("max_active", 1)
                 global_values.setdefault("learning_max_templates_per_run", 30)
                 global_values.setdefault("learning_time_budget_minutes", 20)
+                if not migration_pending:
+                    global_values["reconfig_persistence_40d6b_migrated"] = True
                 conn.execute(self.meta_profile_settings.update().where(
                     self.meta_profile_settings.c.profile == "GLOBAL").values(
                         settings=json.dumps(global_values, sort_keys=True), updated_at=now))

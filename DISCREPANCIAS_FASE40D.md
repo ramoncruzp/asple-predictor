@@ -65,6 +65,14 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - Ajuste del harness de UI: la prueba de reajuste reciente asumía que el contenedor ya estaba en el DOM. Se espera explícitamente el selector y se conserva la misma aserción de texto; la corrida enfocada final pasa.
 
 
+## 40d-6B
+
+- Se corrigió la discrepancia de comportamiento detectada en 40d-6: el reajuste real había adquirido persistencia de dos revisiones y usaba `probability_replay`, y su contador de cuatro acciones filtraba por pieza. Ahora conserva la decisión de 374cec4: `estimate["probability"]`, una revisión por defecto, cuatro reajustes por Meta cada 24 horas y cooldown fijo de una hora por pieza.
+- Las sombras usan los mismos frenos de reajuste con estado propio. La rotación mantiene su política separada, incluido su plazo de persistencia y su tope de acciones.
+- La migración heredada corre una sola vez. Si el perfil guarda 2 y todavía no existe una Meta de ese perfil a la que ligar el evento, deja pendiente esa migración; un arranque posterior la aplicará y anotará. El marcador impide que un valor 2 elegido después se revierta en cada arranque.
+- Pruebas enfocadas: `tests/test_meta_operator.py`, 60 passed, 4 warnings, 3,28 s. Sin suite completa, S1, Testnet, `.env` ni BD real.
+
+
 
 ## 40d-6
 

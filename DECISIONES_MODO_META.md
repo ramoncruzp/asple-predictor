@@ -114,7 +114,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Cerrada en 40d-6: política contrafactual v2 con persistencia y cooldown propios |
 | 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Cerrada en 40d-6: inventario de velas, calibración y conteos persistidos |
 | 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
-| 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; pruebas focalizadas offline |
+| 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; 40d-6B restaura los frenos de reajuste real previos al refactor |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
@@ -241,3 +241,11 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - La política pura compartida gobierna los gates reales de reajuste y rotación. El cierre de pérdida permanece en la protección de 40a.
 - meta_learning_runs.summary_json guarda inventario por moneda de velas y conteos de ventanas simuladas, caché y cortes; las versiones de pesos guardan deciles de calibración para el modelo y p_replay. No se guardan velas ni se añaden tablas.
 - Pendientes de 40d-6: ninguno conocido en el alcance. El aprendizaje sigue en sombra salvo activación explícita por perfil.
+
+## 21. Fase 40d-6B - restaurar el comportamiento de reajuste
+
+- La decisión real vuelve a la semántica de 374cec4: compara la probabilidad ajustada `estimate["probability"]`, permite actuar en la primera revisión material por defecto, limita a cuatro reajustes por Meta en 24 horas y aplica una hora de enfriamiento por pieza desde el último reajuste.
+- `reconfig_persistence_reviews` es editable por perfil: 1 reproduce el comportamiento original y 2 exige dos revisiones materiales consecutivas para la misma alternativa. La rotación conserva sus frenos actuales.
+- Scanner + Advisor y la sombra aprendida evalúan reajustes con los mismos umbrales de materialidad, persistencia, cooldown y límite diario que la decisión real; cada política conserva su estado separado.
+- Si la migración encuentra el valor 2 persistido, lo restablece a 1 y registra el cambio en la bitácora de la Meta más reciente del perfil.
+- Estado: implementada y verificada con `tests/test_meta_operator.py` (60 passed); commit 40d-6B pendiente de esta entrega.

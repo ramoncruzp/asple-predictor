@@ -32,6 +32,8 @@ DEFAULT_PROFILES = {
                  "reconfig_min_probability_delta_pp": 5.0,
                  "reconfig_probability_tie_tolerance_pp": 2.0,
                  "reconfig_min_progress_delta_pct": 10.0,
+                 "reconfig_persistence_reviews": 1,
+                 "max_reconfigurations_per_24h": 4,
                  "rotation_min_probability_delta_pp": 5.0,
                  "rotation_probability_tie_tolerance_pp": 2.0,
                  "rotation_min_progress_delta_pct": 10.0,
@@ -56,6 +58,8 @@ DEFAULT_PROFILES = {
                "reconfig_min_probability_delta_pp": 5.0,
                "reconfig_probability_tie_tolerance_pp": 2.0,
                "reconfig_min_progress_delta_pct": 10.0,
+               "reconfig_persistence_reviews": 1,
+               "max_reconfigurations_per_24h": 4,
                "rotation_min_probability_delta_pp": 5.0,
                "rotation_probability_tie_tolerance_pp": 2.0,
                "rotation_min_progress_delta_pct": 10.0,
@@ -219,6 +223,10 @@ class MetaCore:
         if set(values) - allowed:
             raise ValueError("Parámetros no permitidos.")
         merged = {**DEFAULT_PROFILES[profile], **values}
+        if "reconfig_persistence_reviews" in values:
+            persistence = values["reconfig_persistence_reviews"]
+            if isinstance(persistence, bool) or int(persistence) != float(persistence) or int(persistence) < 1:
+                raise ValueError("reconfig_persistence_reviews debe ser un entero igual o mayor que 1.")
         if "signal_weights" in values:
             if not isinstance(values["signal_weights"], dict):
                 raise ValueError("signal_weights debe ser un objeto de pesos.")

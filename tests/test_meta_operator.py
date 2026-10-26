@@ -314,9 +314,10 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
             return {"ok": True, "changed": True}
 
     def inputs(piece_type="grid", held=0, probability=.56, old_probability=.50,
-               new_progress=20, old_progress=20):
+               new_progress=20, old_progress=20, clock=None):
         core, engine = Core(), Engine()
-        operator = MetaOperator(core, object(), None, engine, None, clock=lambda: 1_800_000_000)
+        clock = clock or [1_800_000_000]
+        operator = MetaOperator(core, object(), None, engine, None, clock=lambda: clock[0])
         grid = {"id": 7, "status": "ACTIVE", "symbol": "AAAUSDT", "strategy": "simple",
                 "range_low": 90, "range_high": 110, "n_levels": 4}
         levels = [{"held_qty": held}]
@@ -331,9 +332,6 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
         return core, engine, operator, grid, levels, plan
 
     core, engine, operator, grid, levels, plan = inputs()
-    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
-        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
-    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"
@@ -342,19 +340,21 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     assert event[2] == "META_OPERATOR_RECONFIGURE"
     assert event[3]["estimated_probability_improvement_pp"] == pytest.approx(6)
 
-    core, engine, operator, grid, levels, plan = inputs(probability=.53)
-    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+    # La decisión histórica usaba la probabilidad ajustada común, no p_replay.
+    core, engine, operator, grid, levels, plan = inputs(probability=.56, old_probability=.50)
+    plan["alternatives"][0]["estimate"]["probability_replay"] = .95
+    plan["alternatives"][1]["estimate"]["probability_replay"] = .10
+    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
-    assert first is None
+    assert result["decision"] == "reajustar_pieza"
+
+    core, engine, operator, grid, levels, plan = inputs(probability=.53)
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result is None  # 3 pp no supera la materialidad de 5 pp.
     assert engine.calls == []
 
     core, engine, operator, grid, levels, plan = inputs(probability=.51, new_progress=22)
-    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
-        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
-    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"  # empate ±2 pp y avance mediano +10 %.
@@ -363,9 +363,6 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
     assert operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 84, plan, {"piece_type": "grid"}, (1, 7)) is None
     operator._outside_range_count[(1, 7)] = 2
-    result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
-        levels, 84, plan, {"piece_type": "grid"}, (1, 7))
-    assert result is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 84, plan, {"piece_type": "grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"  # dos revisiones, desplazamiento > un nivel.
@@ -385,20 +382,103 @@ def test_meta_reconfiguration_uses_materiality_and_repositions_only_unfilled_bot
         levels, 108, plan, {"piece_type": "grid"}, (1, 7))
     assert result is None and engine.calls == []  # máximo de cuatro en 24 h.
 
+    # Secuencia de regresión: borde sin mejora, dos revisiones fuera de rango,
+    # reajuste material y un nuevo borde antes/después de completar una hora.
+    clock = [1_800_000_000]
+    core, engine, operator, grid, levels, plan = inputs(probability=.53, clock=clock)
+    goal = {"id": 1, "config_snapshot": {}}
+    assert operator._consider_piece_reconfiguration(goal, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7)) is None
+    operator._outside_range_count[(1, 7)] = 1
+    assert operator._consider_piece_reconfiguration(goal, grid,
+        levels, 84, plan, {"piece_type": "grid"}, (1, 7)) is None
+    operator._outside_range_count[(1, 7)] = 2
+    plan["alternatives"][1]["estimate"]["probability"] = .56
+    result = operator._consider_piece_reconfiguration(goal, grid,
+        levels, 84, plan, {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"
+    clock[0] += 3599
+    assert operator._consider_piece_reconfiguration(goal, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7)) is None
+    clock[0] += 1
+    result = operator._consider_piece_reconfiguration(goal, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"
+
+    # Cuatro acciones previas pertenecen a la meta, aunque sean de otras piezas.
+    core.rows = [{"event_type": "META_OPERATOR_RECONFIGURE", "grid_id": i,
+        "ts": datetime.fromtimestamp(clock[0] - 60, timezone.utc).replace(tzinfo=None)}
+        for i in (8, 9, 10, 11)]
+    engine.calls.clear()
+    assert operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
+        levels, 108, plan, {"piece_type": "grid"}, (1, 7)) is None
+    assert engine.calls == []
+
     core, engine, operator, grid, levels, plan = inputs("individual_bot_grid")
-    first = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
-        levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
-    assert first is None
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
     assert result["decision"] == "reajustar_pieza"
     assert engine.calls[0][0] == "bot"
     assert engine.calls[0][1][1:] == (92, 112)
 
+    # Persistencia es editable, pero solo se exige cuando el perfil fija 2.
+    core, engine, operator, grid, levels, plan = inputs()
+    goal = {"id": 1, "config_snapshot": {"reconfig_persistence_reviews": 2}}
+    assert operator._consider_piece_reconfiguration(goal, grid, levels, 108, plan,
+        {"piece_type": "grid"}, (1, 7)) is None
+    result = operator._consider_piece_reconfiguration(goal, grid, levels, 108, plan,
+        {"piece_type": "grid"}, (1, 7))
+    assert result["decision"] == "reajustar_pieza"
+
     core, engine, operator, grid, levels, plan = inputs("individual_bot_grid", held=1)
     result = operator._consider_piece_reconfiguration({"id": 1, "config_snapshot": {}}, grid,
         levels, 108, plan, {"piece_type": "individual_bot_grid"}, (1, 7))
     assert result is None and engine.calls == []
+
+
+def test_meta_reconfiguration_profile_migration_resets_two_and_logs_it(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from database.db_manager import DBManager
+
+    url = f"sqlite:///{tmp_path / 'reconfig-profile.sqlite'}"
+    db = DBManager(url)
+    now = datetime(2026, 10, 26, tzinfo=timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.insert().values(capital_initial=100, target_usdt=110,
+            target_input_type="USDT", target_input_value=110, profile="RAPIDO",
+            status="DRAFT", environment="testnet", created_at=now,
+            config_snapshot="{}"))
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "RAPIDO").values(
+                settings=json.dumps({"reconfig_persistence_reviews": 2})))
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "GLOBAL").values(settings=json.dumps({"max_active": 1})))
+
+    migrated = DBManager(url)
+    with migrated.engine.connect() as conn:
+        settings = json.loads(conn.execute(select(
+            migrated.meta_profile_settings.c.settings).where(
+                migrated.meta_profile_settings.c.profile == "RAPIDO")).scalar_one())
+        events = conn.execute(select(migrated.meta_ledger)).mappings().all()
+    assert settings["reconfig_persistence_reviews"] == 1
+    assert len(events) == 1
+    assert events[0]["event_type"] == "META_PROFILE_SETTING_MIGRATED"
+    assert json.loads(events[0]["details"])["old_value"] == 2
+
+    # La migración es de una vez: el ajuste editable 2 no se restablece en cada arranque.
+    with migrated.engine.begin() as conn:
+        settings["reconfig_persistence_reviews"] = 2
+        conn.execute(migrated.meta_profile_settings.update().where(
+            migrated.meta_profile_settings.c.profile == "RAPIDO").values(
+                settings=json.dumps(settings)))
+    restarted = DBManager(url)
+    with restarted.engine.connect() as conn:
+        persisted = json.loads(conn.execute(select(
+            restarted.meta_profile_settings.c.settings).where(
+                restarted.meta_profile_settings.c.profile == "RAPIDO")).scalar_one())
+    assert persisted["reconfig_persistence_reviews"] == 2
 
 
 def test_prudent_requires_medium_sigma_and_complete_model_stats_rapid_does_not():
@@ -1623,3 +1703,45 @@ def test_shadow_counterfactual_states_are_independent_and_persisted():
     assert second["learned"]["decision"] == second["scanner_advisor"]["decision"] == "rotar"
     assert {row["policy"] for row in states} == {"learned", "scanner_advisor"}
     assert all(row["streak"] in {1, 2} for row in states)
+
+
+def test_reconfiguration_shadows_use_real_policy_thresholds_without_open_age_gate():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self, persistence):
+            self.rows = []
+            self.config = {"reconfig_persistence_reviews": persistence,
+                "reconfig_min_probability_delta_pp": 5,
+                "reconfig_probability_tie_tolerance_pp": 2,
+                "reconfig_min_progress_delta_pct": 10,
+                "max_reconfigurations_per_24h": 4}
+        def get_goal(self, _meta_id): return {"id": 4, "config_snapshot": self.config}
+        def ledger(self, _meta_id): return list(self.rows)
+        def _ledger(self, meta_id, run_id, event_type, details, **kwargs):
+            self.rows.append({"meta_id": meta_id, "event_type": event_type, "details": details,
+                "grid_id": kwargs.get("grid_id"), "ts": datetime.fromtimestamp(1_800_000_000, timezone.utc)})
+    class DB:
+        def get_grid(self, _grid_id): return {"id": 10, "symbol": "XRPUSDT", "strategy": "simple",
+            "created_at": datetime.fromtimestamp(1_800_000_000 - 60, timezone.utc)}
+
+    def make_alt(alt_id, floor, probability):
+        return {"alternative_id": alt_id, "symbol": "XRPUSDT", "strategy": "simple",
+            "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid", "strategy": "simple",
+                "floor": floor, "ceiling": floor + 20, "n_levels": 4, "capital_usdt": 50}],
+            "estimate": {"probability": probability, "probability_replay": .01,
+                "median_progress_pct": 10, "evidence_sufficient": True},
+            "shadow_probability": probability, "learned_probability": probability}
+
+    for persistence, expected in ((1, "reajustar"), (2, "mantener")):
+        core = Core(persistence)
+        operator = MetaOperator(core, DB(), None, None, None, clock=lambda: 1_800_000_000)
+        plan = {"alternatives": [make_alt("current", 90, .50), make_alt("next", 92, .56)],
+            "decision_choices": {"scanner_advisor": {"alternative_id": "next", "probability": .56},
+                "learned": {"alternative_id": "next", "probability": .56}}}
+        result = {"decision": "no_hacer_nada", "grid_id": 10}
+        first = operator._active_review_choices(plan, result, 4)
+        assert first["learned"]["decision"] == first["scanner_advisor"]["decision"] == expected
+        if persistence == 2:
+            second = operator._active_review_choices(plan, result, 4)
+            assert second["learned"]["decision"] == second["scanner_advisor"]["decision"] == "reajustar"

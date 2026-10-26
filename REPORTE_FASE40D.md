@@ -167,3 +167,14 @@ La pantalla Inteligencia no tiene deciles de calibración persistidos (ya docume
 - Archivos: grid/meta_operator.py, grid/meta_learning.py, frontend/intelligence.js; pruebas en tests/test_meta_operator.py, tests/test_meta_learning.py, tests/test_meta_learning_api.py, tests/test_intelligence_api.py y tests/ui/test_intelligence_ui.py.
 - Verificación final: 89 passed, 10 warnings; node --check frontend/intelligence.js pasó. Sin suite completa, S1, Testnet, .env ni base real.
 - Sin discrepancias funcionales conocidas en el alcance de 40d-6.
+
+
+## 40d-6B - Restauración del reajuste real
+
+- `grid/meta_operator.py:2767` restaura la política de reajuste previa a 40d-6: materialidad compara `estimate["probability"]`; la persistencia por defecto es una revisión; el límite cuenta cuatro reajustes por Meta en 24 horas; y el enfriamiento usa 3600 segundos desde el último reajuste de la misma pieza.
+- `grid/meta_operator.py:2326` aplica a las sombras aprendida y Scanner + Advisor los mismos umbrales, persistencia, enfriamiento y límite diario cuando evalúan un reajuste. Sus estados contrafactuales siguen separados; la edad de apertura no añade un freno que no existía en la decisión real. La política de rotación conserva sus parámetros anteriores.
+- `grid/meta.py:20` y `grid/meta.py:217` añaden `reconfig_persistence_reviews` editable por perfil, con valor 1; un valor 2 exige dos revisiones consecutivas. `max_reconfigurations_per_24h` conserva el tope predeterminado de 4.
+- `database/db_manager.py:413` completa el default en perfiles existentes. En la migración única de 40d-6B, si encuentra valor legado 2 y existe una Meta de ese perfil, lo cambia a 1 y escribe `META_PROFILE_SETTING_MIGRATED` en su bitácora. Si todavía no existe esa Meta, deja pendiente la migración para poder registrar el evento después. Un marcador global evita que un valor 2 configurado después se restablezca en cada arranque.
+- Pruebas en `tests/test_meta_operator.py:296`, `tests/test_meta_operator.py:439`, `tests/test_meta_operator.py:1626` y `tests/test_meta_operator.py:1708`: materialidad con probabilidad ajustada, primer reajuste inmediato, secuencia de borde y salida de rango, enfriamiento antes/después de una hora, quinto reajuste bloqueado aunque sea otra pieza, persistencia configurable 1/2, sombras y migración con bitácora.
+- Corrida autorizada: `ASPLE_OFFLINE=1 .\\venv\\Scripts\\python.exe -m pytest tests/test_meta_operator.py -q --basetemp <carpeta nueva bajo %TEMP%>`: **60 passed, 4 warnings, 3,28 s**, código 0. No se ejecutó la suite completa.
+- Sin S1, Testnet, `.env` ni base real. No hubo cambios de rotación ni de grids normales.

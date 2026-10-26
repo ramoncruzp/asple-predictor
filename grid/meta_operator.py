@@ -2357,25 +2357,31 @@ class MetaOperator:
                 if row.get("action_at") is not None), None)
             recent_actions = [row for row in prior_details if row.get("action_at") is not None
                 and now - float(row["action_at"]) <= 86400]
+            reconfigure_policy = desired == "reajustar"
+            policy_state = {"last_action_at": last_action, "actions_24h": len(recent_actions)}
+            if not reconfigure_policy:
+                policy_state["opened_at"] = (self._as_utc(grid.get("created_at")).timestamp()
+                    if grid and self._as_utc(grid.get("created_at")) else None)
             choice = counterfactual_policy_decision(
-                {"probability": current_est.get("probability_replay", current_est.get("probability", 0)),
+                {"probability": current_est.get("probability", 0),
                  "median_progress_pct": current_est.get("median_progress_pct")},
                 ([{"probability": ((candidate or {}).get("learned_probability") if name == "learned" else
-                        (candidate or {}).get("shadow_probability", (candidate or {}).get("estimate", {}).get("probability_replay"))),
+                        (candidate or {}).get("shadow_probability", (candidate or {}).get("estimate", {}).get("probability"))),
                     "median_progress_pct": ((candidate or {}).get("estimate") or {}).get("median_progress_pct"),
                     "alternative_id": (candidate or {}).get("alternative_id"),
                     "alternative_key": self._alternative_key(candidate) if candidate else "",
                     "destination": (candidate or {}).get("alternative_id"), "action": desired,
-                    "min_probability_delta_pp": cfg.get("rotation_min_probability_delta_pp", 5),
-                    "probability_tie_tolerance_pp": cfg.get("rotation_probability_tie_tolerance_pp", 2),
-                    "min_progress_delta_pct": cfg.get("rotation_min_progress_delta_pct", 10)}]
+                    "min_probability_delta_pp": cfg.get("reconfig_min_probability_delta_pp", 5) if reconfigure_policy else cfg.get("rotation_min_probability_delta_pp", 5),
+                    "probability_tie_tolerance_pp": cfg.get("reconfig_probability_tie_tolerance_pp", 2) if reconfigure_policy else cfg.get("rotation_probability_tie_tolerance_pp", 2),
+                    "min_progress_delta_pct": cfg.get("reconfig_min_progress_delta_pct", 10) if reconfigure_policy else cfg.get("rotation_min_progress_delta_pct", 10)}]
                     if is_actionable else []),
-                prior_details, {"opened_at": (self._as_utc(grid.get("created_at")).timestamp()
-                    if grid and self._as_utc(grid.get("created_at")) else None),
-                    "last_action_at": last_action, "actions_24h": len(recent_actions)},
-                required_reviews=int(cfg.get("rotation_persistence_reviews", 2)),
-                cooldown_seconds=float(cfg.get("rotation_cooldown_hours", 1)) * 3600,
-                max_actions_per_24h=int(cfg.get("max_rotations_per_24h", 2)), now=now)
+                prior_details, policy_state,
+                required_reviews=(int(cfg.get("reconfig_persistence_reviews", 1)) if reconfigure_policy
+                    else int(cfg.get("rotation_persistence_reviews", 2))),
+                cooldown_seconds=(3600 if reconfigure_policy else
+                    float(cfg.get("rotation_cooldown_hours", 1)) * 3600),
+                max_actions_per_24h=(int(cfg.get("max_reconfigurations_per_24h", 4)) if reconfigure_policy
+                    else int(cfg.get("max_rotations_per_24h", 2))), now=now)
             choice.update({"decision": choice["action"], "probability": proposed.get("probability"),
                 "alternative_id": choice.get("destination"), "symbol": proposed.get("symbol"),
                 "counterfactual": True})
@@ -2806,32 +2812,33 @@ class MetaOperator:
             key=lambda row: (float(row[0]["estimate"].get("probability") or 0),
                              float(row[0]["estimate"].get("median_progress_pct") or 0)))
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
-        recent, evaluations = [], []
+        recent, same_piece, evaluations = [], [], []
         for row in self._meta_ledger_rows(int(goal["id"])):
             stamp = self._as_utc(row.get("ts"))
             if stamp is None or now - stamp > timedelta(hours=24):
                 continue
-            if int(row.get("grid_id") or -1) != int(grid["id"]):
-                continue
             if row.get("event_type") == "META_OPERATOR_RECONFIGURE":
                 recent.append(row)
-            elif row.get("event_type") == "META_OPERATOR_RECONFIGURE_EVALUATED":
+                if int(row.get("grid_id") or -1) == int(grid["id"]):
+                    same_piece.append(row)
+            elif (row.get("event_type") == "META_OPERATOR_RECONFIGURE_EVALUATED"
+                    and int(row.get("grid_id") or -1) == int(grid["id"])):
                 evaluations.append(row.get("details") or {})
         key = self._alternative_key(candidate)
         selected = candidate["estimate"]
         policy = counterfactual_policy_decision(
-            {"probability": old_est.get("probability_replay", old_est.get("probability", 0)),
+            {"probability": old_est.get("probability", 0),
              "median_progress_pct": old_est.get("median_progress_pct")},
-            [{"probability": selected.get("probability_replay", selected.get("probability", 0)),
+            [{"probability": selected.get("probability", 0),
               "median_progress_pct": selected.get("median_progress_pct"), "alternative_key": key,
               "destination": candidate.get("alternative_id"), "action": "reajustar",
               "min_probability_delta_pp": cfg.get("reconfig_min_probability_delta_pp", 5),
               "probability_tie_tolerance_pp": cfg.get("reconfig_probability_tie_tolerance_pp", 2),
               "min_progress_delta_pct": cfg.get("reconfig_min_progress_delta_pct", 10)}],
             evaluations, {"last_action_at": max((stamp.timestamp() for stamp in
-                (self._as_utc(row.get("ts")) for row in recent) if stamp), default=None),
-                "actions_24h": len(recent)}, required_reviews=int(cfg.get("reconfig_persistence_reviews", 2)),
-            cooldown_seconds=float(cfg.get("reconfig_cooldown_hours", 1)) * 3600,
+                (self._as_utc(row.get("ts")) for row in same_piece) if stamp), default=None),
+                "actions_24h": len(recent)}, required_reviews=int(cfg.get("reconfig_persistence_reviews", 1)),
+            cooldown_seconds=3600,
             max_actions_per_24h=int(cfg.get("max_reconfigurations_per_24h", 4)), now=now.timestamp())
         self._ledger(goal["id"], "META_OPERATOR_RECONFIGURE_EVALUATED", {
             "alternative_key": key, "material": policy["material"], "streak": policy["streak"],
