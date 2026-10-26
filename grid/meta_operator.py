@@ -2676,7 +2676,11 @@ class MetaOperator:
             "review_id": review_id, "alternative_key": key, "material": material,
             "streak": streak, "probability_improvement_pp": probability_delta,
             "progress_improvement_pct": progress_delta,
-            "alternative": alternative, "current": current_alternative,
+            "alternative": {"alternative_id": alternative.get("alternative_id"),
+                "symbol": alternative.get("symbol"), "strategy": alternative.get("strategy"),
+                "estimate": new_est}, "current": {"alternative_id": current_alternative.get("alternative_id"),
+                "symbol": current_alternative.get("symbol"), "strategy": current_alternative.get("strategy"),
+                "estimate": old_est},
             "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
         required_reviews = max(2, int(cfg.get("rotation_persistence_reviews", 2)))
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
