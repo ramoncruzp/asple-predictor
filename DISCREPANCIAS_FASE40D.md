@@ -90,8 +90,8 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 
 ## 40d-7B
 
-- B10 usa los resultados ya guardados y calcula sus tasas al abrir Inteligencia. Si outcomes, pron?sticos verificados, etiquetas maduras, se?ales de toque o decisiones comparables no existen, las tablas quedan vac?as; no se sustituyen por estimaciones ni se a?adieron c?lculos de mercado retrospectivos.
-- La precisi?n del resumen de actividad se limita a alternativas persistidas en etiquetas/muestras y eventos `META_PLAN_EVALUATED`; no intenta contar an?lisis que no dejaron registro.
-- La calibraci?n de direcci?n refleja `outcomes.was_correct`; la de volatilidad compara `pred_logvol_cal` con `realized_logvol` en el mismo registro. La tasa del toque usa la predicci?n guardada en la muestra ligada a las observaciones.
+- B10 usa los resultados ya guardados y calcula sus tasas al abrir Inteligencia. Si outcomes, pronósticos verificados, etiquetas maduras, señales de toque o decisiones comparables no existen, las tablas quedan vacías; no se sustituyen por estimaciones ni se añadieron cálculos de mercado retrospectivos.
+- La precisión del resumen de actividad se limita a alternativas persistidas en etiquetas/muestras y eventos `META_PLAN_EVALUATED`; no intenta contar análisis que no dejaron registro.
+- La calibración de dirección refleja `outcomes.was_correct`; la de volatilidad compara `pred_logvol_cal` con `realized_logvol` en el mismo registro. La tasa del toque usa la predicción guardada en la muestra ligada a las observaciones.
 - Las piezas sin `grid_status` se conservan visibles por compatibilidad con respuestas antiguas; la API vigente ya entrega el estado y filtra cierres correctamente.
 - Sin otras discrepancias conocidas en los puntos B, C y D. Los resultados reales de S1 no se consultaron.

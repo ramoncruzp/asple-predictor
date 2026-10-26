@@ -261,7 +261,7 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 ## 23. Fase 40d-7B - observabilidad legible y resultados en sombra
 
-- Inteligencia presenta actividad y replay en lenguaje claro; sus tablas t?cnicas se despliegan a petici?n. Las decisiones muestran lado a lado Real, Scanner + Advisor y Aprendida, con filtro por meta y p?ginas. El JSON de una decisi?n permanece bajo expansi?n manual.
-- B10 resume evidencia observada para direcci?n, volatilidad, toque compra?venta, p_replay y alternativas elegidas. La muestra menor de 30 se identifica como escasa; son m?tricas descriptivas y no cambian pesos ni decisiones.
-- Metas lista solo piezas vivas y expresa el avance como fracci?n del objetivo; el backend expone el estado del grid junto a la valoraci?n.
-- Estado: implementaci?n y pruebas focalizadas terminadas; commit de 40d-7B pendiente. S1 y despliegue no forman parte de esta fase.
+- Inteligencia presenta actividad y replay en lenguaje claro; sus tablas técnicas se despliegan a petición. Las decisiones muestran lado a lado Real, Scanner + Advisor y Aprendida, con filtro por meta y páginas. El JSON de una decisión permanece bajo expansión manual.
+- B10 resume evidencia observada para dirección, volatilidad, toque compra→venta, p_replay y alternativas elegidas. La muestra menor de 30 se identifica como escasa; son métricas descriptivas y no cambian pesos ni decisiones.
+- Metas lista solo piezas vivas y expresa el avance como fracción del objetivo; el backend expone el estado del grid junto a la valoración.
+- Estado: implementación y pruebas focalizadas terminadas; commit de 40d-7B pendiente. S1 y despliegue no forman parte de esta fase.
