@@ -72,13 +72,14 @@ def test_ledger_v2_compacts_advisor_and_review_plan_without_changing_choices():
     original_choices = json.loads(json.dumps(plan["decision_choices"]))
     payload = MetaOperator._plan_ledger_payload(plan, [
         {"symbol": symbol, "eligible": True, "scanner_eligible": True,
-         "score": .7, "sigma_24h": .1, "price": 100,
+         "score": .7, "sigma_24h_open": .1, "price": 100,
          "excluded_reason": None, "testnet_book_state": "two_sided"} for symbol in symbols],
         alternatives[0], plan_kind="analisis")
     assert payload["ledger_schema_version"] == 2
     assert payload["plan_kind"] == "analisis"
     assert payload["decision_choices"] == original_choices
     assert payload["candidates"][0]["symbol"] == "XRPUSDT"
+    assert payload["candidates"][0]["sigma_24h"] == .1
     assert "advisor_recommendations" not in payload["alternatives"][0]
     assert payload["alternatives"][0]["advisor_refs"][0]["margin_target_pct"] == .5
     assert payload["advisor_comparisons"][0]["recommendation"] == recommendation

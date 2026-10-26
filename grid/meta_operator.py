@@ -1242,8 +1242,14 @@ class MetaOperator:
     def _plan_ledger_payload(cls, plan, candidates, selected, *, plan_kind):
         candidate_fields = ("symbol", "scanner_eligible", "hard_filters", "excluded_reason",
             "score", "sigma_24h", "price", "testnet_book_state", "testnet_book_reason")
-        compact_candidates = [{key: row.get(key) for key in candidate_fields if key in row}
-            for row in candidates]
+        compact_candidates = []
+        for row in candidates:
+            compact = {key: row.get(key) for key in candidate_fields if key in row}
+            if "sigma_24h" not in compact and row.get("sigma_24h_open") is not None:
+                compact["sigma_24h"] = row.get("sigma_24h_open")
+            if compact.get("price") is None:
+                compact["price"] = row.get("current_price")
+            compact_candidates.append(compact)
         compact_alternatives = [cls._compact_plan_alternative(item)
             for item in plan.get("alternatives", [])]
         compact_selected = cls._compact_plan_alternative(selected)
