@@ -85,10 +85,10 @@ Los números son punto de partida y se ajustan con los resultados.
 - **40d-2 (modelo y frenos):** la etiqueta de 72 h entrena y la etiqueta del plazo valida en fechas posteriores. El replay histórico usa ventanas del plazo con paso de 7 días, solo cerradas antes del corte; `p_replay` suavizado es `(éxitos + 1) / (ventanas + 2)`.
 - Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
 - Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
-- **Pendiente 40d-3:** registrar decisión aprendida junto a la real y a Scanner+Advisor, interruptor manual apagado por defecto, comparación contrafactual y vista por señal.
+- **40d-3 (completada):** decisiones real/Scanner+Advisor/aprendida en bit?cora, etiquetas contrafactuales existentes, interruptor manual apagado por defecto y vista de evidencia por se?al.
 - Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
 - Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
-- **Pendiente 40d-3:** registrar decisión aprendida junto a la real y a Scanner+Advisor, interruptor manual apagado por defecto, comparación contrafactual y vista por señal.
+- **40d-3 (completada):** decisiones real/Scanner+Advisor/aprendida en bit?cora, etiquetas contrafactuales existentes, interruptor manual apagado por defecto y vista de evidencia por se?al.
 
 - Medir el acierto de cada señal con lo que pasó después, en ventanas no solapadas.
 - Recalcular el peso de cada señal; puede volverse negativo si falla de forma consistente (leerla al revés).
@@ -109,8 +109,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C), `897f0d1` (A) y `3a513dc` (40c-3: defectos de presentación de la prueba de QA en S1); siguiente fase 40d |
 | 40d-1 | Etiquetas 72 h/plazo, backfill causal y almacenamiento separado `live`/`historical_reconstructed` | Implementada y verificada offline en esta entrega; sin S1 ni despliegue |
 | 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
-| 40d-3 | Sombra aprendida, interruptor manual y vista comparativa | Pendiente |
-| 40d | Aprendizaje continuo de pesos por señal | En curso; pendiente 40d-3 (sombra aprendida, activación manual y vista) |
+| 40d-3 | Cach? acotada, decisiones en sombra, pesos efectivos, interruptor y vista | Implementada y verificada offline; commits separados, sin despliegue |
+| 40d | Aprendizaje continuo de pesos por se?al | Partes 1?3 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -207,3 +207,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Plantillas de aprendizaje por forma relativa y cach? de replay por inicio semanal UTC fijo. El replay vivo conserva el anclaje a la fecha actual; la diferencia m?xima de anclaje es 7 d?as.
 - L?mites iniciales editables: 30 plantillas y 20 minutos por corrida. El job guarda trabajo pendiente y lo retoma en corridas posteriores; cede entre bloques de tres cortes.
 - El script `scripts/estimar_costo_aprendizaje_meta.py` requiere una URL indicada expl?citamente y solo lee la base; estima costo sin acceder al mercado ni escribir.
+
+### Fase 40d-3 ? l?mites y activaci?n manual
+
+- Backfill: huella relativa con cuantizaci?n 0,0025, ventanas hist?ricas semanales ancladas a lunes 00:00 UTC y cach? persistente por forma/inicio; l?mite editable 30 plantillas y 20 minutos, prioridad a trabajo pendiente y pausa entre bloques. El replay en vivo sigue anclado al momento de revisi?n, con hasta 7 d?as de diferencia de fase.
+- Los pesos efectivos se eligen por se?al y perfil (live suficiente, hist?rico aceptado, si no 0,25). El ajuste total al logit conserva el tope ?1,0. La selecci?n en sombra no mueve ?rdenes.
+- El switch ?Usar pesos aprendidos? se cambia manualmente por perfil con token, confirmaci?n y actor; queda apagado y no se activa autom?ticamente. Las protecciones operativas no cambian.
+- La vista muestra evidencia disponible, etiquetas maduras y frenos. La muestra real a?n es insuficiente para recomendar activaci?n.

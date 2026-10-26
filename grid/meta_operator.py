@@ -196,6 +196,212 @@ class MetaOperator:
         encoded = json.dumps({"day": day, "kind": kind, "payload": payload}, sort_keys=True, default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), day
 
+    def _effective_learned_weights(self, profile):
+        """Resuelve por señal: live suficiente, luego histórico aceptado, luego prior."""
+        from sqlalchemy import select
+        from grid.meta_learning import LEARNING_SIGNALS
+        with self.db.engine.connect() as conn:
+            versions = conn.execute(select(self.db.meta_learning_weight_versions).where(
+                self.db.meta_learning_weight_versions.c.profile == str(profile).upper()).order_by(
+                    self.db.meta_learning_weight_versions.c.created_at.desc())).mappings().all()
+        accepted = {}
+        for row in versions:
+            kind = str(row["source_kind"])
+            if kind not in accepted and row["status"] == "updated":
+                accepted[kind] = row
+        weights, sources, details = {}, {}, {}
+        for signal in LEARNING_SIGNALS:
+            chosen = None
+            live = accepted.get("live")
+            historical = accepted.get("historical_reconstructed")
+            if live:
+                summary = json.loads(live["summary_json"] or "{}")
+                item = (summary.get("signals") or {}).get(signal, {})
+                if int(item.get("effective_samples") or 0) >= 30:
+                    chosen = (live, item, "live")
+            if chosen is None and historical:
+                summary = json.loads(historical["summary_json"] or "{}")
+                item = (summary.get("signals") or {}).get(signal, {})
+                if int(item.get("effective_samples") or 0) >= 30:
+                    chosen = (historical, item, "historical_reconstructed")
+            if chosen:
+                version, item, source = chosen
+                weights[signal] = float(json.loads(version["weights_json"] or "{}").get(signal, .25))
+                sources[signal] = source
+                details[signal] = {**item, "version_id": int(version["id"])}
+            else:
+                latest_signal = {}
+                for row in versions:
+                    candidate_detail = (json.loads(row["summary_json"] or "{}").get("signals") or {}).get(signal)
+                    if candidate_detail:
+                        latest_signal = candidate_detail
+                        break
+                weights[signal], sources[signal] = .25, "sin evidencia"
+                details[signal] = {**latest_signal, "effective_samples": max(
+                    [int(((json.loads(row["summary_json"] or "{}").get("signals") or {}).get(signal, {})).get("effective_samples") or 0)
+                     for row in versions], default=0),
+                     "reason": latest_signal.get("reason", "sin evidencia suficiente")}
+        version_ids = sorted({item.get("version_id") for item in details.values() if item.get("version_id")})
+        return weights, sources, details, version_ids
+
+    def set_learning_switch(self, profile, enabled, *, confirm, actor):
+        from sqlalchemy import select
+        profile = str(profile).upper()
+        if profile not in {"PRUDENTE", "RAPIDO"}:
+            raise ValueError("Perfil Meta no válido.")
+        if not confirm or not str(actor or "").strip():
+            raise ValueError("Confirma el cambio e indica quién lo autorizó.")
+        weights, sources, _details, version_ids = self._effective_learned_weights(profile)
+        version_id = version_ids[-1] if version_ids else None
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["use_learned_weights"] = bool(enabled)
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == profile)).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == profile).values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile=profile,
+                    settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            conn.execute(self.db.meta_learning_switch_events.insert().values(profile=profile,
+                enabled=bool(enabled), actor=str(actor).strip()[:80], weight_version_id=version_id,
+                changed_at=datetime.now(timezone.utc)))
+        return {"profile": profile, "enabled": bool(enabled), "actor": str(actor).strip(),
+            "weight_version_id": version_id, "weights": weights, "sources": sources}
+
+    def learning_status(self, profile):
+        from sqlalchemy import select
+        profile = str(profile).upper()
+        weights, sources, details, versions = self._effective_learned_weights(profile)
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            config = json.loads(raw or "{}")
+            weight_rows = conn.execute(select(self.db.meta_learning_weight_versions).where(
+                self.db.meta_learning_weight_versions.c.profile == profile).order_by(
+                    self.db.meta_learning_weight_versions.c.created_at.desc()).limit(10)).mappings().all()
+            run = conn.execute(select(self.db.meta_learning_runs).order_by(
+                self.db.meta_learning_runs.c.id.desc()).limit(1)).mappings().first()
+            switch = conn.execute(select(self.db.meta_learning_switch_events).where(
+                self.db.meta_learning_switch_events.c.profile == profile).order_by(
+                    self.db.meta_learning_switch_events.c.id.desc()).limit(1)).mappings().first()
+            goal_ids = [int(row[0]) for row in conn.execute(select(self.db.meta_goals.c.id).where(
+                self.db.meta_goals.c.profile == profile)).all()]
+            ledger_rows = (conn.execute(select(self.db.meta_ledger.c.details).where(
+                self.db.meta_ledger.c.meta_id.in_(goal_ids),
+                self.db.meta_ledger.c.event_type == "META_OPERATOR_REVIEW_DECISION").order_by(
+                    self.db.meta_ledger.c.id.desc()).limit(500)).all() if goal_ids else [])
+            sample_rows = conn.execute(select(self.db.meta_learning_samples.c.id,
+                self.db.meta_learning_samples.c.alternative_id,
+                self.db.meta_learning_samples.c.parameters_json).where(
+                    self.db.meta_learning_samples.c.alternative_id.is_not(None),
+                    self.db.meta_learning_samples.c.profile == profile).order_by(
+                    self.db.meta_learning_samples.c.id.desc()).limit(5000)).all()
+            sample_ids = [int(row[0]) for row in sample_rows]
+            label_rows = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
+                self.db.meta_learning_labels.c.horizon, self.db.meta_learning_labels.c.label_json).where(
+                    self.db.meta_learning_labels.c.sample_id.in_(sample_ids))).all() if sample_ids else []
+        alt_samples = {str(row[1]): (int(row[0]), json.loads(row[2] or "{}")) for row in sample_rows}
+        label_map = {(int(row[0]), str(row[1])): json.loads(row[2] or "{}") for row in label_rows}
+        comparison = {key: {"decisions": 0, "different_from_real": 0,
+            "72h": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0},
+            "profile": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0}}
+            for key in ("real", "scanner_advisor", "learned")}
+        for raw_event, in ledger_rows:
+            event = json.loads(raw_event or "{}")
+            choices = event.get("decision_choices") or {}
+            real_id = (choices.get("real") or {}).get("alternative_id")
+            for name in comparison:
+                choice = choices.get(name) or {}
+                alt_id = choice.get("alternative_id")
+                if not alt_id:
+                    continue
+                comparison[name]["decisions"] += 1
+                comparison[name]["different_from_real"] += int(name != "real" and alt_id != real_id)
+                saved = alt_samples.get(str(alt_id))
+                if saved is None:
+                    continue
+                sample_id, params = saved
+                for horizon_name, horizon in (("72h", "72h"),
+                    ("profile", f"{int(params.get('profile_days', 20))}d")):
+                    label = label_map.get((sample_id, horizon))
+                    if not label or label.get("status") != "labeled" or label.get("reached") is None:
+                        continue
+                    metric = comparison[name][horizon_name]
+                    outcome = int(bool(label["reached"]))
+                    probability = max(.001, min(.999, float(choice.get("probability") or 0)))
+                    metric["n"] += 1
+                    metric["reached"] += outcome
+                    metric["log_loss"] += -(outcome * math.log(probability) +
+                        (1-outcome) * math.log(1-probability))
+                    metric["brier"] += (probability-outcome) ** 2
+        for item in comparison.values():
+            for metric in (item["72h"], item["profile"]):
+                if metric["n"]:
+                    metric["hit_rate"] = metric["reached"] / metric["n"]
+                    metric["log_loss"] /= metric["n"]
+                    metric["brier"] /= metric["n"]
+        enabled = bool(config.get("use_learned_weights", False))
+        signals = {name: {"current_weight": weights[name] if enabled else .25, "learned_weight": weights[name],
+            "source": sources[name], "effective_samples": details[name].get("effective_samples", 0),
+            "p_value_holm": details[name].get("p_value_holm"),
+            "reason": details[name].get("reason", "peso aceptado"),
+            "version_id": details[name].get("version_id")} for name in weights}
+        latest_summary = json.loads(weight_rows[0]["summary_json"] or "{}") if weight_rows else {}
+        baseline = latest_summary.get("baseline_validation") or {}
+        validation = latest_summary.get("validation") or {}
+        return {"profile": profile, "enabled": enabled,
+            "signals": signals, "version_ids": versions,
+            "decision_comparison": comparison,
+            "validation": {"model": validation.get("model"), "replay_only": baseline.get("baseline")},
+            "weight_versions": [{"id": int(row["id"]), "source": row["source_kind"],
+                "status": row["status"], "created_at": str(row["created_at"]),
+                "summary": json.loads(row["summary_json"] or "{}")} for row in weight_rows],
+            "last_run": None if run is None else {"id": int(run["id"]), "status": run["status"],
+                "started_at": str(run["started_at"]), "finished_at": str(run["finished_at"]),
+                "summary": json.loads(run["summary_json"] or "{}").get("timings_s"),
+                "pending": json.loads(run["summary_json"] or "{}").get("pending_template_ids", [])},
+            "last_switch": None if switch is None else {"enabled": bool(switch["enabled"]),
+                "actor": switch["actor"], "changed_at": str(switch["changed_at"]),
+                "weight_version_id": switch["weight_version_id"]}}
+
+    @staticmethod
+    def _learned_is_worse(comparison):
+        learned = (comparison or {}).get("learned", {}).get("72h", {})
+        real = (comparison or {}).get("real", {}).get("72h", {})
+        return bool(learned.get("n", 0) and real.get("n", 0) and
+            learned.get("log_loss", 0) > real.get("log_loss", 0) and
+            learned.get("brier", 0) > real.get("brier", 0))
+
+    def _alert_if_learned_worse(self, profile, current_comparison, current_version_ids):
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            goals = conn.execute(select(self.db.meta_goals.c.id).where(
+                self.db.meta_goals.c.profile == profile).order_by(self.db.meta_goals.c.id.desc())).all()
+            runs = conn.execute(select(self.db.meta_learning_runs.c.summary_json).where(
+                self.db.meta_learning_runs.c.status == "completed").order_by(
+                    self.db.meta_learning_runs.c.id.desc()).limit(1)).all()
+        if not json.loads(raw or "{}").get("use_learned_weights") or not goals or not runs:
+            return False
+        prior_record = json.loads(runs[0][0] or "{}").get("learned_vs_real", {}).get(profile) or {}
+        prior = prior_record.get("metrics", prior_record)
+        prior_versions = prior_record.get("weight_version_ids", [])
+        if (prior_versions != current_version_ids and self._learned_is_worse(prior)
+                and self._learned_is_worse(current_comparison)):
+            self.alert("META_LEARNED_WEIGHTS_WORSE", int(goals[0][0]), {
+                "profile": profile, "runs_in_a_row": 2,
+                "learned": current_comparison.get("learned", {}).get("72h"),
+                "real": current_comparison.get("real", {}).get("72h"),
+                "automatic_disable": False})
+            return True
+        return False
+
     def _quantize_relative_range(self, ratio, step=None):
         """Redondea un ratio precio/precio a pasos fijos (0.25% por defecto)
         para que pequeños movimientos intradía no invaliden el caché de replay."""
@@ -557,6 +763,25 @@ class MetaOperator:
                         if row.get("sigma_24h_open") is not None and float(row["sigma_24h_open"]) > 0)
         profile = str(goal["profile"]).upper()
         cfg = dict(goal.get("config_snapshot") or {})
+        scanner_advisor_weights = dict(cfg.get("signal_weights") or {})
+        try:
+            from sqlalchemy import select
+            with self.db.engine.connect() as conn:
+                stored = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                    self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            stored = json.loads(stored or "{}")
+            learned_weights, learned_sources, learned_details, learned_versions = self._effective_learned_weights(profile)
+        except (AttributeError, KeyError):
+            stored, learned_weights, learned_sources, learned_details, learned_versions = {}, {}, {}, {}, []
+        use_learned = bool(stored.get("use_learned_weights", False))
+        cfg.update({"use_learned_weights": use_learned,
+            "scanner_advisor_weights": scanner_advisor_weights,
+            "learned_signal_weights": learned_weights,
+            "learned_signal_sources": learned_sources,
+            "learned_signal_details": learned_details,
+            "learned_weight_version_ids": learned_versions})
+        if use_learned:
+            cfg["signal_weights"] = learned_weights
         sigma_cfg = cfg.get("sigma_quantiles") or [cfg.get("sigma_q33", 1/3), cfg.get("sigma_q67", 2/3)]
         q33, q67 = (np.quantile(sigmas, sigma_cfg).tolist() if len(sigmas) >= 3 else (None, None))
         prepared = []
@@ -670,7 +895,10 @@ class MetaOperator:
                         "signal_logit_adjustment_cap": cap, "low_likelihood": probability < .25})
                     shadow_signals = [signal for signal in signals if signal["name"] in {"scanner", "advisor"}]
                     shadow = (signal_adjusted_probability(replay_probability, shadow_signals,
-                        cfg.get("signal_weights") or {}, cap) if estimate["evidence_sufficient"]
+                        cfg.get("scanner_advisor_weights") or {}, cap) if estimate["evidence_sufficient"]
+                        else replay_probability)
+                    learned_probability = (signal_adjusted_probability(replay_probability, signals,
+                        cfg.get("learned_signal_weights") or {}, cap) if estimate["evidence_sufficient"]
                         else replay_probability)
                     pieces = [dict(item["pieces"][0]) for item in combination]
                     piece_estimates = [{"symbol": item["symbol"], "strategy": item["strategy"],
@@ -689,6 +917,7 @@ class MetaOperator:
                         "strategy": ",".join(item["strategy"] for item in combination),
                         "pieces": pieces, "estimate": estimate, "piece_estimates": piece_estimates,
                         "replay_probability": replay_probability,
+                        "learned_probability": learned_probability,
                         "window_results": combined_rows, "signals_used": signals,
                         "signals_omitted": [entry for item in combination for entry in item.get("signals_omitted", [])],
                         "shadow_probability": shadow, "shadow_signals": shadow_signals,
@@ -707,9 +936,21 @@ class MetaOperator:
                         "worst_loss_vs_capital_pct": estimate["worst_loss_vs_capital_pct"]})
         if not alternatives:
             raise ValueError("No hay estructuras del Advisor para comparar.")
-        alternatives = rank_alternatives(alternatives)
+        if use_learned:
+            alternatives.sort(key=lambda row: (0 if int(row["estimate"].get("rolling_windows", 1) or 0) > 0 else 1,
+                -float(row.get("learned_probability", row["replay_probability"])),
+                -float(row["estimate"].get("median_progress_pct") or 0),
+                float(row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf),
+                float(row["estimate"].get("worst_drawdown_pct") or 0)))
+            for row in alternatives:
+                row["estimate"]["probability"] = row.get("learned_probability", row["replay_probability"])
+                row["estimate"]["probability_adjusted"] = row["estimate"]["probability"]
+        else:
+            alternatives = rank_alternatives(alternatives)
         shadow = sorted(alternatives, key=lambda row: (-row["shadow_probability"],
             row["estimate"].get("days_median") if row["estimate"].get("days_median") is not None else math.inf))[0]
+        learned_choice = max(alternatives, key=lambda row: (float(row.get("learned_probability", row["replay_probability"])),
+            float(row["estimate"].get("median_progress_pct") or 0)))
         best = alternatives[0]
         pieces = best["pieces"]
         capital_used = sum(float(piece["capital_usdt"]) for piece in pieces)
@@ -755,6 +996,14 @@ class MetaOperator:
         control_seconds = time.perf_counter() - control_started
         for index, item in enumerate(alternatives):
             item["alternative_id"] = f"{decision_id}:{index}"
+        decision_choices = {
+            "real": {"alternative_id": best.get("alternative_id"), "symbol": best["symbol"],
+                "strategy": best["strategy"], "probability": best["estimate"].get("probability")},
+            "scanner_advisor": {"alternative_id": shadow.get("alternative_id"), "symbol": shadow["symbol"],
+                "strategy": shadow["strategy"], "probability": shadow.get("shadow_probability")},
+            "learned": {"alternative_id": learned_choice.get("alternative_id"),
+                "symbol": learned_choice["symbol"], "strategy": learned_choice["strategy"],
+                "probability": learned_choice.get("learned_probability")}}
         selected_public = []
         for item in alternatives:
             if len(item.get("pieces", [])) == 1 or len(selected_public) < 30:
@@ -804,6 +1053,10 @@ class MetaOperator:
                 "historical_evidence_note": best["estimate"].get("evidence_warning"),
                 "shadow_decision": {"symbol": shadow["symbol"], "strategy": shadow["strategy"],
                     "probability": shadow["shadow_probability"], "signals": shadow["shadow_signals"]},
+                "learning": {"enabled": use_learned, "weights": cfg.get("learned_signal_weights", {}),
+                    "sources": cfg.get("learned_signal_sources", {}),
+                    "version_ids": cfg.get("learned_weight_version_ids", [])},
+                "decision_choices": decision_choices,
                 "control_plan": control_plan,
                 "probability_under_25_pct": best["estimate"]["low_likelihood"]}
         if record:
@@ -1141,6 +1394,7 @@ class MetaOperator:
         from grid.meta_learning import (replay_alternative_labels, reconstruct_historical_samples,
             stable_template)
         started = datetime.now(timezone.utc)
+        run_monotonic = time.monotonic()
         timings = {"legacy_import_s": 0.0, "market_history_s": 0.0,
                    "historical_reconstruction_s": 0.0,
                    "label_simulation_s": 0.0, "persistence_s": 0.0,
@@ -1195,14 +1449,22 @@ class MetaOperator:
                         "sample_key": sample["sample_key"], "parameters": params,
                         "canonical": canonical, "sample_at": sample["sample_at"]}
             global_settings = {}
+            previously_pending = []
             with self.db.engine.connect() as conn:
                 setting = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
                     self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
                 if setting:
                     global_settings = json.loads(setting)
+                previous_run = conn.execute(select(self.db.meta_learning_runs.c.summary_json).where(
+                    self.db.meta_learning_runs.c.id < int(run_id)).order_by(
+                    self.db.meta_learning_runs.c.id.desc()).limit(1)).first()
+                if previous_run:
+                    previously_pending = json.loads(previous_run[0] or "{}").get("pending_template_ids", [])
             max_templates = max(1, int(global_settings.get("learning_max_templates_per_run", 30)))
             budget_seconds = max(1.0, float(global_settings.get("learning_time_budget_minutes", 20)) * 60)
-            ordered_templates = sorted(templates_by_id.values(), key=lambda row: row["sample_at"], reverse=True)
+            pending_set = set(previously_pending)
+            ordered_templates = sorted(templates_by_id.values(), key=lambda row: (
+                row["template_id"] not in pending_set, -row["sample_at"].timestamp()))
             selected_templates = ordered_templates[:max_templates]
             pending_ids = [row["template_id"] for row in ordered_templates[max_templates:]]
             if selected_templates:
@@ -1222,7 +1484,7 @@ class MetaOperator:
                                        if value is not None},
                     source_rows_by_symbol=sources, now=datetime.now(timezone.utc), lookback_days=180,
                     existing_cuts=existing_cuts, window_cache=replay_cache,
-                    deadline=time.monotonic() + budget_seconds, pause_callback=lambda: time.sleep(.01))
+                    deadline=run_monotonic + budget_seconds, pause_callback=lambda: time.sleep(.01))
                 reconstructed = reconstruct_result["samples"]
                 pending_ids.extend(reconstruct_result["pending_templates"])
                 for item in reconstructed:
@@ -1295,8 +1557,21 @@ class MetaOperator:
             t = time.perf_counter()
             counters["weight_versions_saved"] = self._train_learning_weights(samples)
             timings["weight_training_s"] = time.perf_counter() - t
+            learned_vs_real = {}
+            for profile in ("PRUDENTE", "RAPIDO"):
+                try:
+                    decision_comparison = self.learning_status(profile)["decision_comparison"]
+                    _weights, _sources, _details, current_version_ids = self._effective_learned_weights(profile)
+                    learned_vs_real[profile] = {"metrics": decision_comparison,
+                        "weight_version_ids": current_version_ids}
+                    counters.setdefault("learned_worse_alerts", 0)
+                    counters["learned_worse_alerts"] += int(self._alert_if_learned_worse(
+                        profile, decision_comparison, current_version_ids))
+                except Exception:
+                    logging.getLogger(__name__).exception("No se pudo comparar decisiones aprendidas Meta")
             summary = {**counters, "pending_template_ids": pending_ids,
                 "limits": {"max_templates": max_templates, "time_budget_minutes": budget_seconds / 60},
+                "learned_vs_real": learned_vs_real,
                 "timings_s": {key: round(value, 3) for key, value in timings.items()},
                 "sample_count": len(samples), "symbols": len(candles_by_symbol),
                 "priority": "baja" if priority_lowered else "baja_best_effort_no_os_thread_priority",
@@ -1861,7 +2136,9 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
             self._ledger(meta_id, "META_OPERATOR_NOOP", result)
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
-                "decision": result, "shadow_decision": None, "valuation": value})
+                "decision": result, "shadow_decision": None, "valuation": value,
+                "decision_choices": {"real": {"decision": result["decision"], "alternative_id": None},
+                    "scanner_advisor": {"alternative_id": None}, "learned": {"alternative_id": None}}})
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
@@ -1895,17 +2172,23 @@ class MetaOperator:
             value = current_value
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "decision": result, "shadow_decision": getattr(self, "_last_review_shadow", None),
-            "valuation": value, "touch_decision_id": plan.get("decision_id"),
+            "valuation": value, "touch_decision_id": (plan or {}).get("decision_id"),
+            "decision_choices": {**((plan or {}).get("decision_choices") or {}),
+                "real_result": result, "learned_weights_enabled": bool(
+                    (((plan or {}).get("learning") or {}).get("enabled"))),
+                "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", [])},
             "touch_alternatives": [{"alternative_id": item.get("alternative_id"),
                 "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
-                for item in plan.get("alternatives", [])]})
+                for item in (plan or {}).get("alternatives", [])]})
         if result.get("decision") == "no_hacer_nada":
             self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
         return result
 
     def _record_review(self, meta_id, result, value, shadow):
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
-            "decision": result, "shadow_decision": shadow, "valuation": value})
+            "decision": result, "shadow_decision": shadow, "valuation": value,
+            "decision_choices": {"real": {"decision": result.get("decision"), "alternative_id": None},
+                "scanner_advisor": {"alternative_id": None}, "learned": {"alternative_id": None}}})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {**result, "valuation": value})
 
     def _plan_price_moved(self, plan, goal):

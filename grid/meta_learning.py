@@ -28,9 +28,13 @@ def stable_template(parameters, *, meta_capital_usdt):
             "strategy": str(piece.get("strategy") or "simple"), "n_levels": int(piece.get("n_levels") or 1),
             "floor_mid_q": round(round(floor / REPLAY_CACHE_STEP) * REPLAY_CACHE_STEP, 4),
             "ceiling_mid_q": round(round(ceiling / REPLAY_CACHE_STEP) * REPLAY_CACHE_STEP, 4),
-            "capital_fraction": round(float(piece.get("capital_usdt") or 0) / denominator, 4)})
+            "capital_fraction": round(float(piece.get("capital_usdt") or 0) / denominator, 4),
+            "margin_pct": round(float(piece.get("margin_pct") or 0), 4)})
     canonical = {"profile": str(parameters.get("profile") or "RAPIDO").upper(),
-        "profile_days": int(parameters.get("profile_days") or 20), "pieces": sorted(pieces,
+        "profile_days": int(parameters.get("profile_days") or 20),
+        "target_fraction": round(float(parameters.get("target_usdt") or 0) / denominator, 6),
+        "max_loss_pct": round(float(parameters.get("max_loss_pct") or 0), 4),
+        "pieces": sorted(pieces,
             key=lambda p: (p["symbol"], p["piece_type"], p["strategy"], p["n_levels"],
                            p["floor_mid_q"], p["ceiling_mid_q"], p["capital_fraction"]))}
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
@@ -548,6 +552,7 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
                     "omitted": ["scanner", "advisor", "break_prob"]},
                 "provenance": {"source_kind": "historical_reconstructed",
                     "signal_cutoff_ts": start_s, "template_sample_key": template_id,
+                    "template_id": template_id,
                     "base_replay": baseline,
                     "template_is_counterfactual": True,
                     "note": "Señales reconstruidas solo con registros y velas anteriores al corte."}})

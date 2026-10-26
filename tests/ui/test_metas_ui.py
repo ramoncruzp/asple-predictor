@@ -270,6 +270,23 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
 
 
+def test_learning_section_starts_in_shadow_and_requires_confirmed_switch(metas_page):
+    page, server = metas_page
+    goal = server.core.create_goal(150, 10, profile="RAPIDO")
+    server.core.start_goal(goal["id"])
+    grid = server.engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
+    server.core.link_grid(goal["id"], grid["id"])
+    page.goto(f"{server.url}/#metas")
+    learning = page.locator(".metas-learning")
+    page.wait_for_selector(".metas-learning-shadow")
+    assert "Experimento en sombra" in learning.inner_text()
+    assert "sin evidencia" in learning.inner_text()
+    page.click("[data-learning-switch]")
+    page.wait_for_selector("#meta-action-dialog:not([hidden])")
+    page.click("#meta-action-dialog [data-action-confirm]")
+    page.wait_for_function("() => document.querySelector('.metas-learning')?.innerText.includes('Pesos aplicados: aprendidos')")
+
+
 def test_active_meta_shows_recent_reconfiguration_in_plain_spanish(metas_page):
     page, server = metas_page
     goal = server.core.create_goal(150, 10, profile="RAPIDO")

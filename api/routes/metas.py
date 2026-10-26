@@ -66,6 +66,14 @@ class LearningLimits(BaseModel):
     time_budget_minutes: float = Field(ge=1, le=240)
 
 
+class LearningSwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: str
+    enabled: StrictBool
+    confirm: StrictBool = False
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -100,6 +108,17 @@ def update_learning_limits(request: Request, body: LearningLimits):
     return _call(_core(request).set_learning_limits,
         max_templates_per_run=body.max_templates_per_run,
         time_budget_minutes=body.time_budget_minutes)
+
+
+@router.get("/learning")
+def learning_status(request: Request, profile: str = "RAPIDO"):
+    return _operator(request).learning_status(profile)
+
+
+@router.put("/learning/switch")
+def update_learning_switch(request: Request, body: LearningSwitch):
+    return _call(_operator(request).set_learning_switch, body.profile, body.enabled,
+        confirm=body.confirm, actor=body.actor)
 
 
 @router.get("")

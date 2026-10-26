@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from sqlalchemy import MetaData, create_engine, select
+from sqlalchemy import MetaData, create_engine, inspect, select
 from sqlalchemy.engine import make_url
 
 
@@ -31,8 +31,11 @@ def main():
                 cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
                 cursor.close()
     metadata = MetaData()
-    metadata.reflect(engine, only=["meta_learning_samples", "meta_learning_replay_cache"])
-    samples, cache = metadata.tables["meta_learning_samples"], metadata.tables.get("meta_learning_replay_cache")
+    metadata.reflect(engine, only=["meta_learning_samples"])
+    samples = metadata.tables["meta_learning_samples"]
+    if "meta_learning_replay_cache" in inspect(engine).get_table_names():
+        metadata.reflect(engine, only=["meta_learning_replay_cache"])
+    cache = metadata.tables.get("meta_learning_replay_cache")
     with engine.connect() as conn:
         live = conn.execute(select(samples.c.sample_key, samples.c.profile, samples.c.sample_at,
             samples.c.parameters_json).where(samples.c.source_kind == "live").order_by(
@@ -52,8 +55,12 @@ def main():
                 "floor_mid_q": round(round(float(piece.get("floor", 0)) / mid / .0025) * .0025, 4),
                 "ceiling_mid_q": round(round(float(piece.get("ceiling", 0)) / mid / .0025) * .0025, 4),
                 "capital_fraction": round(float(piece.get("capital_usdt") or 0) /
-                    max(float(params.get("capital_usdt") or 1), 1e-12), 4)})
+                    max(float(params.get("capital_usdt") or 1), 1e-12), 4),
+                "margin_pct": round(float(piece.get("margin_pct") or 0), 4)})
         shape = json.dumps({"profile": row.profile, "days": params.get("profile_days"),
+            "target_fraction": round(float(params.get("target_usdt") or 0) /
+                max(float(params.get("capital_usdt") or 1), 1e-12), 6),
+            "max_loss_pct": round(float(params.get("max_loss_pct") or 0), 4),
             "pieces": pieces}, sort_keys=True, separators=(",", ":"))
         templates.setdefault(hashlib.sha256(shape.encode()).hexdigest(), {"profile_days":
             int(params.get("profile_days") or 20), "latest": str(row.sample_at), "existing": 0})

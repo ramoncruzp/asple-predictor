@@ -69,3 +69,11 @@
 }
 
 .metas-live-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}.metas-live-facts>span{display:flex;flex-direction:column;gap:4px;padding:10px;background:var(--surface2);border-radius:6px;color:var(--muted);font-size:12px}.metas-live-facts b{color:var(--text);font:600 13px var(--mono)}
+
+
+.metas-learning { margin: 1rem 0; padding: 1rem; border: 1px solid var(--border-color, #314052); border-radius: .5rem; }
+.metas-learning-shadow { font-weight: 700; padding: .5rem; background: rgba(232, 180, 40, .12); border-left: 3px solid #d2a72c; }
+.metas-learning-scroll { max-width: 100%; overflow-x: auto; margin: .75rem 0; }
+.metas-learning .data-table { min-width: 760px; }
+.metas-learning label { display: inline-flex; align-items: center; gap: .5rem; margin: .5rem 1rem .5rem 0; }
+.metas-learning input[data-learning-actor] { max-width: 13rem; }

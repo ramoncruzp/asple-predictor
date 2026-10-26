@@ -22,6 +22,7 @@ DEFAULT_PROFILES = {
                  "learning_min_effective_samples": 30, "learning_weight_max_abs": 1.0,
                  "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                  "learning_alpha": 0.05,
+                 "use_learned_weights": False,
                  "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                  "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
                  "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
@@ -45,6 +46,7 @@ DEFAULT_PROFILES = {
                "learning_min_effective_samples": 30, "learning_weight_max_abs": 1.0,
                "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                "learning_alpha": 0.05,
+                 "use_learned_weights": False,
                "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
                "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
@@ -222,7 +224,7 @@ class MetaCore:
                 raise ValueError("signal_weights debe ser un objeto de pesos.")
             merged["signal_weights"] = {**DEFAULT_PROFILES[profile]["signal_weights"],
                                          **values["signal_weights"]}
-        scalar_values = [v for k, v in merged.items() if k != "signal_weights"]
+        scalar_values = [v for k, v in merged.items() if k != "signal_weights" and not isinstance(v, bool)]
         scalar_values.extend((merged.get("signal_weights") or {}).values())
         if any(Decimal(str(v)) < 0 for v in scalar_values):
             raise ValueError("Los parámetros deben ser positivos.")

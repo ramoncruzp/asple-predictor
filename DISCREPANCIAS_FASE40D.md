@@ -24,3 +24,11 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - La duraci?n se mide como l?mite de pared de la fase de reconstrucci?n, sin interrumpir una simulaci?n ya iniciada; el job termina esa ventana y guarda pendientes para la siguiente corrida.
 - El estimador de costo usa un supuesto configurable de segundos por ventana (0,05 s por defecto) y 60 cortes de 72 h en 180 d?as; es una proyecci?n previa, no una medici?n de S1. La ejecuci?n del estimador no se realiz?.
 - El l?mite de tiempo y plantillas est? editable por API autenticada; valor inicial 30 plantillas y 20 minutos.
+
+
+## 40d-3 ? Costo, sombra e interruptor
+
+- La cach? de ventana guarda el resultado binario de ?xito. Para que el resultado sea reusable sin mezclar condiciones distintas, la huella estable a?ade la fracci?n objetivo/capital, el l?mite de p?rdida del perfil y el margen adem?s de la geometr?a pedida. No conserva precios ni capital absolutos.
+- La alerta de deterioro usa las etiquetas contrafactuales existentes de 72 h para las alternativas real y aprendida. La versi?n se considera distinta cuando cambian los IDs de pesos efectivos guardados en la corrida diaria; si faltan etiquetas para ambas alternativas no se alerta. No desactiva el switch.
+- El reporte de comparaci?n de plazo solo tiene datos cuando existe la etiqueta madura para el horizonte del perfil. Ninguna simulaci?n adicional se lanza para producir la vista.
+- 40d-3A se committe? antes que 40d-3B como pidi? Ram?n; un ajuste de identidad de cach? hallado al revisar la interacci?n qued? en el commit de 40d-3B y est? descrito en `REPORTE_FASE40D.md`.
