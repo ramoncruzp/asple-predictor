@@ -55,41 +55,41 @@
 - No se implementaron sombra aprendida en decisiones, interruptor ni vista; corresponden a 40d-3. No se cambió el comportamiento de grids ni del operador.
 
 
-## 40d-3A ? Costo acotado del aprendizaje
+## 40d-3A — Costo acotado del aprendizaje
 
 ### Implementado
 
-- `grid/meta_learning.py:18-52,101-142,459-565` crea identidad estable por perfil, moneda, tipo, estrategia, niveles, piso/medio y techo/medio cuantizados en pasos 0,0025 y fracci?n de capital. El backfill comprueba la clave plantilla+corte antes de reconstruir y reusa resultados de replay por plantilla+inicio de ventana.
-- Las ventanas hist?ricas se anclan a lunes 00:00 UTC con paso de 7 d?as. El replay operativo sigue anclado a la fecha de an?lisis; el desfase de fase puede ser de hasta 7 d?as. No se cambi? el m?todo del replay operativo.
-- `database/db_manager.py:367-371,406` agrega `meta_learning_replay_cache`. `grid/meta_operator.py:1134-1290` lee y persiste esa cach?, limita a las 30 plantillas m?s recientes por corrida y a 20 minutos por defecto, guarda IDs pendientes en `meta_learning_runs.summary_json` y cede 10 ms cada tres cortes. Los l?mites se editan mediante `meta_profile_settings` y `PUT /api/metas/config/learning-limits` (`grid/meta.py:156-207`, `api/routes/metas.py:97-102`).
-- `scripts/estimar_costo_aprendizaje_meta.py:1-100` estima plantillas, cortes, ventanas y tiempo usando una URL expl?cita, con conexi?n de solo lectura. No se ejecut? contra ninguna base ni mercado.
+- `grid/meta_learning.py:18-52,101-142,459-565` crea identidad estable por perfil, moneda, tipo, estrategia, niveles, piso/medio y techo/medio cuantizados en pasos 0,0025 y fracción de capital. El backfill comprueba la clave plantilla+corte antes de reconstruir y reusa resultados de replay por plantilla+inicio de ventana.
+- Las ventanas históricas se anclan a lunes 00:00 UTC con paso de 7 días. El replay operativo sigue anclado a la fecha de análisis; el desfase de fase puede ser de hasta 7 días. No se cambió el método del replay operativo.
+- `database/db_manager.py:367-371,406` agrega `meta_learning_replay_cache`. `grid/meta_operator.py:1134-1290` lee y persiste esa caché, limita a las 30 plantillas más recientes por corrida y a 20 minutos por defecto, guarda IDs pendientes en `meta_learning_runs.summary_json` y cede 10 ms cada tres cortes. Los límites se editan mediante `meta_profile_settings` y `PUT /api/metas/config/learning-limits` (`grid/meta.py:156-207`, `api/routes/metas.py:97-102`).
+- `scripts/estimar_costo_aprendizaje_meta.py:1-100` estima plantillas, cortes, ventanas y tiempo usando una URL explícita, con conexión de solo lectura. No se ejecutó contra ninguna base ni mercado.
 
 ### Pruebas y resultado
 
-- Corrida enfocada final de A: `tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py` ? **95 passed, 5 warnings, 6,97 s**, salida 0. Una corrida previa tuvo un fallo ?nicamente en una aserci?n demasiado amplia del nombre de clave; ajustada y el archivo afectado qued? en **16 passed, 0,70 s** antes de la corrida final.
-- Se cubren forma relativa con precios/capital escalados, cache hit entre cortes, igualdad del resultado con cach? y sin cach?, saltar cortes existentes, presupuesto con pendientes y continuaci?n en la siguiente corrida.
-- `py_compile` pas? para los m?dulos Python del n?cleo y el estimador. No se consult? S1/Testnet, `.env` ni la BD real; no se corri? la suite completa.
+- Corrida enfocada final de A: `tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py` — **95 passed, 5 warnings, 6,97 s**, salida 0. Una corrida previa tuvo un fallo únicamente en una aserción demasiado amplia del nombre de clave; ajustada y el archivo afectado quedó en **16 passed, 0,70 s** antes de la corrida final.
+- Se cubren forma relativa con precios/capital escalados, cache hit entre cortes, igualdad del resultado con caché y sin caché, saltar cortes existentes, presupuesto con pendientes y continuación en la siguiente corrida.
+- `py_compile` pasó para los módulos Python del núcleo y el estimador. No se consultó S1/Testnet, `.env` ni la BD real; no se corrió la suite completa.
 
 
-## 40d-3B ? Sombra, interruptor y vista
+## 40d-3B — Sombra, interruptor y vista
 
 ### Implementado
 
-- `grid/meta_operator.py:199-245` resuelve el peso por perfil y se?al: versi?n live aceptada con al menos 30 observaciones efectivas; si falta, versi?n hist?rica reconstruida aceptada; en otro caso conserva 0,25. Devuelve la procedencia, el motivo/freno, p ajustado por Holm y la versi?n usada. El ajuste del logit sigue limitado por `signal_logit_cap` (?1,0).
-- `grid/meta_operator.py:747-760,895-925,962-1008,2131-2195` calcula junto a las alternativas existentes la selecci?n por pesos aprendidos y Scanner+Advisor. Con el interruptor apagado, la elecci?n real conserva la ruta de ranking previa; con ?l encendido se ordena por la probabilidad aprendida. Las compuertas de materialidad, cooldown, bloqueo, capital y revalidaci?n permanecen en las rutas existentes. Cada revisi?n escribe las tres alternativas con `alternative_id` en `META_OPERATOR_REVIEW_DECISION`; la sombra Scanner+Advisor conserva sus pesos previos aunque el interruptor se active.
-- `database/db_manager.py:378-382` crea `meta_learning_switch_events` con perfil, valor, actor, fecha y versi?n. `grid/meta_operator.py:247-275` exige confirmaci?n, registra qui?n pidi? el cambio y nunca activa el interruptor autom?ticamente. `grid/meta.py:16-57` lo define apagado por defecto en ambos perfiles.
-- `api/routes/metas.py:114-122` ofrece `GET /api/metas/learning?profile=...` y `PUT /api/metas/learning/switch`; ambos requieren `X-API-Token` (o loopback seg?n la regla API existente), y el cambio exige confirmaci?n expl?cita y actor. La respuesta incluye pesos/fuentes/muestras/p Holm/motivos, validaci?n frente a replay, alternativas reales/sombra/aprendida y ?ltima corrida.
-- `grid/meta_operator.py:276-379` compara las alternativas elegidas cuando maduran las etiquetas ya existentes de 72 h y del plazo, sin generar simulaciones adicionales. Si el interruptor est? encendido y dos versiones seguidas tienen log-loss y Brier peores que la elecci?n real en 72 h, manda alerta; no desactiva el switch.
-- `frontend/metas.js:489,540-599` y `frontend/metas.css:74-79` a?aden la secci?n ?Aprendizaje? en la Meta activa, con aviso ?Experimento en sombra?, tabla traducida al espa?ol, validaci?n, comparaci?n y acci?n confirmada. `tests/ui/test_metas_ui.py:273-288` prueba el estado inicial y el cambio confirmado.
-- Correcci?n de seguridad de cach? descubierta al cerrar A: `grid/meta_learning.py:18-39` tambi?n incorpora a la identidad las fracciones objetivo/capital, m?ximo de p?rdida y margen, que afectan al resultado simulado. Siguen siendo relativas o par?metros del perfil; evita compartir etiquetas binarias entre objetivos distintos.
+- `grid/meta_operator.py:199-245` resuelve el peso por perfil y señal: versión live aceptada con al menos 30 observaciones efectivas; si falta, versión histórica reconstruida aceptada; en otro caso conserva 0,25. Devuelve la procedencia, el motivo/freno, p ajustado por Holm y la versión usada. El ajuste del logit sigue limitado por `signal_logit_cap` (?1,0).
+- `grid/meta_operator.py:747-760,895-925,962-1008,2131-2195` calcula junto a las alternativas existentes la selección por pesos aprendidos y Scanner+Advisor. Con el interruptor apagado, la elección real conserva la ruta de ranking previa; con él encendido se ordena por la probabilidad aprendida. Las compuertas de materialidad, cooldown, bloqueo, capital y revalidación permanecen en las rutas existentes. Cada revisión escribe las tres alternativas con `alternative_id` en `META_OPERATOR_REVIEW_DECISION`; la sombra Scanner+Advisor conserva sus pesos previos aunque el interruptor se active.
+- `database/db_manager.py:378-382` crea `meta_learning_switch_events` con perfil, valor, actor, fecha y versión. `grid/meta_operator.py:247-275` exige confirmación, registra quién pidió el cambio y nunca activa el interruptor automáticamente. `grid/meta.py:16-57` lo define apagado por defecto en ambos perfiles.
+- `api/routes/metas.py:114-122` ofrece `GET /api/metas/learning?profile=...` y `PUT /api/metas/learning/switch`; ambos requieren `X-API-Token` (o loopback según la regla API existente), y el cambio exige confirmación explícita y actor. La respuesta incluye pesos/fuentes/muestras/p Holm/motivos, validación frente a replay, alternativas reales/sombra/aprendida y última corrida.
+- `grid/meta_operator.py:276-379` compara las alternativas elegidas cuando maduran las etiquetas ya existentes de 72 h y del plazo, sin generar simulaciones adicionales. Si el interruptor está encendido y dos versiones seguidas tienen log-loss y Brier peores que la elección real en 72 h, manda alerta; no desactiva el switch.
+- `frontend/metas.js:489,540-599` y `frontend/metas.css:74-79` añaden la sección «Aprendizaje» en la Meta activa, con aviso «Experimento en sombra», tabla traducida al español, validación, comparación y acción confirmada. `tests/ui/test_metas_ui.py:273-288` prueba el estado inicial y el cambio confirmado.
+- Corrección de seguridad de caché descubierta al cerrar A: `grid/meta_learning.py:18-39` también incorpora a la identidad las fracciones objetivo/capital, máximo de pérdida y margen, que afectan al resultado simulado. Siguen siendo relativas o parámetros del perfil; evita compartir etiquetas binarias entre objetivos distintos.
 
 ### Pruebas y resultado
 
-- Corrida final enfocada, con `ASPLE_OFFLINE=1` y carpeta temporal nueva: `tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py tests/test_meta_learning_api.py tests/ui/test_metas_ui.py` ? **115 passed, 11 warnings, 30,12 s**, exit code 0.
-- `py_compile` pas? para los m?dulos Python tocados y el script de estimaci?n. `node --check frontend/metas.js` pas?.
-- Durante la implementaci?n, una corrida enfocada inicial encontr? dos fallos por incluir el booleano `use_learned_weights` en una validaci?n `Decimal`; se excluy? del chequeo num?rico y `tests/test_meta_core.py` pas? **29/29**. Una prueba del bloqueo del 75 % tambi?n detect? acceso a `plan=None` al guardar una revisi?n sin an?lisis; se protegi? esa ruta y el archivo API nuevo pas? **7/7**. La corrida final completa enfocada qued? verde.
-- No se ejecut? suite completa, script de estimaci?n, S1, Testnet ni consulta/escritura de la BD real. No hubo despliegue ni push.
+- Corrida final enfocada, con `ASPLE_OFFLINE=1` y carpeta temporal nueva: `tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py tests/test_meta_learning_api.py tests/ui/test_metas_ui.py` — **115 passed, 11 warnings, 30,12 s**, exit code 0.
+- `py_compile` pasó para los módulos Python tocados y el script de estimación. `node --check frontend/metas.js` pasó.
+- Durante la implementación, una corrida enfocada inicial encontró dos fallos por incluir el booleano `use_learned_weights` en una validación `Decimal`; se excluyó del chequeo numérico y `tests/test_meta_core.py` pasó **29/29**. Una prueba del bloqueo del 75 % también detectó acceso a `plan=None` al guardar una revisión sin análisis; se protegió esa ruta y el archivo API nuevo pasó **7/7**. La corrida final completa enfocada quedó verde.
+- No se ejecutó suite completa, script de estimación, S1, Testnet ni consulta/escritura de la BD real. No hubo despliegue ni push.
 
 ### Evidencia pendiente
 
-La comparaci?n solo crece a medida que maduran etiquetas y depende de que haya alternativas seleccionadas y pesos aceptados suficientes. No hay todav?a muestra de producci?n verificada ni fundamento para recomendar activar los pesos. El interruptor sigue apagado por defecto.
+La comparación solo crece a medida que maduran etiquetas y depende de que haya alternativas seleccionadas y pesos aceptados suficientes. No hay todavía muestra de producción verificada ni fundamento para recomendar activar los pesos. El interruptor sigue apagado por defecto.

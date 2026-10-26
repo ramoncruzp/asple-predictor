@@ -12,13 +12,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", required=True, help="URL existente; no se lee .env")
     parser.add_argument("--segundos-por-ventana", type=float, default=0.05,
-        help="estimaci?n local por replay; no ejecuta simulaciones")
+        help="estimación local por replay; no ejecuta simulaciones")
     args = parser.parse_args()
     url = make_url(args.database_url)
     if url.get_backend_name() == "sqlite":
         path = Path(url.database or "").resolve()
         if not path.exists():
-            raise SystemExit("La base indicada no existe; no se cre? ninguna base.")
+            raise SystemExit("La base indicada no existe; no se creó ninguna base.")
         db_url = f"sqlite+pysqlite:///file:{path.as_posix()}?mode=ro&uri=true"
         engine = create_engine(db_url, future=True, connect_args={"uri": True})
     else:
