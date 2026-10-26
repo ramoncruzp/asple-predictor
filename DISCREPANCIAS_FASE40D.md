@@ -46,3 +46,12 @@ No se detectaron discrepancias de comportamiento en grids normales: el job solo 
 - La comparación nueva usa `comparison_version=1`; los registros anteriores se conservan y no se incorporan al conteo bajo el esquema nuevo.
 - El ranking comparte las mismas claves y desempates entre las decisiones real, Scanner + Advisor y aprendida. Las revisiones sin acción registran las tres como mantener.
 - Límite pendiente: las revisiones activas que sí ejecutan una alternativa comparan acción y destino registrados, pero todavía no reproducen de manera independiente todos los frenos de materialidad, persistencia y enfriamiento para una acción contrafactual que la política real rechazó. La comparación de diferencias para esas decisiones no debe interpretarse como evaluación completa de política.
+
+
+## 40d-4B - Inteligencia
+
+- No hay tabla persistente de velas en el esquema de la aplicación. La pestaña informa que ese inventario no está disponible desde la BD y no escanea `data/` ni consulta la red.
+- Las versiones guardadas no incluyen deciles de calibración ni un contador separado de simulaciones nuevas por evaluación. Se informa esa falta de persistencia; no se ejecuta cálculo pesado al abrir la vista.
+- El API limita a 10.000 filas la muestra de aprendizaje usada para estadísticas descriptivas; los totales por perfil/origen/moneda y los conteos de exclusiones se agregan en SQL.
+- La comparación activa de 40d-4A sigue pendiente de evaluar el contrafactual completo de los frenos de materialidad/persistencia/cooldown para candidatos que la política real rechazó. La ordenación del plan y la equivalencia de `mantener` sí están cubiertas.
+- Listo para encender: el medidor usa la última versión guardada por perfil, pero la pantalla no propone activar automáticamente el interruptor.

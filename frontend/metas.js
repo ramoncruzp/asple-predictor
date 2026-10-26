@@ -551,6 +551,16 @@
     historical_reconstruction_s: 'Reconstrucción', label_simulation_s: 'Etiquetas',
     persistence_s: 'Guardado', weight_training_s: 'Pesos' };
 
+  function learningReadinessMarkup(readiness, enabled) {
+    if (!readiness) return '';
+    const status = readiness.status || 'gris';
+    const reasons = Object.entries(readiness.conditions || {}).filter(([, ok]) => !ok).map(([name]) => ({
+      muestra: 'falta muestra efectiva', significancia_y_cambio: 'falta evidencia estad\u00edstica con cambio aceptado',
+      validacion: 'falta validaci\u00f3n temporal suficiente', mejora: 'la validaci\u00f3n no mejora a solo p_replay'
+    }[name] || name));
+    return `<aside class="meta-learning-readiness ${esc(status)}"><b>${esc(readiness.label || 'Recolectando datos')}</b> &middot; ${esc(readiness.best_effective_samples || 0)} de 30; faltan ${esc(readiness.remaining || 0)}.<progress max="30" value="${Math.min(30, Number(readiness.best_effective_samples || 0))}"></progress>${reasons.length ? ` <span>${esc(reasons.join('; '))}</span>` : ''}${enabled && status !== 'verde' ? '<p>Aviso: interruptor encendido sin evidencia vigente.</p>' : ''}</aside>`;
+  }
+
   function learningMarkup(data, profile) {
     const rows = Object.entries(data.signals || {}).map(([name, item]) => `<tr><td>${esc(LEARNING_SIGNAL_LABELS[name] || name)}</td>
       <td>${fmtMoney(item.current_weight, 2)}</td><td>${fmtMoney(item.learned_weight, 3)}</td>
@@ -564,6 +574,7 @@
       Object.entries(timings).map(([key, value]) => `${esc(LEARNING_TIMING_LABELS[key] || key)} ${fmtMoney(value, 2)} s`).join(' &middot; ') +
       ` &middot; pendientes ${esc((data.last_run.pending || []).length)}` : 'Sin corridas del aprendizaje.';
     return `<p>Interruptor: <b>${data.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; se cambia en <a href="#lab">Laboratorio &rarr; Reglas globales</a></p>
+      ${learningReadinessMarkup(data.readiness, data.enabled)}
       <p>${data.enabled ? 'Pesos aplicados: aprendidos' : 'Pesos aplicados: 0,25 por se\u00f1al'} &middot; \u00faltima versi\u00f3n ${esc((data.version_ids || []).join(', ') || 'sin evidencia')}</p>
       <div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Se\u00f1al</th><th>Peso actual</th><th>Aprendido</th><th>Fuente</th><th>Muestras efectivas</th><th>p Holm</th><th>Freno</th></tr></thead><tbody>${rows}</tbody></table></div>
       <p>Validaci\u00f3n: log-loss ${fmtMoney(data.validation?.model?.log_loss, 3)} y Brier ${fmtMoney(data.validation?.model?.brier, 3)}; solo p_replay: ${fmtMoney(data.validation?.replay_only?.log_loss, 3)} / ${fmtMoney(data.validation?.replay_only?.brier, 3)}.</p>
@@ -606,6 +617,7 @@
         return `<article class="global-flag-row" data-meta-learning-switch="${profile}"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
           <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
+          ${learningReadinessMarkup(item.readiness, enabled)}
           ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (todas las se\u00f1ales siguen en 0,25)</p>' : ''}
           <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>

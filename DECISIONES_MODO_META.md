@@ -111,8 +111,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
 | 40d-3 | Caché acotada, decisiones en sombra, pesos efectivos y vista de evidencia | Implementada y verificada offline; sin despliegue |
 | 40d-3C | Interruptores por perfil en Laboratorio, aprendizaje global en Metas y recarga parcial | Implementada y verificada offline; sin despliegue |
-| 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Implementada; pruebas enfocadas aprobadas; la evaluación contrafactual completa de frenos activos queda documentada como pendiente |
-| 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | En curso |
+| 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Parcial; pruebas enfocadas aprobadas; falta evaluar frenos contrafactuales completos en revisiones activas |
+| 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Parcial; vista y API verificadas offline; B1 velas, simulaciones nuevas y deciles de calibración no están persistidos |
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1–3 implementadas y verificadas offline; interruptor apagado por defecto |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.

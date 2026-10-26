@@ -373,7 +373,30 @@ class MetaOperator:
         latest_summary = json.loads(weight_rows[0]["summary_json"] or "{}") if weight_rows else {}
         baseline = latest_summary.get("baseline_validation") or {}
         validation = latest_summary.get("validation") or {}
+        summary_signals = latest_summary.get("signals") or {}
+        best_effective = max((int(item.get("effective_samples") or 0)
+            for item in summary_signals.values()), default=0)
+        readiness_conditions = {
+            "muestra": best_effective >= 30,
+            "significancia_y_cambio": any(float(item.get("p_value_holm") or 1) < .05
+                and abs(float(item.get("weight", .25)) - .25) > 1e-9
+                for item in summary_signals.values()),
+            "validacion": int(latest_summary.get("validation_effective") or 0) >= 5,
+            "mejora": bool(latest_summary.get("improves")) and bool(
+                validation.get("model") and baseline.get("baseline") and
+                validation["model"].get("log_loss", math.inf) < baseline["baseline"].get("log_loss", -math.inf) and
+                validation["model"].get("brier", math.inf) < baseline["baseline"].get("brier", -math.inf)),
+        }
+        if not readiness_conditions["muestra"]:
+            readiness_status, readiness_label = "gris", "Recolectando datos"
+        elif all(readiness_conditions.values()):
+            readiness_status, readiness_label = "verde", "Listo para encender"
+        else:
+            readiness_status, readiness_label = "amarillo", "Hay datos, sin señal útil todavía"
         return {"profile": profile, "enabled": enabled,
+            "readiness": {"status": readiness_status, "label": readiness_label,
+                "best_effective_samples": best_effective, "remaining": max(0, 30-best_effective),
+                "conditions": readiness_conditions, "signals": summary_signals},
             "signals": signals, "version_ids": versions,
             "decision_comparison": comparison,
             "validation": {"model": validation.get("model"), "replay_only": baseline.get("baseline")},

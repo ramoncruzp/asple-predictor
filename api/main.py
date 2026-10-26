@@ -27,7 +27,7 @@ from config.models_config import (ACTIVE_INTERVAL, ACTIVE_SYMBOL, MODELS_CONFIG,
                                   SHADOW_ARTIFACT, VOL_ARTIFACT_DIR, VOL_SYMBOL, VOL_WIDEN_COMPUTE_HOUR_UTC)
 from scheduler.prediction_loop import PredictionLoop
 from scheduler.verification_loop import VerificationLoop
-from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings, alerts, metas
+from api.routes import coins, grid_advisor, grid_status, grids, grid_control, grid_account, grid_structure, models_status, model_training, predictions, volatility, app_settings, alerts, metas, intelligence
 from models.volatility.live import VolPredictorRegistry
 from models.shadow_loader import load_optional_shadow_models
 from models.training_jobs import TrainingJobService
@@ -250,6 +250,7 @@ app.include_router(grid_account.router)
 app.include_router(app_settings.router, prefix="/api/settings", tags=["app-settings"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(metas.router, prefix="/api/metas", tags=["metas"])
+app.include_router(intelligence.router, prefix="/api/intelligence", tags=["intelligence"])
 
 @app.get("/api/health")
 async def health(request: Request):
