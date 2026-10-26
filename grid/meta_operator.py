@@ -2202,21 +2202,25 @@ class MetaOperator:
         else:
             omitted.append({"name": "advisor", "reason": "recomendación sin margen neto"})
         try:
-            from grid.meta_learning import causal_touch_buy_to_sell
             candles = self._load_candles(row["symbol"])
-            piece = (alternative.get("pieces") or [{}])[0]
-            touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,
-                buy_price=piece.get("floor", low), sell_price=piece.get("ceiling", high))
-            rate = touch.get("sell_rate")
-            if rate is not None:
-                signals.append({"name": "touch_buy_to_sell", "value": float(rate),
-                    "normalized": max(-1.0, min(1.0, 2 * float(rate) - 1)),
-                    "source": "velas previas", "lookback_days": 30})
-            else:
-                omitted.append({"name": "touch_buy_to_sell",
-                    "reason": "sin tasa de venta causal disponible"})
         except Exception as exc:
             omitted.append({"name": "touch_buy_to_sell", "reason": f"velas no disponibles: {exc}"})
+        else:
+            try:
+                from grid.meta_learning import causal_touch_buy_to_sell
+                piece = (alternative.get("pieces") or [{}])[0]
+                touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,
+                    buy_price=piece.get("floor", low), sell_price=piece.get("ceiling", high))
+                rate = touch.get("sell_rate")
+                if rate is not None:
+                    signals.append({"name": "touch_buy_to_sell", "value": float(rate),
+                        "normalized": max(-1.0, min(1.0, 2 * float(rate) - 1)),
+                        "source": "velas previas", "lookback_days": 30})
+                else:
+                    omitted.append({"name": "touch_buy_to_sell",
+                        "reason": "sin tasa de venta causal disponible"})
+            except Exception as exc:
+                omitted.append({"name": "touch_buy_to_sell", "reason": f"error al calcular toque: {exc}"})
         weights = (cfg.get("signal_weights") or {})
         enough_evidence = bool(alternative["estimate"].get("evidence_sufficient"))
         logit_cap = float(cfg.get("signal_logit_cap", 1.0))
