@@ -65,18 +65,47 @@ El tamaño es una medición del fixture sintético documentado, no un promedio d
 
 | Lector | Archivo:línea | Datos consultados / compatibilidad requerida |
 |---|---|---|
-| Estado de aprendizaje y comparación | `grid/meta_operator.py:409-435` | Lee eventos de plan/revisión, `decision_choices` y versiones; conservar IDs, elecciones y resultados v1/v2. |
-| Importación de muestras live desde planes históricos | `grid/meta_operator.py:1321-1368` | Lee `META_PLAN_EVALUATED.alternatives`, `decision_id`, piezas, estimación y señales; se mantienen esas claves y su significado. |
-| Construcción de alternativas y recomendaciones | `grid/meta_operator.py:993-1077` | Cada cartera adjunta `advisor_recommendations`; la respuesta de análisis debe continuar completa. |
-| Persistencia del evento del plan | `grid/meta_operator.py:1206-1218` | Escribe alternativas, decisiones, Advisor comparado, combinaciones, sombra, selección y bandas sigma. |
-| Selección de elecciones de revisión | `grid/meta_operator.py:2361-2429` | Usa alternativas del plan para calcular real, Scanner + Advisor y aprendida. No depende del evento ya persistido. |
-| Escritura de revisión | `grid/meta_operator.py:2432-2498` | Actualmente persiste decisión, valoración, sombra, `decision_choices.real_result` y toque; v2 debe conservar la elección referenciada sin duplicar el plan. |
+| Estado de aprendizaje y comparación | `grid/meta_operator.py:389`, `:409`, `:435` | Lee eventos de plan/revisión, `decision_choices` y versiones; conservar IDs, elecciones y resultados v1/v2. |
+| Importación de muestras live desde planes históricos | `grid/meta_operator.py:1375`, `:1382` | Lee `META_PLAN_EVALUATED.alternatives`, `decision_id`, piezas, estimación y señales; se mantienen esas claves y su significado. |
+| Construcción de alternativas y recomendaciones | `grid/meta_operator.py:820`, `:899` | Cada cartera adjunta `advisor_recommendations`; la respuesta de análisis debe continuar completa. |
+| Persistencia del evento del plan | `grid/meta_operator.py:1211`, `:1212` | Escribe alternativas, decisiones, Advisor comparado, combinaciones, sombra, selección y bandas sigma. |
+| Selección de elecciones de revisión | `grid/meta_operator.py:2419` | Usa alternativas del plan para calcular real, Scanner + Advisor y aprendida. No depende del evento ya persistido. |
+| Escritura de revisión | `grid/meta_operator.py:2490`, `:2540`, `:2556` | El formato previo persistía decisión, valoración, sombra, `decision_choices.real_result` y toque; v2 conserva la elección referenciada sin duplicar el plan. |
 | Cobertura y datos recientes de Inteligencia | `api/routes/intelligence.py:103-175`, `api/routes/intelligence.py:389-393` | Cuenta señales y devuelve `decision_choices` y el detalle de eventos; mantener compatibilidad con eventos antiguos y exponer claves v2. |
 | Resultados de elecciones contra etiquetas | `api/routes/intelligence.py:316-330` | Cruza `decision_choices` con etiquetas usando `alternative_id`; debe seguir resolviendo versiones previas y nuevas. |
 | Diagnóstico de omisiones de toque | `scripts/diagnostico_senales_meta.py:91-100`, `scripts/diagnostico_senales_meta.py:145-157` | Lee alternativas y `signals_omitted`; ambas se conservan en eventos v2. |
 | Bitácora en Metas | `frontend/metas.js:402-430` | Renderiza tipo, símbolo/capital, pieza, decisión, motivo y sombra; no despliega alternativas completas. |
-| Decisiones en Inteligencia | `frontend/intelligence.js` (bloque de decisiones y visor JSON) | Muestra elecciones y permite expandir el objeto `details`; el plan completo no es presentado como pantalla de alternativas ahí. |
+| Decisiones en Inteligencia | `frontend/intelligence.js:31`, `:76` | Muestra elecciones y permite expandir el objeto `details`; el visor JSON muestra el esquema compacto v2 enlazado al plan. |
 
 No se encontró un renderizador de la lista completa de alternativas de la bitácora: el análisis HTTP continúa entregando el plan completo al operador/UI, mientras que el ledger genérico expone el JSON expandible. La v2 evita cambiar los campos visibles habituales y mantiene los campos que usa aprendizaje y diagnóstico.
 
 Estado de esta parte: revisión y medición documentadas; todavía no se ha cambiado código de producción.
+
+### Implementación 41b
+
+- `grid/meta_operator.py:904` distingue planes de análisis (`analisis`) y de revisión (`revision`). La persistencia de `META_PLAN_EVALUATED` se prepara con `_plan_ledger_payload` (`:1242`) y usa `ledger_schema_version: 2`.
+- Las alternativas del evento guardan `advisor_refs` con símbolo, margen y números de decisión (`grid/meta_operator.py:1219`); `advisor_comparisons` conserva la recomendación íntegra una sola vez por símbolo/margen. El plan de ejecución que devuelve el análisis conserva los asesores completos; la búsqueda, el ranking, los replays, las señales y las piezas abiertas no cambiaron.
+- El evento v2 contiene `profile`, `target_usdt`, `deadline_days`, `capital_usage`, `selection_reason`, candidatos compactos (incluido precio si lo entrega Scanner), alternativas, `decision_choices`, combinaciones, sombra y bandas sigma (`grid/meta_operator.py:1242`). La sigma del Scanner se normaliza desde `sigma_24h_open` en ese mismo serializador. Se excluyen ventanas crudas ya resumidas y recomendaciones duplicadas.
+- `META_OPERATOR_REVIEW_DECISION` guarda el resultado con campos decisorios y costos permitidos, `ledger_schema_version: 2`, y `plan_decision_id`; elimina el `real_result` duplicado de `decision_choices` (`grid/meta_operator.py:1268`, `:2492`, `:2530`, `:2548`). La respuesta de ejecución que recibe el llamador no se compacta.
+- Las elecciones Real / Scanner + Advisor / Aprendida conservan `alternative_id`, decisión, símbolo y probabilidad. La API de Inteligencia sigue devolviendo detalles de eventos v1/v2; el diagnóstico de señales sigue leyendo `alternatives.signals_omitted`. Los campos consumidos se cubren en `tests/test_intelligence_api.py:38`, `tests/test_meta_learning_api.py:112` y `tests/test_meta_signal_diagnostics.py:72`.
+- `grid/meta_operator.py:2211` diferencia el fallo al cargar velas (`velas no disponibles: …`) de la excepción del cálculo (`error al calcular toque: …`, línea `:2229`). La señal continúa siendo omitida en ambos casos.
+
+La alternativa completa sigue accesible en el evento de plan, junto con la recomendación completa dentro de `advisor_comparisons`; cada recomendación de alternativa se puede localizar por `symbol` y `margin_target_pct`. La pantalla Metas usa campos superiores que se conservaron. El visor JSON expandible de Inteligencia refleja el esquema v2 y el enlace `plan_decision_id`; los lectores de etiquetas y las comparaciones usan `decision_choices` y `alternative_id` conservados. No se cambió frontend ni lógica decisoria.
+
+### Pruebas y resultado
+
+Comando dirigido final, con `ASPLE_OFFLINE=1` y carpeta temporal nueva:
+
+`$testBase = Join-Path $env:TEMP 'asple-fase41b-20261026-03'; New-Item -ItemType Directory -Path $testBase | Out-Null; $env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_operator.py tests/test_intelligence_api.py tests/test_meta_learning_api.py tests/test_meta_signal_diagnostics.py -q --basetemp $testBase`
+
+Resultado final de la suite enfocada: **82 passed, 10 warnings, 0 failed**, 10,68 s. Verificación posterior del archivo del operador: **67 passed, 4 warnings**, 8,45 s. Una corrida inicial tuvo 80 passed y una falla de harness: el stub de `review_once` no aceptaba el argumento `plan_kind`; se corrigió solo el stub. No se ejecutó suite completa. La prueba sintética verifica el límite de 150 KiB para los dos eventos, el ID de plan, conservación de elecciones y campos, y la compatibilidad v1/v2 de API y diagnóstico.
+
+### Commits locales
+
+- `520766e` — `Fase 41b-1: medir y localizar el inflado de bitácora`.
+- `38bcffa` — `Fase 41b-2: compactar eventos de planes`.
+- `dcf6c3e` — `Fase 41b-3: compactar decisiones y enlazar planes`.
+- `d1b3656` — `Fase 41b-4: distinguir fallos de señal de toque`.
+- `1956a2d` — `Fase 41b-2: normalizar datos de candidatos` (seguimiento: sigma y precio compactos).
+
+Sin push. No se usó S1, Testnet, `.env` ni base real.
