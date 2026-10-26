@@ -9,3 +9,11 @@
 - **Fuera de esta parte:** ajuste de pesos con regresión, errores agrupados, Holm, criterios de evidencia, sombra aprendida, interruptor y vista quedan para 40d-2/40d-3.
 
 No se detectaron discrepancias de comportamiento en grids normales: el job solo lee velas/tablas y escribe las tres tablas nuevas de aprendizaje. La suite offline completa pasó.
+
+## 40d-2
+
+- **Validación mínima adicional:** el diseño pidió validar en el tramo temporal posterior, pero no dio un mínimo numérico para ese tramo. Se exige un mínimo de 5 observaciones efectivas de plazo; con menos, se guarda el intento como insuficiente y no se mueve ningún peso. Evita aceptar pesos con una validación demasiado pequeña.
+- **Muestras `live` antiguas:** sus filas de 40d-1 no incluyen recuento de ventanas ni probabilidad suavizada; no se inventan. Se mantienen guardadas y excluidas por base insuficiente. Las muestras `historical_reconstructed` sí se marcan y recalculan con paso de 7 días.
+- **Procedencia de señales:** la reconstrucción histórica genera volatilidad normalizada y dirección cuando hay fuentes fechadas equivalentes a las del operador. Scanner, Advisor y `break_prob` no existían causalmente en esas fechas; valen cero en el logit y no cuentan como evidencia para esos pesos. No se usan valores actuales para completar el pasado.
+- **Medición y evidencia real pendientes:** no se contó muestra de BD real ni se midió el job en S1. El aprendizaje queda en sombra y no cambia decisiones; la suite completa no se corrió porque esta fase autorizó solamente los tres archivos enfocados más las pruebas nuevas.
+- **Fuera del alcance:** sin vista ni interruptor de pesos aprendidos, sin cambiar decisiones del operador o grids normales, y sin incluir aún la señal de toques.

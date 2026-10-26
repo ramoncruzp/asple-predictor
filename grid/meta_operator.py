@@ -887,15 +887,31 @@ class MetaOperator:
             signals = {"signals_used": alternative.get("signals_used", []),
                 "touch_signal": alternative.get("touch_signal"),
                 "shadow_signals": alternative.get("shadow_signals", [])}
+            replay_raw = alternative.get("replay_probability")
+            replay_windows = int((alternative.get("estimate") or {}).get("rolling_windows") or
+                alternative.get("independent_windows") or 0)
+            replay_smoothed = (((round(float(replay_raw) * replay_windows) + 1) /
+                (replay_windows + 2)) if replay_raw is not None and replay_windows else None)
             values = {"sample_key": sample_key, "meta_id": int(goal["id"]),
                 "decision_id": str(decision_id), "alternative_id": alt_id,
                 "symbol": str(pieces[0].get("symbol") or "").upper(),
                 "profile": params["profile"], "sample_at": started_at,
-                "source_kind": "live", "base_probability": alternative.get("replay_probability"),
+                "source_kind": "live", "base_probability": replay_raw,
+                "base_probability_smoothed": replay_smoothed,
+                "base_window_count": replay_windows,
+                "base_independent_windows": int(alternative.get("independent_windows") or 0),
+                "base_method_version": "rolling_7d_v2", "recalculate_base": False,
+                "training_exclusion_reason": ("sin base suficiente" if
+                    int(alternative.get("independent_windows") or 0) < 3 else None),
                 "parameters_json": json.dumps(params, sort_keys=True, default=str),
                 "signals_json": json.dumps(signals, sort_keys=True, default=str),
                 "provenance_json": json.dumps({"source": "META_PLAN_EVALUATED",
-                    "decision_id": decision_id, "alternative_id": alt_id}, sort_keys=True),
+                    "decision_id": decision_id, "alternative_id": alt_id,
+                    "base_replay": {"raw_probability": replay_raw,
+                        "smoothed_probability": replay_smoothed, "step_days": 7,
+                        "window_count": replay_windows,
+                        "independent_windows": int(alternative.get("independent_windows") or 0),
+                        "method_version": "rolling_7d_v2"}}, sort_keys=True),
                 "created_at": started_at}
             created += int(self._store_learning_sample(values))
         return created
@@ -925,18 +941,34 @@ class MetaOperator:
                     key = hashlib.sha256(f"live:{decision_id}:{alt_id}".encode()).hexdigest()
                     ts = row["ts"]
                     ts = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+                    replay_raw = alternative.get("replay_probability")
+                    replay_windows = int((alternative.get("estimate") or {}).get("rolling_windows") or
+                        alternative.get("independent_windows") or 0)
+                    replay_smoothed = (((round(float(replay_raw) * replay_windows) + 1) /
+                        (replay_windows + 2)) if replay_raw is not None and replay_windows else None)
                     values = {"sample_key": key, "meta_id": int(row["meta_id"]),
                         "decision_id": decision_id, "alternative_id": alt_id,
                         "symbol": str(pieces[0].get("symbol") or "").upper(),
                         "profile": params["profile"], "sample_at": ts,
-                        "source_kind": "live", "base_probability": alternative.get("replay_probability"),
+                        "source_kind": "live", "base_probability": replay_raw,
+                        "base_probability_smoothed": replay_smoothed,
+                        "base_window_count": replay_windows,
+                        "base_independent_windows": int(alternative.get("independent_windows") or 0),
+                        "base_method_version": "rolling_7d_v2", "recalculate_base": False,
+                        "training_exclusion_reason": ("sin base suficiente" if
+                            int(alternative.get("independent_windows") or 0) < 3 else None),
                         "parameters_json": json.dumps(params, sort_keys=True, default=str),
                         "signals_json": json.dumps({"signals_used": alternative.get("signals_used", []),
                             "touch_signal": alternative.get("touch_signal"),
                             "shadow_signals": alternative.get("shadow_signals", [])}, sort_keys=True, default=str),
                         "provenance_json": json.dumps({"source": "legacy_meta_ledger",
                             "ledger_id": row["id"], "decision_id": decision_id,
-                            "alternative_id": alt_id}, sort_keys=True), "created_at": datetime.now(timezone.utc)}
+                            "alternative_id": alt_id, "base_replay": {
+                                "raw_probability": replay_raw, "smoothed_probability": replay_smoothed,
+                                "step_days": 7, "window_count": replay_windows,
+                                "independent_windows": int(alternative.get("independent_windows") or 0),
+                                "method_version": "rolling_7d_v2"}}, sort_keys=True),
+                        "created_at": datetime.now(timezone.utc)}
                     created += int(self._store_learning_sample(values))
             except (TypeError, ValueError, KeyError):
                 continue
@@ -984,6 +1016,121 @@ class MetaOperator:
                 inserted += 1
         return inserted
 
+    def _recalculate_learning_bases(self, samples, candles_by_symbol):
+        """Actualiza bases históricas obsoletas sin borrar ni reemplazar muestras."""
+        from grid.meta_learning import causal_replay_probability, REPLAY_METHOD_VERSION
+        changed = 0
+        for sample in samples:
+            if sample.get("source_kind") != "historical_reconstructed":
+                continue
+            if not sample.get("recalculate_base") and sample.get("base_method_version") == REPLAY_METHOD_VERSION:
+                continue
+            params = json.loads(sample["parameters_json"])
+            symbols = {str(piece.get("symbol") or "").upper() for piece in params.get("pieces", [])}
+            market = {symbol: candles_by_symbol.get(symbol) for symbol in symbols}
+            if not market or any(value is None for value in market.values()):
+                continue
+            at = sample["sample_at"]
+            baseline = causal_replay_probability(market, at=at, parameters=params)
+            provenance = json.loads(sample["provenance_json"] or "{}")
+            provenance["base_replay"] = baseline
+            provenance["base_replay_method_version"] = REPLAY_METHOD_VERSION
+            exclusion = baseline.get("training_exclusion_reason")
+            with self.db.engine.begin() as conn:
+                conn.execute(self.db.meta_learning_samples.update().where(
+                    self.db.meta_learning_samples.c.id == int(sample["id"])).values(
+                        base_probability=baseline.get("raw_probability"),
+                        base_probability_smoothed=baseline.get("smoothed_probability"),
+                        base_window_count=int(baseline.get("window_count") or 0),
+                        base_independent_windows=int(baseline.get("independent_windows") or 0),
+                        base_method_version=REPLAY_METHOD_VERSION, recalculate_base=False,
+                        training_exclusion_reason=exclusion,
+                        provenance_json=json.dumps(provenance, sort_keys=True)))
+            changed += 1
+        return changed
+
+    def _train_learning_weights(self, samples):
+        """Ajusta versiones en sombra; no modifica pesos usados por el operador."""
+        from sqlalchemy import select
+        from grid.meta_learning import (effective_sample_rows, fit_signal_weights,
+            temporal_learning_split, LEARNING_SIGNALS)
+        with self.db.engine.connect() as conn:
+            label_rows = conn.execute(select(self.db.meta_learning_labels)).mappings().all()
+            setting_rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
+            previous = conn.execute(select(self.db.meta_learning_weight_versions).order_by(
+                self.db.meta_learning_weight_versions.c.created_at)).mappings().all()
+        labels = {(int(row["sample_id"]), str(row["horizon"])): json.loads(row["label_json"])
+                  for row in label_rows}
+        settings = {str(row["profile"]): json.loads(row["settings"] or "{}") for row in setting_rows}
+        latest = {}
+        for row in previous:
+            latest[(row["profile"], row["source_kind"])] = json.loads(row["weights_json"] or "{}")
+        saved = 0
+        for profile in {str(row["profile"]).upper() for row in samples}:
+            cfg = settings.get(profile, {})
+            for source_kind in ("live", "historical_reconstructed"):
+                rows = []
+                for sample in samples:
+                    if str(sample["profile"]).upper() != profile or sample["source_kind"] != source_kind:
+                        continue
+                    params = json.loads(sample["parameters_json"])
+                    days = int(params.get("profile_days", 20))
+                    row = dict(sample)
+                    row["signals"] = json.loads(sample["signals_json"] or "{}")
+                    weights = {}
+                    for piece in params.get("pieces", []):
+                        symbol = str(piece.get("symbol") or "").upper()
+                        weights[symbol] = weights.get(symbol, 0.0) + float(piece.get("capital_usdt", 0))
+                    row["feature_weights"] = weights
+                    row["base_window_count"] = int(sample.get("base_window_count") or 0)
+                    row["base_independent_windows"] = int(sample.get("base_independent_windows") or 0)
+                    row["base_probability_smoothed"] = sample.get("base_probability_smoothed")
+                    row["label"] = labels.get((int(sample["id"]), "72h"))
+                    row["profile_label"] = labels.get((int(sample["id"]), f"{days}d"))
+                    rows.append(row)
+                training_rows, validation_rows = temporal_learning_split(rows)
+                split_at = min((row["sample_at"] for row in validation_rows), default=None)
+                training = [row for row in training_rows if row.get("label")]
+                validation = [row for row in validation_rows if row.get("profile_label")]
+                days = int(next((json.loads(row["parameters_json"]).get("profile_days", 20)
+                    for row in rows), 20))
+                training = effective_sample_rows(training, horizon_days=3)
+                validation = effective_sample_rows(validation, horizon_days=days)
+                current = {key: float((latest.get((profile, source_kind)) or {}).get(key, .25))
+                    for key in LEARNING_SIGNALS}
+                if (len(training) < int(cfg.get("learning_min_effective_samples", 30))
+                        or len(validation) < 5):
+                    result = {"status": "insufficient", "weights": current,
+                        "signals": {key: {"weight": current[key], "reason": "sin evidencia suficiente",
+                            "effective_samples": sum(1 for row in training if key in row["signals"])}
+                            for key in LEARNING_SIGNALS},
+                        "reason": "sin entrenamiento y validación temporal suficientes",
+                        "training_effective": len(training), "validation_effective": len(validation)}
+                else:
+                    result = fit_signal_weights(training, current,
+                        min_effective=int(cfg.get("learning_min_effective_samples", 30)),
+                        max_delta=float(cfg.get("learning_max_weight_delta", .05)),
+                        max_abs_weight=float(cfg.get("learning_weight_max_abs", 1.0)),
+                        logit_cap=float(cfg.get("signal_logit_cap", 1.0)),
+                        regularization=float(cfg.get("learning_regularization", 1.0)),
+                        alpha=float(cfg.get("learning_alpha", .05)),
+                        validation_rows=[{**row, "label": row["profile_label"]} for row in validation])
+                    result["training_effective"] = len(training)
+                    result["validation_effective"] = len(validation)
+                result["training_cutoff"] = str(split_at) if split_at is not None else None
+                result["training_sample_ids"] = [int(row["id"]) for row in training]
+                result["validation_sample_ids"] = [int(row["id"]) for row in validation]
+                # Registrar intentos y frenos por separado para cada origen.
+                with self.db.engine.begin() as conn:
+                    conn.execute(self.db.meta_learning_weight_versions.insert().values(
+                        created_at=datetime.now(timezone.utc), profile=profile,
+                        source_kind=source_kind, status=("updated" if result.get("improves") else
+                            ("unchanged" if result.get("status") == "fitted" else result["status"])),
+                        weights_json=json.dumps(result.get("weights", current), sort_keys=True),
+                        summary_json=json.dumps(result, sort_keys=True, default=str)))
+                saved += 1
+        return saved
+
     def run_learning_daily(self):
         """Etiqueta en prioridad baja sin tomar ops_lock ni ejecutar órdenes."""
         from sqlalchemy import select
@@ -995,7 +1142,8 @@ class MetaOperator:
         started = datetime.now(timezone.utc)
         timings = {"legacy_import_s": 0.0, "market_history_s": 0.0,
                    "historical_reconstruction_s": 0.0,
-                   "label_simulation_s": 0.0, "persistence_s": 0.0}
+                   "label_simulation_s": 0.0, "persistence_s": 0.0,
+                   "weight_training_s": 0.0}
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
                     "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0}
         priority_lowered = False
@@ -1061,6 +1209,12 @@ class MetaOperator:
                         "alternative_id": None, "symbol": item["symbol"], "profile": item["profile"],
                         "sample_at": sample_at, "source_kind": "historical_reconstructed",
                         "base_probability": item.get("base_probability"),
+                        "base_probability_smoothed": item.get("base_probability_smoothed"),
+                        "base_window_count": int(item.get("base_window_count") or 0),
+                        "base_independent_windows": int(item.get("base_independent_windows") or 0),
+                        "base_method_version": item.get("base_method_version"),
+                        "recalculate_base": False,
+                        "training_exclusion_reason": item.get("training_exclusion_reason"),
                         "parameters_json": json.dumps(params, sort_keys=True, default=str),
                         "signals_json": json.dumps(item["signals"], sort_keys=True, default=str),
                         "provenance_json": json.dumps(item["provenance"], sort_keys=True),
@@ -1072,6 +1226,11 @@ class MetaOperator:
                     labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
                         self.db.meta_learning_labels.c.horizon)).all()
                 existing = {(int(row[0]), str(row[1])) for row in labels}
+            t = time.perf_counter()
+            counters["bases_recalculated"] = self._recalculate_learning_bases(samples, candles_by_symbol)
+            timings["base_recalculation_s"] = time.perf_counter() - t
+            with self.db.engine.connect() as conn:
+                samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
             for sample in samples:
                 params = json.loads(sample["parameters_json"])
                 profile_horizon = f"{int(params.get('profile_days', 20))}d"
@@ -1098,6 +1257,9 @@ class MetaOperator:
                 counters["labels_72h"] += int("72h" in fresh and fresh["72h"].get("status") == "labeled")
                 counters["labels_profile"] += sum(1 for horizon, label in fresh.items()
                     if horizon != "72h" and label.get("status") == "labeled")
+            t = time.perf_counter()
+            counters["weight_versions_saved"] = self._train_learning_weights(samples)
+            timings["weight_training_s"] = time.perf_counter() - t
             summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
                 "sample_count": len(samples), "symbols": len(candles_by_symbol),
                 "priority": "baja" if priority_lowered else "baja_best_effort_no_os_thread_priority",

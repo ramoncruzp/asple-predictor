@@ -1,17 +1,24 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 import time
 
 import numpy as np
+import pytest
 from sqlalchemy import select
 
 from database.db_manager import DBManager
 from grid.meta_learning import (
+    causal_replay_probability,
+    effective_sample_rows,
+    fit_signal_weights,
+    extract_learning_features,
+    holm_adjust,
     make_learning_label,
     non_overlapping_72h_starts,
     point_in_time_signals,
     replay_alternative_labels,
+    temporal_learning_split,
 )
 from grid.meta_operator import MetaOperator
 from grid.sim.data import CandleData
@@ -136,3 +143,149 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
     assert stored["horizon"] == "72h"
     assert json.loads(stored["label_json"])["reached"] is True
     assert run["status"] == "completed"
+    with db.engine.connect() as conn:
+        sample = conn.execute(select(db.meta_learning_samples)).mappings().one()
+        versions = conn.execute(select(db.meta_learning_weight_versions)).mappings().all()
+    assert sample["base_method_version"] == "rolling_7d_v2"
+    assert sample["recalculate_base"] is False
+    assert {row["source_kind"] for row in versions} == {"live", "historical_reconstructed"}
+    assert all(row["status"] == "insufficient" for row in versions)
+
+
+def test_causal_replay_uses_seven_day_stride_and_only_windows_before_cut(monkeypatch):
+    import grid.meta_learning as learning
+    step = 300
+    candles = _candles(np.arange(0, 121 * 86400 + step, step, dtype=np.int64))
+    at = 100 * 86400
+    seen = []
+    def fake_replay(_market, *, start_ts, parameters, include_horizons):
+        seen.append(start_ts)
+        return {"20d": {"status": "labeled", "reached": start_ts % (14 * 86400) == 0}}
+    monkeypatch.setattr(learning, "replay_alternative_labels", fake_replay)
+    result = causal_replay_probability({"XRPUSDT": candles}, at=at,
+        parameters={"profile_days": 20, "pieces": [{"symbol": "XRPUSDT"}]})
+    assert seen and all(b - a == 7 * 86400 for a, b in zip(seen, seen[1:]))
+    assert all(start + 20 * 86400 < at for start in seen)
+    assert result["step_days"] == 7
+    assert result["window_count"] == len(seen)
+    assert result["method_version"] == "rolling_7d_v2"
+
+
+def test_replay_probability_smoothing_handles_zero_and_one_windows(monkeypatch):
+    import grid.meta_learning as learning
+    candles = _candles(np.arange(0, 31 * 86400 + 300, 300, dtype=np.int64))
+    monkeypatch.setattr(learning, "replay_alternative_labels", lambda *_a, **_k:
+        {"20d": {"status": "labeled", "reached": False}})
+    result = causal_replay_probability({"XRPUSDT": candles}, at=21 * 86400,
+        parameters={"profile_days": 20})
+    assert result["window_count"] == 1
+    assert result["raw_probability"] == 0
+    assert result["smoothed_probability"] == pytest.approx(1 / 3)
+    assert result["training_exclusion_reason"] == "sin base suficiente"
+    empty = causal_replay_probability({"XRPUSDT": candles}, at=20 * 86400,
+        parameters={"profile_days": 20})
+    assert empty["raw_probability"] is None
+    assert empty["smoothed_probability"] is None
+    assert empty["independent_windows"] == 0
+    no_logit = fit_signal_weights([{"sample_at": datetime.now(timezone.utc), "symbol": "XRPUSDT",
+        "base_probability": 0.0, "base_window_count": 1, "label": {"reached": False}}])
+    assert no_logit["status"] == "insufficient"
+
+
+def test_effective_samples_and_temporal_split_prevent_overlapping_or_mixed_dates():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [{"id": i, "symbol": "XRPUSDT",
+        "sample_at": start + timedelta(days=offset)}
+        for i, offset in enumerate((0, 1, 3, 6, 9, 12, 15))]
+    effective = effective_sample_rows(rows, horizon_days=3)
+    assert [r["sample_at"] for r in effective] == [rows[0]["sample_at"], rows[2]["sample_at"],
+        rows[3]["sample_at"], rows[4]["sample_at"], rows[5]["sample_at"], rows[6]["sample_at"]]
+    train, validation = temporal_learning_split(rows, train_fraction=.6)
+    assert train and validation
+    assert max(str(r["sample_at"])[:10] for r in train) < min(
+        str(r["sample_at"])[:10] for r in validation)
+
+
+def test_holm_correction_is_monotonic_and_controls_familywise_threshold():
+    adjusted = holm_adjust({"a": .01, "b": .03, "c": .04})
+    assert adjusted == {"a": pytest.approx(.03), "b": pytest.approx(.06),
+        "c": pytest.approx(.06)}
+
+
+def test_historical_features_rebuild_only_available_normalized_signals():
+    values, present = extract_learning_features({"point_in_time_by_symbol": {
+        "XRPUSDT": {"signals": {"realized_volatility_24h": .01,
+            "volatility_forecasts": [{"sigma": .02}],
+            "direction_predictions": [{"model": "model_a_down", "interval": "1h",
+                "probability_up": .8}]}}}})
+    assert values["volatility"] == pytest.approx(np.log(2))
+    assert values["direction"] == 1.0
+    assert present == {"volatility", "direction"}
+
+
+def test_absent_signal_stays_at_prior_and_reported_without_evidence():
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    for i in range(45):
+        rows.append({"id": i, "symbol": f"COIN{i % 5}",
+            "sample_at": base + timedelta(days=i * 3), "base_probability": .5,
+            "base_probability_smoothed": .5, "base_window_count": 5,
+            "signals": {"signals_used": [{"name": "volatility", "normalized": .8}]},
+            "label": {"reached": bool(i % 2)}})
+    validation = [{**row, "label": {"reached": bool(row["id"] % 2)}} for row in rows[-10:]]
+    result = fit_signal_weights(rows, validation_rows=validation, min_effective=30,
+        max_delta=.05)
+    assert result["signals"]["scanner"]["weight"] == .25
+    assert result["signals"]["scanner"]["reason"] == "sin evidencia suficiente"
+    assert result["signals"]["scanner"]["effective_samples"] == 0
+    assert result["signals"]["volatility"]["effective_samples"] == 45
+    assert result["improves"] is False
+    assert result["weights"]["volatility"] == .25
+
+
+def test_weight_update_is_significant_holm_adjusted_and_limited_to_005():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    training, validation = [], []
+    identifier = 0
+    for day in range(180):
+        for coin in range(10):
+            signal = 1.0 if (day + coin) % 2 else -1.0
+            row = {"id": identifier, "symbol": f"COIN{coin}",
+                "sample_at": base + timedelta(days=day * 3),
+            "base_probability": .5, "base_probability_smoothed": .5,
+            "base_window_count": 5, "base_independent_windows": 5,
+                "signals": {"signals_used": [{"name": "volatility", "normalized": signal}]},
+                "label": {"reached": signal > 0}}
+            identifier += 1
+            (training if day < 126 else validation).append(row)
+    result = fit_signal_weights(training, validation_rows=validation,
+        min_effective=30, max_delta=.05)
+    assert result["improves"] is True
+    assert result["signals"]["volatility"]["p_value_holm"] <= .05
+    assert result["weights"]["volatility"] == pytest.approx(.30)
+
+
+def test_weight_that_fails_later_validation_is_not_applied():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    training, validation = [], []
+    identifier = 0
+    for day in range(180):
+        for coin in range(10):
+            signal = 1.0 if (day + coin) % 2 else -1.0
+            row = {"id": identifier, "symbol": f"COIN{coin}",
+                "sample_at": base + timedelta(days=day * 3),
+                "base_probability": .5, "base_probability_smoothed": .5,
+                "base_window_count": 5, "base_independent_windows": 5,
+                "signals": {"signals_used": [{"name": "volatility", "normalized": signal}]},
+                "label": {"reached": signal > 0}}
+            identifier += 1
+            if day >= 126:
+                row["label"] = {"reached": signal < 0}
+                validation.append(row)
+            else:
+                training.append(row)
+    result = fit_signal_weights(training, validation_rows=validation,
+        min_effective=30, max_delta=.05)
+    assert result["improves"] is False
+    assert result["weights"]["volatility"] == .25
+    assert result["signals"]["volatility"]["reason"] == "validación no mejora a solo p_replay"

@@ -345,7 +345,12 @@ class DBManager:
             Column("symbol", String(32), nullable=False), Column("profile", String(16), nullable=False),
             Column("sample_at", DateTime(timezone=True), nullable=False),
             Column("source_kind", String(32), nullable=False),
-            Column("base_probability", Float), Column("parameters_json", Text, nullable=False),
+            Column("base_probability", Float), Column("base_probability_smoothed", Float),
+            Column("base_window_count", Integer, nullable=False, default=0),
+            Column("base_independent_windows", Integer, nullable=False, default=0),
+            Column("base_method_version", String(32)),
+            Column("recalculate_base", Boolean, nullable=False, default=True),
+            Column("training_exclusion_reason", Text), Column("parameters_json", Text, nullable=False),
             Column("signals_json", Text, nullable=False), Column("provenance_json", Text, nullable=False),
             Column("created_at", DateTime(timezone=True), nullable=False))
         self.meta_learning_labels = Table("meta_learning_labels", self.metadata,
@@ -359,6 +364,12 @@ class DBManager:
             Column("started_at", DateTime(timezone=True), nullable=False),
             Column("finished_at", DateTime(timezone=True)), Column("status", String(24), nullable=False),
             Column("summary_json", Text, nullable=False, default="{}"))
+        self.meta_learning_weight_versions = Table("meta_learning_weight_versions", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("profile", String(16), nullable=False), Column("source_kind", String(32), nullable=False),
+            Column("status", String(24), nullable=False), Column("weights_json", Text, nullable=False),
+            Column("summary_json", Text, nullable=False))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
@@ -371,6 +382,7 @@ class DBManager:
         self._seed_widen_defaults()
         self._migrate_grid_columns()
         self._migrate_meta_columns()
+        self._migrate_meta_learning_columns()
         self._seed_meta_profile_settings()
         with self.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_symbol_model ON predictions(symbol, model_name)"))
@@ -433,6 +445,24 @@ class DBManager:
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_plan_json TEXT")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_result_json TEXT")
+
+    def _migrate_meta_learning_columns(self) -> None:
+        """Conserva muestras previas y las marca para recalcular su base causal."""
+        additions = {"base_probability_smoothed": "FLOAT", "base_window_count": "INTEGER NOT NULL DEFAULT 0",
+            "base_independent_windows": "INTEGER NOT NULL DEFAULT 0",
+            "base_method_version": "TEXT", "recalculate_base": "BOOLEAN NOT NULL DEFAULT 1",
+            "training_exclusion_reason": "TEXT"}
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name == "sqlite":
+                present = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info('meta_learning_samples')")}
+                for name, sql_type in additions.items():
+                    if name not in present:
+                        conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN {name} {sql_type}")
+                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=1 WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v2')")
+            elif self.engine.dialect.name == "postgresql":
+                for name, sql_type in additions.items():
+                    conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=TRUE WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v2')")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""

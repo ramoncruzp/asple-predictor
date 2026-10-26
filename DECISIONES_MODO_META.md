@@ -82,6 +82,14 @@ Los números son punto de partida y se ajustan con los resultados.
 
 ## 7. Aprendizaje (Fase 40d)
 
+- **40d-2 (modelo y frenos):** la etiqueta de 72 h entrena y la etiqueta del plazo valida en fechas posteriores. El replay histórico usa ventanas del plazo con paso de 7 días, solo cerradas antes del corte; `p_replay` suavizado es `(éxitos + 1) / (ventanas + 2)`.
+- Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
+- Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
+- **Pendiente 40d-3:** registrar decisión aprendida junto a la real y a Scanner+Advisor, interruptor manual apagado por defecto, comparación contrafactual y vista por señal.
+- Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
+- Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
+- **Pendiente 40d-3:** registrar decisión aprendida junto a la real y a Scanner+Advisor, interruptor manual apagado por defecto, comparación contrafactual y vista por señal.
+
 - Medir el acierto de cada señal con lo que pasó después, en ventanas no solapadas.
 - Recalcular el peso de cada señal; puede volverse negativo si falla de forma consistente (leerla al revés).
 - Frenos: muestra mínima, prueba estadística contra el azar, cambios graduales.
@@ -100,9 +108,9 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40b-6B | Operador activo: reajuste de piezas abiertas, materialidad, frenos y presentación de cambios | Implementada, pruebas enfocadas y suite completa offline verdes; commit de esta entrega |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C), `897f0d1` (A) y `3a513dc` (40c-3: defectos de presentación de la prueba de QA en S1); siguiente fase 40d |
 | 40d-1 | Etiquetas 72 h/plazo, backfill causal y almacenamiento separado `live`/`historical_reconstructed` | Implementada y verificada offline en esta entrega; sin S1 ni despliegue |
-| 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Pendiente |
+| 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
 | 40d-3 | Sombra aprendida, interruptor manual y vista comparativa | Pendiente |
-| 40d | Aprendizaje continuo de pesos por señal | En curso; 40d-2/40d-3 pendientes |
+| 40d | Aprendizaje continuo de pesos por señal | En curso; pendiente 40d-3 (sombra aprendida, activación manual y vista) |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 

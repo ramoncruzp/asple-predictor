@@ -8,6 +8,8 @@ import numpy as np
 
 HOURS_72 = 72
 BACKFILL_DAYS = 180
+REPLAY_METHOD_VERSION = "rolling_7d_v2"
+LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor")
 
 
 def _utc_seconds(value):
@@ -65,13 +67,18 @@ def make_learning_label(*, horizon, net_advance_usdt, target_usdt,
 
 
 def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_days=BACKFILL_DAYS):
-    """Estima p_replay solo con simulaciones de bloques previos ya terminados."""
+    """Estima p_replay con ventanas del plazo y paso de siete días, antes del corte."""
     at_s = _utc_seconds(at)
     days = max(1, int(parameters.get("profile_days", 20)))
     width = days * 86400
     earliest = max(at_s - int(lookback_days) * 86400,
         max((int(candles.timestamp[0]) for candles in candles_by_symbol.values()), default=at_s))
-    starts = range(at_s - width, earliest - 1, -width)
+    step = 7 * 86400
+    # La misma cadencia que build_windows en el operador. El ancla queda en
+    # el primer timestamp disponible para que los cortes sean reproducibles.
+    anchor = max((int(c.timestamp[0]) for c in candles_by_symbol.values()), default=earliest)
+    first = anchor + max(0, (earliest - anchor + step - 1) // step) * step
+    starts = range(first, at_s - width, step)
     outcomes = []
     label_key = f"{days}d"
     for start_s in starts:
@@ -80,9 +87,240 @@ def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_day
         label = labels.get(label_key, {})
         if label.get("status") == "labeled":
             outcomes.append(bool(label.get("reached")))
-    return {"probability": (sum(outcomes) / len(outcomes)) if outcomes else None,
-            "independent_windows": len(outcomes), "successes": sum(outcomes),
-            "window_days": days, "through_ts": at_s}
+    count = len(outcomes)
+    raw = (sum(outcomes) / count) if count else None
+    return {"probability": raw, "raw_probability": raw,
+            "smoothed_probability": ((sum(outcomes) + 1) / (count + 2)) if count else None,
+            "independent_windows": min(count, (count * 7) // days),
+            "window_count": count, "successes": sum(outcomes), "step_days": 7,
+            "method_version": REPLAY_METHOD_VERSION, "window_days": days, "through_ts": at_s,
+            "training_exclusion_reason": "sin base suficiente" if (count * 7) // days < 3 else None}
+
+
+def effective_sample_rows(rows, *, horizon_days):
+    """Conserva una observación por moneda y bloque no solapado del horizonte."""
+    width = max(1, int(horizon_days)) * 86400
+    selected, last_by_symbol = [], {}
+    for row in sorted(rows, key=lambda item: (_utc_seconds(item["sample_at"]), int(item.get("id", 0)))):
+        symbol = str(row.get("symbol") or "").upper()
+        timestamp = _utc_seconds(row["sample_at"])
+        if timestamp - last_by_symbol.get(symbol, -10**30) < width:
+            continue
+        selected.append(row)
+        last_by_symbol[symbol] = timestamp
+    return selected
+
+
+def temporal_learning_split(rows, *, train_fraction=0.7):
+    """Divide por fechas de inicio completas: ninguna fecha aparece en ambos lados."""
+    dates = sorted({str(row["sample_at"])[:10] for row in rows})
+    if len(dates) < 2:
+        return [], []
+    cut = min(len(dates) - 1, max(1, int(len(dates) * float(train_fraction))))
+    validation_start = dates[cut]
+    return ([row for row in rows if str(row["sample_at"])[:10] < validation_start],
+            [row for row in rows if str(row["sample_at"])[:10] >= validation_start])
+
+
+def extract_learning_features(signals, weights_by_symbol=None):
+    """Mapea únicamente señales numéricas presentes; ausentes quedan neutrales y sin máscara."""
+    values, present = {}, set()
+    if not isinstance(signals, dict):
+        return values, present
+    live = signals.get("signals_used")
+    if isinstance(live, list):
+        for item in live:
+            if not isinstance(item, dict):
+                continue
+            name, value = str(item.get("name") or ""), item.get("normalized")
+            if name in LEARNING_SIGNALS and isinstance(value, (int, float)) and np.isfinite(value):
+                values[name] = float(np.clip(value, -1.0, 1.0))
+                present.add(name)
+    historical = signals.get("point_in_time_by_symbol")
+    volatility_values, direction_values = [], []
+    if isinstance(historical, dict):
+        weights_by_symbol = weights_by_symbol or signals.get("point_in_time_weights") or {}
+        for symbol, snapshot in historical.items():
+            piece_weight = max(0.0, float(weights_by_symbol.get(symbol, 1.0)))
+            if not piece_weight:
+                continue
+            source = (snapshot or {}).get("signals", {})
+            realized = source.get("realized_volatility_24h")
+            forecasts = [float(row["sigma"]) for row in source.get("volatility_forecasts", [])
+                if row.get("sigma") is not None and float(row["sigma"]) > 0]
+            if realized is not None and float(realized) > 0 and forecasts:
+                normalized = float(np.clip(np.log(float(np.median(forecasts)) / float(realized)), -1, 1))
+                volatility_values.append((normalized, piece_weight))
+            for row in source.get("direction_predictions", []):
+                if str(row.get("model") or "").lower() != "model_a_down" or str(row.get("interval") or "") != "1h":
+                    continue
+                probability_up = row.get("probability_up")
+                if probability_up is not None and float(probability_up) >= .60:
+                    probability_up = float(probability_up)
+                    direction_values.append((float(np.clip((probability_up - .5) / .1, -1, 1)),
+                        piece_weight))
+    if volatility_values:
+        values["volatility"] = float(np.average([v for v, _ in volatility_values],
+            weights=[w for _, w in volatility_values]))
+        present.add("volatility")
+    if direction_values:
+        values["direction"] = float(np.average([v for v, _ in direction_values],
+            weights=[w for _, w in direction_values]))
+        present.add("direction")
+    return values, present
+
+
+def holm_adjust(p_values):
+    """Valores p ajustados por Holm, conservando las claves originales."""
+    ordered = sorted((float(p), key) for key, p in p_values.items())
+    adjusted, running = {}, 0.0
+    total = len(ordered)
+    for index, (p_value, key) in enumerate(ordered):
+        running = max(running, min(1.0, p_value * (total - index)))
+        adjusted[key] = running
+    return adjusted
+
+
+def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
+                       max_delta=0.05, max_abs_weight=1.0, logit_cap=1.0,
+                       regularization=1.0, alpha=0.05, validation_rows=None):
+    """Ajuste penalizado con offset replay, errores cluster bidireccionales y Holm."""
+    from scipy.optimize import minimize
+    from scipy.special import expit, logit
+    from scipy.stats import norm
+
+    current = {key: float((current_weights or {}).get(key, .25)) for key in LEARNING_SIGNALS}
+    parsed = []
+    for row in rows:
+        base = row.get("base_probability_smoothed")
+        if base is None:
+            base = row.get("base_probability")
+        if base is None or int(row.get("base_independent_windows", row.get("base_window_count")) or 0) < 3:
+            continue
+        label = row.get("label") or {}
+        if "reached" not in label:
+            continue
+        feature_values, present = extract_learning_features(row.get("signals") or {},
+            row.get("feature_weights"))
+        parsed.append({**row, "base": float(np.clip(base, 1e-6, 1 - 1e-6)),
+            "label": int(bool(label["reached"])), "features": feature_values,
+            "present": present})
+    if len(parsed) < 2:
+        return {"status": "insufficient", "weights": current, "signals": {},
+                "reason": "sin base suficiente"}
+    names = list(LEARNING_SIGNALS)
+    X = np.array([[item["features"].get(name, 0.0) for name in names] for item in parsed])
+    y = np.array([item["label"] for item in parsed], dtype=float)
+    offsets = logit([item["base"] for item in parsed])
+    present_matrix = np.array([[name in item["present"] for name in names] for item in parsed])
+    counts = {name: int(present_matrix[:, j].sum()) for j, name in enumerate(names)}
+    active = [j for j, name in enumerate(names) if counts[name] >= min_effective]
+    if not active:
+        return {"status": "insufficient", "weights": current,
+            "signals": {name: {"effective_samples": counts[name], "reason": "sin evidencia suficiente",
+                "weight": current[name]} for name in names}, "reason": "sin evidencia suficiente"}
+    # Señales con menos de 30 observaciones no aportan coeficiente entrenable.
+    fixed = np.array([current[n] if j not in active else 0.0 for j, n in enumerate(names)])
+    Xa = X[:, active]
+    active_names = [names[j] for j in active]
+    base_offset = offsets + X @ fixed
+    initial = np.array([current[names[j]] for j in active])
+
+    def objective(beta):
+        full = fixed.copy()
+        full[active] = beta
+        logits = np.clip(offsets + np.clip(X @ full, -logit_cap, logit_cap), -35, 35)
+        probs = expit(logits)
+        loss = -np.sum(y * np.log(np.maximum(probs, 1e-12)) +
+            (1-y) * np.log(np.maximum(1-probs, 1e-12)))
+        return loss + .5 * regularization * float(np.sum((beta - .25) ** 2))
+    result = minimize(objective, initial, method="L-BFGS-B",
+        bounds=[(-max_abs_weight, max_abs_weight)] * len(active))
+    candidate = fixed.copy()
+    candidate[active] = result.x
+    # Clamp per-row total signal contribution as the runtime does.
+    candidate_logits = offsets + np.clip(X @ candidate, -logit_cap, logit_cap)
+    baseline_logits = offsets + np.clip(X @ np.array([current[n] for n in names]), -logit_cap, logit_cap)
+    p_candidate, p_baseline = expit(candidate_logits), expit(baseline_logits)
+
+    # Sandwich covariance with date and symbol clusters (two-way inclusion-exclusion).
+    fitted_full = fixed.copy()
+    fitted_full[active] = result.x
+    raw_adjustment = X @ fitted_full
+    active_rows = (np.abs(raw_adjustment) < logit_cap).astype(float)
+    probabilities = expit(offsets + np.clip(raw_adjustment, -logit_cap, logit_cap))
+    weights_diag = probabilities * (1 - probabilities)
+    hessian = Xa.T @ (weights_diag[:, None] * Xa) + regularization * np.eye(len(active))
+    inverse = np.linalg.pinv(hessian)
+    residual_score = Xa * ((y - probabilities) * active_rows)[:, None]
+    def meat(group_key):
+        groups = {}
+        for index, item in enumerate(parsed):
+            groups.setdefault(group_key(item), np.zeros(len(active)))
+            groups[group_key(item)] += residual_score[index]
+        return sum((np.outer(score, score) for score in groups.values()), np.zeros((len(active), len(active))))
+    date_meat, symbol_meat = meat(lambda item: str(item["sample_at"])[:10]), meat(lambda item: item.get("symbol"))
+    joint_meat = meat(lambda item: (str(item["sample_at"])[:10], item.get("symbol")))
+    covariance = inverse @ (date_meat + symbol_meat - joint_meat) @ inverse
+    se = np.sqrt(np.maximum(0.0, np.diag(covariance)))
+    p_values = {name: float(2 * norm.sf(abs(result.x[i]) / max(se[i], 1e-12)))
+        for i, name in enumerate(active_names)}
+    corrected = holm_adjust(p_values)
+    signals = {}
+    for j, name in enumerate(names):
+        if j not in active:
+            signals[name] = {"weight": current[name], "candidate": current[name],
+                "effective_samples": counts[name], "p_value": None, "p_value_holm": None,
+                "reason": "sin evidencia suficiente"}
+            continue
+        k = active.index(j)
+        moved = float(np.clip(candidate[j] - current[name], -max_delta, max_delta))
+        proposed = current[name] + moved
+        significant = corrected.get(name, 1.0) <= alpha
+        signals[name] = {"weight": proposed if significant else current[name],
+            "candidate": float(candidate[j]), "effective_samples": counts[name],
+            "standard_error_clustered": float(se[k]), "p_value": p_values[name],
+            "p_value_holm": corrected[name], "reason": "cambio limitado a 0,05" if significant and abs(moved) > 1e-12
+                else ("sin evidencia estadística tras Holm" if not significant else "sin cambio material")}
+    accepted = np.array([signals[name]["weight"] for name in names])
+    def metrics_for(items, weights):
+        yy, xx, pp = [], [], []
+        for item in items:
+            base = item.get("base_probability_smoothed", item.get("base_probability"))
+            if base is None:
+                base = item.get("base_probability")
+            label = item.get("label") or {}
+            if base is None or int(item.get("base_independent_windows", item.get("base_window_count")) or 0) < 3 or "reached" not in label:
+                continue
+            features, _ = extract_learning_features(item.get("signals") or {},
+                item.get("feature_weights"))
+            xx.append([features.get(name, 0.0) for name in names])
+            yy.append(int(bool(label["reached"])))
+            pp.append(float(np.clip(base, 1e-6, 1-1e-6)))
+        if not yy:
+            return None
+        probs_base = expit(logit(pp))
+        probs_model = expit(logit(pp) + np.clip(np.asarray(xx) @ weights, -logit_cap, logit_cap))
+        def scores(probabilities):
+            return {"log_loss": float(-np.mean(np.asarray(yy)*np.log(np.maximum(probabilities, 1e-12))+
+                (1-np.asarray(yy))*np.log(np.maximum(1-probabilities, 1e-12)))),
+                "brier": float(np.mean((probabilities-np.asarray(yy))**2))}
+        return {"baseline": scores(probs_base), "model": scores(probs_model), "n": len(yy)}
+    validation = metrics_for(validation_rows or [], accepted)
+    baseline_validation = metrics_for(validation_rows or [], np.array([current[n] for n in names]))
+    improves = bool(validation and baseline_validation and
+        validation["model"]["log_loss"] < baseline_validation["baseline"]["log_loss"] and
+        validation["model"]["brier"] < baseline_validation["baseline"]["brier"])
+    if not improves:
+        accepted = np.array([current[n] for n in names])
+        for name, detail in signals.items():
+            detail["weight"] = current[name]
+            if detail.get("reason") not in {"sin evidencia suficiente"}:
+                detail["reason"] = "validación no mejora a solo p_replay"
+    return {"status": "fitted", "weights": dict(zip(names, accepted.tolist())),
+        "signals": signals, "validation": validation,
+        "baseline_validation": baseline_validation, "improves": improves,
+        "effective_samples": len(parsed), "optimizer_success": bool(result.success)}
 
 
 def point_in_time_signals(*, at, candles, buy_price=None, sell_price=None,
@@ -242,8 +480,17 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
             output.append({"template_sample_key": template.get("sample_key"),
                 "profile": str(params.get("profile", "RAPIDO")).upper(),
                 "symbol": primary, "sample_at": start_s, "parameters": historical_params,
-                "base_probability": baseline["probability"],
+                "base_probability": baseline["raw_probability"],
+                "base_probability_smoothed": baseline["smoothed_probability"],
+                "base_window_count": baseline["window_count"],
+                "base_independent_windows": baseline["independent_windows"],
+                "base_method_version": REPLAY_METHOD_VERSION,
+                "recalculate_base": False,
+                "training_exclusion_reason": baseline["training_exclusion_reason"],
                 "signals": {"point_in_time_by_symbol": snapshots,
+                    "point_in_time_weights": {symbol: sum(float(piece.get("capital_usdt", 0))
+                        for piece in rebuilt_pieces if str(piece.get("symbol") or "").upper() == symbol)
+                        for symbol in snapshots},
                     "omitted": ["scanner", "advisor", "break_prob"]},
                 "provenance": {"source_kind": "historical_reconstructed",
                     "signal_cutoff_ts": start_s, "template_sample_key": template.get("sample_key"),

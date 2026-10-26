@@ -26,3 +26,30 @@
 - Suite completa: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests -m "not live" -q --basetemp="$env:TEMP\asple_40d1_full_20261025_job"` — **1523 passed, 1 skipped, 18 deselected, 56 warnings, 339,00 s**, exit code 0.
 - Casos añadidos: umbral proporcional conocido; bloques de 72 h sin solape; descarte de velas, pronósticos y predicciones futuras; replay sintético de bot con cruce conocido; persistencia de muestra/etiqueta y deduplicación; job diario sintético que guarda etiquetas y tiempos sin llamadas al exchange.
 - No se usó S1, Testnet, `.env` ni base real. No se hizo despliegue.
+
+## 40d-2 — Modelo de pesos y frenos
+
+### Implementado
+
+- `grid/meta_learning.py:67-100` calcula el replay histórico con plazo de 20/45 días y ventanas rodantes cada 7 días. Solo acepta ventanas cuyo final sea anterior al corte. La procedencia incluye `step_days`, `window_count`, `independent_windows` y `method_version=rolling_7d_v2`. La probabilidad cruda sigue en `base_probability`; `base_probability_smoothed` usa `(éxitos + 1) / (ventanas + 2)`. La muestra se excluye del entrenamiento si hay menos de 3 ventanas efectivas independientes.
+- `database/db_manager.py:340-385, 448-469` añade columnas para la probabilidad suavizada, los dos recuentos de ventanas, versión del método, marca de recálculo y motivo de exclusión; agrega `meta_learning_weight_versions` para registrar cada intento. La migración conserva filas y marca para recalcular las muestras históricas con el método anterior.
+- `grid/meta_operator.py:1000-1128` recalcula las bases antiguas al correr el job diario y guarda una versión separada por perfil y procedencia (`live` / `historical_reconstructed`). No llama a órdenes ni toma `ops_lock`.
+- `grid/meta_learning.py:102-131, 169-314` reduce la muestra por moneda con bloques no solapados, divide por fecha completa (70 % anterior para entrenar; el resto posterior para validar), usa regresión logística con `logit(p_replay suavizado)` como offset y regularización hacia 0,25. Las señales ausentes aportan cero al logit y no cuentan para el umbral de esa señal; las señales históricas disponibles se normalizan con las mismas fórmulas que en vivo y, en carteras, se ponderan por el capital de cada pieza. Scanner, Advisor y `break_prob` no se imputan en el histórico.
+- El error estándar usa sandwich agrupado por fecha y moneda con inclusión/exclusión de las intersecciones. Los valores p contrastan coeficiente cero, se ajustan por Holm y se guarda el ajuste por señal. Cada peso tiene tope absoluto editable, variación máxima de 0,05 por actualización y el ajuste aplicado al logit se recorta a ±1,0. Solo se aceptan cambios si en validación posterior mejoran **log-loss y Brier** frente a solo `p_replay`; de lo contrario se persiste el intento y los pesos no cambian.
+- `grid/meta.py:16-50` expone en los dos perfiles los parámetros editables: mínimo de 30 muestras efectivas, tope absoluto de peso 1,0, cambio máximo 0,05, regularización 1,0 y alfa 0,05. Se exige además un mínimo de 5 observaciones efectivas de validación como freno contra métricas con una muestra ínfima; queda documentado como decisión de implementación.
+- Las versiones almacenan fecha, procedencia, pesos aceptados, muestras de entrenamiento/validación, corte temporal, log-loss/Brier y causa por señal (cambio, Holm, falta de evidencia o validación sin mejora). Ningún consumidor operativo lee estas versiones: los pesos vivos y decisiones siguen intactos hasta 40d-3.
+
+### Pruebas y resultado
+
+- Corrida inicial enfocada: **85 passed, 4 failed** por imports ausentes en cuatro pruebas nuevas; corregido únicamente el archivo de pruebas.
+- Corrida enfocada final: `ASPLE_OFFLINE=1 .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py tests/test_meta_core.py tests/test_meta_operator.py -q --basetemp="$env:TEMP\asple_40d2_focused_20261026_final2"` — **92 passed, 4 warnings, 6,72 s**, exit code 0. Se usó una carpeta temporal nueva. No se ejecutó la suite completa por instrucción.
+- Casos cubiertos: cadencia 7 días y corte estricto; probabilidades crudas 0/1 con suavizado y exclusión de base insuficiente; recálculo de una fila histórica antigua sin borrarla; muestras independientes y separación temporal; extracción histórica causal de volatilidad/dirección; señales ausentes; Holm; límite 0,05; cambio significativo de prueba; y peso que no mejora en validación y permanece igual.
+- También pasó `py_compile` para los cuatro módulos modificados y `tests/test_meta_learning.py`. No se corrió S1, Testnet, `.env`, base real ni suite completa.
+
+### Límites y discrepancias
+
+- No se midió cuántas observaciones reales tienen Scanner/Advisor y otras señales; no se accedió a BD real. Las versiones actuales son experimento estadístico en sombra y no certifican beneficio futuro.
+- La reconstrucción histórica incluye volatilidad y dirección solo cuando existen sus pronósticos/predicciones fechados; Scanner, Advisor y `break_prob` quedan neutrales y no suman muestra para esos pesos. Muestras antiguas `live` sin recuento de ventanas no son entrenables hasta contar con un snapshot completo nuevo.
+- El piso adicional de 5 muestras efectivas en validación no estaba fijado numéricamente en el prompt; se agregó para evitar mover pesos con métricas de validación demasiado pequeñas. Sigue siendo un freno interno, no un parámetro global.
+- La regresión usa las cinco señales de los perfiles actuales. La señal de toques permanece fuera del modelo hasta que se defina su inclusión en una fase posterior.
+- No se implementaron sombra aprendida en decisiones, interruptor ni vista; corresponden a 40d-3. No se cambió el comportamiento de grids ni del operador.
