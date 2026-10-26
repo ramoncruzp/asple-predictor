@@ -901,7 +901,7 @@ class MetaOperator:
                     alternatives.append(alternative)
         return alternatives, [{"symbol": symbol, **item} for item in advisor_rows]
 
-    def _build_plan(self, goal, *, record=True):
+    def _build_plan(self, goal, *, record=True, plan_kind="analisis"):
         from grid.meta_learning import LEARNING_SIGNALS
         timing_started = time.perf_counter()
         decision_id = uuid.uuid4().hex
@@ -966,12 +966,14 @@ class MetaOperator:
             if reason is None:
                 model_statistics = self._model_snapshot(symbol)
                 model_statistics["required_verifications"] = int(cfg.get("min_effective_verifications", 30))
-                prepared.append({**row, "scanner_eligible": True, "book_state": "two_sided",
+                prepared.append({**row, "price": row.get("price", row.get("current_price")),
+                                 "scanner_eligible": True, "book_state": "two_sided",
                                  "testnet_book_state": testnet_book["state"],
                                  "testnet_book_reason": testnet_book["reason"],
                                  "model_statistics": model_statistics, "excluded_reason": None})
             else:
-                prepared.append({"symbol": symbol, "eligible": bool(row.get("eligible")),
+                prepared.append({"symbol": symbol, "price": row.get("price", row.get("current_price")),
+                                 "eligible": bool(row.get("eligible")),
                                  "scanner_eligible": bool(row.get("eligible")),
                                  "hard_filters": row.get("hard_filters", []),
                                  "sigma_24h": sigma, "score": row.get("score"),
@@ -1207,18 +1209,64 @@ class MetaOperator:
                 "control_plan": control_plan,
                 "probability_under_25_pct": best["estimate"]["low_likelihood"]}
         if record:
-            self._ledger(goal["id"], "META_PLAN_EVALUATED", {"decision_id": decision_id,
-                          "alternatives": public_alternatives,
-                          "decision_choices": decision_choices,
-                          "advisor_comparisons": advisor_comparisons,
-                          "combinations_evaluated": evaluated_combinations,
-                          "shadow_decision": plan["shadow_decision"],
-                          "selected": {key: value for key, value in best.items()
-                                       if key not in {"window_results", "_touch_observations"}},
-                          "sigma_bands": plan["sigma_bands"]})
+            self._ledger(goal["id"], "META_PLAN_EVALUATED", self._plan_ledger_payload(
+                plan, prepared, best, plan_kind=plan_kind))
             self._persist_touch_observations(int(goal["id"]), decision_id, alternatives)
             self._persist_learning_samples(goal, decision_id, alternatives)
         return plan
+
+    @staticmethod
+    def _compact_plan_alternative(alternative):
+        """Conserva la alternativa decisoria y sustituye Advisor completo por referencias."""
+        compact = {key: value for key, value in alternative.items()
+            if key not in {"window_results", "_touch_observations", "advisor_recommendations"}}
+        refs = []
+        recommendations = alternative.get("advisor_recommendations") or []
+        for index, recommendation in enumerate(recommendations):
+            piece = (alternative.get("pieces") or [{}])[index] if index < len(alternative.get("pieces") or []) else {}
+            if not isinstance(recommendation, dict):
+                continue
+            refs.append({"symbol": piece.get("symbol") or recommendation.get("symbol"),
+                "margin_target_pct": (piece.get("margin_target_pct") or piece.get("margin_pct") or
+                    alternative.get("advisor_margin_target_pct") or recommendation.get("margin_target_pct")),
+                "recommended_floor": recommendation.get("recommended_floor"),
+                "recommended_ceiling": recommendation.get("recommended_ceiling"),
+                "suggested_grids": recommendation.get("suggested_grids"),
+                "spacing_pct": recommendation.get("spacing_pct"),
+                "target_met": recommendation.get("target_met"),
+                "net_per_cycle_after_dust_usdt": recommendation.get("net_per_cycle_after_dust_usdt")})
+        compact["advisor_refs"] = refs
+        return compact
+
+    @classmethod
+    def _plan_ledger_payload(cls, plan, candidates, selected, *, plan_kind):
+        candidate_fields = ("symbol", "scanner_eligible", "hard_filters", "excluded_reason",
+            "score", "sigma_24h", "price", "testnet_book_state", "testnet_book_reason")
+        compact_candidates = [{key: row.get(key) for key in candidate_fields if key in row}
+            for row in candidates]
+        compact_alternatives = [cls._compact_plan_alternative(item)
+            for item in plan.get("alternatives", [])]
+        compact_selected = cls._compact_plan_alternative(selected)
+        return {"ledger_schema_version": 2, "plan_kind": str(plan_kind),
+            "decision_id": plan.get("decision_id"), "profile": plan.get("profile"),
+            "target_usdt": plan.get("target_usdt"), "deadline_days": plan.get("deadline_days"),
+            "capital_usage": plan.get("capital_usage"), "selection_reason": plan.get("selection_reason"),
+            "candidates": compact_candidates, "alternatives": compact_alternatives,
+            "decision_choices": plan.get("decision_choices"),
+            "advisor_comparisons": plan.get("advisor_comparisons"),
+            "combinations_evaluated": plan.get("combinations_evaluated"),
+            "shadow_decision": plan.get("shadow_decision"), "selected": compact_selected,
+            "sigma_bands": plan.get("sigma_bands")}
+
+    @staticmethod
+    def _compact_review_result(result):
+        """Serializa el resultado de revisión sin volver a anidar plan o alternativas."""
+        allowed = ("decision", "reason", "grid_id", "meta_id", "symbol", "alternative_id",
+            "probability", "loss_usdt", "expected_gain_usdt", "close_fee_usdt", "reopen_fee_usdt",
+            "estimated_gain_usdt", "estimated_realized_loss_usdt", "estimated_close_fee_usdt",
+            "actual_costs", "reallocation_allowed_after_verified_close", "closed_grid_id",
+            "opened", "capital_reusable", "rotation_gate", "error")
+        return {key: result[key] for key in allowed if key in (result or {})}
 
     def _persist_touch_observations(self, meta_id, decision_id, alternatives):
         table = getattr(self.db, "meta_signal_observations", None)
@@ -2452,7 +2500,7 @@ class MetaOperator:
         # Scanner/Advisor/replays can take minutes. They must not hold the
         # monitor lock because MetaCore's one-minute loss guard uses it too.
         try:
-            plan = self._build_plan(goal)
+            plan = self._build_plan(goal, plan_kind="revision")
         except Exception as exc:
             self._reset_rotation_streaks(meta_id, f"analisis no disponible: {exc}")
             result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}

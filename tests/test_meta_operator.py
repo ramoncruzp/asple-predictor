@@ -34,6 +34,97 @@ def test_meta_replay_reports_probability_time_drawdown_and_independent_windows()
     assert summarize_replays(rows, independent_window_days=45)["window_days"] == 45
 
 
+def test_ledger_v2_compacts_advisor_and_review_plan_without_changing_choices():
+    import itertools
+    import json
+    from grid.meta_operator import MetaOperator
+
+    symbols = ("XRPUSDT", "ADAUSDT", "PEPEUSDT")
+    recommendation = {"recommended_floor": 90, "recommended_ceiling": 110,
+        "suggested_grids": 12, "spacing_pct": .7, "target_met": True,
+        "net_per_cycle_after_dust_usdt": .8,
+        "simulations": {"strategies": {name: {"probability": .6,
+            "window_results": [{"reached": False, "progress_pct": 50} for _ in range(20)]}
+            for name in ("simple", "smart")}}}
+    alternatives = []
+    for index, combo in enumerate([(symbol,) for symbol in symbols] +
+                                  list(itertools.combinations(symbols, 2)) + [symbols]):
+        pieces = [{"symbol": symbol, "strategy": "smart", "piece_type": "grid",
+            "capital_usdt": 100 / len(combo), "margin_target_pct": .5,
+            "floor": 90, "ceiling": 110} for symbol in combo]
+        alternative = {"alternative_id": f"plan:{index}", "symbol": combo[0],
+            "symbols": list(combo), "strategy": ",".join("smart" for _ in combo),
+            "pieces": pieces, "estimate": {"probability": .6, "probability_replay": .55,
+                "median_progress_pct": 80, "days_median": 12, "evidence_sufficient": True},
+            "advisor_recommendations": [recommendation for _ in combo],
+            "signals_used": [{"name": "scanner", "normalized": .2}],
+            "window_results": [{"start": str(day), "reached": False} for day in range(20)]}
+        alternatives.append(alternative)
+    choices = {"comparison_version": 2, "real": {"alternative_id": "plan:0",
+        "decision": "seleccionar_alternativa", "probability": .6}}
+    plan = {"decision_id": "plan", "profile": "RAPIDO", "target_usdt": 10,
+        "deadline_days": 20, "capital_usage": {"used_usdt": 100},
+        "selection_reason": "mejor replay", "candidates": [], "alternatives": alternatives,
+        "decision_choices": choices,
+        "advisor_comparisons": [{"symbol": symbol, "margin_target_pct": .5,
+            "recommendation": recommendation} for symbol in symbols],
+        "combinations_evaluated": [], "shadow_decision": {}, "sigma_bands": {"q33": .1}}
+    original_choices = json.loads(json.dumps(plan["decision_choices"]))
+    payload = MetaOperator._plan_ledger_payload(plan, [
+        {"symbol": symbol, "eligible": True, "scanner_eligible": True,
+         "score": .7, "sigma_24h": .1, "price": 100,
+         "excluded_reason": None, "testnet_book_state": "two_sided"} for symbol in symbols],
+        alternatives[0], plan_kind="analisis")
+    assert payload["ledger_schema_version"] == 2
+    assert payload["plan_kind"] == "analisis"
+    assert payload["decision_choices"] == original_choices
+    assert payload["candidates"][0]["symbol"] == "XRPUSDT"
+    assert "advisor_recommendations" not in payload["alternatives"][0]
+    assert payload["alternatives"][0]["advisor_refs"][0]["margin_target_pct"] == .5
+    assert payload["advisor_comparisons"][0]["recommendation"] == recommendation
+    assert len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) < 150 * 1024
+
+    large_result = {"decision": "cerrar_y_reasignar", "reason": "rotación", "grid_id": 12,
+        "symbol": "ADAUSDT", "alternative_id": "plan:1", "probability": .65,
+        "alternative": alternatives[1], "plan": plan}
+    compact = MetaOperator._compact_review_result(large_result)
+    review = {"ledger_schema_version": 2, "plan_decision_id": plan["decision_id"],
+        "decision": compact, "decision_choices": choices}
+    assert review["plan_decision_id"] == "plan"
+    assert compact["decision"] == "cerrar_y_reasignar"
+    assert compact["alternative_id"] == "plan:1" and compact["probability"] == .65
+    assert "plan" not in compact and "alternative" not in compact
+    assert len(json.dumps(review, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) < 150 * 1024
+
+
+def test_touch_signal_omission_distinguishes_candle_loading_from_calculation(monkeypatch):
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    class DB:
+        def get_latest_prediction(self, *_args): return None
+
+    operator = MetaOperator(object(), DB(), None, None, None)
+    operator._model_snapshot = lambda _symbol: {"volatility_forecasts": {}}
+    operator._load_candles = lambda _symbol: (_ for _ in ()).throw(OSError("sin archivo"))
+    monkeypatch.setattr(module, "break_prob", lambda *_args: (.5, None, None, None))
+    alternative = {"pieces": [{"symbol": "XRPUSDT", "capital_usdt": 10, "floor": 90, "ceiling": 110}],
+        "estimate": {"probability": .5, "evidence_sufficient": True}, "replay_probability": .5}
+    row = {"symbol": "XRPUSDT", "sigma_24h_open": .02, "score": .5, "model_statistics": {}}
+    operator._apply_intelligence(alternative, row, 100, 90, 110, {"signal_weights": {}})
+    touch = next(item for item in alternative["signals_omitted"] if item["name"] == "touch_buy_to_sell")
+    assert touch["reason"] == "velas no disponibles: sin archivo"
+
+    operator._load_candles = lambda _symbol: object()
+    monkeypatch.setattr("grid.meta_learning.causal_touch_buy_to_sell",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("geometría inválida")))
+    alternative = {"pieces": [{"symbol": "XRPUSDT", "capital_usdt": 10, "floor": 90, "ceiling": 110}],
+        "estimate": {"probability": .5, "evidence_sufficient": True}, "replay_probability": .5}
+    operator._apply_intelligence(alternative, row, 100, 90, 110, {"signal_weights": {}})
+    touch = next(item for item in alternative["signals_omitted"] if item["name"] == "touch_buy_to_sell")
+    assert touch["reason"] == "error al calcular toque: geometría inválida"
+
+
 def test_individual_bot_replay_sells_once_and_never_rebuys():
     import numpy as np
     from grid.sim.data import CandleData
@@ -797,7 +888,7 @@ def test_review_withdrawal_requires_two_consecutive_hard_filter_or_ceiling_check
         "eligible": not bad}], "alternatives": [{"symbol": "AAAUSDT", "strategy": "simple",
         "pieces": [{"piece_type": "grid", "symbol": "AAAUSDT"}],
         "estimate": {"evidence_sufficient": True, "probability": .7, "days_median": 3, "days_p90": 4}}]}
-    operator._build_plan = lambda _goal: plan
+    operator._build_plan = lambda _goal, **_kwargs: plan
     operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None
     goal = {"id": 1, "target_usdt": 10, "config_snapshot": {}}
     assert operator._review_allocations(goal, {})["decision"] == "no_hacer_nada"
@@ -1396,7 +1487,7 @@ def test_review_once_opens_a_real_piece_on_the_fake_exchange_using_free_cash(tmp
                     "capital_usdt": 100, "n_levels": 4, "floor": 90, "ceiling": 110,
                     "mid_at_plan": 100.005}],
                 "estimate": {"evidence_sufficient": True, "probability": .6}}]}
-    operator._build_plan = lambda _goal: plan
+    operator._build_plan = lambda _goal, **_kwargs: plan
 
     goal = core.create_goal(250, 10, profile="RAPIDO")
     core.start_goal(goal["id"])
