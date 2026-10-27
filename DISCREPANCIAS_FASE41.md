@@ -112,3 +112,8 @@ No se eliminan las entradas de cach? antiguas durante el cambio: si contienen cu
 ## Fase 41-G1b ? discrepancias
 
 La geometr?a com?n se deriva de los cierres 5m y de sigma 5m causal, aunque 1m puede mostrar otro recorrido dentro de la primera vela. Esa es la comparaci?n solicitada y evita que cada resoluci?n ajuste su propia estrategia. Las m?tricas 1m no constituyen una reconstrucci?n del orden real dentro de cada vela.
+
+
+## Fase 41-G1c ? discrepancias
+
+Los errores de excepci?n del proveedor quedan vinculados a la moneda del grid cuando MetaCore puede identificarla. Los libros con estado DESCONOCIDO registran el motivo ofrecido por `executable_value`; no se infiere la causa si el proveedor no la devuelve. Inteligencia limita el detalle a 20 motivos y el c?lculo a 5.000 decisiones recientes en siete d?as. No se cambi? la condici?n de cancelaci?n.

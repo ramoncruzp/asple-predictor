@@ -564,6 +564,8 @@ class MetaCore:
                                               if coin.get("status") != "DESCONOCIDO" else None)
                 piece["value_best_bid"] = str(_d(coin.get("best_bid_gross")) * ratio) if coin.get("best_bid_gross") is not None else None
                 piece["status"] = coin.get("status", "KNOWN")
+                piece["valuation_reason"] = coin.get("reason")
+                piece["book_read_at"] = coin.get("book_read_at")
             self._update_valuation_state(meta_id, state_rows, profile_cfg)
             value_best = cash + inventory_best * (Decimal(1) - FEE)
             value_exec = cash + inventory_exec
@@ -593,7 +595,7 @@ class MetaCore:
                            if self.db.get_grid(int(link["grid_id"]))), "UNKNOWN")
             self._update_valuation_state(meta_id, [(symbol, {"status": "DESCONOCIDO", "reason": str(exc),
                 "missing_qty": "0", "missing_value_est": None})], self._profile_settings().get(goal["profile"], {}))
-            return {"status": "DESCONOCIDO", "reason": str(exc), "value_best_bid": None,
+            return {"status": "DESCONOCIDO", "symbol": symbol, "reason": str(exc), "value_best_bid": None,
                     "value_executable": None, "result_pct": None, "pieces": []}
 
     def _update_valuation_state(self, meta_id, states, cfg):

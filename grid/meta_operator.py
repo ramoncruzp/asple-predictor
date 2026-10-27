@@ -3148,12 +3148,17 @@ class MetaOperator:
         goal = self.core.get_goal(meta_id)
         value = self.core.valuation(meta_id)
         if goal["status"] != "ACTIVE" or value.get("status") != "KNOWN":
+            if value.get("status") != "KNOWN":
+                logging.getLogger(__name__).warning("Revisión Meta %s cancelada por valoración desconocida: %s",
+                    meta_id, self._valuation_unknown_diagnostic(value))
             self._reset_rotation_streaks(meta_id, "meta no activa o valor desconocido")
             result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
             self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, None))
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "ledger_schema_version": 2, "plan_decision_id": None,
                 "decision": self._compact_review_result(result), "shadow_decision": None, "valuation": value,
+                **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
+                    if value.get("status") != "KNOWN" else {}),
                 "decision_choices": {"comparison_version": 2,
                     "real": {"decision": "mantener", "alternative_id": None},
                     "scanner_advisor": {"decision": "mantener", "alternative_id": None},
@@ -3179,6 +3184,10 @@ class MetaOperator:
             current_goal = self.core.get_goal(meta_id)
             current_value = self.core.valuation(meta_id)
             if current_goal["status"] != "ACTIVE" or current_value.get("status") != "KNOWN":
+                if current_value.get("status") != "KNOWN":
+                    logging.getLogger(__name__).warning(
+                        "Revisión Meta %s cancelada durante análisis por valoración desconocida: %s",
+                        meta_id, self._valuation_unknown_diagnostic(current_value))
                 self._reset_rotation_streaks(meta_id, "meta cambio durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "meta dejó de estar activa o valor DESCONOCIDO durante el análisis"}
             elif float(current_value["result_pct"]) <= -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0)):
@@ -3199,6 +3208,8 @@ class MetaOperator:
             "decision": self._compact_review_result(result),
             "shadow_decision": getattr(self, "_last_review_shadow", None),
             "valuation": value,
+            **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
+                if value.get("status") != "KNOWN" else {}),
                 "decision_choices": {**choices,
                 "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
@@ -3220,6 +3231,8 @@ class MetaOperator:
             "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
             **comparison_error,
             "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
+            **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
+                if value.get("status") != "KNOWN" else {}),
             "decision_choices": choices,
             "comparison_version": 2})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {
@@ -3229,6 +3242,18 @@ class MetaOperator:
     def _noop_payload(cls, result, valuation, plan_decision_id):
         return {**cls._compact_review_result(result), "ledger_schema_version": 2,
                 "valuation": valuation, "plan_decision_id": plan_decision_id}
+
+    @staticmethod
+    def _valuation_unknown_diagnostic(valuation):
+        valuation = valuation or {}
+        pieces = [{"symbol": row.get("symbol"), "reason": row.get("valuation_reason"),
+            "status": row.get("status"), "book_read_at": row.get("book_read_at")}
+            for row in valuation.get("pieces", []) if row.get("status") == "DESCONOCIDO"]
+        return {"symbol": valuation.get("symbol") or next(
+                (row.get("symbol") for row in pieces if row.get("symbol")), None),
+            "reason": valuation.get("reason") or next(
+                (row.get("reason") for row in pieces if row.get("reason")), None),
+            "pieces": pieces}
 
     def _plan_price_moved(self, plan, goal):
         max_drift = float((goal.get("config_snapshot") or {}).get("plan_price_drift_pct", self.price_drift_pct))

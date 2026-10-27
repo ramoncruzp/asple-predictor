@@ -323,3 +323,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 - La medici?n 5m/1m comparte la geometr?a determinada con 5m al inicio del periodo o ventana; se informa `same_geometry` y no se comparan filas con geometr?a desigual.
 - Es un script de estudio; no modifica simuladores ni decisiones del operador.
+
+
+## Fase 41-G1c ? diagn?stico de valoraci?n desconocida
+
+- La revisi?n cancelada conserva s?mbolo, motivo/edad del libro disponible y estado de valoraci?n en la bit?cora y el log. Inteligencia muestra conteos m?viles de 24 horas y siete d?as con motivos recientes.
+- El diagn?stico es observabilidad; la valoraci?n DESCONOCIDA contin?a bloqueando piezas y cancelando la revisi?n como antes.

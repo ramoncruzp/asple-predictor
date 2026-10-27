@@ -71,9 +71,10 @@
         `${pct(d.probability_before)} → ${pct(d.probability_after)}`,
         `${num(d.delta_probability_pp)} puntos`, d.reason || ''];
     });
+    const unknown = d.unknown_valuation_reviews || {last_24h: 0, last_7d: 0, reasons: []};
     const content = $('#intelligence-content');
     content.innerHTML = `
-      <section class="card"><h2>B1 · Datos disponibles</h2><p class="intelligence-summary">${esc(d.summary_text || 'Todavía no hay datos suficientes para describir la actividad.')}</p><p>${esc(d.candles?.reason || 'Velas no disponibles.')}</p>
+      <section class="card"><h2>B1 · Datos disponibles</h2><p class="intelligence-summary">${esc(d.summary_text || 'Todavía no hay datos suficientes para describir la actividad.')}</p><p>${esc(d.candles?.reason || 'Velas no disponibles.')}</p><p>Revisiones canceladas por valoración desconocida: ${num(unknown.last_24h)} en 24 h · ${num(unknown.last_7d)} en 7 días.</p>${detail('Motivos de valoración desconocida','Símbolo y fallo o antigüedad del libro en las revisiones recientes.',table(['Fecha','Meta','Moneda','Motivo'],(unknown.reasons||[]).map(x=>[x.at,x.meta_id,x.symbol,x.reason])))}
         ${detail('Pronósticos de volatilidad','Cantidad y fechas disponibles por moneda, modelo y horizonte.',table(['Moneda','Modelo','Horizonte','Cantidad','Primero','Último'],forecastRows))}
         ${detail('Predicciones de dirección','Predicciones guardadas por moneda, modelo e intervalo.',table(['Moneda','Modelo','Intervalo','Cantidad','Primero','Último'],predictionRows))}
         ${detail('Observaciones de señales','Observaciones de toque compra a venta guardadas por moneda.',table(['Moneda','Cantidad','Primero','Último'],(d.meta_signal_observations_by_symbol||[]).map(x=>[x.symbol,x.count,x.first_at,x.last_at])))}

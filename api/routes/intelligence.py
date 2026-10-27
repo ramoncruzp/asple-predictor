@@ -170,6 +170,25 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         last_plan_row = conn.execute(select(db.meta_ledger.c.details).where(
             db.meta_ledger.c.event_type == "META_PLAN_EVALUATED").order_by(
                 db.meta_ledger.c.id.desc()).limit(1)).first()
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        unknown_review_rows = conn.execute(select(db.meta_ledger.c.ts, db.meta_ledger.c.meta_id,
+            db.meta_ledger.c.details).where(db.meta_ledger.c.event_type == "META_OPERATOR_REVIEW_DECISION",
+                db.meta_ledger.c.ts >= now_utc - timedelta(days=7)).order_by(
+                    db.meta_ledger.c.ts.desc()).limit(5000)).all()
+
+    unknown_reviews = []
+    for stamp, unknown_meta_id, raw_details in unknown_review_rows:
+        detail = _json(raw_details)
+        valuation = detail.get("valuation") or {}
+        diagnostic = detail.get("valuation_unknown") or {}
+        if valuation.get("status") == "DESCONOCIDO" or diagnostic:
+            unknown_reviews.append({"at": str(stamp), "meta_id": int(unknown_meta_id),
+                "symbol": diagnostic.get("symbol") or valuation.get("symbol"),
+                "reason": diagnostic.get("reason") or valuation.get("reason"),
+                "pieces": diagnostic.get("pieces", [])})
+    cutoff_24h = (now_utc - timedelta(hours=24)).isoformat(sep=" ")
+    unknown_valuation_summary = {"last_24h": sum(row["at"] >= cutoff_24h for row in unknown_reviews),
+        "last_7d": len(unknown_reviews), "reasons": unknown_reviews[:20]}
 
     observation_counts = Counter()
     observation_counts_by_symbol = Counter()
@@ -363,6 +382,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             "meta_signal_counts": dict(observation_counts),
             "meta_signal_counts_by_symbol": [{"signal": signal, "symbol": symbol, "count": count}
                 for (signal, symbol), count in observation_counts_by_symbol.items()],
+            "unknown_valuation_reviews": unknown_valuation_summary,
             "meta_ledger": [dict(row) for row in ledger]},
         "samples": {"by_profile_source_symbol": [dict(row) for row in sample_groups],
             "exclusions": [dict(row) for row in exclusions], "recalculate_pending": int(recalc),

@@ -1442,7 +1442,7 @@ def test_review_does_not_move_capital_when_valuation_unknown_or_loss_warning_rea
     class Core:
         def __init__(self):
             self.status = "ACTIVE"
-            self.value = {"status": "UNKNOWN"}
+            self.value = {"status": "UNKNOWN", "symbol": "XRPUSDT", "reason": "timeout de lectura del libro"}
             self.ledger_rows = []
         def get_goal(self, _meta_id):
             return {"id": 1, "status": self.status, "config_snapshot": {"warning_loss_pct": 6}}
@@ -1454,6 +1454,9 @@ def test_review_does_not_move_capital_when_valuation_unknown_or_loss_warning_rea
     first = operator.review_once(1)
     assert first["decision"] == "no_hacer_nada"
     assert "DESCONOCIDO" in first["reason"]
+    review = next(row for row in core.ledger_rows if row[0][2] == "META_OPERATOR_REVIEW_DECISION")
+    assert review[0][3]["valuation_unknown"]["symbol"] == "XRPUSDT"
+    assert review[0][3]["valuation_unknown"]["reason"] == "timeout de lectura del libro"
     core.value = {"status": "KNOWN", "result_pct": "-6.0"}
     second = operator.review_once(1)
     assert second["decision"] == "no_hacer_nada"

@@ -72,7 +72,9 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             details = {'decision_choices': {'real': {'decision': 'mantener',
                 'alternative_id': f'a{index}', 'symbol': 'XRPUSDT', 'probability': .6}}}
             if index == 1:
-                details.update({'ledger_schema_version': 2, 'plan_decision_id': 'plan-v2'})
+                details.update({'ledger_schema_version': 2, 'plan_decision_id': 'plan-v2',
+                    'valuation': {'status': 'DESCONOCIDO', 'symbol': 'XRPUSDT', 'reason': 'libro obsoleto'},
+                    'valuation_unknown': {'symbol': 'XRPUSDT', 'reason': 'libro obsoleto', 'pieces': []}})
             conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
                 ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type='META_OPERATOR_REVIEW_DECISION',
                 details=json.dumps(details)))
@@ -85,6 +87,9 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload['data']['candles']['available'] is False
+    assert payload['data']['unknown_valuation_reviews']['last_24h'] == 1
+    assert payload['data']['unknown_valuation_reviews']['last_7d'] == 1
+    assert payload['data']['unknown_valuation_reviews']['reasons'][0]['reason'] == 'libro obsoleto'
     assert payload['data']['direction_predictions'][0]['count'] == 1
     assert payload['switches']['RAPIDO']['readiness']['status'] == 'gris'
     assert payload['switches']['RAPIDO']['enabled'] is False

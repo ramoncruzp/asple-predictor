@@ -368,3 +368,10 @@ Prueba: comando dirigido a `tests/test_meta_portfolio_equity.py`; **13 passed, 0
 `scripts/medir_orden_intravela.py:136-148` calcula la geometr?a de grid con las velas 5m y la sigma causal disponible al inicio; los bots tambi?n derivan compra/venta del cierre 5m de inicio. La misma geometr?a se copia a 1m para el periodo completo y se recalcula desde 5m para cada ventana de 20 d?as (`:255-305`). Cada fila exporta `same_geometry`; una discrepancia produce error y no se presenta como comparaci?n v?lida.
 
 Prueba: `tests/test_measure_intracandle_order.py:27-59,151-158` confirma que la vela ambigua pierde el ciclo en 5m y el replay 1m lo completa, y que las filas medidas reutilizan exactamente piso, techo y niveles. Comando dirigido: `tests/test_measure_intracandle_order.py` ? **8 passed, 0 failed, 5,52 s**. Datos sint?ticos; sin red ni BD.
+
+
+## Fase 41-G1c ? causa de revisiones canceladas por valoraci?n desconocida
+
+`grid/meta.py:470-599` conserva en la valoraci?n el s?mbolo y el error global de lectura; por pieza conserva el estado, el motivo y la marca de lectura del libro (`:580-584`). `grid/meta_operator.py:3147-3255` registra esa informaci?n en `META_OPERATOR_REVIEW_DECISION` y emite un aviso estructurado al log tanto al inicio como si el dato se vuelve desconocido durante el an?lisis. La cancelaci?n sigue teniendo la misma condici?n y no permite mover capital. `api/routes/intelligence.py:170-192,385` agrega conteos de 24 h/7 d?as y motivos recientes; `frontend/intelligence.js:74-77` los presenta en B1.
+
+Verificaci?n dirigida: operador, MetaCore, API/UI de Inteligencia ? **110 passed, 5 warnings, 11,61 s**. `node --check frontend/intelligence.js`: correcto. El contador examina como m?ximo 5.000 revisiones de los ?ltimos siete d?as y muestra hasta 20 motivos.
