@@ -64,6 +64,18 @@
 - Si no hay velas/cache válida o falla el replay, el plan registra el error de esa pieza. Las rutas de revisión conservan el fallback a una alternativa equivalente cuando esté disponible; sin ambos resultados, la pieza se informa como no comparable.
 - El benchmark usa datos y proveedor ficticios, replay cacheado y latencia simulada; el resultado de tiempo no certifica el rendimiento en S1. No se usaron S1, Testnet, red, `.env` ni BD real.
 
-## Fase 41c-2a
+## Fase 41c-2a — diferencias
 
-No se reprodujo la p?rdida de `capital_usage` en el serializador local de `ea6dc6d`: el campo ya estaba incluido. Se a?adi? una prueba de contrato del evento v2 para evitar regresiones. No se consult? S1 ni una base real, por lo que el origen del valor `None` observado all? queda sin confirmar.
+No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6dc6d`: el campo ya estaba incluido. Se añadió una prueba de contrato para el evento v2. No se consultó S1 ni una base real; el origen del `None` informado en S1 queda sin confirmar.
+
+## Fase 41c-2b — diferencias y límites
+
+- La medición usa replay, libros, Scanner y datos sintéticos con caché caliente y latencia de 50 ms. No demuestra el tiempo de producción o de S1.
+- La apertura y el replay se vuelven a comprobar en cada escalón de capital. Si falla el filtro o replay de una variante, se omite esa variante y se conservan las otras.
+- La nueva selección continúa en sombra por defecto. Con el perfil apagado, la ruta previa de efectivo puede seguir agregando como antes; el interruptor solo controla el motor ampliado.
+
+## Fase 41c-2c — diferencias y límites
+
+- C15 no requirió modificar el cálculo: el payload ya copiaba `capital_usage` en `ea6dc6d`; se agregó cobertura de contrato.
+- La paridad adapta el esquema solo para cuatro campos nuevos permitidos: `current_pieces`, `allocation_shadow`, `use_extended_allocation` y `allocation_tie_tolerance_pp`. Cada uno se afirma explícitamente; todo campo previo conserva comparación exacta y un campo inesperado hace fallar la prueba.
+- Benchmark y pruebas usan dobles locales. No se consultó S1 ni Testnet real.

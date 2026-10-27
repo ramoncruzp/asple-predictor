@@ -403,6 +403,31 @@ class MetaOperator:
         return {"profile": profile, "enabled": bool(enabled), "actor": str(actor).strip(),
             "weight_version_id": version_id, "weights": weights, "sources": sources}
 
+    def set_extended_allocation_switch(self, profile, enabled, *, confirm, actor):
+        from sqlalchemy import select
+        profile = str(profile).upper()
+        if profile not in {"PRUDENTE", "RAPIDO"}:
+            raise ValueError("Perfil Meta no vÃ¡lido.")
+        if not confirm or not str(actor or "").strip():
+            raise ValueError("Confirma el cambio e indica quiÃ©n lo autorizÃ³.")
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["use_extended_allocation"] = bool(enabled)
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == profile)).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == profile).values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile=profile,
+                    settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            conn.execute(self.db.meta_allocation_switch_events.insert().values(profile=profile,
+                enabled=bool(enabled), actor=str(actor).strip()[:80], changed_at=datetime.now(timezone.utc)))
+        return {"profile": profile, "enabled": bool(enabled), "actor": str(actor).strip()[:80]}
+
     def learning_status(self, profile):
         from sqlalchemy import select
         profile = str(profile).upper()
@@ -421,6 +446,9 @@ class MetaOperator:
                     self.db.meta_learning_switch_events.c.id.desc()).limit(1)).mappings().first()
             goal_ids = [int(row[0]) for row in conn.execute(select(self.db.meta_goals.c.id).where(
                 self.db.meta_goals.c.profile == profile)).all()]
+            allocation_switch = conn.execute(select(self.db.meta_allocation_switch_events).where(
+                self.db.meta_allocation_switch_events.c.profile == profile).order_by(
+                    self.db.meta_allocation_switch_events.c.id.desc()).limit(1)).mappings().first()
             ledger_rows = (conn.execute(select(self.db.meta_ledger.c.ts, self.db.meta_ledger.c.details).where(
                 self.db.meta_ledger.c.meta_id.in_(goal_ids),
                 self.db.meta_ledger.c.event_type.in_(("META_PLAN_EVALUATED", "META_OPERATOR_REVIEW_DECISION"))).order_by(
@@ -524,7 +552,12 @@ class MetaOperator:
             readiness_status, readiness_label = "verde", "Listo para encender"
         else:
             readiness_status, readiness_label = "amarillo", "Hay datos, sin señal útil todavía"
+        allocation_switch_details = (None if allocation_switch is None else {
+            "enabled": bool(allocation_switch["enabled"]), "actor": allocation_switch["actor"],
+            "changed_at": str(allocation_switch["changed_at"])})
         return {"profile": profile, "enabled": enabled,
+            "use_extended_allocation": bool(config.get("use_extended_allocation", False)),
+            "allocation_switch": allocation_switch_details,
             "readiness": {"status": readiness_status, "label": readiness_label,
                 "best_effective_samples": best_effective, "remaining": max(0, 30-best_effective),
                 "conditions": readiness_conditions, "signals": summary_signals},
@@ -1452,7 +1485,25 @@ class MetaOperator:
                     "version_ids": cfg.get("learned_weight_version_ids", [])},
                 "decision_choices": decision_choices,
                 "control_plan": control_plan,
-                "probability_under_25_pct": best["estimate"]["low_likelihood"]}
+                "probability_under_25_pct": best["estimate"]["low_likelihood"],
+                "allocation_tie_tolerance_pp": float(stored.get("allocation_tie_tolerance_pp", 5))}
+        plan["use_extended_allocation"] = use_extended_allocation
+        allocation_started = time.perf_counter()
+        try:
+            from grid.meta_allocation import evaluate_extended_allocation
+            allocation_cash = unused_capital if allocation_free_cash is None else allocation_free_cash
+            allocation_variants = self._allocation_curve_variants(allocation_candidates, prepared, goal,
+                cfg, allocation_cash, current_pieces)
+            plan["allocation_shadow"] = evaluate_extended_allocation({"alternatives": allocation_variants}, current_pieces,
+                free_cash=allocation_cash,
+                capital_initial=capital, target_usdt=target_usdt,
+                window_days=int(cfg.get("max_days", 20)), limits=cfg,
+                tie_tolerance_pp=float(stored.get("allocation_tie_tolerance_pp", 5)))
+        except Exception as exc:
+            plan["allocation_shadow"] = {"decision": "no_agregar", "selected": None,
+                "reason": f"no se pudo evaluar: {type(exc).__name__}: {exc}", "evaluated_top": []}
+        finally:
+            plan["timings_s"]["allocation_shadow"] = round(time.perf_counter() - allocation_started, 6)
         if record:
             self._ledger(goal["id"], "META_PLAN_EVALUATED", self._plan_ledger_payload(
                 plan, prepared, best, plan_kind=plan_kind))
@@ -3195,6 +3246,52 @@ class MetaOperator:
                         "alternative_id": best.get("alternative_id"), "symbol": best.get("symbol"), "loss_usdt": loss,
                         "expected_gain_usdt": expected, "close_fee_usdt": close_fee,
                         "reopen_fee_usdt": reopen_fee, "opened": opened}
+        cfg = goal.get("config_snapshot") or {}
+        initial = float(goal.get("capital_initial") or 0)
+        active_grids = []
+        used_by_symbol = {}
+        for link in links:
+            owned = self.db.get_grid(int(link["grid_id"]))
+            if owned is None or owned.get("status") not in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}:
+                continue
+            active_grids.append((link, owned))
+            used_by_symbol[owned["symbol"]] = used_by_symbol.get(owned["symbol"], 0.0) + float(owned.get("capital_total") or 0)
+        allocatable = max(0.0, initial - sum(float(grid.get("capital_total") or 0) for _, grid in active_grids))
+        cash = float((valuation or {}).get("cash_usdt") or 0)
+        free = min(allocatable, cash)
+        if free >= 5.5:
+            allocation = plan.get("allocation_shadow") or {"decision": "no_agregar",
+                "selected": None, "reason": "no hay cálculo de sombra disponible", "evaluated_top": []}
+            plan["allocation_shadow"] = allocation
+            shadow = allocation.get("selected")
+            self._ledger(goal["id"], "META_OPERATOR_ALLOCATION_SHADOW", {
+                "decision": allocation.get("decision"), "symbol": shadow.get("symbol") if shadow else None,
+                "piece_type": shadow.get("piece_type") if shadow else None,
+                "capital_usdt": shadow.get("capital_usdt") if shadow else None,
+                "probability_before": allocation.get("probability_before"),
+                "probability_after": shadow.get("probability_after") if shadow else None,
+                "delta_probability_pp": shadow.get("delta_probability_pp") if shadow else None,
+                "progress_improvement_pct": shadow.get("progress_improvement_pct") if shadow else None,
+                "reason": allocation.get("reason"), "evaluated_top": allocation.get("evaluated_top", [])})
+            if plan.get("use_extended_allocation"):
+                selected = allocation.get("selected")
+                if selected and float(selected.get("capital_usdt") or 0) <= free + 1e-8:
+                    alternative = next((row for row in plan.get("alternatives", [])
+                        if row.get("alternative_id") == selected.get("alternative_id")), None)
+                    if alternative:
+                        piece = dict(alternative["pieces"][0])
+                        piece["capital_usdt"] = float(selected["capital_usdt"])
+                        openability = self._testnet_openability(piece, goal)
+                        if not openability.get("allowed"):
+                            reason = f"alternativa no abrible en Testnet: {openability.get('reason')}"
+                            self._ledger(goal["id"], "META_OPERATOR_OPEN_REJECTED", {
+                                "reason": reason, "piece": piece, "testnet_openability": openability})
+                            return {"decision": "no_hacer_nada", "reason": reason}
+                        chosen = dict(alternative, pieces=[piece], reason=allocation.get("reason"))
+                        opened = self._open_replacement(goal, chosen, piece["capital_usdt"])
+                        return {"decision": "abrir_pieza_con_asignacion_ampliada",
+                            "reason": allocation.get("reason"), "opened": opened}
+                return {"decision": "no_hacer_nada", "reason": allocation.get("reason")}
         added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation)
         if added is not None:
             return added
@@ -3421,7 +3518,8 @@ class MetaOperator:
                 params=params, meta_id=int(goal["id"]))
             grid_id = int(grid["id"])
         self.core.link_grid(int(goal["id"]), grid_id, piece["piece_type"])
-        self._ledger(goal["id"], "META_OPERATOR_OPEN", {"piece": piece, "grid_id": grid_id},)
+        self._ledger(goal["id"], "META_OPERATOR_OPEN", {"piece": piece, "grid_id": grid_id,
+            "reason": alternative.get("reason")}, grid_id=grid_id)
         self.alert("META_OPERATOR_OPEN", goal["id"], {"symbol": piece["symbol"], "reason": alternative["reason"]})
         return {**piece, "grid_id": grid_id}
 

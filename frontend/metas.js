@@ -622,7 +622,9 @@
         const enabled = Boolean(item.enabled);
         const evidence = Object.values(item.signals || {}).some(signal => Number(signal.effective_samples || 0) >= 30 && signal.source !== 'sin evidencia');
         const change = item.last_switch ? `${esc(item.last_switch.actor)} &middot; ${esc(item.last_switch.changed_at)} &middot; versi\u00f3n ${esc(item.last_switch.weight_version_id || 'sin versi\u00f3n')}` : 'Nunca encendido';
-        return `<article class="global-flag-row" data-meta-learning-switch="${profile}"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
+        const allocationEnabled = Boolean(item.use_extended_allocation);
+        const allocationChange = item.allocation_switch ? `${esc(item.allocation_switch.actor)} &middot; ${esc(item.allocation_switch.changed_at)}` : 'Nunca encendido';
+        const learningRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="learning"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
           <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al (Toque compra\u2192venta: 0) y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
           ${learningReadinessMarkup(item.readiness, enabled)}
@@ -630,6 +632,13 @@
           <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
           <button class="button secondary" type="button" data-switch-open>${enabled ? 'Apagar' : 'Encender'}</button></article>`;
+        const allocationRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="allocation"><div class="global-flag-copy"><h3>${label}: asignaci\u00f3n de capital ampliada</h3>
+          <p>Encendido: el operador elige piezas para el efectivo libre con replay de cartera. Apagado: se conserva el m\u00e9todo actual para usar efectivo; esta selecci\u00f3n queda solo en sombra.</p>
+          <small class="muted">Estado: <b>${allocationEnabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${allocationChange}</small>
+          <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
+            <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
+          <button class="button secondary" type="button" data-switch-open>${allocationEnabled ? 'Apagar' : 'Encender'}</button></article>`;
+        return learningRow + allocationRow;
       }).join('');
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
@@ -647,7 +656,8 @@
         button.disabled = true;
         try {
           const currentlyEnabled = row.querySelector('small b').textContent === 'ENCENDIDO';
-          await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
+          const kind = row.dataset.switchKind;
+          await apiPut(kind === 'allocation' ? '/api/metas/allocation/switch' : '/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           await loadLearningSwitches(host);
         } catch (error) { status.textContent = error.message; button.disabled = false; }
       }));
@@ -662,7 +672,14 @@
     try {
       const page = await apiGet(`/api/metas/${goalId}/ledger?page=1&page_size=100&include_valuation=false`);
       const rows = page.events.filter(row => row.event_type === 'META_OPERATOR_RECONFIGURE').slice(0, 5);
-      slot.innerHTML = rows.length ? rows.map(row => {
+      const allocation = page.events.find(row => row.event_type === 'META_OPERATOR_ALLOCATION_SHADOW');
+      const allocationLine = allocation ? (() => {
+        const d = allocation.details || {};
+        return d.decision === 'agregar' && d.symbol
+          ? `<li>En sombra agregar\u00eda: ${esc(d.symbol)} ${esc(d.piece_type || 'pieza')} ${fmtMoney(d.capital_usdt)} USDT &middot; prob. ${fmtMoney(Number(d.probability_before || 0) * 100, 1)} % \u2192 ${fmtMoney(Number(d.probability_after || 0) * 100, 1)} %</li>`
+          : `<li>En sombra: no agregar\u00eda (${esc(d.reason || 'sin mejora suficiente')})</li>`;
+      })() : '';
+      slot.innerHTML = (rows.length || allocationLine) ? allocationLine + rows.map(row => {
         const d = row.details || {}, old = d.old || {}, next = d.new || {};
         const piece = `Pieza ${row.grid_id || 'Meta'}`;
         const change = `piso ${fmtMoney(old.floor, 6)} → ${fmtMoney(next.floor, 6)}, techo ${fmtMoney(old.ceiling, 6)} → ${fmtMoney(next.ceiling, 6)}, niveles ${esc(old.n_levels ?? '—')} → ${esc(next.n_levels ?? '—')}`;

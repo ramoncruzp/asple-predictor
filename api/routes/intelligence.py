@@ -90,6 +90,9 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             func.count().label("count")).group_by(db.meta_ledger.c.meta_id,
                 db.meta_ledger.c.event_type).order_by(db.meta_ledger.c.meta_id,
                 db.meta_ledger.c.event_type)).mappings().all()
+        allocation_shadow_rows = conn.execute(select(db.meta_ledger.c.meta_id, db.meta_ledger.c.ts,
+            db.meta_ledger.c.details).where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")
+            .order_by(db.meta_ledger.c.id.desc()).limit(10)).mappings().all()
         sample_groups = conn.execute(select(db.meta_learning_samples.c.profile,
             db.meta_learning_samples.c.source_kind, db.meta_learning_samples.c.symbol,
             func.count().label("count"), func.min(db.meta_learning_samples.c.sample_at).label("first_at"),
@@ -388,6 +391,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             "recent": [{"at": str(row["ts"]), "meta_id": int(row["meta_id"]),
             "event_type": row["event_type"], "choices": _json(row["details"]).get("decision_choices", {}),
             "details": _json(row["details"])} for row in ledger_events]},
+        "allocation_shadow": [{"meta_id": int(row["meta_id"]), "at": str(row["ts"]),
+            "details": _json(row["details"])} for row in allocation_shadow_rows],
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],

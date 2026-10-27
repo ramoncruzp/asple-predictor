@@ -137,13 +137,14 @@ def test_lab_stats_degrade_when_events_unavailable(ui_page, live_server):
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("Sin datos disponibles")
 
 
-def test_mobile_menu_has_ten_routes_including_lab(ui_page, live_server):
+def test_mobile_menu_has_eleven_routes_including_lab_and_metas(ui_page, live_server):
     # Fase 40c agregó la ruta #metas al menú móvil; antes eran 9 rutas.
     _mock_lab_api(ui_page, live_server)
     ui_page.set_viewport_size({"width": 390, "height": 844})
     ui_page.goto(f"{live_server.url}/#lab")
     ui_page.locator("#mobile-menu-toggle").click()
     links = ui_page.locator("[data-mobile-route]")
-    expect(links).to_have_count(10)
+    expect(links).to_have_count(11)
     expect(links.filter(has_text="Laboratorio")).to_have_count(1)
     expect(links.filter(has_text="Metas")).to_have_count(1)
+    expect(links.filter(has_text="Inteligencia")).to_have_count(1)

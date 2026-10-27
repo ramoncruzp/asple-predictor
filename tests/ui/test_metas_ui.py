@@ -296,7 +296,7 @@ def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):
 def test_learning_switches_live_in_lab_and_require_actor(metas_page):
     page, server = metas_page
     page.goto(f"{server.url}/#lab")
-    row = page.locator("[data-meta-learning-switch='RAPIDO']")
+    row = page.locator("[data-meta-learning-switch='RAPIDO'][data-switch-kind='learning']")
     page.wait_for_selector("[data-meta-learning-switch='PRUDENTE']")
     assert "Sin evidencia todav\u00eda" in row.inner_text()
     assert "APAGADO" in row.inner_text()
@@ -307,6 +307,14 @@ def test_learning_switches_live_in_lab_and_require_actor(metas_page):
     page.click("[data-meta-learning-switch='RAPIDO'] [data-switch-save]")
     page.wait_for_function("() => document.querySelector('[data-meta-learning-switch=RAPIDO]')?.innerText.includes('ENCENDIDO')")
     assert server.operator.learning_status('RAPIDO')['enabled'] is True
+    allocation = page.locator("[data-meta-learning-switch='RAPIDO'][data-switch-kind='allocation']")
+    assert "asignación de capital ampliada" in allocation.inner_text()
+    assert "APAGADO" in allocation.inner_text()
+    allocation.locator('[data-switch-open]').click()
+    allocation.locator('[data-switch-actor]').fill('Prueba local')
+    allocation.locator('[data-switch-save]').click()
+    page.wait_for_function("() => [...document.querySelectorAll('[data-meta-learning-switch][data-switch-kind=allocation]')].some(x => x.innerText.includes('ENCENDIDO'))")
+    assert server.operator.learning_status('RAPIDO')['use_extended_allocation'] is True
 
 
 

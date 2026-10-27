@@ -123,6 +123,9 @@ Los números son punto de partida y se ajustan con los resultados.
 | 41b-11 | Revisión resistente a alternativas actuales ausentes y evaluación sin autoconflicto de la pieza propia | Ambas partes implementadas; comparación y plan verificados offline con 87 pruebas dirigidas, sin push |
 | 41c-0 | Lecturas repetidas cacheadas por plan y subtiempos de selección | Hecha localmente; paridad con `a062e09`, 90 pruebas dirigidas verdes y medición sintética 148,26 → 2,24 s |
 | 41c-1 | Curvas de cartera y corrección de C6 | Implementada: éxito por efectivo atribuible agregado; riesgo y avance por patrimonio agregado; 143 pruebas dirigidas verdes |
+| 41c-2a | Preservar `capital_usage` en eventos de plan v2 | Contrato probado; no se reprodujo la pérdida reportada en S1 |
+| 41c-2b | Asignación de efectivo libre con curvas v3 por monto | Motor en sombra; benchmark sintético con 30 USDT libres y 0,033 s de coste |
+| 41c-2c | Interruptor por perfil y presentación en Metas/Inteligencia | Apagado por defecto; 122 pruebas dirigidas verdes; sin despliegue |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -297,7 +300,7 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 - 41c-0 reutiliza lecturas de exchange/BD solo durante cada plan, con contexto aislado y descarte al terminar. Las ejecuciones vuelven a consultar los datos; las cachés no se comparten entre revisiones. No cambia números ni reglas en el escenario de regresión fijado a `a062e09`.
 - Desde 41c-1 la probabilidad de cada alternativa se mide con la trayectoria agregada de la cartera. El éxito exige efectivo atribuible agregado más capital no asignado >= capital inicial + objetivo, igual que grid/meta.py:718; el inventario no cuenta para cumplir. El patrimonio agregado, neto de comisión estimada de venta del 0,1 %, mide avance, drawdown y pérdida máxima. Se guardan curvas cada 15 minutos; el método rolling_7d_v3_equity separa cachés y etiquetas incompatibles.
-- 41c-2 queda fuera del alcance de esta entrega.
+- 41c-2 amplía en sombra la asignación de efectivo libre y ofrece un interruptor explícito por perfil, apagado por defecto. No altera la ruta antigua mientras permanece apagado; solo Ramón puede activarlo.
 
 
 ## Fase 41b-12 — estimación comparable de piezas propias (2026-10-27)
@@ -305,4 +308,3 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - La pieza actual se estima por su símbolo, estrategia, rango, niveles, capital y margen reales mediante `rolling_7d_v3_equity` y la caché del plan. No requiere ser abrible de nuevo en Testnet. Las alternativas de rotación, apertura o reajuste siguen pasando el filtro de Testnet.
 - El resumen propio se guarda bajo `current_pieces[grid_id]` y se adjunta a la bitácora de revisión. Se presenta en Metas e Inteligencia con probabilidades histórica y ajustada, rango, niveles, capital y avance mediano.
 - Pruebas focalizadas: 108 passed acumuladas en operador/resiliencia, interfaz y benchmark, con 6 warnings; benchmark caliente 2,384 s frente a 2,39 s documentados en 41c-0 (−0,26 %). Sin suite completa ni validación en S1.
-| 41c-2a | Preservar `capital_usage` en eventos de plan v2 | Contrato cubierto por prueba local; no se reprodujo la p?rdida reportada en S1 |

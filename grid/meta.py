@@ -22,7 +22,8 @@ DEFAULT_PROFILES = {
                  "learning_min_effective_samples": 30, "learning_weight_max_abs": 1.0,
                  "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                  "learning_alpha": 0.05,
-                 "use_learned_weights": False,
+                 "use_learned_weights": False, "use_extended_allocation": False,
+                 "allocation_tie_tolerance_pp": 5.0,
                  "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                  "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
                  "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
@@ -48,7 +49,8 @@ DEFAULT_PROFILES = {
                "learning_min_effective_samples": 30, "learning_weight_max_abs": 1.0,
                "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                "learning_alpha": 0.05,
-                 "use_learned_weights": False,
+                 "use_learned_weights": False, "use_extended_allocation": False,
+                 "allocation_tie_tolerance_pp": 5.0,
                "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
                "valuation_haircut_pct": 1.0, "loss_confirm_minutes": 2,
@@ -236,6 +238,8 @@ class MetaCore:
         scalar_values.extend((merged.get("signal_weights") or {}).values())
         if any(Decimal(str(v)) < 0 for v in scalar_values):
             raise ValueError("Los parámetros deben ser positivos.")
+        if float(merged.get("allocation_tie_tolerance_pp", 5)) > 100:
+            raise ValueError("allocation_tie_tolerance_pp no puede superar 100.")
         weights = merged.get("signal_weights")
         if not isinstance(weights, dict) or set(weights) - {"volatility", "break_prob", "direction", "scanner", "advisor"}:
             raise ValueError("signal_weights debe contener solo señales Meta conocidas.")

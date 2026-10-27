@@ -200,10 +200,14 @@ def test_plan_ledger_payload_v2_preserves_capital_usage_c15():
         "best_higher_capital_alternative": {"symbols": ["XRPUSDT"],
             "capital_used_usdt": 80.0, "probability_replay": .4,
             "median_progress_pct": 60.0}}
-    payload = MetaOperator._plan_ledger_payload({"capital_usage": usage}, [],
+    allocation = {"decision": "agregar", "selected": {"symbol": "XRPUSDT",
+        "capital_usdt": 10.0, "delta_probability_pp": 3.0}}
+    payload = MetaOperator._plan_ledger_payload({"capital_usage": usage,
+        "allocation_shadow": allocation}, [],
         {"symbol": "XRPUSDT"}, plan_kind="revision")
     assert payload["ledger_schema_version"] == 2
     assert payload["capital_usage"] == usage
+    assert payload["allocation_shadow"] == allocation
 
 
 def test_individual_bot_replay_sells_once_and_never_rebuys():
@@ -936,6 +940,72 @@ def test_review_can_add_one_piece_using_only_free_goal_cash():
     assert result["decision"] == "abrir_pieza_con_efectivo_libre"
     assert opened == [40]
     assert operator._add_piece_from_free_cash(goal, links, {"alternatives": []}) is None
+
+
+def test_extended_allocation_shadow_off_logs_without_changing_legacy_open_path():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self): self.events = []
+        def _owned_grids(self, _goal_id): return []
+        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+
+    class DB:
+        def get_grid(self, _grid_id): return None
+
+    operator, core = MetaOperator(Core(), DB(), None, None, None), None
+    core = operator.core
+    legacy = []
+    operator._add_piece_from_free_cash = lambda *args, **kwargs: legacy.append((args, kwargs)) or None
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True}
+    goal = {"id": 1, "capital_initial": 100, "target_usdt": 3,
+        "config_snapshot": {"max_days": 20}}
+    alternative = {"alternative_id": "alt", "symbol": "AAAUSDT", "strategy": "simple",
+        "pieces": [{"symbol": "AAAUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 20}], "estimate": {"probability": .4, "evidence_sufficient": True}}
+    plan = {"alternatives": [alternative], "candidates": [], "allocation_shadow": {"decision": "agregar",
+        "selected": {"alternative_id": "alt", "symbol": "AAAUSDT", "piece_type": "grid",
+            "capital_usdt": 10, "probability_before": .4, "probability_after": .43,
+            "delta_probability_pp": 3, "progress_improvement_pct": 0}, "probability_before": .4,
+        "reason": "supera el umbral de asignación", "evaluated_top": []},
+        "use_extended_allocation": False}
+    result = operator._review_allocations(goal, {"cash_usdt": 30}, plan=plan)
+    assert result["decision"] == "no_hacer_nada"
+    assert len(legacy) == 1
+    event = next(args for args, _kwargs in core.events if args[2] == "META_OPERATOR_ALLOCATION_SHADOW")
+    assert event[3]["symbol"] == "AAAUSDT" and event[3]["capital_usdt"] == 10
+
+
+def test_extended_allocation_switch_opens_selected_alternative_on_fake_exchange():
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self): self.events = []
+        def _owned_grids(self, _goal_id): return []
+        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+
+    class DB:
+        def get_grid(self, _grid_id): return None
+
+    operator = MetaOperator(Core(), DB(), None, None, None)
+    opened = []
+    operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True}
+    operator._open_replacement = lambda _goal, alternative, capital: (
+        opened.append((alternative, capital)) or {"grid_id": 44, "capital_usdt": capital})
+    goal = {"id": 1, "capital_initial": 100, "target_usdt": 3,
+        "config_snapshot": {"max_days": 20}}
+    alternative = {"alternative_id": "alt", "symbol": "AAAUSDT", "strategy": "simple",
+        "pieces": [{"symbol": "AAAUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 20}], "estimate": {"probability": .4, "evidence_sufficient": True}}
+    plan = {"alternatives": [alternative], "candidates": [], "allocation_shadow": {"decision": "agregar",
+        "selected": {"alternative_id": "alt", "symbol": "AAAUSDT", "piece_type": "grid",
+            "capital_usdt": 10, "probability_before": .4, "probability_after": .43,
+            "delta_probability_pp": 3, "progress_improvement_pct": 0}, "probability_before": .4,
+        "reason": "supera el umbral", "evaluated_top": []}, "use_extended_allocation": True}
+    result = operator._review_allocations(goal, {"cash_usdt": 30}, plan=plan)
+    assert result["decision"] == "abrir_pieza_con_asignacion_ampliada"
+    assert opened[0][1] == 10
+    assert opened[0][0]["pieces"][0]["capital_usdt"] == 10
 
 
 @pytest.mark.parametrize("trigger", ["scanner", "ceiling"])

@@ -75,6 +75,24 @@ def test_learning_api_requires_token_and_switch_endpoint_confirmation(tmp_path):
     assert client.put('/api/metas/learning/switch', json=payload, headers=auth).json()['enabled'] is True
 
 
+def test_extended_allocation_switch_is_off_by_default_and_audited(tmp_path):
+    db, operator, client = _operator(tmp_path)
+    auth = {'X-API-Token': 'learning-secret'}
+    status = operator.learning_status('RAPIDO')
+    assert status['use_extended_allocation'] is False
+    payload = {'profile': 'RAPIDO', 'enabled': True, 'confirm': False, 'actor': 'Prueba local'}
+    assert client.put('/api/metas/allocation/switch', json=payload, headers=auth).status_code == 409
+    payload['confirm'] = True
+    response = client.put('/api/metas/allocation/switch', json=payload, headers=auth)
+    assert response.status_code == 200 and response.json()['enabled'] is True
+    status = operator.learning_status('RAPIDO')
+    assert status['use_extended_allocation'] is True
+    assert status['allocation_switch']['actor'] == 'Prueba local'
+    with db.engine.connect() as conn:
+        row = conn.execute(db.meta_allocation_switch_events.select()).mappings().one()
+    assert row['profile'] == 'RAPIDO' and row['enabled'] is True
+
+
 def test_signal_contribution_is_capped_even_with_learned_weights():
     weights = {name: 1.0 for name in ('volatility', 'break_prob', 'direction', 'scanner', 'advisor', 'touch_buy_to_sell')}
     signals = [{'name': name, 'normalized': 1.0} for name in weights]
