@@ -95,3 +95,10 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 - La geometría se vuelve a generar por capital mediante el mismo `_candidate_alternatives` que el análisis. Se mantienen solo las alternativas del tipo candidato original y hasta tres opciones generadas por monto; esto limita la búsqueda y no pretende optimizar exhaustivamente cada monto.
 - Las pruebas usan exchange falso y replay local. No miden rendimiento con datos de mercado ni prueban un libro real de Testnet.
 - La prueba de paridad del flujo real lo compara con `_review_allocations` de HEAD con el interruptor de asignación apagado; la nueva información y los descartes solo amplían la sombra.
+
+## Fase 41b-13 — diferencias y límites
+
+- `meta_learning_replay_cache` no tiene columna de versión; la vigencia se estima comparando sus IDs deterministas con los reconstruidos desde las muestras actuales. Sin muestras, se conserva la caché reciente y se aplica solo la antigüedad.
+- `META_MAINTENANCE` requiere `meta_id` por la clave foránea de `meta_ledger`. Cuando no hay metas, el resultado queda en el log de aplicación sin crear registros ficticios.
+- El script solo admite SQLite y no crea respaldos: requiere uno del día o una confirmación explícita `--backup-ok`. La comprobación `systemctl` y el ahorro físico de VACUUM quedan pendientes de ejecución manual en S1.
+- La estimación de espacio para `meta_learning_replay_cache` usa 96 bytes por fila y es aproximada. Ninguna base real se abrió y ningún VACUUM se ejecutó en esta fase.

@@ -332,3 +332,23 @@ Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **
 - La sombra sigue sin seleccionar aperturas reales cuando el interruptor por perfil está apagado. La prueba `tests/test_meta_own_grid_evaluation.py` compara `_review_allocations` con la implementación de HEAD; también cubre geometría generada para los montos de 5,5–30,5 USDT, causa del mínimo de celda y agotamiento del presupuesto. `tests/test_meta_allocation.py` conserva las reglas de selección de cartera.
 - Verificación dirigida final: `tests/test_meta_own_grid_evaluation.py tests/test_meta_allocation.py`: **23 passed, 0 failed; 1,07 s**. `tests/ui/test_metas_ui.py`: **15 passed, 2 warnings, 0 failed; 25,15 s**. `node --check frontend/metas.js` sin errores. El primer pase de Python antes del ajuste de expectativas tuvo dos fallos: cambió a agregar la variante sombra de monto compatible, y el test de paridad llamó la firma del método con `valuation` duplicado; ambos quedaron corregidos y pasaron en la corrida final.
 - No se ejecutó la suite completa ni se usaron S1, Testnet, red, `.env` o base real. La revisión de descartes y el diseño por monto permanecen en sombra.
+
+## Fase 41b-13 — mantenimiento de la base de datos Meta
+
+### 13a — Retención automática de cachés
+
+- `grid/meta_operator.py:291,326,876` versiona Advisor (`advisor_relative_v1`) y toque (`touch_signal_v2`); replay conserva `rolling_7d_v3_equity`. La lectura persistida rechaza versiones viejas antes de que corra el limpiador.
+- La retención por defecto es de 7 días y se edita junto con `ledger_plan_detail_days` (14) en `GET/PUT /api/metas/config/maintenance` (`grid/meta.py:164,179`; `api/routes/metas.py:128`). El limpiador corre al iniciar y cada día a las 09:30 UTC. Se omite si revisión, precálculo o aprendizaje están ocupados. Conserva cachés del día actual; elimina versiones obsoletas y entradas vencidas mediante lotes de 100.
+- `meta_learning_replay_cache` no guarda la versión: se infiere reconstruyendo IDs de plantilla con `stable_template`. Si aún no hay muestras, solo se aplica la edad. Los resultados se registran en el log y como `META_MAINTENANCE` ligado a la última meta; sin metas se conserva solo el log.
+
+### 13b — Resumen de planes antiguos
+
+- `grid/meta_operator.py:431,479` transforma planes v2 de más de 14 días a esquema 3 (`ledger_detail=resumido`), en transacciones de hasta 20 filas. Retiene campos decisorios, diez alternativas mejor clasificadas y todas las referenciadas por decisiones, selección o muestras; quita `advisor_comparisons` y ejemplos de descartes.
+- Antes de compactar, importa de forma idempotente las muestras legacy. Guarda `alternatives_total` para Inteligencia (`api/routes/intelligence.py:231`) y `signals_omitted_summary` para que el diagnóstico conserve las mismas cuentas (`scripts/diagnostico_senales_meta.py:150`).
+
+### 13c — herramienta manual
+
+- `scripts/mantenimiento_bd_meta.py:19-430` exige `--db` y usa SQLite explícito. Sin `--apply` abre en modo de solo lectura, informa ahorros estimados por evento/tabla y confirma SHA-256 sin cambios. `--apply` compacta eventos v1, importa muestras pendientes, aplica retención y registra el mantenimiento; cada lote de hasta 20 eventos o 100 cachés se confirma de forma atómica.
+- `--vacuum` exige `--apply` en la misma llamada, respaldo del día o `--backup-ok`, servicio parado según `systemctl is-active asple-predictor`, e `integrity_check` correcto antes y después. La bandera `--i-know-service-is-stopped` solo se usa en pruebas.
+- Procedimiento para S1 (no ejecutado): desde `/home/ubuntu/asple-predictor`, detener `asple-predictor` y comprobar estado inactivo; establecer `DB="$PWD/asple_predictor.db"` solo tras verificar la ruta real sin abrir `.env`; copiar con `mkdir -p "$HOME/respaldos"; cp -a "$DB" "$HOME/respaldos/asple_predictor_$(date +%F).db"`; comparar ambos hashes con `sha256sum`; inspeccionar con `./venv2/bin/python scripts/mantenimiento_bd_meta.py --db "$DB"`; aplicar con `--apply`; revisar el resultado y ejecutar `--apply --vacuum --backup-ok`; iniciar el servicio, verificar estado activo y ejecutar `sqlite3 "$DB" "PRAGMA integrity_check;"`. Si dry-run/apply falla, no continuar con VACUUM.
+- Pruebas finales: `tests/test_meta_db_maintenance.py`, `tests/test_meta_operator.py`, `tests/test_meta_signal_diagnostics.py`, `tests/test_intelligence_api.py`, `tests/test_app_settings_api.py` y `tests/test_meta_core.py`: **127 passed, 14 warnings, 0 failed; 8,68 s**. No se ejecutó la suite completa ni se usaron S1, Testnet, red, `.env` o BD real.
