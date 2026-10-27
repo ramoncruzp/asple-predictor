@@ -102,7 +102,9 @@ def scenario(revision="a062e09", latency_s=0.0, *, curves=False):
     for name in ("_candidate_alternatives", "_testnet_openability", "_apply_intelligence"):
         timed(operator, name)
     started = time.perf_counter()
-    plan = operator._build_plan(goal, record=False, plan_kind="revision")
+    review_cash = float(core.valuation(3).get("cash_usdt") or 0)
+    plan = operator._build_plan(goal, record=False, plan_kind="revision",
+        allocation_free_cash=review_cash)
     total = time.perf_counter() - started
     operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None
     decision_started = time.perf_counter()
@@ -110,7 +112,7 @@ def scenario(revision="a062e09", latency_s=0.0, *, curves=False):
     decision_s = time.perf_counter() - decision_started
     return {"revision": revision, "latency_s": latency_s, "total_s": total,
         "decision_s": decision_s, "review_total_s": total + decision_s,
-        "timings_s": dict(timings), "counts": dict(counts),
+        "timings_s": dict(timings), "plan_timings_s": plan.get("timings_s", {}), "counts": dict(counts),
         "candles_per_symbol": len(timestamps), "combinations": len(plan["combinations_evaluated"]),
         "plan": copy.deepcopy(plan), "decision": decision}
 

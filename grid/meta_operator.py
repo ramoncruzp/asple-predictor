@@ -944,15 +944,84 @@ class MetaOperator:
         finally:
             context["times"][name] = context["times"].get(name, 0.0) + time.perf_counter() - started
 
-    def _build_plan(self, goal, *, record=True, plan_kind="analisis"):
+    def _allocation_curve_variants(self, candidates, prepared, goal, cfg, free_cash, current_pieces):
+        """Reproduce curvas v3 en cada escalón de capital para una pieza adicional."""
+        capital_initial = float(goal.get("capital_initial") or 0)
+        step = capital_initial * .05
+        minimum = max(5.5, step)
+        if step <= 0 or minimum <= 0:
+            return []
+        current_by_symbol = {}
+        for item in (current_pieces or {}).values():
+            piece = item.get("piece") or {}
+            symbol = piece.get("symbol")
+            current_by_symbol[symbol] = current_by_symbol.get(symbol, 0.0) + float(piece.get("capital_usdt") or 0)
+        prepared_by_symbol = {row.get("symbol"): row for row in prepared}
+        coin_cap_pct = float(cfg.get("capital_per_coin_pct", 100))
+        unique = {}
+        for alternative in sorted(candidates,
+                key=lambda row: float(row.get("replay_probability") or 0), reverse=True):
+            piece = (alternative.get("pieces") or [{}])[0]
+            geometry_key = (piece.get("symbol"), piece.get("piece_type"), piece.get("strategy"),
+                round(float(piece.get("floor") or 0), 12), round(float(piece.get("ceiling") or 0), 12),
+                int(piece.get("n_levels") or 0), round(float(piece.get("margin_pct") or 0), 8))
+            unique.setdefault(geometry_key, alternative)
+        geometry_counts = {}
+        selected = []
+        for key, alternative in unique.items():
+            symbol, kind = key[:2]
+            count_key = (symbol, kind)
+            if geometry_counts.get(count_key, 0) >= 3:
+                continue
+            geometry_counts[count_key] = geometry_counts.get(count_key, 0) + 1
+            source_piece = (alternative.get("pieces") or [{}])[0]
+            coin_free = max(0.0, capital_initial * coin_cap_pct / 100 - current_by_symbol.get(symbol, 0.0))
+            cap_limit = min(max(0.0, float(free_cash or 0)), coin_free)
+            if cap_limit + 1e-8 < minimum:
+                continue
+            row = prepared_by_symbol.get(symbol)
+            if row is None:
+                continue
+            cap = minimum
+            variants = []
+            while cap <= cap_limit + 1e-8:
+                piece = {**source_piece, "capital_usdt": round(cap, 4)}
+                try:
+                    openability = self._plan_timed("allocation_testnet_openability",
+                        self._testnet_openability, piece, goal)
+                except Exception:
+                    cap += step
+                    continue
+                if openability.get("allowed"):
+                    strategy = "individual_bot" if kind == "individual_bot_grid" else source_piece.get("strategy", "simple")
+                    try:
+                        evaluated = self._plan_timed("allocation_replay", self._evaluate, row, strategy,
+                            cap, float(goal.get("target_usdt") or 0), float(source_piece.get("floor") or 0),
+                            float(source_piece.get("ceiling") or 0), int(source_piece.get("n_levels") or 1), cfg,
+                            margin_pct=source_piece.get("margin_pct"))
+                    except Exception:
+                        cap += step
+                        continue
+                    variants.append({**alternative, "pieces": evaluated.get("pieces") or [piece],
+                        "window_results": evaluated.get("window_results") or [],
+                        "estimate": evaluated.get("estimate") or {},
+                        "replay_probability": (evaluated.get("estimate") or {}).get("probability_replay"),
+                        "testnet_openability": openability})
+                cap += step
+            if variants:
+                selected.append({**alternative, "capital_variants": variants})
+        return selected
+
+    def _build_plan(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
         token = _PLAN_READ_CONTEXT.set({"owner": self, "reads": {}, "times": {},
             "read_calls": 0, "read_hits": 0})
         try:
-            return self._build_plan_impl(goal, record=record, plan_kind=plan_kind)
+            return self._build_plan_impl(goal, record=record, plan_kind=plan_kind,
+                allocation_free_cash=allocation_free_cash)
         finally:
             _PLAN_READ_CONTEXT.reset(token)
 
-    def _build_plan_impl(self, goal, *, record=True, plan_kind="analisis"):
+    def _build_plan_impl(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
         from grid.meta_learning import LEARNING_SIGNALS
         timing_started = time.perf_counter()
         decision_id = uuid.uuid4().hex
@@ -983,12 +1052,14 @@ class MetaOperator:
         except (AttributeError, KeyError):
             stored, learned_weights, learned_sources, learned_details, learned_versions = {}, {}, {}, {}, []
         use_learned = bool(stored.get("use_learned_weights", False))
+        use_extended_allocation = bool(stored.get("use_extended_allocation", False))
         cfg.update({"use_learned_weights": use_learned,
             "scanner_advisor_weights": scanner_advisor_weights,
             "learned_signal_weights": learned_weights,
             "learned_signal_sources": learned_sources,
             "learned_signal_details": learned_details,
-            "learned_weight_version_ids": learned_versions})
+            "learned_weight_version_ids": learned_versions,
+            "use_extended_allocation": use_extended_allocation})
         if use_learned:
             cfg["signal_weights"] = learned_weights
         else:
@@ -1044,7 +1115,7 @@ class MetaOperator:
         target_usdt = float(goal["target_usdt"])
         portfolio_started = time.perf_counter()
         shortlist = sorted(eligible, key=lambda item: float(item.get("score") or 0), reverse=True)[:3]
-        alternatives, advisor_comparisons, evaluated_combinations = [], [], []
+        alternatives, allocation_candidates, advisor_comparisons, evaluated_combinations = [], [], [], []
         profile_cap = float(cfg.get("capital_per_coin_pct", 100))
         cfg["_advisor_reference_capital"] = capital * profile_cap / 100
         option_cache = {}
@@ -1127,6 +1198,7 @@ class MetaOperator:
                     "margin_pct": estimate_row["pieces"][0].get("margin_pct")}
                 current_pieces[str(int(own_grid["id"]))] = {"grid_id": int(own_grid["id"]),
                     "piece": actual_piece, "estimate": estimate_row["estimate"],
+                    "window_results": estimate_row.get("window_results", []),
                     "probability_replay": estimate_row["estimate"].get("probability_replay"),
                     "probability_adjusted": estimate_row["estimate"].get("probability"),
                     "signals_used": estimate_row.get("signals_used", []),
@@ -1228,6 +1300,10 @@ class MetaOperator:
                         "advisor_recommendations": [item.get("advisor") for item in combination],
                         "reason": f"cartera de {piece_count} pieza(s), reparto {shares} %"}
                     alternatives.append(row)
+                    if piece_count == 1:
+                        allocation_candidates.append({**row,
+                            "_source_alternative_index": len(alternatives) - 1,
+                            "testnet_openability": combination[0].get("testnet_openability", {})})
                     if piece_count == 1 and "own_grid_excluded_from_check" in combination[0].get("testnet_openability", {}):
                         row["testnet_openability"] = combination[0]["testnet_openability"]
                     evaluated_combinations.append({"symbols": symbols, "shares_pct": shares,
@@ -1301,6 +1377,9 @@ class MetaOperator:
         control_seconds = time.perf_counter() - control_started
         for index, item in enumerate(alternatives):
             item["alternative_id"] = f"{decision_id}:{index}"
+        for item in allocation_candidates:
+            source_index = item.pop("_source_alternative_index")
+            item["alternative_id"] = alternatives[source_index]["alternative_id"]
         decision_choices = {
             "comparison_version": 2,
             "real": {"decision": "seleccionar_alternativa", "alternative_id": best.get("alternative_id"), "symbol": best["symbol"],
@@ -1314,6 +1393,9 @@ class MetaOperator:
         for item in alternatives:
             if len(item.get("pieces", [])) == 1 or len(selected_public) < 30:
                 selected_public.append(item)
+        public_alternative_ids = {item.get("alternative_id") for item in selected_public}
+        allocation_candidates = [item for item in allocation_candidates
+            if item.get("alternative_id") in public_alternative_ids]
         unique_comparisons = {}
         for item in advisor_comparisons:
             unique_comparisons.setdefault((item.get("symbol"), item.get("margin_target_pct")), item)
@@ -1440,6 +1522,7 @@ class MetaOperator:
             "candidates": compact_candidates, "alternatives": compact_alternatives,
             "current_pieces": {key: cls._compact_current_piece(value) for key, value in
                 (plan.get("current_pieces") or {}).items()},
+            "allocation_shadow": plan.get("allocation_shadow"),
             "decision_choices": plan.get("decision_choices"),
             "advisor_comparisons": plan.get("advisor_comparisons"),
             "combinations_evaluated": plan.get("combinations_evaluated"),
@@ -2741,7 +2824,8 @@ class MetaOperator:
         # Scanner/Advisor/replays can take minutes. They must not hold the
         # monitor lock because MetaCore's one-minute loss guard uses it too.
         try:
-            plan = self._build_plan(goal, plan_kind="revision")
+            plan = self._build_plan(goal, plan_kind="revision",
+                allocation_free_cash=value.get("cash_usdt"))
         except Exception as exc:
             self._reset_rotation_streaks(meta_id, f"analisis no disponible: {exc}")
             result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}

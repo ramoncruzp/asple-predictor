@@ -171,7 +171,7 @@ def test_current_piece_uses_live_geometry_even_when_foreign_sell_blocks_jup_dest
     assert current["estimate"]["probability"] == .45
     assert advisor_calls[0][0] == "JUPUSDT"
     assert advisor_inputs == [{"net_per_cycle_after_dust_usdt": .5}]
-    assert evaluated == [("JUPUSDT", "smart", 90, 110, 4, 70.0)]
+    assert evaluated[0] == ("JUPUSDT", "smart", 90, 110, 4, 70.0)
     assert all(not (row["symbol"] == "JUPUSDT" and row["strategy"] == "smart")
         for row in plan["alternatives"])
     blocked = operator._testnet_openability({"symbol": "JUPUSDT", "strategy": "smart",
@@ -234,10 +234,43 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     old_plan = reference._build_plan(goal, record=False)
     current_plan.pop("timings_s")
     old_plan.pop("timings_s")
-    current_plan.pop("current_pieces")
     from grid.meta_learning import REPLAY_METHOD_VERSION
     assert current_plan.pop("base_method_version") == REPLAY_METHOD_VERSION
-    assert current_plan == old_plan
+    allowed_new_fields = {"current_pieces", "allocation_shadow",
+        "use_extended_allocation", "allocation_tie_tolerance_pp"}
+    assert set(current_plan) - set(old_plan) == allowed_new_fields
+    assert set(current_plan) - allowed_new_fields == set(old_plan)
+    for key in allowed_new_fields:
+        assert key in current_plan
+    assert current_plan["current_pieces"] == {}
+    assert current_plan["allocation_shadow"]["decision"] == "no_agregar"
+    assert current_plan["allocation_shadow"]["selected"] is None
+    assert "capital_usage" in current_plan and current_plan["capital_usage"]["initial_capital_usdt"] == 100
+    assert current_plan["capital_usage"]["unused_usdt"] == old_plan["capital_usage"]["unused_usdt"]
+    assert current_plan["use_extended_allocation"] is False
+    assert current_plan["allocation_tie_tolerance_pp"] == 5
+    assert all("allocation_shadow" not in item for item in current_plan["alternatives"])
+    comparable = {key: value for key, value in current_plan.items() if key in old_plan}
+    assert comparable == old_plan
     for operator in (actual, reference):
         operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None
     assert actual._review_allocations(goal, {}, plan=current_plan) == reference._review_allocations(goal, {}, plan=old_plan)
+
+
+def test_allocation_shadow_keeps_source_testnet_checked_alternative_id(monkeypatch):
+    import grid.meta_allocation as allocation_module
+
+    seen = {}
+    def capture(plan, *_args, **_kwargs):
+        seen["alternatives"] = plan["alternatives"]
+        return {"decision": "no_agregar", "selected": None, "evaluated_top": []}
+    monkeypatch.setattr(allocation_module, "evaluate_extended_allocation", capture)
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    monkeypatch.setattr(operator, "_allocation_curve_variants",
+        lambda candidates, *_args: candidates)
+    plan = operator._build_plan(goal, record=False)
+    by_id = {row["alternative_id"]: row for row in plan["alternatives"]}
+    assert seen["alternatives"]
+    assert all(row["alternative_id"] in by_id for row in seen["alternatives"])
+    assert all(row["testnet_openability"].get("allowed") is True
+        for row in seen["alternatives"])
