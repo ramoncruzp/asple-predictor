@@ -39,3 +39,14 @@
 - `include_held_proceeds=True` permite estimar un reemplazo tras cierre; no autoriza usar ese dinero para una apertura adicional ni para retirar conservando inventario. Iniciar y agregar piezas conservan sus chequeos completos.
 - La ocupación del grid reemplazado se descuenta solo si la consulta ya lo cuenta: HOLDING no genera una plaza libre ficticia. El límite global conserva su valor y su finalidad.
 - La primera corrida detectó un fixture incompleto (`avg_price`); tras corregirlo, los tres archivos dirigidos quedaron verdes: 87 passed. Sin suite completa ni uso de S1, Testnet, `.env` o base real.
+
+## Fase 41c-0 — medición y alcance (2026-10-27)
+
+- El escenario mantiene los límites de `a062e09`: seis candidatas, cuatro elegibles, lista corta de tres, 100 carteras y 297 alternativas de pieza (894 ajustes de probabilidad). No se expandió la búsqueda a 950 carteras para evitar cambiar el resultado.
+- La medición representa caché caliente: replay y Advisor se sustituyen por resultados deterministas, y las lecturas de exchange/BD falsos duermen 50 ms. No mide el Scanner real, un replay frío ni S1. El total del análisis baja de 148,26 a 2,24 s; análisis más decisión optimizados: 2,39 s. Los subtiempos de etapas anidadas se solapan.
+- Se conservaron los resultados exactos en la regresión contra `a062e09`. Las lecturas se fijan al primer acceso durante el plan; se renuevan entre planes y al ejecutar. No se tocaron reglas, pesos, probabilidades, límites ni simuladores.
+
+## Fase 41c-1 — discrepancia que requiere decisión de Ramón
+
+- El núcleo cumple por efectivo realizado (`grid/meta.py:718`); el prompt propone cumplimiento simulado por patrimonio incluyendo inventario. Son criterios distintos, incluso con la misma comisión de 0,1 %. Ejecutar literalmente el punto 3 y describirlo como «el mismo criterio que la meta real» sería incorrecto.
+- Conforme a la regla de no cambiar el criterio real, se deja 41c-1 pendiente de aclaración. No se cambió el núcleo ni se publicó un método v3 que mezclara ambas definiciones. Faltan implementación, comparación de carteras, pruebas y versionado de esta parte; no se presentan como hechos.

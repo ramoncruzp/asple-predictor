@@ -6,6 +6,8 @@ import itertools
 import hashlib
 import math
 import logging
+import copy
+from contextvars import ContextVar
 import os
 import statistics
 import threading
@@ -26,6 +28,10 @@ from grid.guards import sell_level_conflicts
 from data.exchange_filters import SymbolFilters
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import break_prob, DEFAULT_SMART_PARAMS, validate_params
+
+
+# Contexto aislado por llamada e hilo: nunca comparte lecturas entre revisiones.
+_PLAN_READ_CONTEXT = ContextVar("meta_plan_reads", default=None)
 
 
 def summarize_replays(rows, independent_window_days=30, target_usdt=None):
@@ -693,10 +699,10 @@ class MetaOperator:
         """
         client = self.scanner.client
         if callable(getattr(client, "get_book_ticker", None)):
-            book = client.get_book_ticker(symbol)
+            book = self._plan_read(client, "get_book_ticker", symbol)
         else:
             raw = getattr(client, "client", client)
-            book = raw.get_orderbook_ticker(symbol=symbol)
+            book = self._plan_read(raw, "get_orderbook_ticker", symbol=symbol)
         book = dict(book)
         book["bid_price"] = book.get("bid_price", book.get("bidPrice"))
         book["ask_price"] = book.get("ask_price", book.get("askPrice"))
@@ -706,9 +712,9 @@ class MetaOperator:
         """Valida Testnet y las restricciones de celdas sin crear órdenes."""
         symbol = str(piece.get("symbol") or "").upper()
         try:
-            if callable(getattr(self.engine, "_active_coin", None)) and not self.engine._active_coin(symbol):
+            if callable(getattr(self.engine, "_active_coin", None)) and not self._plan_read(self.engine, "_active_coin", symbol):
                 return {"allowed": False, "reason": f"{symbol} no está activa en Coin Registry"}
-            filters, snapshot, avg_price = self.engine._market_context(symbol)
+            filters, snapshot, avg_price = self._plan_read(self.engine, "_market_context", symbol)
             if not book_is_two_sided(snapshot):
                 return {"allowed": False, "reason": (f"libro de Testnet unilateral para {symbol}: "
                     f"bid {snapshot.get('bid_price')}, ask {snapshot.get('ask_price')}")}
@@ -758,24 +764,24 @@ class MetaOperator:
                 buy_plans = [row for row in plans if row.initial_state == "BUY_OPEN"]
                 sell_prices = [row.sell_price for row in plans]
             exchange = self.engine.exchange
-            open_orders = exchange.get_open_orders(symbol)
+            open_orders = self._plan_read(exchange, "get_open_orders", symbol)
             replaced_prefix = f"g{int(replacing_grid_id)}L" if replacing_grid_id is not None else None
             released_orders = [order for order in open_orders if replaced_prefix and
                 str(order.get("clientOrderId") or order.get("origClientOrderId") or "").startswith(replaced_prefix)]
             existing_levels = []
             for status in ("OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"):
-                for active in self.db.list_grids_by_status({status}):
+                for active in self._plan_read(self.db, "list_grids_by_status", {status}):
                     active_id = int(active["id"])
                     if active_id == int(replacing_grid_id or -1):
                         continue
                     if active.get("symbol") == symbol:
-                        existing_levels.extend(self.db.get_grid_levels(active_id))
+                        existing_levels.extend(self._plan_read(self.db, "get_grid_levels", active_id))
             current_order_count = max(0, len(open_orders) - len(released_orders))
             if filters.max_num_orders is not None and current_order_count + len(buy_plans) > filters.max_num_orders:
                 return {"allowed": False, "reason": "se alcanzaría MAX_NUM_ORDERS"}
             max_grids = int(getattr(self.settings, "max_grids_simultaneos", 5))
-            open_grid_count = int(self.db.count_open_grids())
-            current = (self.db.get_grid(int(replacing_grid_id)) or {}
+            open_grid_count = int(self._plan_read(self.db, "count_open_grids"))
+            current = (self._plan_read(self.db, "get_grid", int(replacing_grid_id)) or {}
                 if replacing_grid_id is not None else {})
             # HOLDING no forma parte de count_open_grids: no libera una plaza.
             replaces_counted_grid = current.get("status") in {"OPENING", "ACTIVE", "PAUSED", "CLOSING"}
@@ -785,20 +791,20 @@ class MetaOperator:
                 getattr(self.settings, "same_coin_sell_tolerance_pct", .05))
             if conflicts:
                 return {"allowed": False, "reason": "conflicto con niveles de venta vivos"}
-            balance = exchange.get_balance("USDT").get("USDT", {"free": 0})
+            balance = self._plan_read(exchange, "get_balance", "USDT").get("USDT", {"free": 0})
             free = Decimal(str(balance.get("free", 0)))
             releasable = Decimal(0)
             if replacing_grid_id is not None:
                 prefix = f"g{int(replacing_grid_id)}L"
-                current_orders = [order for order in exchange.get_open_orders(current.get("symbol", symbol))
+                current_orders = [order for order in self._plan_read(exchange, "get_open_orders", current.get("symbol", symbol))
                     if str(order.get("clientOrderId") or order.get("origClientOrderId") or "").startswith(prefix)]
                 for order in current_orders:
                     if str(order.get("side", "")).upper() == "BUY":
                         releasable += Decimal(str(order.get("price") or 0)) * Decimal(str(order.get("origQty") or 0))
                 held_qty = sum((Decimal(str(level.get("held_qty") or 0))
-                    for level in self.db.get_grid_levels(int(replacing_grid_id))), Decimal(0))
+                    for level in self._plan_read(self.db, "get_grid_levels", int(replacing_grid_id))), Decimal(0))
                 if held_qty > 0 and include_held_proceeds:
-                    old_book = exchange.get_book_ticker(current.get("symbol", symbol))
+                    old_book = self._plan_read(exchange, "get_book_ticker", current.get("symbol", symbol))
                     old_bid = Decimal(str(old_book.get("bid_price") or 0))
                     if old_bid <= 0:
                         return {"allowed": False, "reason": "no se puede estimar el efectivo Testnet de la venta actual"}
@@ -814,7 +820,7 @@ class MetaOperator:
 
     def _testnet_book_status(self, symbol):
         try:
-            book = self.engine.exchange.get_book_ticker(symbol)
+            book = self._plan_read(self.engine.exchange, "get_book_ticker", symbol)
             if not book_is_two_sided(book):
                 return {"state": "one_sided", "reason": (f"libro de Testnet unilateral: bid "
                     f"{book.get('bid_price')}, ask {book.get('ask_price')}")}
@@ -901,12 +907,43 @@ class MetaOperator:
                         alternative["bot_y"] = variant_high
                     for piece in alternative["pieces"]:
                         piece["mid_at_plan"] = price
-                    self._apply_intelligence(alternative, row, price, low, high, cfg,
+                    self._plan_timed("apply_intelligence", self._apply_intelligence, alternative, row, price, low, high, cfg,
                         advisor_result=advisory if self.advisor is not None else None)
                     alternatives.append(alternative)
         return alternatives, [{"symbol": symbol, **item} for item in advisor_rows]
 
+    def _plan_read(self, source, method, *args, **kwargs):
+        context = _PLAN_READ_CONTEXT.get()
+        if context is None or context["owner"] is not self:
+            return getattr(source, method)(*args, **kwargs)
+        key = (id(source), method, repr((args, sorted(kwargs.items()))))
+        if key not in context["reads"]:
+            context["reads"][key] = copy.deepcopy(self._plan_timed(
+                "read_" + method, getattr(source, method), *args, **kwargs))
+            context["read_calls"] += 1
+        else:
+            context["read_hits"] += 1
+        return copy.deepcopy(context["reads"][key])
+
+    def _plan_timed(self, name, function, *args, **kwargs):
+        context = _PLAN_READ_CONTEXT.get()
+        if context is None or context["owner"] is not self:
+            return function(*args, **kwargs)
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            context["times"][name] = context["times"].get(name, 0.0) + time.perf_counter() - started
+
     def _build_plan(self, goal, *, record=True, plan_kind="analisis"):
+        token = _PLAN_READ_CONTEXT.set({"owner": self, "reads": {}, "times": {},
+            "read_calls": 0, "read_hits": 0})
+        try:
+            return self._build_plan_impl(goal, record=record, plan_kind=plan_kind)
+        finally:
+            _PLAN_READ_CONTEXT.reset(token)
+
+    def _build_plan_impl(self, goal, *, record=True, plan_kind="analisis"):
         from grid.meta_learning import LEARNING_SIGNALS
         timing_started = time.perf_counter()
         decision_id = uuid.uuid4().hex
@@ -919,7 +956,7 @@ class MetaOperator:
         scan_seconds = time.perf_counter() - timing_started
         candidates = list(scan.get("results", []))
         preparation_started = time.perf_counter()
-        active_rows = self.db.get_active_coins()
+        active_rows = self._plan_read(self.db, "get_active_coins")
         active = {str(row["symbol"]).upper() for row in active_rows}
         usable = [row for row in candidates if row.get("eligible") and row.get("symbol") in active]
         sigmas = sorted(float(row["sigma_24h_open"]) for row in usable
@@ -969,7 +1006,7 @@ class MetaOperator:
                 reason = profile_candidate_exclusion(profile, sigma, q33, q67, model_ready,
                                                      required_verifications)
             if reason is None:
-                model_statistics = self._model_snapshot(symbol)
+                model_statistics = self._plan_read(self, "_model_snapshot", symbol)
                 model_statistics["required_verifications"] = int(cfg.get("min_effective_verifications", 30))
                 prepared.append({**row, "price": row.get("price", row.get("current_price")),
                                  "scanner_eligible": True, "book_state": "two_sided",
@@ -985,7 +1022,7 @@ class MetaOperator:
                                  "book_state": "two_sided" if row.get("eligible") else "excluded",
                                  "testnet_book_state": testnet_book["state"],
                                  "testnet_book_reason": testnet_book["reason"],
-                                 "model_statistics": ({**self._model_snapshot(symbol),
+                                 "model_statistics": ({**self._plan_read(self, "_model_snapshot", symbol),
                                      "required_verifications": int(cfg.get("min_effective_verifications", 30))}
                                      if symbol else None),
                                  "excluded_reason": reason})
@@ -1005,30 +1042,31 @@ class MetaOperator:
         owned_reader = getattr(self.core, "_owned_grids", None)
         if callable(owned_reader) and goal.get("id") is not None:
             for link in sorted(owned_reader(int(goal["id"])), key=lambda item: int(item["grid_id"])):
-                own_grid = self.db.get_grid(int(link["grid_id"]))
+                own_grid = self._plan_read(self.db, "get_grid", int(link["grid_id"]))
                 if own_grid and own_grid.get("status") in {"ACTIVE", "PAUSED", "OPENING", "HOLDING"}:
                     # Solo una pieza se evalúa como reemplazo; las demás siguen contando.
                     own_grids_by_symbol.setdefault(own_grid["symbol"], int(own_grid["id"]))
+        combination_started = time.perf_counter()
         max_pieces = max(1, min(3, int(cfg.get("max_grids", 1)) + int(cfg.get("max_bots", 0))))
         for piece_count in range(1, max_pieces + 1):
             target_piece = target_usdt / piece_count
             for selected_rows in itertools.combinations(shortlist, piece_count):
                 symbols = [row["symbol"] for row in selected_rows]
-                for shares in allocation_vectors(piece_count, profile_cap):
+                for shares in self._plan_timed("allocation_vectors", allocation_vectors, piece_count, profile_cap):
                     combination = []
                     for row, share in zip(selected_rows, shares):
                         cache_key = (row["symbol"], share, piece_count)
                         if cache_key not in option_cache:
-                            options, comparisons = self._candidate_alternatives(row,
+                            options, comparisons = self._plan_timed("candidate_alternatives", self._candidate_alternatives, row,
                                 capital * share / 100, target_piece, cfg)
                             valid_options = []
                             testnet_reasons = []
                             for option in options:
                                 own_grid_id = own_grids_by_symbol.get(option["pieces"][0]["symbol"])
                                 if own_grid_id is None:
-                                    piece_check = self._testnet_openability(option["pieces"][0], goal)
+                                    piece_check = self._plan_timed("testnet_openability", self._testnet_openability, option["pieces"][0], goal)
                                 else:
-                                    piece_check = self._testnet_openability(option["pieces"][0], goal,
+                                    piece_check = self._plan_timed("testnet_openability", self._testnet_openability, option["pieces"][0], goal,
                                         replacing_grid_id=own_grid_id, include_held_proceeds=True)
                                     piece_check = {**piece_check, "own_grid_excluded_from_check": own_grid_id}
                                     row["own_grid_excluded_from_check"] = own_grid_id
@@ -1041,7 +1079,7 @@ class MetaOperator:
                                 row["excluded_reason"] = ("alternativa no abrible en Testnet: " +
                                     (testnet_reasons[0] if testnet_reasons else "sin estructuras válidas"))
                                 row["testnet_openability"] = testnet_reasons
-                            option_cache[cache_key] = rank_alternatives(valid_options)
+                            option_cache[cache_key] = self._plan_timed("rank_alternatives", rank_alternatives, valid_options)
                             advisor_comparisons.extend(comparisons)
                         options = option_cache[cache_key]
                         if not options:
@@ -1054,24 +1092,24 @@ class MetaOperator:
                     bot_count = piece_count - grid_count
                     if grid_count > int(cfg.get("max_grids", 0)) or bot_count > int(cfg.get("max_bots", 0)):
                         continue
-                    estimate, combined_rows = combine_aligned_replays(combination, target_usdt,
+                    estimate, combined_rows = self._plan_timed("combine_aligned_replays", combine_aligned_replays, combination, target_usdt,
                         int(cfg.get("max_days", 20)))
                     if not combined_rows:
                         continue
-                    signals = combine_piece_signals(combination)
+                    signals = self._plan_timed("combine_piece_signals", combine_piece_signals, combination)
                     replay_probability = estimate["probability"]
                     cap = float(cfg.get("signal_logit_cap", 1.0))
-                    probability = (signal_adjusted_probability(replay_probability, signals,
+                    probability = (self._plan_timed("signal_adjusted_probability", signal_adjusted_probability, replay_probability, signals,
                         cfg.get("signal_weights") or {}, cap) if estimate["evidence_sufficient"]
                         else replay_probability)
                     estimate.update({"probability_replay": replay_probability,
                         "probability_adjusted": probability, "probability": probability,
                         "signal_logit_adjustment_cap": cap, "low_likelihood": probability < .25})
                     shadow_signals = [signal for signal in signals if signal["name"] in {"scanner", "advisor"}]
-                    shadow = (signal_adjusted_probability(replay_probability, shadow_signals,
+                    shadow = (self._plan_timed("signal_adjusted_probability", signal_adjusted_probability, replay_probability, shadow_signals,
                         cfg.get("scanner_advisor_weights") or {}, cap) if estimate["evidence_sufficient"]
                         else replay_probability)
-                    learned_probability = (signal_adjusted_probability(replay_probability, signals,
+                    learned_probability = (self._plan_timed("signal_adjusted_probability", signal_adjusted_probability, replay_probability, signals,
                         cfg.get("learned_signal_weights") or {}, cap) if estimate["evidence_sufficient"]
                         else replay_probability)
                     pieces = [dict(item["pieces"][0]) for item in combination]
@@ -1110,17 +1148,22 @@ class MetaOperator:
                         "independent_windows": estimate["independent_windows"],
                         "worst_drawdown_pct": estimate["worst_drawdown_pct"],
                         "worst_loss_vs_capital_pct": estimate["worst_loss_vs_capital_pct"]})
+        sub_times = _PLAN_READ_CONTEXT.get()["times"]
+        sub_times["combination_assembly"] = max(0.0, time.perf_counter() - combination_started - sum(
+            sub_times.get(name, 0.0) for name in ("allocation_vectors", "candidate_alternatives",
+                "testnet_openability", "combine_aligned_replays", "combine_piece_signals",
+                "signal_adjusted_probability", "rank_alternatives")))
         if not alternatives:
             raise ValueError("No hay estructuras del Advisor para comparar.")
         if use_learned:
-            alternatives = rank_alternatives(alternatives, probability_key="learned_probability")
+            alternatives = self._plan_timed("rank_alternatives", rank_alternatives, alternatives, probability_key="learned_probability")
             for row in alternatives:
                 row["estimate"]["probability"] = row.get("learned_probability", row["replay_probability"])
                 row["estimate"]["probability_adjusted"] = row["estimate"]["probability"]
         else:
-            alternatives = rank_alternatives(alternatives)
-        shadow = rank_alternatives(alternatives, probability_key="shadow_probability")[0]
-        learned_choice = rank_alternatives(alternatives, probability_key="learned_probability")[0]
+            alternatives = self._plan_timed("rank_alternatives", rank_alternatives, alternatives)
+        shadow = self._plan_timed("rank_alternatives", rank_alternatives, alternatives, probability_key="shadow_probability")[0]
+        learned_choice = self._plan_timed("rank_alternatives", rank_alternatives, alternatives, probability_key="learned_probability")[0]
         best = alternatives[0]
         pieces = best["pieces"]
         capital_used = sum(float(piece["capital_usdt"]) for piece in pieces)
@@ -1206,7 +1249,11 @@ class MetaOperator:
                     "portfolio_selection": round(max(0.0, time.perf_counter() - portfolio_started - control_seconds
                         - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]
                         - self._analysis_timing["touch_signal_s"]), 3),
-                    "control_advisor": round(control_seconds, 3)},
+                    "control_advisor": round(control_seconds, 3),
+                    "portfolio_detail": {name: round(seconds, 6) for name, seconds in
+                        _PLAN_READ_CONTEXT.get()["times"].items()},
+                    "plan_read_calls": _PLAN_READ_CONTEXT.get()["read_calls"],
+                    "plan_read_cache_hits": _PLAN_READ_CONTEXT.get()["read_hits"]},
                 "warnings": (["El replay no modela los préstamos de grids Smart; la estimación no incluye capital prestado."]
                     if any(piece["strategy"] == "smart" for piece in pieces) else []),
                 "target_usdt": float(goal["target_usdt"]), "loss_max_usdt": capital * float(cfg.get("max_loss_pct", 0)) / 100,
@@ -1896,7 +1943,7 @@ class MetaOperator:
                 "volatility_forecasts": forecasts}
 
     def _model_ready(self, symbol, minimum=30):
-        data = self._model_snapshot(symbol)
+        data = self._plan_read(self, "_model_snapshot", symbol)
         try:
             count = float(data.get("effective_verifications") or 0)
         except (TypeError, ValueError):
@@ -2186,7 +2233,7 @@ class MetaOperator:
         self._analysis_timing.setdefault("touch_signal_s", 0.0)
         self._analysis_timing.setdefault("touch_signal_cache_hits", 0)
         signals, omitted = [], []
-        model = row.get("model_statistics") or self._model_snapshot(row["symbol"])
+        model = row.get("model_statistics") or self._plan_read(self, "_model_snapshot", row["symbol"])
         usable_sigmas = [float(value["sigma_24h"]) for value in (model.get("volatility_forecasts") or {}).values()
                          if value.get("used") and value.get("sigma_24h") is not None]
         if usable_sigmas and row.get("sigma_24h_open"):
@@ -2217,7 +2264,7 @@ class MetaOperator:
                             "normalized": max(-1.0, min(1.0, 1 - 2 * float(probability)))})
         except Exception as exc:
             omitted.append({"name": "break_prob", "reason": str(exc)})
-        prediction = self.db.get_latest_prediction(row["symbol"], "1h", "model_a_down")
+        prediction = self._plan_read(self.db, "get_latest_prediction", row["symbol"], "1h", "model_a_down")
         fresh_direction = False
         if prediction and prediction.get("predicted_at") is not None:
             predicted_at = prediction["predicted_at"]

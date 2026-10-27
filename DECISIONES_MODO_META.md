@@ -1,7 +1,7 @@
 # Modo Meta — Decisiones y rumbo
 
 **Para qué es este archivo:** tener en un solo lugar qué estamos construyendo, qué se decidió y por qué, para no perder el camino. Si algo de otro documento o prompt choca con esto, manda este archivo (y la especificación `ESPEC_FASE40_MODO_META.md`).
-**Última actualización:** 2026-10-26.
+**Última actualización:** 2026-10-27.
 
 ---
 
@@ -121,6 +121,8 @@ Los números son punto de partida y se ajustan con los resultados.
 | 41a | Corrección directa de señales Meta, trazabilidad y diagnóstico | Implementada y verificada offline; commit por partes, sin despliegue |
 | 41b | Bitácora compacta v2 para planes y decisiones, recomendaciones guardadas una vez y decisiones ligadas por ID; lectores compatibles con v1 | Hecha localmente en `520766e`, `38bcffa`, `dcf6c3e`, `d1b3656`, `1956a2d`; 82 pruebas dirigidas verdes, sin push |
 | 41b-11 | Revisión resistente a alternativas actuales ausentes y evaluación sin autoconflicto de la pieza propia | Ambas partes implementadas; comparación y plan verificados offline con 87 pruebas dirigidas, sin push |
+| 41c-0 | Lecturas repetidas cacheadas por plan y subtiempos de selección | Hecha localmente; paridad con `a062e09`, 90 pruebas dirigidas verdes y medición sintética 148,26 → 2,24 s |
+| 41c-1 | Curvas de cartera y corrección de C6 | Pendiente de resolver éxito por efectivo real frente a patrimonio propuesto; no implementada |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -290,3 +292,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - No se cambian materialidad, empate, persistencia, enfriamientos, límites, pesos ni reglas del operador.
 - Desde 41b-11 la Meta puede volver a reajustar/rotar una pieza que tenga ventas vivas. Al evaluar el reemplazo se excluye solo su propio grid del mismo símbolo, identificado en el plan por `own_grid_excluded_from_check`; las demás piezas propias, de otras metas o manuales siguen contando. Antes de actuar se repiten las validaciones existentes.
 - Iniciar y agregar piezas nuevas no excluyen grids existentes. La estimación de efectivo de un posible cierre no se usa como efectivo libre para aperturas adicionales ni para retiradas con ventas vivas.
+
+## Fase 41c — rendimiento y coherencia del replay (2026-10-27)
+
+- 41c-0 reutiliza lecturas de exchange/BD solo durante cada plan, con contexto aislado y descarte al terminar. Las ejecuciones vuelven a consultar los datos; las cachés no se comparten entre revisiones. No cambia números ni reglas en el escenario de regresión fijado a `a062e09`.
+- Antes de 41c-1 se confirmó que el cumplimiento del núcleo exige efectivo atribuible, mientras el prompt pide éxito simulado con patrimonio. Queda pendiente elegir la etiqueta correcta sin cambiar ese criterio real. La nota «desde 41c-1 la probabilidad de cada alternativa se mide con la curva de patrimonio sumada de la meta; corrige la conclusión 6.2» solo podrá declararse implementada tras resolver esta discrepancia y verificar el nuevo método.
+- 41c-2 queda fuera del alcance de esta entrega.

@@ -175,3 +175,63 @@ Pruebas nuevas: `tests/test_meta_own_grid_evaluation.py:99` usa el exchange fals
 Comando final: `$env:ASPLE_OFFLINE='1'; $testBase = Join-Path $env:TEMP ('asple-41b11b-' + [guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_review_resilience.py tests/test_meta_operator.py -q --basetemp $testBase`
 
 Resultado final: **87 passed, 4 warnings, 0 failed; 4,89 s**. Una primera corrida de esta parte dio 10 fallos nuevos por faltar `avg_price` en el contexto del exchange falso; se completó ese fixture y se repitió en otra carpeta temporal. Las 77 pruebas previas siguieron verdes. No se ejecutó suite completa ni se modificó JavaScript. Todo se guardó en UTF-8 sin BOM y LF; sin interrogaciones corruptas dentro de palabras en los documentos tocados.
+
+## Fase 41c-0 — tiempo de selección de cartera (2026-10-27)
+
+### Escenario y medición
+
+`tests/meta_portfolio_benchmark.py` ejecuta `_build_plan` contra la implementación del commit local `a062e09` y contra la actual. Usa seis candidatas, cuatro elegibles, 51.840 velas sintéticas de 5 min por símbolo y latencia real de 50 ms por lectura del exchange/BD falsos (`time.sleep`, medida con `time.perf_counter`). Representa una revisión con Advisor y replay calientes, como la evidencia aportada: 135 aciertos de Advisor y 297 respuestas de replay representadas por el fixture. La descarga, las simulaciones y el servicio Advisor reales no se ejecutan en este benchmark; el toque causal vivo y la política de selección sí. El costo del Scanner real de S1 no está representado por este Scanner determinista.
+
+El código conserva la lista corta de tres monedas y sus repartos: genera 100 carteras, 297 alternativas de pieza y 894 ajustes de probabilidad. Las «~950 combinaciones» del prompt no son 950 carteras finales bajo estos límites; no se amplió la lista corta ni se alteraron los repartos para forzar ese número.
+
+Comandos de medición (salida JSON bajo `$env:TEMP`):
+
+- `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m tests.meta_portfolio_benchmark --revision a062e09 --latency 0.05 --output (Join-Path $env:TEMP 'asple41c-baseline-a062e09-20261027.json')`
+- `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m tests.meta_portfolio_benchmark --revision working --latency 0.05 --output (Join-Path $env:TEMP 'asple41c-optimizado-20261027.json')`
+
+| Paso (segundos) | `a062e09` | Optimizado |
+|---|---:|---:|
+| Total `_build_plan` | 148,258523 | 2,240180 |
+| `_testnet_openability` | 129,513010 | 0,736279 |
+| `_candidate_alternatives` | 17,413347 | 0,194317 |
+| `_apply_intelligence` (incluido en candidatas) | 15,028938 | 0,166104 |
+| `allocation_vectors` | 0,000271 | 0,000120 |
+| `combine_aligned_replays` | 0,029627 | 0,016055 |
+| `combine_piece_signals` | 0,002646 | 0,001800 |
+| `signal_adjusted_probability` (incluye llamadas anidadas) | 0,008431 | 0,002667 |
+| `rank_alternatives` | 0,001655 | 0,000453 |
+| Ensamblado de bucles, excluyendo etapas temporizadas | No separado internamente en v2 | 0,002156 |
+
+Los tiempos inclusivos de etapas anidadas no deben sumarse. La decisión posterior tardó 0,151260 s en el escenario optimizado: análisis más decisión = **2,391440 s**, por debajo de 5 min. Esto verifica el objetivo en el escenario sintético de caché caliente; no certifica un tiempo de S1 ni una corrida con replays fríos.
+
+| Lectura simulada (incluye la decisión posterior) | Antes | Después |
+|---|---:|---:|
+| Todas las lecturas exchange/BD instrumentadas | 2934 | 44 |
+| `get_open_orders` | 324 | 3 |
+| `get_balance` | 243 | 1 |
+| `list_grids_by_status` | 1215 | 5 |
+| `count_open_grids` | 243 | 1 |
+| `get_grid_levels` | 82 | 2 |
+| `get_latest_prediction` | 297 | 3 |
+
+La causa confirmada en este escenario son las lecturas repetidas por opción, sobre todo los chequeos de apertura, seguidas por la predicción de dirección leída en cada alternativa. La aritmética de probabilidades y la combinación de ventanas no dominan el tiempo.
+
+### Cambio y paridad
+
+`grid/meta_operator.py:915` reutiliza lecturas por fuente, método y argumentos durante un solo plan; devuelve copias para evitar mutaciones del snapshot. `_build_plan` (`:938`) instala un `ContextVar` aislado por llamada/hilo y lo descarta en `finally`, también ante excepciones. Cubre saldo, órdenes, libros/contexto de mercado, grids por estado, niveles, conteo, grid reemplazado, snapshot de modelo y predicción por símbolo. Fuera del plan se llaman los proveedores de nuevo: las revalidaciones de ejecución no reutilizan ese snapshot.
+
+`_plan_timed` (`grid/meta_operator.py:928`) mide etapas internas. `timings_s.portfolio_detail` (`:1253`) guarda armado residual de combinaciones (`:1152`), candidatas, comprobaciones de apertura, mezcla de replays/señales, probabilidades, ranking e inteligencia, además de lecturas por método. `plan_read_calls` y `plan_read_cache_hits` registran 29 lecturas únicas del contexto y 2890 reutilizaciones en la última medición; estos contadores no equivalen al total de llamadas internas de los proveedores. El bloque ya se persiste mediante `META_PLAN_EVALUATED` v2.
+
+`tests/test_meta_portfolio_performance.py` compara el plan completo (excluyendo solo duraciones) con `a062e09`, usando IDs fijos: alternativas, probabilidades, orden, selección y decisión iguales. También comprueba menos lecturas, renovación entre planes y ejecución, y descarte del contexto tras una excepción. Las pruebas anteriores del operador, revisión y autoconflicto siguen verdes.
+
+Comando dirigido: `$env:ASPLE_OFFLINE='1'; $testBase = Join-Path $env:TEMP ('asple-41c0-' + [guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_portfolio_performance.py tests/test_meta_operator.py tests/test_meta_own_grid_evaluation.py tests/test_meta_review_resilience.py -q --basetemp $testBase`
+
+Resultado: **90 passed, 4 warnings, 0 failed; 6,02 s**. Sin suite completa, JavaScript modificado, S1, Testnet, `.env` ni base real.
+
+## Fase 41c-1 — criterio de cumplimiento pendiente de resolución (2026-10-27)
+
+La comprobación previa requerida encontró una discrepancia sustancial: `grid/meta.py:718` declara cumplimiento con `cash_usdt >= capital_initial + target_usdt`, no con patrimonio marcado. `cash_usdt` procede de `attributable_cash` (`grid/meta.py:485`) con ventas/comisiones realizadas; no aplica un haircut ni valora inventario. El patrimonio ejecutable y best bid sí valoran inventario con comisión estimada de 0,1 % (`:518`, `:540`); el haircut de 1 % solo estima inventario que no absorbe el libro. Esos valores se usan para pérdida y presentación, no sustituyen al efectivo en el cumplimiento.
+
+El punto 3 del prompt pide éxito con suma de patrimonio menos capital usado. Por ejemplo, con capital 100, objetivo 3, efectivo 30 e inventario valorado en 80 antes de comisión, el patrimonio estimado es 109,92 y cruzaría el objetivo; el núcleo seguiría sin cumplir porque el efectivo es 30. Por tanto, esa definición de éxito no reproduce el cumplimiento actual. No se modificaron `grid/meta.py`, el método de replay, sus cachés ni `REPLAY_METHOD_VERSION`.
+
+Se solicitó a Ramón resolver si el replay debe exigir efectivo para éxito (y patrimonio para avance/riesgo), o usar patrimonio como estimación predictiva explícitamente distinta del cumplimiento real. Hasta resolverlo quedan pendientes la implementación v3, sus pruebas, la tabla de cinco carteras, el versionado de muestras y la corrección de la conclusión 6.2. No se creó el commit 41c-1 ni se implementó 41c-2.
