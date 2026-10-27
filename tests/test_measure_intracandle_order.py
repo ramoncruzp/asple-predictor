@@ -41,6 +41,20 @@ def test_5m_misses_intrabar_buy_then_sell_that_1m_simulator_completes():
     assert one_result["metrics"]["cycles"] >= 1
 
 
+def test_measurement_uses_same_causal_5m_geometry_for_both_resolutions():
+    five = _candle_data([0, 300, 600], [10, 10.1, 10.2], [10.1, 10.2, 10.3],
+        [9.9, 10, 10.1], [10, 10.1, 10.2], 300)
+    one = _candle_data(np.arange(15, dtype=np.int64) * 60,
+        np.full(15, 10), np.full(15, 10.5), np.full(15, 9.5), np.full(15, 10), 60)
+    geometry = measurement._shared_geometry(five, "simple", start_index=0)
+    same = dict(geometry)
+    assert geometry["geometry_source_interval"] == "5m"
+    assert same == geometry
+    result5 = measurement._run_grid(five, geometry, "simple")
+    result1 = measurement._run_grid(one, same, "simple")
+    assert result1["metrics"]["cycles"] >= result5["metrics"]["cycles"]
+
+
 def test_exact_buy_touch_is_counted_but_does_not_fill():
     data = _candle_data([0, 300], [10.5, 10.5], [10.5, 10.5], [10.5, 10], [10.5, 10.2], 300)
     geometry = {"low": 9, "high": 11, "n": 4}
@@ -134,6 +148,12 @@ def test_csv_mode_runs_synthetic_inputs_and_writes_json_and_csv(tmp_path):
                     measurement.timezone.utc).isoformat(), price, high, low, price))
     rows = measurement.measure(["TESTUSDT"], 20, "csv", csv_dir, out)
     assert len(rows) == 5
+    assert all(row.get("same_geometry") is True for row in rows if row.get("measured"))
+    for row in rows:
+        if row.get("measured"):
+            assert row["range_low_5m"] == row["range_low_1m"]
+            assert row["range_high_5m"] == row["range_high_1m"]
+            assert row["n_levels_5m"] == row["n_levels_1m"]
     assert (out / "medicion_intravela.json").is_file()
     assert (out / "medicion_intravela.csv").is_file()
 

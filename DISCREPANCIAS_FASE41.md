@@ -107,3 +107,8 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 ## Fase 41-G1a ? discrepancias
 
 No se eliminan las entradas de cach? antiguas durante el cambio: si contienen curvas de formato anterior, se consideran no reutilizables al leerlas y se regeneran; el borrado f?sico queda a cargo de la retenci?n ya existente. La validaci?n de tama?o usa una trayectoria sint?tica suave de 180 d?as; otras trayectorias con mayor entrop?a podr?an comprimir menos y deben observarse mediante tama?os reales al correr el mantenimiento en S1.
+
+
+## Fase 41-G1b ? discrepancias
+
+La geometr?a com?n se deriva de los cierres 5m y de sigma 5m causal, aunque 1m puede mostrar otro recorrido dentro de la primera vela. Esa es la comparaci?n solicitada y evita que cada resoluci?n ajuste su propia estrategia. Las m?tricas 1m no constituyen una reconstrucci?n del orden real dentro de cada vela.

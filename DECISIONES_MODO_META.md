@@ -317,3 +317,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 - Las curvas de efectivo y patrimonio mantienen precisi?n `float32` y puntos cada 15 minutos; se almacenan con zlib y byte shuffle (formato 2).
 - Las curvas legacy siguen siendo legibles, pero las entradas persistentes con formato viejo se regeneran. Ninguna decisi?n ni m?trica cambia.
+
+
+## Fase 41-G1b ? comparabilidad intravela
+
+- La medici?n 5m/1m comparte la geometr?a determinada con 5m al inicio del periodo o ventana; se informa `same_geometry` y no se comparan filas con geometr?a desigual.
+- Es un script de estudio; no modifica simuladores ni decisiones del operador.

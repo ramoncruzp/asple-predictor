@@ -133,6 +133,21 @@ def _advisor_geometry(candles: CandleData, filters=FILTERS, *, start_index: int 
                       f"σ realizada previa con {bars_per_hour} barras/h, margen 0,3 %"}
 
 
+def _shared_geometry(candles5: CandleData, kind: str, filters=FILTERS, *, start_index: int = 0,
+                     offset_pct: float | None = None) -> dict:
+    """Una geometría causal derivada de 5m que se reutiliza sin cambios en 1m."""
+    if kind == "bot":
+        if start_index < 0 or start_index >= len(candles5.close):
+            raise ValueError("índice inicial fuera de las velas disponibles")
+        reference = float(candles5.close[start_index])
+        buy = reference * (1 + float(offset_pct or 0) / 100)
+        return {"reference": reference, "low": buy,
+                "high": buy * (1 + .95 / 100), "n": 1,
+                "geometry_source_interval": "5m"}
+    shape = _advisor_geometry(candles5, filters, start_index=start_index, bars_per_hour=12)
+    return {**shape, "geometry_source_interval": "5m"}
+
+
 def _run_grid(candles: CandleData, geometry: dict, strategy: str, target: bool = False,
               filters=FILTERS) -> dict:
     n = int(geometry["n"])
@@ -236,14 +251,14 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
             row = {"symbol": symbol,
                 "geometry": kind + (f"_buy_{offset:+.1f}%" if offset is not None else "")}
             try:
-                shape5 = ( {"reference": float(candles5.close[0])} if kind == "bot" else
-                    _advisor_geometry(candles5, filters, start_index=0, bars_per_hour=12))
-                shape1 = ( {"reference": float(candles1.close[0])} if kind == "bot" else
-                    _advisor_geometry(candles1, filters, start_index=0, bars_per_hour=60))
+                shape5 = _shared_geometry(candles5, kind, filters, start_index=0, offset_pct=offset)
+                shape1 = dict(shape5)
                 def run(candles, shape, target=False):
                     return (_run_bot(candles, shape, offset, target, filters) if kind == "bot"
                         else _run_grid(candles, shape, kind, target, filters))
                 result5, result1 = run(candles5, shape5), run(candles1, shape1)
+                if shape5 != shape1:
+                    raise ValueError("la geometría intravela 5m/1m no coincide")
                 metrics5 = result5.get("metrics", {})
                 metrics1 = result1.get("metrics", {})
                 cycles5 = int(metrics5.get("cycles", int(result5.get("sold", False))))
@@ -261,11 +276,13 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
                         continue
                     try:
                         ix5 = int(np.searchsorted(candles5.timestamp, begin, side="left"))
-                        ix1 = int(np.searchsorted(candles1.timestamp, begin, side="left"))
-                        window_shape5 = ({"reference": float(w5.close[0])} if kind == "bot" else
-                            _advisor_geometry(candles5, filters, start_index=ix5, bars_per_hour=12))
-                        window_shape1 = ({"reference": float(w1.close[0])} if kind == "bot" else
-                            _advisor_geometry(candles1, filters, start_index=ix1, bars_per_hour=60))
+                        window_shape5 = _shared_geometry(candles5, kind, filters,
+                            start_index=ix5, offset_pct=offset)
+                        # La geometría de cada ventana se calcula con 5m y se aplica
+                        # idéntica a 1m, incluso si el cierre de la primera vela difiere.
+                        window_shape1 = dict(window_shape5)
+                        if window_shape1 != window_shape5:
+                            raise ValueError("la geometría intravela no coincide dentro de la ventana")
                         result_w5, result_w1 = run(w5, window_shape5, True), run(w1, window_shape1, True)
                         windows5 += 1
                         windows1 += 1
@@ -283,13 +300,14 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
                     "target_probability_1m_pct": successes1 / windows1 * 100 if windows1 else None,
                     "window_successes_5m": successes5, "window_count_5m": windows5,
                     "window_successes_1m": successes1, "window_count_1m": windows1,
+                    "same_geometry": (shape5 == shape1),
                     "window_errors": window_errors,
                     "elapsed_s": round(time.perf_counter() - t0, 4),
                     "range_low_5m": shape5.get("low"), "range_high_5m": shape5.get("high"),
                     "range_low_1m": shape1.get("low"), "range_high_1m": shape1.get("high"),
                     "reference_5m": shape5.get("reference"), "reference_1m": shape1.get("reference"),
                     "n_levels_5m": shape5.get("n"), "n_levels_1m": shape1.get("n"),
-                    "advisor_geometry_source": "geometría centrada al inicio con σ causal"})
+                    "advisor_geometry_source": "geometría calculada con 5m al inicio y compartida con 1m"})
                 row["measured"] = True
                 if window_errors:
                     row["error"] = window_errors[0]["error"]

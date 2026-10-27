@@ -361,3 +361,10 @@ Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **
 Una curva sint?tica de 180 d?as (17.280 marcas) ocupa **84.350 bytes** serializada en JSON, frente a 138.240 bytes de efectivo y patrimonio sin comprimir (sin contar metadatos). La reducci?n del bloque num?rico serializado es aproximadamente **38,9 %**, por debajo del m?ximo de 100 KB por entrada solicitado.
 
 Prueba: comando dirigido a `tests/test_meta_portfolio_equity.py`; **13 passed, 0 failed, 0,37 s**. La prueba compara bits de las curvas, timestamps, m?tricas de replay y lectura legacy. No se usaron red, Testnet, S1, `.env` ni BD real.
+
+
+## Fase 41-G1b ? medici?n intravela con geometr?a com?n
+
+`scripts/medir_orden_intravela.py:136-148` calcula la geometr?a de grid con las velas 5m y la sigma causal disponible al inicio; los bots tambi?n derivan compra/venta del cierre 5m de inicio. La misma geometr?a se copia a 1m para el periodo completo y se recalcula desde 5m para cada ventana de 20 d?as (`:255-305`). Cada fila exporta `same_geometry`; una discrepancia produce error y no se presenta como comparaci?n v?lida.
+
+Prueba: `tests/test_measure_intracandle_order.py:27-59,151-158` confirma que la vela ambigua pierde el ciclo en 5m y el replay 1m lo completa, y que las filas medidas reutilizan exactamente piso, techo y niveles. Comando dirigido: `tests/test_measure_intracandle_order.py` ? **8 passed, 0 failed, 5,52 s**. Datos sint?ticos; sin red ni BD.
