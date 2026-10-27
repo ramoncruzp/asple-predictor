@@ -29,7 +29,7 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
     loss_cut = False
     peak, max_drawdown_pct = Decimal(0), Decimal(0)
     trough = capital
-    target_cash = capital + Decimal(str(target_usdt))
+    target_cash = capital + Decimal(str(target_usdt)) if target_usdt is not None else None
     for idx, (low, high, close) in enumerate(zip(candles.low, candles.high, candles.close)):
         was_bought = bought
         if not bought and Decimal(str(low)) <= buy_price:
@@ -50,7 +50,7 @@ def run_meta_bot(candles, *, capital, buy_price, sell_price, target_usdt, fee_pc
         trough = min(trough, marked)
         if peak > 0:
             max_drawdown_pct = max(max_drawdown_pct, (peak - marked) / peak * 100)
-        if sold and cash >= target_cash and event is None:
+        if sold and target_cash is not None and cash >= target_cash and event is None:
             event = {"type": "TARGET_REACHED", "ts": int(candles.timestamp[idx]),
                      "details": {"cash_total": str(cash), "state": "DONE"}}
         if (max_loss_pct is not None and not loss_cut and

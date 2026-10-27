@@ -775,11 +775,8 @@ def test_plan_search_can_choose_two_distinct_coins_with_bounded_allocation(monke
     assert all("BBBUSDT" not in row["symbols"] for row in filtered["alternatives"])
 
 
-def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
-    """Fase 40c-3, defecto 6: combine_aligned_replays no sabe de "loss_cut" y
-    el total de cartera quedaba en 0 aunque las piezas sí tuvieran ventanas
-    cortadas por pérdida (ej. PEPE 2 + JUP 1 = 3, pero la pantalla mostraba 0).
-    El total a nivel de plan debe coincidir con la suma real de las piezas."""
+def test_portfolio_loss_cut_windows_are_not_sum_of_piece_estimates(monkeypatch):
+    """41c-1: los cortes pertenecen al patrimonio agregado, no se suman por pieza."""
     from grid.meta_operator import MetaOperator
 
     class DB:
@@ -813,6 +810,9 @@ def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
             "mid_at_plan": 100, "margin_pct": .7, "loans_pct": 0}
         outcome = [{"window_start": f"2026-01-{day:02d}", "pnl_usdt": capital * .12,
             "days": 10, "drawdown_pct": 1, "step_days": 7} for day in (1, 8, 15, 22, 29, 36, 43)]
+        from grid.sim.meta_portfolio import pack_curve
+        for window in outcome:
+            window["curve"] = pack_curve([0, 900], [capital, capital * 1.12], [capital, capital * 1.12], capital)
         estimate = {"probability": .7, "days_median": 10, "days_p10": 10, "days_p90": 10,
             "worst_drawdown_pct": 1, "rolling_windows": 7, "independent_windows": 2,
             "evidence_sufficient": False, "low_likelihood": False,
@@ -832,7 +832,7 @@ def test_portfolio_loss_cut_windows_matches_sum_of_piece_estimates(monkeypatch):
     assert len(plan["pieces"]) == 2
     piece_total = sum(item["loss_cut_windows"] for item in plan["piece_estimates"])
     assert piece_total == 3
-    assert plan["estimated_time"]["loss_cut_windows"] == piece_total
+    assert plan["estimated_time"]["loss_cut_windows"] == 0
 
 
 def test_advisor_signal_comes_from_advisor_result_not_scanner_structure(monkeypatch):
@@ -1080,10 +1080,11 @@ def test_replay_rescales_plan_range_for_historical_prices_over_fifty_percent_awa
 
     def replay(_sample, **kwargs):
         ranges.append((kwargs["low"], kwargs["high"]))
-        return {"events": [], "metrics": {"equity_final_after_repository_liquidation": kwargs["capital"],
-            "max_drawdown_pct": 0}}
+        from grid.sim.meta_portfolio import pack_curve
+        return {"curve": pack_curve(_sample.timestamp, [kwargs["capital"]] * len(_sample.timestamp),
+            [kwargs["capital"]] * len(_sample.timestamp), kwargs["capital"])}
 
-    monkeypatch.setattr(module, "run_simulation", replay)
+    monkeypatch.setattr("grid.sim.meta_portfolio.simulate_piece_curve", replay)
     operator._evaluate({"symbol": "XRPUSDT", "book": {"bid_price": 100, "ask_price": 100},
         "sigma_24h_open": .1}, "simple", 100, 10, 90, 110, 4, {"max_days": 20})
     assert ranges[0] == pytest.approx((180, 220))

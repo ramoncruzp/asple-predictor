@@ -514,11 +514,11 @@ class DBManager:
                 for name, sql_type in additions.items():
                     if name not in present:
                         conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN {name} {sql_type}")
-                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=1 WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v2')")
+                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=1 WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v3_equity')")
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN IF NOT EXISTS {name} {sql_type}")
-                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=TRUE WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v2')")
+                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=TRUE WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v3_equity')")
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""

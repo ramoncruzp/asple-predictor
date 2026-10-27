@@ -175,7 +175,7 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
     with db.engine.connect() as conn:
         sample = conn.execute(select(db.meta_learning_samples)).mappings().one()
         versions = conn.execute(select(db.meta_learning_weight_versions)).mappings().all()
-    assert sample["base_method_version"] == "rolling_7d_v2"
+    assert sample["base_method_version"] == "rolling_7d_v3_equity"
     assert sample["recalculate_base"] is False
     assert {row["source_kind"] for row in versions} == {"live", "historical_reconstructed"}
     assert all(row["status"] == "insufficient" for row in versions)
@@ -197,7 +197,7 @@ def test_causal_replay_uses_seven_day_stride_and_only_windows_before_cut(monkeyp
     assert all(start + 20 * 86400 < at for start in seen)
     assert result["step_days"] == 7
     assert result["window_count"] == len(seen)
-    assert result["method_version"] == "rolling_7d_v2"
+    assert result["method_version"] == "rolling_7d_v3_equity"
 
 
 def test_replay_probability_smoothing_handles_zero_and_one_windows(monkeypatch):

@@ -113,7 +113,7 @@ def signal_adjusted_probability(replay_probability, signals, weights, max_abs_lo
     return 1 / (1 + math.exp(-max(-30, min(30, logit))))
 
 
-def combine_aligned_replays(alternatives, target_usdt, window_days):
+def combine_aligned_replays(alternatives, target_usdt, window_days, *, capital_initial=None, max_loss_pct=None):
     """Suma resultados de piezas por inicio de ventana compartido."""
     maps = []
     for alternative in alternatives:
@@ -122,6 +122,15 @@ def combine_aligned_replays(alternatives, target_usdt, window_days):
     rows = []
     for start in sorted(common):
         outcomes = [mapping[start] for mapping in maps]
+        if any("curve" in row for row in outcomes):
+            if not all("curve" in row for row in outcomes):
+                raise ValueError("no se mezclan ventanas de patrimonio v3 con resultados antiguos")
+            from grid.sim.meta_portfolio import evaluate_portfolio
+            initial = (sum(float(row["curve"]["capital_usdt"]) for row in outcomes)
+                if capital_initial is None else float(capital_initial))
+            rows.append({"window_start": start, **evaluate_portfolio([row["curve"] for row in outcomes],
+                capital_initial=initial, target_usdt=target_usdt, max_loss_pct=max_loss_pct)})
+            continue
         pnl = sum(float(row.get("pnl_usdt", 0.0)) for row in outcomes)
         reached_days = [float(row["days"]) for row in outcomes if row.get("days") is not None]
         rows.append({"reached": pnl >= float(target_usdt), "pnl_usdt": pnl,
@@ -1031,6 +1040,7 @@ class MetaOperator:
         if not eligible:
             raise ValueError("Ninguna moneda cumple los límites del perfil.")
         capital = float(goal["capital_initial"])
+        cfg["_meta_capital_initial"] = capital
         target_usdt = float(goal["target_usdt"])
         portfolio_started = time.perf_counter()
         shortlist = sorted(eligible, key=lambda item: float(item.get("score") or 0), reverse=True)[:3]
@@ -1049,7 +1059,7 @@ class MetaOperator:
         combination_started = time.perf_counter()
         max_pieces = max(1, min(3, int(cfg.get("max_grids", 1)) + int(cfg.get("max_bots", 0))))
         for piece_count in range(1, max_pieces + 1):
-            target_piece = target_usdt / piece_count
+            target_piece = target_usdt
             for selected_rows in itertools.combinations(shortlist, piece_count):
                 symbols = [row["symbol"] for row in selected_rows]
                 for shares in self._plan_timed("allocation_vectors", allocation_vectors, piece_count, profile_cap):
@@ -1093,7 +1103,7 @@ class MetaOperator:
                     if grid_count > int(cfg.get("max_grids", 0)) or bot_count > int(cfg.get("max_bots", 0)):
                         continue
                     estimate, combined_rows = self._plan_timed("combine_aligned_replays", combine_aligned_replays, combination, target_usdt,
-                        int(cfg.get("max_days", 20)))
+                        int(cfg.get("max_days", 20)), capital_initial=capital, max_loss_pct=cfg.get("max_loss_pct"))
                     if not combined_rows:
                         continue
                     signals = self._plan_timed("combine_piece_signals", combine_piece_signals, combination)
@@ -1121,10 +1131,8 @@ class MetaOperator:
                         "bot_windows_sold": item["estimate"].get("bot_windows_sold"),
                         "rolling_windows": item["estimate"].get("rolling_windows", 0)}
                         for item in combination]
-                    # combine_aligned_replays sólo alinea ventanas compartidas por fecha y no
-                    # sabe de "loss_cut"; el total de cartera se toma de la suma por pieza para
-                    # que coincida con lo que ve el medidor (piece_estimates_summary).
-                    estimate["loss_cut_windows"] = sum(item["loss_cut_windows"] for item in piece_estimates)
+                    # El corte se mide sobre la curva sumada, nunca sumando cortes de piezas.
+                    estimate["loss_cut_windows"] = sum(bool(item.get("loss_cut")) for item in combined_rows)
                     row = {"symbol": pieces[0]["symbol"], "symbols": symbols,
                         "strategy": ",".join(item["strategy"] for item in combination),
                         "pieces": pieces, "estimate": estimate, "piece_estimates": piece_estimates,
@@ -1229,7 +1237,8 @@ class MetaOperator:
         public_alternatives = [{key: value for key, value in item.items()
                                 if key not in {"window_results", "_touch_observations"}}
                                for item in selected_public]
-        plan = {"profile": profile, "decision_id": decision_id,
+        from grid.meta_learning import REPLAY_METHOD_VERSION
+        plan = {"profile": profile, "decision_id": decision_id, "base_method_version": REPLAY_METHOD_VERSION,
                 "candidates": prepared, "sigma_bands": {"q33": q33, "q67": q67},
                 "alternatives": public_alternatives, "combinations_evaluated": evaluated_combinations,
                 "pieces": pieces, "estimated_time": best["estimate"],
@@ -1325,6 +1334,7 @@ class MetaOperator:
         compact_selected = cls._compact_plan_alternative(selected)
         return {"ledger_schema_version": 2, "plan_kind": str(plan_kind),
             "decision_id": plan.get("decision_id"), "profile": plan.get("profile"),
+            "base_method_version": plan.get("base_method_version"),
             "target_usdt": plan.get("target_usdt"), "deadline_days": plan.get("deadline_days"),
             "capital_usage": plan.get("capital_usage"), "selection_reason": plan.get("selection_reason"),
             "candidates": compact_candidates, "alternatives": compact_alternatives,
@@ -1395,6 +1405,7 @@ class MetaOperator:
 
     def _persist_learning_samples(self, goal, decision_id, alternatives):
         """Congela señales y geometría puntuales, sin copiar filas de replay futuras."""
+        from grid.meta_learning import REPLAY_METHOD_VERSION
         table = getattr(self.db, "meta_learning_samples", None)
         if table is None:
             return 0
@@ -1418,6 +1429,8 @@ class MetaOperator:
                 alternative.get("independent_windows") or 0)
             replay_smoothed = (((round(float(replay_raw) * replay_windows) + 1) /
                 (replay_windows + 2)) if replay_raw is not None and replay_windows else None)
+            independent_windows = int((alternative.get("estimate") or {}).get("independent_windows")
+                or alternative.get("independent_windows") or 0)
             values = {"sample_key": sample_key, "meta_id": int(goal["id"]),
                 "decision_id": str(decision_id), "alternative_id": alt_id,
                 "symbol": str(pieces[0].get("symbol") or "").upper(),
@@ -1425,10 +1438,10 @@ class MetaOperator:
                 "source_kind": "live", "base_probability": replay_raw,
                 "base_probability_smoothed": replay_smoothed,
                 "base_window_count": replay_windows,
-                "base_independent_windows": int(alternative.get("independent_windows") or 0),
-                "base_method_version": "rolling_7d_v2", "recalculate_base": False,
+                "base_independent_windows": independent_windows,
+                "base_method_version": REPLAY_METHOD_VERSION, "recalculate_base": False,
                 "training_exclusion_reason": ("sin base suficiente" if
-                    int(alternative.get("independent_windows") or 0) < 3 else None),
+                    independent_windows < 3 else None),
                 "parameters_json": json.dumps(params, sort_keys=True, default=str),
                 "signals_json": json.dumps(signals, sort_keys=True, default=str),
                 "provenance_json": json.dumps({"source": "META_PLAN_EVALUATED",
@@ -1436,8 +1449,8 @@ class MetaOperator:
                     "base_replay": {"raw_probability": replay_raw,
                         "smoothed_probability": replay_smoothed, "step_days": 7,
                         "window_count": replay_windows,
-                        "independent_windows": int(alternative.get("independent_windows") or 0),
-                        "method_version": "rolling_7d_v2"}}, sort_keys=True),
+                        "independent_windows": independent_windows,
+                        "method_version": REPLAY_METHOD_VERSION}}, sort_keys=True),
                 "created_at": started_at}
             created += int(self._store_learning_sample(values))
         return created
@@ -1455,6 +1468,7 @@ class MetaOperator:
             try:
                 details = json.loads(row["details"] or "{}")
                 decision_id = str(details.get("decision_id") or "")
+                base_method = details.get("base_method_version") or "rolling_7d_v2"
                 cfg = json.loads(row["config_snapshot"] or "{}")
                 for alternative in details.get("alternatives", []):
                     alt_id = str(alternative.get("alternative_id") or "")
@@ -1480,7 +1494,7 @@ class MetaOperator:
                         "base_probability_smoothed": replay_smoothed,
                         "base_window_count": replay_windows,
                         "base_independent_windows": int(alternative.get("independent_windows") or 0),
-                        "base_method_version": "rolling_7d_v2", "recalculate_base": False,
+                        "base_method_version": base_method, "recalculate_base": False,
                         "training_exclusion_reason": ("sin base suficiente" if
                             int(alternative.get("independent_windows") or 0) < 3 else None),
                         "parameters_json": json.dumps(params, sort_keys=True, default=str),
@@ -1494,7 +1508,7 @@ class MetaOperator:
                                 "raw_probability": replay_raw, "smoothed_probability": replay_smoothed,
                                 "step_days": 7, "window_count": replay_windows,
                                 "independent_windows": int(alternative.get("independent_windows") or 0),
-                                "method_version": "rolling_7d_v2"}}, sort_keys=True),
+                                "method_version": base_method}}, sort_keys=True),
                         "created_at": datetime.now(timezone.utc)}
                     created += int(self._store_learning_sample(values))
             except (TypeError, ValueError, KeyError):
@@ -1595,7 +1609,7 @@ class MetaOperator:
         """Ajusta versiones en sombra; no modifica pesos usados por el operador."""
         from sqlalchemy import select
         from grid.meta_learning import (effective_sample_rows, extract_learning_features,
-            fit_signal_weights, temporal_learning_split, LEARNING_SIGNALS)
+            fit_signal_weights, temporal_learning_split, LEARNING_SIGNALS, REPLAY_METHOD_VERSION)
         with self.db.engine.connect() as conn:
             label_rows = conn.execute(select(self.db.meta_learning_labels)).mappings().all()
             setting_rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
@@ -1615,6 +1629,8 @@ class MetaOperator:
                 for sample in samples:
                     if str(sample["profile"]).upper() != profile or sample["source_kind"] != source_kind:
                         continue
+                    if sample.get("base_method_version") != REPLAY_METHOD_VERSION:
+                        continue
                     params = json.loads(sample["parameters_json"])
                     days = int(params.get("profile_days", 20))
                     row = dict(sample)
@@ -1629,6 +1645,9 @@ class MetaOperator:
                     row["base_probability_smoothed"] = sample.get("base_probability_smoothed")
                     row["label"] = labels.get((int(sample["id"]), "72h"))
                     row["profile_label"] = labels.get((int(sample["id"]), f"{days}d"))
+                    if any(label and label.get("base_method_version") != REPLAY_METHOD_VERSION
+                           for label in (row["label"], row["profile_label"])):
+                        continue
                     rows.append(row)
                 training_rows, validation_rows = temporal_learning_split(rows)
                 split_at = min((row["sample_at"] for row in validation_rows), default=None)
@@ -1663,6 +1682,7 @@ class MetaOperator:
                     result["training_effective"] = len(training)
                     result["validation_effective"] = len(validation)
                 result["training_cutoff"] = str(split_at) if split_at is not None else None
+                result["base_method_version"] = REPLAY_METHOD_VERSION
                 result["training_sample_ids"] = [int(row["id"]) for row in training]
                 result["validation_sample_ids"] = [int(row["id"]) for row in validation]
                 result["calibration_deciles"] = validation_calibration(
@@ -2019,9 +2039,10 @@ class MetaOperator:
         low_ratio = self._quantize_relative_range(float(low) / current_mid)
         high_ratio = self._quantize_relative_range(float(high) / current_mid)
         low, high = low_ratio * current_mid, high_ratio * current_mid
-        key = (symbol, self.clock() // 86400, strategy, round(target_usdt, 4), n,
+        from grid.meta_learning import REPLAY_METHOD_VERSION
+        key = (REPLAY_METHOD_VERSION, symbol, self.clock() // 86400, strategy, round(target_usdt, 4), n,
                round(capital, 4), window_days, low_ratio, high_ratio,
-               round(float(cfg.get("max_loss_pct", 0)), 4))
+               round(float(cfg.get("max_loss_pct", 0)), 4), float(cfg.get("_meta_capital_initial", capital)))
         cached = self._cache.get(key)
         self._analysis_timing.setdefault("replay_cache_hits", 0)
         if cached is None:
@@ -2032,6 +2053,9 @@ class MetaOperator:
         else:
             self._analysis_timing["replay_cache_hits"] += 1
             self._analysis_timing["replay_process_cache_hits"] = self._analysis_timing.get("replay_process_cache_hits", 0) + 1
+        if cached is not None and (cached.get("method_version") != REPLAY_METHOD_VERSION or
+                any("curve" not in row for row in cached.get("window_results", []))):
+            cached = None
         replay_windows = None
         if cached is None:
             replay_started = time.perf_counter()
@@ -2069,7 +2093,7 @@ class MetaOperator:
                 if getattr(self, "_low_priority_precompute", False):
                     time.sleep(.001)
             cached = {"summary": summarize_replays(rows, independent_window_days=window_days, target_usdt=target_usdt),
-                      "window_results": window_results}
+                      "window_results": window_results, "method_version": REPLAY_METHOD_VERSION}
             cached["summary"]["skipped_windows"] = len(skipped_windows)
             if skipped_windows:
                 cached["summary"]["skipped_reason"] = skipped_windows[0]["reason"]
@@ -2094,7 +2118,7 @@ class MetaOperator:
             windows=replay_windows)
         self._analysis_timing["touch_signal_s"] = self._analysis_timing.get("touch_signal_s", 0.0) + (
             time.perf_counter() - touch_started)
-        cached = json.loads(json.dumps(cached))
+        cached = copy.deepcopy(cached)
         window_results = cached["window_results"]
         estimate = cached["summary"]
         piece_type = "individual_bot_grid" if strategy == "individual_bot" else "grid"
@@ -2123,36 +2147,13 @@ class MetaOperator:
         `filters` son los filtros reales del símbolo (tick/step/notional); si
         faltan, cada simulador cae a su propio tick genérico (comportamiento
         anterior a la Fase 40c, parte B1)."""
-        if strategy == "individual_bot":
-            from grid.sim.meta_bot import run_meta_bot
-            replay = run_meta_bot(sample, capital=capital, buy_price=w_low, sell_price=w_high,
-                                  target_usdt=target_usdt, fee_pct=.1, filters=filters,
-                                  max_loss_pct=cfg.get("max_loss_pct"),
-                                  min_margin_pct=cfg.get("min_margin_pct", .3))
-            result_row = {"window_start": start_ts, "reached": replay["reached"],
-                          "days": replay["days"], "pnl_usdt": replay["pnl_usdt"],
-                          "drawdown_pct": replay["drawdown_pct"],
-                          "worst_loss_vs_capital_pct": replay["worst_loss_vs_capital_pct"], "step_days": 7,
-                          "loss_cut": replay["loss_cut"], "bought": replay["bought"],
-                          "sold": replay["sold"]}
-        else:
-            params = {"target_usdt": target_usdt, "target_basis": "cash"}
-            simulation = run_simulation(sample, strategy=strategy, n=n, capital=capital,
-                low=w_low, high=w_high, width_pct=None, params=params, fee_pct=.1,
-                close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
-                meta_max_loss_pct=cfg.get("max_loss_pct"), filters=filters)
-            event = next((e for e in simulation["events"] if e.get("type") == "TARGET_REACHED"), None)
-            loss_cut = any(e.get("type") == "META_LOSS_CUT" for e in simulation["events"])
-            days = None if event is None else (int(event["ts"]) - int(sample.timestamp[0])) / 86400
-            metrics = simulation["metrics"]
-            result_row = {"window_start": start_ts, "reached": event is not None,
-                          "days": days,
-                          "pnl_usdt": (float(metrics.get("cash_final", capital)) - capital if loss_cut else
-                              float(metrics.get("equity_final_after_repository_liquidation", capital)) - capital),
-                          "drawdown_pct": max(0.0, float(metrics.get("max_drawdown_pct", 0))),
-                          "worst_loss_vs_capital_pct": max(0.0, float(metrics.get("worst_loss_vs_capital_pct", 0))),
-                          "step_days": 7, "loss_cut": loss_cut}
-        return result_row
+        from grid.sim.meta_portfolio import simulate_piece_curve, evaluate_portfolio
+        piece = simulate_piece_curve(sample, strategy=strategy, n=n, capital=capital,
+            low=w_low, high=w_high, filters=filters, min_margin_pct=cfg.get("min_margin_pct", .3))
+        outcome = evaluate_portfolio([piece["curve"]],
+            capital_initial=float(cfg.get("_meta_capital_initial", capital)),
+            target_usdt=target_usdt, max_loss_pct=cfg.get("max_loss_pct"))
+        return {"window_start": start_ts, **piece, **outcome}
 
     def _touch_signal_for(self, symbol, strategy, n, low, high, ref, candles, window_days, *, windows=None):
         """Calcula estadísticas por celda y ventana, con precios reescalados."""

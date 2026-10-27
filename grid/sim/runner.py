@@ -87,7 +87,7 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                    sigma_values=None, idle_shrink_enabled=False, adjust_enabled_global=True,
                    stoploss_enabled=True, close_wait_enabled=False, respacing_enabled=False,
                    direction_signal=None, direction_threshold=0.60,
-                   meta_max_loss_pct=None):
+                   meta_max_loss_pct=None, meta_portfolio_piece=False):
     if strategy not in {"simple", "smart"}:
         raise ValueError("strategy must be simple or smart")
     dust_sweep_enabled = bool(params is None or params.get("dust_sweep_enabled", True))
@@ -263,6 +263,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                                          active_high, float(capital), sigma_now, paused_since,
                                          datetime.fromtimestamp(int(ts), timezone.utc), pause_reasons)
                 action = decision.action
+                if meta_portfolio_piece and action == "CLOSE_REPOSITORY":
+                    # En Meta el corte pertenece a la cartera, no a cada grid.
+                    action = "NONE"
                 now = datetime.fromtimestamp(int(ts), timezone.utc)
                 target_decision = None
                 if target_enabled and action != "CLOSE_REPOSITORY":
@@ -685,7 +688,9 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
         if status == "HOLDING" and not any(c["state"] == "SELL_OPEN" and c["held_qty"] > 0
                                              for c in cells):
             status = "CLOSED"
-        if trace_callback is not None and i % resync_candles == 0:
+        if trace_callback is not None and (
+                (meta_portfolio_piece and (int(ts) % 900 == 0 or i == 0 or i == len(candles.timestamp) - 1))
+                or (not meta_portfolio_piece and i % resync_candles == 0)):
             projected_cells = cells
             projected_orders = list(exchange.orders.values())
             if status == "HOLDING":
@@ -800,6 +805,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
                      "resync_candles": resync_candles, "halflife_h": halflife_h,
                      "sigma_scale": sigma_scale, "meta_max_loss_pct": meta_max_loss_pct,
                      "params": effective}
+    if meta_portfolio_piece:
+        hashed_params["meta_portfolio_piece"] = True
     params_digest = hashlib.sha256(json.dumps(hashed_params,
                                                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     result = {"strategy": strategy, "start": int(candles.timestamp[0]), "end": int(candles.timestamp[-1]),

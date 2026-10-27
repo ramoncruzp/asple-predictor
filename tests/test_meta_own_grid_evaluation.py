@@ -173,6 +173,8 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     old_plan = reference._build_plan(goal, record=False)
     current_plan.pop("timings_s")
     old_plan.pop("timings_s")
+    from grid.meta_learning import REPLAY_METHOD_VERSION
+    assert current_plan.pop("base_method_version") == REPLAY_METHOD_VERSION
     assert current_plan == old_plan
     for operator in (actual, reference):
         operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None

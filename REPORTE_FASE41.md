@@ -228,10 +228,45 @@ Comando dirigido: `$env:ASPLE_OFFLINE='1'; $testBase = Join-Path $env:TEMP ('asp
 
 Resultado: **90 passed, 4 warnings, 0 failed; 6,02 s**. Sin suite completa, JavaScript modificado, S1, Testnet, `.env` ni base real.
 
-## Fase 41c-1 — criterio de cumplimiento pendiente de resolución (2026-10-27)
+## Fase 41c-1 — curvas de cartera y corrección de C6 (2026-10-27)
 
-La comprobación previa requerida encontró una discrepancia sustancial: `grid/meta.py:718` declara cumplimiento con `cash_usdt >= capital_initial + target_usdt`, no con patrimonio marcado. `cash_usdt` procede de `attributable_cash` (`grid/meta.py:485`) con ventas/comisiones realizadas; no aplica un haircut ni valora inventario. El patrimonio ejecutable y best bid sí valoran inventario con comisión estimada de 0,1 % (`:518`, `:540`); el haircut de 1 % solo estima inventario que no absorbe el libro. Esos valores se usan para pérdida y presentación, no sustituyen al efectivo en el cumplimiento.
+### Criterio de evaluación
 
-El punto 3 del prompt pide éxito con suma de patrimonio menos capital usado. Por ejemplo, con capital 100, objetivo 3, efectivo 30 e inventario valorado en 80 antes de comisión, el patrimonio estimado es 109,92 y cruzaría el objetivo; el núcleo seguiría sin cumplir porque el efectivo es 30. Por tanto, esa definición de éxito no reproduce el cumplimiento actual. No se modificaron `grid/meta.py`, el método de replay, sus cachés ni `REPLAY_METHOD_VERSION`.
+Ramón confirmó el criterio del núcleo (grid/meta.py:704-718): el primer éxito ocurre cuando el efectivo atribuible sumado de todas las piezas, más el capital inicial aún no asignado, alcanza capital_inicial + target_usdt. El inventario no cuenta para cumplir la meta. En paralelo, la curva de patrimonio suma efectivo e inventario valorado al cierre con una comisión estimada de venta del 0,1 %. Esa curva determina el corte por pérdida máxima, el avance mediano, el drawdown y la peor pérdida. La pérdida máxima se compara con el capital inicial y, si se toca antes del éxito o en el mismo punto, prevalece el corte. Se conservan por pieza ambas curvas de efectivo y patrimonio cada 15 minutos; no se guardan velas en la base de datos. Esta precisión corrige el criterio del punto 3 del prompt: el éxito es por efectivo atribuible, mientras el patrimonio mide riesgo y avance, según el núcleo vigente.
 
-Se solicitó a Ramón resolver si el replay debe exigir efectivo para éxito (y patrimonio para avance/riesgo), o usar patrimonio como estimación predictiva explícitamente distinta del cumplimiento real. Hasta resolverlo quedan pendientes la implementación v3, sus pruebas, la tabla de cinco carteras, el versionado de muestras y la corrección de la conclusión 6.2. No se creó el commit 41c-1 ni se implementó 41c-2.
+### Implementación y compatibilidad
+
+grid/sim/meta_portfolio.py:8-65 empaqueta curvas float32 con base64 y agrega las piezas en marcas de tiempo comunes; el efectivo no asignado se incorpora como saldo constante. :68-108 simula grids y bots sin objetivo ni corte de pérdida por pieza y captura efectivo y patrimonio. El bot queda en DONE tras vender. grid/sim/runner.py habilita el trazado cada 15 minutos solo para este replay Meta; los grids normales conservan su ejecución. grid/sim/meta_bot.py permite el trazado sin detener la trayectoria al alcanzar un objetivo individual.
+
+grid/meta_operator.py:2143-2158 usa el simulador de curva para las evaluaciones por pieza; combine_aligned_replays suma curvas alineadas y aplica el criterio conjunto a las carteras. La estimación no suma éxitos separados de ventanas o piezas.
+
+grid/meta_learning.py cambia el método base a rolling_7d_v3_equity. La versión forma parte de la plantilla/hash de replay; resultados persistidos v2 sin curvas se recalculan y no se mezclan con v3. Las etiquetas y versiones históricas no se borran. Las muestras y modelos de aprendizaje con versiones incompatibles se excluyen del ajuste combinado. La simulación de aprendizaje usa el mismo criterio: efectivo para éxito, patrimonio para avance y corte por pérdida.
+
+### Comparación sintética de cinco carteras
+
+Velas sintéticas de 5 minutos, tres ventanas de 20 días por alternativa, paso de 7 días, filtros de símbolo ficticios y simuladores reales. «Avance mediano» es el avance de patrimonio como porcentaje del objetivo de 3 USDT; puede superar 100 % cuando el patrimonio avanza más que el objetivo. No es una promesa de rendimiento.
+
+| Cartera | Método | Éxito | Avance mediano (% del objetivo) | Días medianos al éxito |
+|---|---:|---:|---:|---:|
+| JUP Smart 70 | v2 | 100 % | 122,50 % | 0,71 |
+| JUP Smart 70 | v3 | 100 % | 3.392,65 % | 4,70 |
+| JUP Smart 70 + ZRO Simple 30 | v2 | 100 % | 177,23 % | 1,36 |
+| JUP Smart 70 + ZRO Simple 30 | v3 | 100 % | 5.068,21 % | 3,71 |
+| JUP Smart 70 + bot XRP 20 | v2 | 0 % | 71,23 % | — |
+| JUP Smart 70 + bot XRP 20 | v3 | 100 % | 3.398,69 % | 4,70 |
+| XRP Simple 30 + JUP Smart 70 | v2 | 100 % | 143,28 % | 1,05 |
+| XRP Simple 30 + JUP Smart 70 | v3 | 100 % | 4.835,25 % | 4,70 |
+| JUP Smart 50 + ZRO Simple 30 + bot XRP 20 | v2 | 100 % | 136,31 % | 1,03 |
+| JUP Smart 50 + ZRO Simple 30 + bot XRP 20 | v3 | 100 % | 4.099,16 % | 3,71 |
+
+Artefacto reproducible: $env:TEMP\asple41c1-carteras-20261027.json. Harness: tests/meta_portfolio_curve_benchmark.py. La diferencia de avance entre v2 y v3 responde a los objetivos individuales frente a la evaluación conjunta sin objetivo por pieza. Estas trayectorias sintéticas verifican el método; no estiman resultados de mercado.
+
+### Pruebas y resultado
+
+Comando: $env:ASPLE_OFFLINE='1'; $testBase = Join-Path $env:TEMP ('asple-41c1-' + [guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_portfolio_equity.py tests/test_meta_learning.py tests/test_meta_operator.py tests/test_meta_learning_api.py tests/test_grid_sim_runner.py tests/test_meta_own_grid_evaluation.py tests/test_meta_review_resilience.py tests/test_meta_portfolio_performance.py -q --tb=short --basetemp $testBase
+
+Resultado: 143 passed, 9 warnings, 0 failed; 7,56 s. Cubre efectivo/patrimonio agregados, capital sin asignar, corte de pérdida antes de recuperación, timestamps comunes, curvas de grid cada 15 minutos, bot DONE, grid cada 15 minutos, migracion de version, rechazo de caché v2, versionado de plantilla/aprendizaje y regresiones dirigidas.
+
+Medición sintética de plan con caché caliente: 6 candidatas, 4 elegibles, 100 combinaciones, 297 alternativas de pieza y 894 cálculos de probabilidad. Análisis 5,07 s, decisión 0,16 s, total 5,23 s con lecturas ficticias de 50 ms. No usa S1 ni red. Los 148,26 s de 41c-0 provienen de otro fixture caliente y se conservan como referencia separada.
+
+No se cambió el cumplimiento real ni los límites de operación. La Fase 41c-2 queda fuera del alcance.

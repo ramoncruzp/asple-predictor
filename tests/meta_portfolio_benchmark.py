@@ -15,7 +15,7 @@ from tests.test_meta_own_grid_evaluation import plan_setup
 from grid.sim.data import CandleData
 
 
-def scenario(revision="a062e09", latency_s=0.0):
+def scenario(revision="a062e09", latency_s=0.0, *, curves=False):
     source = (Path("grid/meta_operator.py").read_text(encoding="utf-8") if revision == "working"
         else subprocess.check_output(["git", "show", revision + ":grid/meta_operator.py"]).decode("utf-8"))
     module = types.ModuleType("meta_portfolio_benchmark_" + revision)
@@ -70,6 +70,13 @@ def scenario(revision="a062e09", latency_s=0.0):
             "pnl_usdt": capital * .12, "days": 8 + i % 3, "drawdown_pct": 2, "step_days": 7}
             for i in range(12)]
         estimate = module.summarize_replays(rows, independent_window_days=20, target_usdt=target)
+        if curves:
+            from grid.sim.meta_portfolio import pack_curve
+            points = np.arange(0, 20 * 86400 + 1, 900, dtype=np.int64)
+            balances = np.linspace(capital, capital * 1.12, len(points))
+            packed = pack_curve(points, balances, balances, capital)
+            for window_row in rows:
+                window_row["curve"] = packed
         return {"symbol": row["symbol"], "strategy": "simple" if strategy == "individual_bot" else strategy,
             "pieces": [{"symbol": row["symbol"], "strategy": "simple" if strategy == "individual_bot" else strategy,
                 "piece_type": "individual_bot_grid" if strategy == "individual_bot" else "grid",
@@ -113,8 +120,9 @@ def main():
     parser.add_argument("--revision", default="a062e09")
     parser.add_argument("--latency", type=float, default=.05)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--curves", action="store_true", help="medir suma de curvas v3 con caché caliente")
     args = parser.parse_args()
-    result = scenario(args.revision, args.latency)
+    result = scenario(args.revision, args.latency, curves=args.curves)
     args.output.write_text(json.dumps(result, ensure_ascii=True, default=str), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key not in {"plan", "decision"}}, indent=2))
 

@@ -11,7 +11,7 @@ import numpy as np
 HOURS_72 = 72
 VOL_FORECAST_HORIZON_H = 24
 BACKFILL_DAYS = 180
-REPLAY_METHOD_VERSION = "rolling_7d_v2"
+REPLAY_METHOD_VERSION = "rolling_7d_v3_equity"
 LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor",
                     "touch_buy_to_sell")
 DEFAULT_SIGNAL_WEIGHTS = {name: .25 for name in LEARNING_SIGNALS}
@@ -40,7 +40,8 @@ def stable_template(parameters, *, meta_capital_usdt):
             "ceiling_mid_q": round(round(ceiling / REPLAY_CACHE_STEP) * REPLAY_CACHE_STEP, 4),
             "capital_fraction": round(float(piece.get("capital_usdt") or 0) / denominator, 4),
             "margin_pct": round(float(piece.get("margin_pct") or 0), 4)})
-    canonical = {"profile": str(parameters.get("profile") or "RAPIDO").upper(),
+    canonical = {"base_method_version": REPLAY_METHOD_VERSION,
+        "profile": str(parameters.get("profile") or "RAPIDO").upper(),
         "profile_days": int(parameters.get("profile_days") or 20),
         "target_fraction": round(float(parameters.get("target_usdt") or 0) / denominator, 6),
         "max_loss_pct": round(float(parameters.get("max_loss_pct") or 0), 4),
@@ -258,6 +259,9 @@ def fit_signal_weights(rows, current_weights=None, *, min_effective=30,
                        max_delta=0.05, max_abs_weight=1.0, logit_cap=1.0,
                        regularization=1.0, alpha=0.05, validation_rows=None):
     """Ajuste penalizado con offset replay, errores cluster bidireccionales y Holm."""
+    versions = {row.get("base_method_version") for row in list(rows) + list(validation_rows or [])}
+    if len(versions) > 1:
+        raise ValueError("no se mezclan versiones de base replay en un ajuste")
     from scipy.optimize import minimize
     from scipy.special import expit, logit
     from scipy.stats import norm
@@ -664,65 +668,36 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, includ
         if immature:
             result[label_horizon] = {"status": "immature", "required_until": end_s}
             continue
-        net_advance, drawdowns = 0.0, []
-        piece_paths = []
+        from grid.sim.meta_portfolio import simulate_piece_curve, evaluate_portfolio
+        curves = []
         required_total = proportional_target_usdt(target, profile_days, hours)
         for piece in pieces:
             capital = float(piece.get("capital_usdt", 0))
             if capital <= 0:
                 continue
-            piece_target = required_total * capital / total_capital
-            path = {}
-            trace = lambda row, path=path: path.__setitem__(int(row["timestamp"]),
-                float(row["equity"]) - capital)
             sample = samples[str(piece.get("symbol") or "").upper()]
             ref = float(piece.get("mid_at_plan") or piece.get("reference_price") or sample.open[0])
             scale = float(sample.open[0]) / ref if ref > 0 else 1.0
             floor = float(piece.get("floor", piece.get("range_low", 0))) * scale
             ceiling = float(piece.get("ceiling", piece.get("range_high", 0))) * scale
-            if floor <= 0 or ceiling <= floor:
-                continue
-            if piece.get("piece_type") == "individual_bot_grid":
-                replay = run_meta_bot(sample, capital=capital, buy_price=floor,
-                    sell_price=ceiling, target_usdt=piece_target, fee_pct=.1,
-                    max_loss_pct=parameters.get("max_loss_pct"), min_margin_pct=.3,
-                    trace_callback=trace)
-                net_advance += float(replay.get("pnl_usdt", 0))
-                drawdowns.append(float(replay.get("drawdown_pct", 0)))
-                piece_paths.append(path)
-            else:
-                sim = run_simulation(sample, strategy=piece.get("strategy", "simple"),
-                    n=max(4, int(piece.get("n_levels", 4))), capital=capital,
-                    low=floor, high=ceiling, width_pct=None,
-                    params={"target_usdt": piece_target, "target_basis": "cash"},
-                    fee_pct=.1, close_wait_enabled=True, adjust_enabled_global=False,
-                    stoploss_enabled=False, meta_max_loss_pct=parameters.get("max_loss_pct"),
-                    trace_callback=trace, resync_candles=1)
-                metrics = sim.get("metrics", {})
-                if any(event.get("type") == "META_LOSS_CUT" for event in sim.get("events", [])):
-                    ending = float(metrics.get("cash_final", capital))
-                else:
-                    ending = float(metrics.get("equity_final_after_repository_liquidation", capital))
-                net_advance += ending - capital
-                drawdowns.append(float(metrics.get("max_drawdown_pct", 0)))
-                piece_paths.append(path)
-        portfolio_path = {}
-        for path in piece_paths:
-            for timestamp, pnl in path.items():
-                portfolio_path[timestamp] = portfolio_path.get(timestamp, 0.0) + pnl
-        crossings = [timestamp for timestamp, pnl in portfolio_path.items()
-                     if pnl >= required_total]
-        max_advance = max(portfolio_path.values(), default=net_advance)
+            strategy = ("individual_bot" if piece.get("piece_type") == "individual_bot_grid"
+                else piece.get("strategy", "simple"))
+            replay = simulate_piece_curve(sample, strategy=strategy,
+                n=max(1, int(piece.get("n_levels", 4))), capital=capital,
+                low=floor, high=ceiling, min_margin_pct=piece.get("margin_pct", .3))
+            curves.append(replay["curve"])
+        outcome = evaluate_portfolio(curves, capital_initial=total_capital,
+            target_usdt=required_total, max_loss_pct=parameters.get("max_loss_pct"))
         result[label_horizon] = make_learning_label(horizon=label_horizon,
-            net_advance_usdt=net_advance, target_usdt=target,
+            net_advance_usdt=outcome["pnl_usdt"], target_usdt=target,
             profile_days=profile_days, capital_usdt=total_capital,
-            reached_target=bool(crossings),
-            elapsed_hours=((min(crossings) - start_s) / 3600) if crossings else None,
-            drawdown_pct=max(drawdowns, default=0.0))
-        result[label_horizon]["reached"] = bool(crossings)
-        result[label_horizon]["max_advance_usdt"] = float(max_advance)
-        result[label_horizon]["status"] = "labeled"
-        result[label_horizon]["sample_start"] = start_s
-        result[label_horizon]["sample_end"] = end_s
+            reached_target=outcome["reached"], elapsed_hours=(
+                outcome["days"] * 24 if outcome["days"] is not None else None),
+            drawdown_pct=outcome["drawdown_pct"])
+        result[label_horizon].update({"status": "labeled", "sample_start": start_s,
+            "sample_end": end_s, "base_method_version": REPLAY_METHOD_VERSION,
+            "cash_final": outcome["cash_final"], "loss_cut": outcome["loss_cut"],
+            "worst_loss_vs_capital_pct": outcome["worst_loss_vs_capital_pct"],
+            "max_advance_usdt": outcome["max_advance_usdt"]})
     return result
 

@@ -46,7 +46,13 @@
 - La medición representa caché caliente: replay y Advisor se sustituyen por resultados deterministas, y las lecturas de exchange/BD falsos duermen 50 ms. No mide el Scanner real, un replay frío ni S1. El total del análisis baja de 148,26 a 2,24 s; análisis más decisión optimizados: 2,39 s. Los subtiempos de etapas anidadas se solapan.
 - Se conservaron los resultados exactos en la regresión contra `a062e09`. Las lecturas se fijan al primer acceso durante el plan; se renuevan entre planes y al ejecutar. No se tocaron reglas, pesos, probabilidades, límites ni simuladores.
 
-## Fase 41c-1 — discrepancia que requiere decisión de Ramón
+## Fase 41c-1 — decisiones y límites documentados (2026-10-27)
 
-- El núcleo cumple por efectivo realizado (`grid/meta.py:718`); el prompt propone cumplimiento simulado por patrimonio incluyendo inventario. Son criterios distintos, incluso con la misma comisión de 0,1 %. Ejecutar literalmente el punto 3 y describirlo como «el mismo criterio que la meta real» sería incorrecto.
-- Conforme a la regla de no cambiar el criterio real, se deja 41c-1 pendiente de aclaración. No se cambió el núcleo ni se publicó un método v3 que mezclara ambas definiciones. Faltan implementación, comparación de carteras, pruebas y versionado de esta parte; no se presentan como hechos.
+- Ramón confirmó: éxito por efectivo atribuible agregado más capital no asignado; pérdida máxima, avance, drawdown y peor pérdida por patrimonio agregado. Es el criterio del núcleo (grid/meta.py:704-718). El punto 3 del prompt queda precisado: el inventario no adelanta el cumplimiento, aunque su valor sí cuenta para riesgo y avance.
+- Las curvas usan precio de cierre simulado y comisión estimada de venta del 0,1 %. No se integró profundidad histórica del libro; es una estimación reproducible con velas.
+- Las piezas se agregan solo en timestamps comunes. Las curvas se serializan como float32; puede haber redondeo de precisión simple. No se guardan las velas.
+- El runner Meta desactiva únicamente en la simulación de cartera el cierre de repositorio por pieza; el corte de pérdida pertenece a la cartera. El camino normal de grids no cambia. El bot se simula hasta el final de la ventana y conserva DONE sin recompra.
+- Los cinco ejemplos sintéticos no son una comparación de mercado ni una afirmación de superioridad. El avance puede cambiar ampliamente al quitar objetivos individuales por pieza; no es una promesa.
+- El método se versionó como rolling_7d_v3_equity. Las entradas v2 sin curva se recalculan; database/db_manager.py:517-521 compara con la versión vigente para no volver a marcar v3 en cada arranque. No se eliminaron filas ni versiones. Muestras y etiquetas incompatibles no se combinan.
+- Pruebas dirigidas: 143 passed, 9 warnings, 0 failed. No se ejecutó la suite completa. No se usaron S1, Testnet, .env, red ni base real.
+- Fase 41c-2 no implementada.

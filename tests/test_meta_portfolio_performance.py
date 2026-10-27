@@ -10,7 +10,8 @@ from tests.test_meta_own_grid_evaluation import plan_setup
 
 def test_production_sized_warm_plan_matches_a062e09_with_fewer_reads():
     before = scenario("a062e09")
-    after = scenario("working")
+    # Se fija el refactor de caché: 41c-1 cambia el método de replay deliberadamente.
+    after = scenario("c0bc8da")
     old_plan, new_plan = copy.deepcopy(before["plan"]), copy.deepcopy(after["plan"])
     old_plan.pop("timings_s")
     new_plan.pop("timings_s")
