@@ -136,3 +136,41 @@ def test_csv_mode_runs_synthetic_inputs_and_writes_json_and_csv(tmp_path):
     assert len(rows) == 5
     assert (out / "medicion_intravela.json").is_file()
     assert (out / "medicion_intravela.csv").is_file()
+
+
+def test_strong_trend_uses_start_geometry_even_when_final_price_leaves_range():
+    count = 120
+    times = np.arange(count, dtype=np.int64) * 300
+    closes = 10 * np.power(1.001, np.arange(count))
+    candles = _candle_data(times, closes, closes * 1.001, closes * .999, closes, 300)
+    geometry = measurement._advisor_geometry(candles)
+    assert geometry["reference"] == candles.close[0]
+    assert candles.close[-1] > geometry["high"]
+    result = measurement._run_grid(candles, geometry, "simple")
+    assert "metrics" in result
+    changed_future = _candle_data(times, closes, closes * 1.001, closes * .999,
+        np.r_[closes[:41], closes[41:] * 3], 300)
+    original_prefix_geometry = measurement._advisor_geometry(candles, start_index=40)
+    changed_prefix_geometry = measurement._advisor_geometry(changed_future, start_index=40)
+    assert original_prefix_geometry == changed_prefix_geometry
+
+
+def test_invalid_geometry_is_recorded_and_other_rows_continue(tmp_path, monkeypatch, capsys):
+    five = _candle_data(np.arange(80, dtype=np.int64) * 300,
+        np.full(80, 10), np.full(80, 10.2), np.full(80, 9.8), np.full(80, 10), 300)
+    one = _candle_data(np.arange(400, dtype=np.int64) * 60,
+        np.full(400, 10), np.full(400, 10.2), np.full(400, 9.8), np.full(400, 10), 60)
+    monkeypatch.setattr(measurement, "_load_csv", lambda path, seconds: five if seconds == 300 else one)
+    monkeypatch.setattr(measurement, "_advisor_geometry", lambda candles, *_a, **_k: {
+        "low": float(candles.close[0]), "high": float(candles.close[0]) * 1.02,
+        "reference": float(candles.close[0]), "n": 4, "sigma_24h": 0.0, "source": "invalid synthetic"})
+    rows = measurement.measure(["TESTUSDT"], 20, "csv", tmp_path, tmp_path / "out")
+    assert rows[0]["geometry"] == "smart" and rows[0]["error"].startswith("GridConfigError:")
+    assert rows[1]["geometry"] == "simple" and rows[1]["error"].startswith("GridConfigError:")
+    assert all("error" not in row for row in rows[2:])
+    saved = __import__("json").loads((tmp_path / "out" / "medicion_intravela.json").read_text(encoding="utf-8"))
+    assert saved["rows"][0]["error"].startswith("GridConfigError:")
+    assert "ciclos 5m" in capsys.readouterr().out
+    monkeypatch.setattr(measurement, "measure", lambda *_args: rows)
+    assert measurement.main(["--symbols", "TESTUSDT", "--days", "20", "--source", "csv",
+        "--csv-dir", str(tmp_path), "--out", str(tmp_path / "cli-out")]) == 0

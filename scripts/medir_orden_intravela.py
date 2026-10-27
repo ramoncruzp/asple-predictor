@@ -100,10 +100,20 @@ def _slice(candles: CandleData, begin: int, end: int) -> CandleData | None:
                         ("timestamp", "open", "high", "low", "close")), gaps=0)
 
 
-def _advisor_geometry(candles: CandleData, filters=FILTERS) -> dict:
+def _advisor_geometry(candles: CandleData, filters=FILTERS, *, start_index: int = 0,
+                      bars_per_hour: int = 12) -> dict:
     """Reproduce el rango centrado moderado y el selector puro de niveles del Advisor."""
-    sigma = float(ewma_sigma_24h(candles.close, bars_per_hour=12)[-1])
-    mid = float(candles.close[-1])
+    start_index = int(start_index)
+    if start_index < 0 or start_index >= len(candles.close):
+        raise ValueError("índice inicial fuera de las velas disponibles")
+    # Sigma usa estrictamente velas anteriores al primer instante simulado.
+    # En el inicio global no hay precalentamiento descargado; se usa el fallback σ=0.
+    if start_index < 2:
+        sigma = 0.0
+    else:
+        sigma = float(ewma_sigma_24h(candles.close[:start_index],
+            bars_per_hour=bars_per_hour)[-1])
+    mid = float(candles.close[start_index])
     if sigma > 0:
         # Fórmula de rango centrado moderado del Advisor: objetivo de toque 30 %,
         # sigma de 72 h y amplitud máxima del perfil 45 %.
@@ -117,10 +127,10 @@ def _advisor_geometry(candles: CandleData, filters=FILTERS) -> dict:
     selected = select_levels(low, high, mid, CAPITAL, filters, FEE_PCT,
                               margin_target_pct=.3, sigma_24h=sigma,
                               vol_spacing=False, k=2.0)
-    return {"low": float(low), "high": float(high),
+    return {"low": float(low), "high": float(high), "reference": mid,
             "n": max(4, int(selected["n_levels"])), "sigma_24h": sigma,
             "source": "rango centrado moderado del Advisor y grid.structure.select_levels; "
-                      "σ realizada 5m, margen 0,3 %"}
+                      f"σ realizada previa con {bars_per_hour} barras/h, margen 0,3 %"}
 
 
 def _run_grid(candles: CandleData, geometry: dict, strategy: str, target: bool = False,
@@ -217,59 +227,94 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
         cutoff = int(candles5.timestamp[-1]) - days * DAY
         candles5 = _slice(candles5, cutoff, int(candles5.timestamp[-1]) + 1) or candles5
         candles1 = _slice(candles1, cutoff, int(candles1.timestamp[-1]) + 1) or candles1
-        geometry = _advisor_geometry(candles5, filters)
-        specs = [("smart", geometry, None), ("simple", geometry, None)] + [
-            ("bot", {"reference": float(candles5.close[-1])}, offset) for offset in (-.5, -1.5, -3.0)]
-        for kind, shape, offset in specs:
+        specs = [("smart", None), ("simple", None)] + [("bot", offset) for offset in (-.5, -1.5, -3.0)]
+        for kind, offset in specs:
             done += 1
             label = f"{symbol} {kind}" + (f" compra {offset:+.1f}%" if offset is not None else "")
             print(f"[{done}/{total}] {label}", flush=True)
             t0 = time.perf_counter()
-            run = lambda c, target=False: (_run_bot(c, shape, offset, target, filters) if kind == "bot"
-                                           else _run_grid(c, shape, kind, target, filters))
-            result5, result1 = run(candles5), run(candles1)
-            metrics5 = result5.get("metrics", {})
-            metrics1 = result1.get("metrics", {})
-            cycles5 = int(metrics5.get("cycles", int(result5.get("sold", False))))
-            cycles1 = int(metrics1.get("cycles", int(result1.get("sold", False))))
-            pnl5 = float(metrics5.get("pnl_total_net_usdt", result5.get("pnl_usdt", 0)))
-            pnl1 = float(metrics1.get("pnl_total_net_usdt", result1.get("pnl_usdt", 0)))
-            ambiguous, exact = ambiguous_and_exact(candles5, shape, kind, offset)
-            windows5 = windows1 = 0
-            successes5 = successes1 = 0
-            for begin, end in _windows(candles5):
-                w5, w1 = _slice(candles5, begin, end), _slice(candles1, begin, end)
-                if w5 is None or w1 is None:
-                    continue
-                windows5 += 1
-                windows1 += 1
-                successes5 += bool(run(w5, True).get("metrics", {}).get("target_reached", False)
-                                    if kind != "bot" else run(w5, True).get("reached"))
-                successes1 += bool(run(w1, True).get("metrics", {}).get("target_reached", False)
-                                    if kind != "bot" else run(w1, True).get("reached"))
-            rows.append({"symbol": symbol, "geometry": kind + (f"_buy_{offset:+.1f}%" if offset is not None else ""),
-                "cycles_5m": cycles5, "cycles_1m": cycles1,
-                "cycles_lost_pct": (max(0, cycles1 - cycles5) / cycles1 * 100 if cycles1 else 0),
-                "pnl_5m_usdt": pnl5, "pnl_1m_usdt": pnl1,
-                "ambiguous_5m_candles": ambiguous, "exact_touches_5m": exact,
-                "target_probability_5m_pct": successes5 / windows5 * 100 if windows5 else None,
-                "target_probability_1m_pct": successes1 / windows1 * 100 if windows1 else None,
-                "window_successes_5m": successes5, "window_count_5m": windows5,
-                "window_successes_1m": successes1, "window_count_1m": windows1,
-                "elapsed_s": round(time.perf_counter() - t0, 4),
-                "range_low": shape.get("low"), "range_high": shape.get("high"),
-                "n_levels": shape.get("n"), "advisor_geometry_source": geometry["source"]})
+            row = {"symbol": symbol,
+                "geometry": kind + (f"_buy_{offset:+.1f}%" if offset is not None else "")}
+            try:
+                shape5 = ( {"reference": float(candles5.close[0])} if kind == "bot" else
+                    _advisor_geometry(candles5, filters, start_index=0, bars_per_hour=12))
+                shape1 = ( {"reference": float(candles1.close[0])} if kind == "bot" else
+                    _advisor_geometry(candles1, filters, start_index=0, bars_per_hour=60))
+                def run(candles, shape, target=False):
+                    return (_run_bot(candles, shape, offset, target, filters) if kind == "bot"
+                        else _run_grid(candles, shape, kind, target, filters))
+                result5, result1 = run(candles5, shape5), run(candles1, shape1)
+                metrics5 = result5.get("metrics", {})
+                metrics1 = result1.get("metrics", {})
+                cycles5 = int(metrics5.get("cycles", int(result5.get("sold", False))))
+                cycles1 = int(metrics1.get("cycles", int(result1.get("sold", False))))
+                pnl5 = float(metrics5.get("pnl_total_net_usdt", result5.get("pnl_usdt", 0)))
+                pnl1 = float(metrics1.get("pnl_total_net_usdt", result1.get("pnl_usdt", 0)))
+                ambiguous, exact = ambiguous_and_exact(candles5, shape5, kind, offset)
+                windows5 = windows1 = 0
+                successes5 = successes1 = 0
+                window_errors = []
+                for begin, end in _windows(candles5):
+                    w5, w1 = _slice(candles5, begin, end), _slice(candles1, begin, end)
+                    if w5 is None or w1 is None:
+                        window_errors.append({"start": begin, "error": "ValueError: ventana incompleta en 5m o 1m"})
+                        continue
+                    try:
+                        ix5 = int(np.searchsorted(candles5.timestamp, begin, side="left"))
+                        ix1 = int(np.searchsorted(candles1.timestamp, begin, side="left"))
+                        window_shape5 = ({"reference": float(w5.close[0])} if kind == "bot" else
+                            _advisor_geometry(candles5, filters, start_index=ix5, bars_per_hour=12))
+                        window_shape1 = ({"reference": float(w1.close[0])} if kind == "bot" else
+                            _advisor_geometry(candles1, filters, start_index=ix1, bars_per_hour=60))
+                        result_w5, result_w1 = run(w5, window_shape5, True), run(w1, window_shape1, True)
+                        windows5 += 1
+                        windows1 += 1
+                        successes5 += bool(result_w5.get("metrics", {}).get("target_reached", False)
+                            if kind != "bot" else result_w5.get("reached"))
+                        successes1 += bool(result_w1.get("metrics", {}).get("target_reached", False)
+                            if kind != "bot" else result_w1.get("reached"))
+                    except Exception as exc:
+                        window_errors.append({"start": begin, "error": f"{type(exc).__name__}: {exc}"})
+                row.update({"cycles_5m": cycles5, "cycles_1m": cycles1,
+                    "cycles_lost_pct": (max(0, cycles1 - cycles5) / cycles1 * 100 if cycles1 else 0),
+                    "pnl_5m_usdt": pnl5, "pnl_1m_usdt": pnl1,
+                    "ambiguous_5m_candles": ambiguous, "exact_touches_5m": exact,
+                    "target_probability_5m_pct": successes5 / windows5 * 100 if windows5 else None,
+                    "target_probability_1m_pct": successes1 / windows1 * 100 if windows1 else None,
+                    "window_successes_5m": successes5, "window_count_5m": windows5,
+                    "window_successes_1m": successes1, "window_count_1m": windows1,
+                    "window_errors": window_errors,
+                    "elapsed_s": round(time.perf_counter() - t0, 4),
+                    "range_low_5m": shape5.get("low"), "range_high_5m": shape5.get("high"),
+                    "range_low_1m": shape1.get("low"), "range_high_1m": shape1.get("high"),
+                    "reference_5m": shape5.get("reference"), "reference_1m": shape1.get("reference"),
+                    "n_levels_5m": shape5.get("n"), "n_levels_1m": shape1.get("n"),
+                    "advisor_geometry_source": "geometría centrada al inicio con σ causal"})
+                row["measured"] = True
+                if window_errors:
+                    row["error"] = window_errors[0]["error"]
+            except Exception as exc:
+                row["error"] = f"{type(exc).__name__}: {exc}"
+            rows.append(row)
+            if not row.get("measured"):
+                print(f"[{done}/{total}] {label}: error {row['error']}", flush=True)
+            else:
+                suffix = f"; error de ventana: {row['error']}" if row.get("error") else ""
+                print(f"[{done}/{total}] {label}: ciclos 5m {row['cycles_5m']}, 1m {row['cycles_1m']}{suffix}", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     payload = {"method": "run_simulation/run_meta_bot sin cambios; fee=0,1%; éxito por efectivo atribuible",
                "source": source, "days": days, "horizon_days": HORIZON_DAYS,
                "step_days": STEP_DAYS, "rows": rows}
     (out / "medicion_intravela.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     with (out / "medicion_intravela.csv").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else [])
+        fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         if rows:
             writer.writeheader(); writer.writerows(rows)
     print("\nSímbolo/geometría | ciclos 5m/1m | perdidos % | PnL 5m/1m | ambiguas | exactos | P(+3) 5m/1m")
     for row in rows:
+        if not row.get("measured"):
+            continue
         print(f"{row['symbol']} {row['geometry']} | {row['cycles_5m']}/{row['cycles_1m']} | "
               f"{row['cycles_lost_pct']:.1f} | {row['pnl_5m_usdt']:.3f}/{row['pnl_1m_usdt']:.3f} | "
               f"{row['ambiguous_5m_candles']} | {row['exact_touches_5m']} | "
@@ -291,11 +336,11 @@ def main(argv=None) -> int:
     if args.days < HORIZON_DAYS:
         parser.error("--days debe ser al menos 20 para crear ventanas de probabilidad")
     try:
-        measure([s.strip().upper().replace("/", "") for s in args.symbols.split(",") if s.strip()],
+        rows = measure([s.strip().upper().replace("/", "") for s in args.symbols.split(",") if s.strip()],
                 args.days, args.source, args.csv_dir, args.out)
     except Exception as exc:
         parser.exit(2, f"Error de medición: {type(exc).__name__}: {exc}\n")
-    return 0
+    return 0 if any(row.get("measured") for row in rows) else 2
 
 
 if __name__ == "__main__":
