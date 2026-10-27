@@ -25,3 +25,9 @@
 - La caché de toque cuantiza geometría en pasos relativos de 0,01 % como permite el pedido. Una diferencia inferior a esa resolución puede reutilizar el último valor causal; queda pendiente medir en el arnés integral el impacto numérico agregado frente a una corrida sin caché.
 - `META_OPERATOR_ROTATION_EVALUATED` conserva los datos decisorios necesarios para persistencia y auditoría breve, mientras que el detalle extenso queda representado por la evaluación vinculada. La pantalla no consumía sus alternativas completas.
 - La suite completa no se ejecutó; la verificación fue solo sobre cinco archivos enfocados.
+
+## Fase 41b-11 — parte 1 (2026-10-27)
+
+- Sin cambios de reglas ni discrepancias funcionales en esta parte. Un fallo de comparación se registra en `decision_choices_error` tanto dentro de la comparación de respaldo como en el evento de revisión y el NOOP correspondiente; no se inventan decisiones de sombra cuando el cálculo falla.
+- Las cifras de S1 provienen del prompt de Ramón; la reproducción y las pruebas son locales con dobles de prueba. La corrección del autoconflicto del grid propio corresponde a la parte 2 y al commit 41b-11b.
+- Se usó una carpeta nueva bajo `$env:TEMP`, según el pedido específico, que tiene prioridad sobre la carpeta fija indicada en `AGENTS.md`. Solo se ejecutaron los dos archivos dirigidos: 77 pruebas verdes.

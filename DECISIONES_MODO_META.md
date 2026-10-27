@@ -120,6 +120,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 | 41a | Corrección directa de señales Meta, trazabilidad y diagnóstico | Implementada y verificada offline; commit por partes, sin despliegue |
 | 41b | Bitácora compacta v2 para planes y decisiones, recomendaciones guardadas una vez y decisiones ligadas por ID; lectores compatibles con v1 | Hecha localmente en `520766e`, `38bcffa`, `dcf6c3e`, `d1b3656`, `1956a2d`; 82 pruebas dirigidas verdes, sin push |
+| 41b-11 | Revisión resistente a alternativas actuales ausentes y evaluación sin autoconflicto de la pieza propia | Parte 1 implementada: comparación protegida y decisión real persistida; parte 2 en el siguiente commit |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -282,3 +283,8 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Las nuevas filas de `META_OPERATOR_NOOP` guardan los campos visibles de decisión en el nivel superior, la valoración, `plan_decision_id` y esquema 2. La evaluación de rotación no duplica planes completos.
 - El diagnóstico de muestras, eventos y predicciones convierte los timestamps a `datetime` de SQLite antes de comparar.
 - Pendiente de certificación: medir Advisor, replay, descarga lenta y `_build_plan` completos frente a `24f2ba7`, con el escenario sintético especificado. Las cifras de toque aislado no representan el tiempo de una revisión.
+
+## Fase 41b-11 — conservación de decisiones de revisión (2026-10-27)
+
+- La falta de una alternativa de una pieza para el grid actual se anota en la comparación con su motivo conocido. Un error de la comparación en sombra deja traceback y `decision_choices_error`; la decisión real y el NOOP correspondiente se guardan igualmente.
+- No se cambian materialidad, empate, persistencia, enfriamientos, límites, pesos ni reglas del operador. La parte 2 corrige el autoconflicto de las piezas propias al evaluar el plan.

@@ -145,3 +145,19 @@ Resultado: **102 passed, 12 warnings, 0 failed, 29,66 s**. Una corrida previa de
 ### Estado y limitaciones
 
 Implementación y pruebas dirigidas: hechas. Comparación completa de `_build_plan` con `24f2ba7`, medición de llamadas con retraso artificial de 2 s y certificación del límite de 2 minutos: no hechas; deben medirse antes de considerar cerrado el objetivo de rendimiento.
+
+## Fase 41b-11 — revisión resistente a una alternativa actual ausente (2026-10-27)
+
+### Parte 1: conservar la decisión real
+
+La evidencia de 39 fallos en S1 fue aportada por Ramón; no se consultó S1. En `_active_review_choices`, `current` puede ser `None` cuando el plan no contiene una alternativa de una pieza del símbolo y estrategia actuales. La expresión original llamaba igualmente a `current.get(...)` al preparar la comparación, después de tomar la decisión real y antes de escribirla.
+
+- `grid/meta_operator.py:2452`: la comparación usa `(current or {}).get("alternative_id")`. Si falta la alternativa, agrega `current_alternative_missing: true` y `current_alternative_missing_reason`: motivo de exclusión/filtro del candidato, moneda ausente o ausencia de estructura para la estrategia actual.
+- `grid/meta_operator.py:2533`: `_safe_active_review_choices` captura errores de comparación, registra el traceback con `logger.exception` y conserva la elección real junto con `decision_choices_error: "Tipo: mensaje"`. `_review_once_locked` (`:2591`) y `_record_review` (`:2614`) guardan el evento de revisión y el NOOP que corresponda con ese diagnóstico. No se modifican la asignación, las reglas ni el resultado real.
+- Lectores revisados: `_review_choice_label` (`:2443`) ya acepta `None`; `_review_allocations` (`:2770`) ya protege `current_alternative` ausente al calcular el plazo; `_rotation_gate` (`:2676`) ya retorna antes de acceder a una alternativa sin estimación; `_consider_piece_reconfiguration` (`:2939`) selecciona `current` después de exigir al menos dos candidatas. Se conservan esas protecciones. En `_active_review_choices` también se protege un `estimate` explícitamente nulo al leer la probabilidad de la sombra.
+
+Pruebas: `tests/test_meta_review_resilience.py` reproduce un grid JUP Smart cuyo plan solo contiene XRP Simple, verifica revisión y NOOP persistidos, y fuerza una excepción de comparación en ambas rutas de registro. También comprueba que una acción real ya decidida se conserva sin crear un NOOP y compara dos revisiones normales con la función original extraída del commit local `dd10892` (resultados y eventos completos idénticos). La prueba de rotación sin alternativa actual verifica la protección existente.
+
+Comando: `$env:ASPLE_OFFLINE='1'; $testBase = Join-Path $env:TEMP ('asple-41b11-' + [guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_review_resilience.py tests/test_meta_operator.py -q --basetemp $testBase`
+
+Resultado: **77 passed, 4 warnings, 0 failed; 9,22 s**. Sin suite completa, JavaScript modificado, red, S1, Testnet, `.env` ni base real. Parte 2 (autoconflicto de la pieza en el plan) se implementa y documenta en el siguiente commit separado.

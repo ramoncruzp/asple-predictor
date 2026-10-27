@@ -2462,6 +2462,16 @@ class MetaOperator:
             row.get("symbol") == grid.get("symbol") and row.get("strategy") == grid.get("strategy") and
             len(row.get("pieces", [])) == 1), None)
         current_est = (current or {}).get("estimate") or {}
+        if grid_id is not None and current is None:
+            candidate_row = next((row for row in (plan or {}).get("candidates", [])
+                if grid and row.get("symbol") == grid.get("symbol")), None)
+            choices["current_alternative_missing"] = True
+            choices["current_alternative_missing_reason"] = (
+                "grid actual no encontrado" if grid is None else
+                (candidate_row or {}).get("excluded_reason") or
+                (candidate_row or {}).get("hard_filters") or
+                ("moneda ausente del plan" if candidate_row is None else
+                 "sin alternativa de una pieza para la estrategia actual"))
         meta_id = int(meta_id or result.get("meta_id") or 0)
         cfg = (self.core.get_goal(meta_id) or {}).get("config_snapshot") or {} if meta_id else {}
         now = float(self.clock())
@@ -2471,7 +2481,7 @@ class MetaOperator:
             candidate = next((row for row in (plan or {}).get("alternatives", [])
                 if row.get("alternative_id") == proposed.get("alternative_id")), None)
             is_actionable = bool(candidate and grid and proposed.get("alternative_id") and
-                proposed.get("alternative_id") != current.get("alternative_id" if current else ""))
+                proposed.get("alternative_id") != (current or {}).get("alternative_id"))
             desired = ("reajustar" if grid and candidate and candidate.get("symbol") == grid.get("symbol")
                 and candidate.get("strategy") == grid.get("strategy") else "rotar")
             key = f"{name}:{int(grid_id or 0)}"
@@ -2492,7 +2502,7 @@ class MetaOperator:
                 {"probability": current_est.get("probability", 0),
                  "median_progress_pct": current_est.get("median_progress_pct")},
                 ([{"probability": ((candidate or {}).get("learned_probability") if name == "learned" else
-                        (candidate or {}).get("shadow_probability", (candidate or {}).get("estimate", {}).get("probability"))),
+                        (candidate or {}).get("shadow_probability", ((candidate or {}).get("estimate") or {}).get("probability"))),
                     "median_progress_pct": ((candidate or {}).get("estimate") or {}).get("median_progress_pct"),
                     "alternative_id": (candidate or {}).get("alternative_id"),
                     "alternative_key": self._alternative_key(candidate) if candidate else "",
@@ -2519,6 +2529,19 @@ class MetaOperator:
                      "decision": choice["action"], "reason": choice["reason"],
                      "action_at": now if choice["action"] != "mantener" else None}, grid_id=int(grid_id))
         return choices
+
+    def _safe_active_review_choices(self, plan, result, meta_id):
+        """Un fallo de la comparación no impide guardar la decisión real."""
+        try:
+            return self._active_review_choices(plan, result, meta_id)
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Falló la comparación de la revisión de Meta %s; se conserva la decisión real", meta_id)
+            return {"comparison_version": 2,
+                "real": {"decision": self._review_choice_label(result),
+                    "alternative_id": result.get("alternative_id"), "symbol": result.get("symbol"),
+                    "probability": result.get("probability")},
+                "decision_choices_error": f"{type(exc).__name__}: {exc}"}
 
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
@@ -2565,12 +2588,16 @@ class MetaOperator:
             else:
                 result = self._review_allocations(current_goal, current_value, plan=plan)
             value = current_value
+        choices = self._safe_active_review_choices(plan, result, meta_id)
+        comparison_error = ({"decision_choices_error": choices["decision_choices_error"]}
+            if "decision_choices_error" in choices else {})
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
+            **comparison_error,
             "decision": self._compact_review_result(result),
             "shadow_decision": getattr(self, "_last_review_shadow", None),
             "valuation": value,
-                "decision_choices": {**self._active_review_choices(plan, result, meta_id),
+                "decision_choices": {**choices,
                 "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
                 "learned_weight_version_ids": ((plan or {}).get("learning") or {}).get("version_ids", []),
@@ -2579,16 +2606,22 @@ class MetaOperator:
                 "symbol": item.get("symbol"), "touch_signal": item.get("touch_signal")}
                 for item in (plan or {}).get("alternatives", [])]})
         if result.get("decision") == "no_hacer_nada":
-            self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, (plan or {}).get("decision_id")))
+            self._ledger(meta_id, "META_OPERATOR_NOOP", {
+                **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error})
         return result
 
     def _record_review(self, meta_id, result, value, shadow, plan=None):
+        choices = self._safe_active_review_choices(plan, result, meta_id)
+        comparison_error = ({"decision_choices_error": choices["decision_choices_error"]}
+            if "decision_choices_error" in choices else {})
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
             "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
+            **comparison_error,
             "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
-            "decision_choices": self._active_review_choices(plan, result, meta_id),
+            "decision_choices": choices,
             "comparison_version": 2})
-        self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, (plan or {}).get("decision_id")))
+        self._ledger(meta_id, "META_OPERATOR_NOOP", {
+            **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error})
 
     @classmethod
     def _noop_payload(cls, result, valuation, plan_decision_id):
