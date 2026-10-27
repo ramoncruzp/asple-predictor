@@ -31,3 +31,11 @@
 - Sin cambios de reglas ni discrepancias funcionales en esta parte. Un fallo de comparación se registra en `decision_choices_error` tanto dentro de la comparación de respaldo como en el evento de revisión y el NOOP correspondiente; no se inventan decisiones de sombra cuando el cálculo falla.
 - Las cifras de S1 provienen del prompt de Ramón; la reproducción y las pruebas son locales con dobles de prueba. La corrección del autoconflicto del grid propio corresponde a la parte 2 y al commit 41b-11b.
 - Se usó una carpeta nueva bajo `$env:TEMP`, según el pedido específico, que tiene prioridad sobre la carpeta fija indicada en `AGENTS.md`. Solo se ejecutaron los dos archivos dirigidos: 77 pruebas verdes.
+
+## Fase 41b-11b — evaluación de la pieza propia (2026-10-27)
+
+- Sin cambios de reglas ni pendientes funcionales del alcance solicitado. Desde 41b-11 la Meta puede volver a reajustar/rotar una pieza que tenga ventas vivas, sujeta a los mismos frenos y a la revalidación antes de ejecutar.
+- Si existen varias piezas propias del mismo símbolo, solo se excluye una (menor ID); no se ignoran en bloque los conflictos ni las plazas de las demás. Esto hace explícita la identidad del reemplazo evaluado en `own_grid_excluded_from_check`.
+- `include_held_proceeds=True` permite estimar un reemplazo tras cierre; no autoriza usar ese dinero para una apertura adicional ni para retirar conservando inventario. Iniciar y agregar piezas conservan sus chequeos completos.
+- La ocupación del grid reemplazado se descuenta solo si la consulta ya lo cuenta: HOLDING no genera una plaza libre ficticia. El límite global conserva su valor y su finalidad.
+- La primera corrida detectó un fixture incompleto (`avg_price`); tras corregirlo, los tres archivos dirigidos quedaron verdes: 87 passed. Sin suite completa ni uso de S1, Testnet, `.env` o base real.

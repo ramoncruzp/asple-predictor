@@ -775,7 +775,11 @@ class MetaOperator:
                 return {"allowed": False, "reason": "se alcanzaría MAX_NUM_ORDERS"}
             max_grids = int(getattr(self.settings, "max_grids_simultaneos", 5))
             open_grid_count = int(self.db.count_open_grids())
-            if open_grid_count - (1 if replacing_grid_id is not None else 0) >= max_grids:
+            current = (self.db.get_grid(int(replacing_grid_id)) or {}
+                if replacing_grid_id is not None else {})
+            # HOLDING no forma parte de count_open_grids: no libera una plaza.
+            replaces_counted_grid = current.get("status") in {"OPENING", "ACTIVE", "PAUSED", "CLOSING"}
+            if open_grid_count - int(replaces_counted_grid) >= max_grids:
                 return {"allowed": False, "reason": "se alcanzaría el máximo de grids simultáneos"}
             conflicts = sell_level_conflicts(sell_prices, existing_levels, filters.tick_size,
                 getattr(self.settings, "same_coin_sell_tolerance_pct", .05))
@@ -785,7 +789,6 @@ class MetaOperator:
             free = Decimal(str(balance.get("free", 0)))
             releasable = Decimal(0)
             if replacing_grid_id is not None:
-                current = self.db.get_grid(int(replacing_grid_id)) or {}
                 prefix = f"g{int(replacing_grid_id)}L"
                 current_orders = [order for order in exchange.get_open_orders(current.get("symbol", symbol))
                     if str(order.get("clientOrderId") or order.get("origClientOrderId") or "").startswith(prefix)]
@@ -998,6 +1001,14 @@ class MetaOperator:
         profile_cap = float(cfg.get("capital_per_coin_pct", 100))
         cfg["_advisor_reference_capital"] = capital * profile_cap / 100
         option_cache = {}
+        own_grids_by_symbol = {}
+        owned_reader = getattr(self.core, "_owned_grids", None)
+        if callable(owned_reader) and goal.get("id") is not None:
+            for link in sorted(owned_reader(int(goal["id"])), key=lambda item: int(item["grid_id"])):
+                own_grid = self.db.get_grid(int(link["grid_id"]))
+                if own_grid and own_grid.get("status") in {"ACTIVE", "PAUSED", "OPENING", "HOLDING"}:
+                    # Solo una pieza se evalúa como reemplazo; las demás siguen contando.
+                    own_grids_by_symbol.setdefault(own_grid["symbol"], int(own_grid["id"]))
         max_pieces = max(1, min(3, int(cfg.get("max_grids", 1)) + int(cfg.get("max_bots", 0))))
         for piece_count in range(1, max_pieces + 1):
             target_piece = target_usdt / piece_count
@@ -1013,7 +1024,14 @@ class MetaOperator:
                             valid_options = []
                             testnet_reasons = []
                             for option in options:
-                                piece_check = self._testnet_openability(option["pieces"][0], goal)
+                                own_grid_id = own_grids_by_symbol.get(option["pieces"][0]["symbol"])
+                                if own_grid_id is None:
+                                    piece_check = self._testnet_openability(option["pieces"][0], goal)
+                                else:
+                                    piece_check = self._testnet_openability(option["pieces"][0], goal,
+                                        replacing_grid_id=own_grid_id, include_held_proceeds=True)
+                                    piece_check = {**piece_check, "own_grid_excluded_from_check": own_grid_id}
+                                    row["own_grid_excluded_from_check"] = own_grid_id
                                 option["testnet_openability"] = piece_check
                                 if piece_check["allowed"]:
                                     valid_options.append(option)
@@ -1080,6 +1098,8 @@ class MetaOperator:
                         "advisor_recommendations": [item.get("advisor") for item in combination],
                         "reason": f"cartera de {piece_count} pieza(s), reparto {shares} %"}
                     alternatives.append(row)
+                    if piece_count == 1 and "own_grid_excluded_from_check" in combination[0].get("testnet_openability", {}):
+                        row["testnet_openability"] = combination[0]["testnet_openability"]
                     evaluated_combinations.append({"symbols": symbols, "shares_pct": shares,
                         "piece_types": [piece["piece_type"] for piece in pieces],
                         "capital_used_usdt": round(sum(float(piece["capital_usdt"]) for piece in pieces), 4),
@@ -1243,7 +1263,8 @@ class MetaOperator:
     @classmethod
     def _plan_ledger_payload(cls, plan, candidates, selected, *, plan_kind):
         candidate_fields = ("symbol", "scanner_eligible", "hard_filters", "excluded_reason",
-            "score", "sigma_24h", "price", "testnet_book_state", "testnet_book_reason")
+            "score", "sigma_24h", "price", "testnet_book_state", "testnet_book_reason",
+            "own_grid_excluded_from_check")
         compact_candidates = []
         for row in candidates:
             compact = {key: row.get(key) for key in candidate_fields if key in row}

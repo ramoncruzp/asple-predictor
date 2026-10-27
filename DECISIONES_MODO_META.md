@@ -120,7 +120,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d | Aprendizaje continuo de pesos por señal | Partes 1-6 implementadas y verificadas offline; interruptor apagado por defecto |
 | 41a | Corrección directa de señales Meta, trazabilidad y diagnóstico | Implementada y verificada offline; commit por partes, sin despliegue |
 | 41b | Bitácora compacta v2 para planes y decisiones, recomendaciones guardadas una vez y decisiones ligadas por ID; lectores compatibles con v1 | Hecha localmente en `520766e`, `38bcffa`, `dcf6c3e`, `d1b3656`, `1956a2d`; 82 pruebas dirigidas verdes, sin push |
-| 41b-11 | Revisión resistente a alternativas actuales ausentes y evaluación sin autoconflicto de la pieza propia | Parte 1 implementada: comparación protegida y decisión real persistida; parte 2 en el siguiente commit |
+| 41b-11 | Revisión resistente a alternativas actuales ausentes y evaluación sin autoconflicto de la pieza propia | Ambas partes implementadas; comparación y plan verificados offline con 87 pruebas dirigidas, sin push |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 
@@ -287,4 +287,6 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 ## Fase 41b-11 — conservación de decisiones de revisión (2026-10-27)
 
 - La falta de una alternativa de una pieza para el grid actual se anota en la comparación con su motivo conocido. Un error de la comparación en sombra deja traceback y `decision_choices_error`; la decisión real y el NOOP correspondiente se guardan igualmente.
-- No se cambian materialidad, empate, persistencia, enfriamientos, límites, pesos ni reglas del operador. La parte 2 corrige el autoconflicto de las piezas propias al evaluar el plan.
+- No se cambian materialidad, empate, persistencia, enfriamientos, límites, pesos ni reglas del operador.
+- Desde 41b-11 la Meta puede volver a reajustar/rotar una pieza que tenga ventas vivas. Al evaluar el reemplazo se excluye solo su propio grid del mismo símbolo, identificado en el plan por `own_grid_excluded_from_check`; las demás piezas propias, de otras metas o manuales siguen contando. Antes de actuar se repiten las validaciones existentes.
+- Iniciar y agregar piezas nuevas no excluyen grids existentes. La estimación de efectivo de un posible cierre no se usa como efectivo libre para aperturas adicionales ni para retiradas con ventas vivas.
