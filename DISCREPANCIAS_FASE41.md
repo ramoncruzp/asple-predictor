@@ -102,3 +102,8 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 - `META_MAINTENANCE` requiere `meta_id` por la clave foránea de `meta_ledger`. Cuando no hay metas, el resultado queda en el log de aplicación sin crear registros ficticios.
 - El script solo admite SQLite y no crea respaldos: requiere uno del día o una confirmación explícita `--backup-ok`. La comprobación `systemctl` y el ahorro físico de VACUUM quedan pendientes de ejecución manual en S1.
 - La estimación de espacio para `meta_learning_replay_cache` usa 96 bytes por fila y es aproximada. Ninguna base real se abrió y ningún VACUUM se ejecutó en esta fase.
+
+
+## Fase 41-G1a ? discrepancias
+
+No se eliminan las entradas de cach? antiguas durante el cambio: si contienen curvas de formato anterior, se consideran no reutilizables al leerlas y se regeneran; el borrado f?sico queda a cargo de la retenci?n ya existente. La validaci?n de tama?o usa una trayectoria sint?tica suave de 180 d?as; otras trayectorias con mayor entrop?a podr?an comprimir menos y deben observarse mediante tama?os reales al correr el mantenimiento en S1.

@@ -2578,6 +2578,12 @@ class MetaOperator:
         if cached is not None and (cached.get("method_version") != REPLAY_METHOD_VERSION or
                 any("curve" not in row for row in cached.get("window_results", []))):
             cached = None
+        if cached is not None:
+            from grid.sim.meta_portfolio import CURVE_FORMAT_VERSION
+            curve_rows = [row["curve"] for row in cached.get("window_results", []) if "curve" in row]
+            if any(int(curve.get("curve_format_version", 1)) != CURVE_FORMAT_VERSION
+                   for curve in curve_rows):
+                cached = None
         replay_windows = None
         if cached is None:
             replay_started = time.perf_counter()

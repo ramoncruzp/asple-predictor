@@ -352,3 +352,12 @@ Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **
 - `--vacuum` exige `--apply` en la misma llamada, respaldo del día o `--backup-ok`, servicio parado según `systemctl is-active asple-predictor`, e `integrity_check` correcto antes y después. La bandera `--i-know-service-is-stopped` solo se usa en pruebas.
 - Procedimiento para S1 (no ejecutado): desde `/home/ubuntu/asple-predictor`, detener `asple-predictor` y comprobar estado inactivo; establecer `DB="$PWD/asple_predictor.db"` solo tras verificar la ruta real sin abrir `.env`; copiar con `mkdir -p "$HOME/respaldos"; cp -a "$DB" "$HOME/respaldos/asple_predictor_$(date +%F).db"`; comparar ambos hashes con `sha256sum`; inspeccionar con `./venv2/bin/python scripts/mantenimiento_bd_meta.py --db "$DB"`; aplicar con `--apply`; revisar el resultado y ejecutar `--apply --vacuum --backup-ok`; iniciar el servicio, verificar estado activo y ejecutar `sqlite3 "$DB" "PRAGMA integrity_check;"`. Si dry-run/apply falla, no continuar con VACUUM.
 - Pruebas finales: `tests/test_meta_db_maintenance.py`, `tests/test_meta_operator.py`, `tests/test_meta_signal_diagnostics.py`, `tests/test_intelligence_api.py`, `tests/test_app_settings_api.py` y `tests/test_meta_core.py`: **127 passed, 14 warnings, 0 failed; 8,68 s**. No se ejecutó la suite completa ni se usaron S1, Testnet, red, `.env` o BD real.
+
+
+## Fase 41-G1a ? compresi?n exacta de cach? v3
+
+`grid/sim/meta_portfolio.py:7-50` versiona las curvas como formato 2 y comprime los bytes `float32` con zlib y byte shuffle. La resoluci?n de 15 minutos y cada bit de efectivo/patrimonio se conservan. `unpack_curve` mantiene lectura del formato anterior. `grid/meta_operator.py:2582-2585` rechaza para regeneraci?n las curvas persistidas con formato anterior; no borra filas y la retenci?n ya existente las retirar?.
+
+Una curva sint?tica de 180 d?as (17.280 marcas) ocupa **84.350 bytes** serializada en JSON, frente a 138.240 bytes de efectivo y patrimonio sin comprimir (sin contar metadatos). La reducci?n del bloque num?rico serializado es aproximadamente **38,9 %**, por debajo del m?ximo de 100 KB por entrada solicitado.
+
+Prueba: comando dirigido a `tests/test_meta_portfolio_equity.py`; **13 passed, 0 failed, 0,37 s**. La prueba compara bits de las curvas, timestamps, m?tricas de replay y lectura legacy. No se usaron red, Testnet, S1, `.env` ni BD real.

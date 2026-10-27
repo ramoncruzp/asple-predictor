@@ -1,6 +1,10 @@
 """Curvas compactas de piezas y evaluación conjunta de una Meta simulada."""
 import base64
+import zlib
 import numpy as np
+
+
+CURVE_FORMAT_VERSION = 2
 
 
 def pack_curve(timestamps, cash, equity, capital):
@@ -9,19 +13,36 @@ def pack_curve(timestamps, cash, equity, capital):
         raise ValueError("curva vacía o desalineada")
     gaps = np.diff(times)
     step = int(gaps[0]) if len(gaps) and np.all(gaps == gaps[0]) else None
-    encode = lambda values, dtype: base64.b64encode(np.asarray(values, dtype=dtype).tobytes()).decode("ascii")
+    def encode(values, dtype):
+        array = np.asarray(values, dtype=dtype)
+        raw = array.tobytes()
+        if array.dtype.kind == "f" and array.dtype.itemsize == 4:
+            raw = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4).T.tobytes()
+        return base64.b64encode(zlib.compress(raw, level=9)).decode("ascii")
     return {"start_ts": int(times[0]), "step_s": step, "count": len(times),
         "offsets_i32": None if step else encode(times - times[0], "<i4"),
-        "cash_f32": encode(cash, "<f4"), "equity_f32": encode(equity, "<f4"),
+        "curve_format_version": CURVE_FORMAT_VERSION,
+        "cash_zlib_f32": encode(cash, "<f4"), "equity_zlib_f32": encode(equity, "<f4"),
         "capital_usdt": float(capital)}
 
 
 def unpack_curve(curve):
-    decode = lambda key, dtype: np.frombuffer(base64.b64decode(curve[key]), dtype=dtype)
+    def decode(key, dtype, *, compressed=False):
+        raw = base64.b64decode(curve[key])
+        if compressed:
+            raw = zlib.decompress(raw)
+            if dtype == "<f4":
+                raw = np.frombuffer(raw, dtype=np.uint8).reshape(4, -1).T.tobytes()
+        return np.frombuffer(raw, dtype=dtype)
     offsets = (np.arange(curve["count"], dtype=np.int64) * curve["step_s"]
-        if curve.get("step_s") else decode("offsets_i32", "<i4"))
+        if curve.get("step_s") else decode("offsets_i32", "<i4",
+            compressed=int(curve.get("curve_format_version", 1)) >= 2))
+    compressed = int(curve.get("curve_format_version", 1)) >= 2
+    cash_key, equity_key = (("cash_zlib_f32", "equity_zlib_f32") if compressed
+        else ("cash_f32", "equity_f32"))
     return (int(curve["start_ts"]) + offsets,
-        decode("cash_f32", "<f4"), decode("equity_f32", "<f4"))
+        decode(cash_key, "<f4", compressed=compressed),
+        decode(equity_key, "<f4", compressed=compressed))
 
 
 def evaluate_portfolio(curves, *, capital_initial, target_usdt, max_loss_pct=None):

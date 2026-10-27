@@ -2,6 +2,8 @@
 from types import SimpleNamespace
 
 import numpy as np
+import base64
+import json
 import pytest
 
 from grid.meta_operator import combine_aligned_replays, MetaOperator
@@ -14,6 +16,35 @@ from datetime import datetime, timezone
 
 def curve(capital, cash, equity=None):
     return pack_curve(np.arange(len(cash)) * 900, cash, cash if equity is None else equity, capital)
+
+
+def test_zlib_curve_is_exact_same_size_below_100kb_and_reads_legacy_format():
+    from grid.sim.meta_portfolio import pack_curve, unpack_curve, CURVE_FORMAT_VERSION
+
+    count = 180 * 24 * 4
+    stamps = np.arange(count, dtype=np.int64) * 900
+    cash = (100 + np.sin(np.arange(count) / 19) * 2).astype("<f4")
+    equity = (cash + np.cos(np.arange(count) / 31) * .5).astype("<f4")
+    packed = pack_curve(stamps, cash, equity, 100)
+    restored = unpack_curve(packed)
+    assert packed["curve_format_version"] == CURVE_FORMAT_VERSION == 2
+    assert np.array_equal(restored[0], stamps)
+    assert np.array_equal(restored[1].view("u4"), cash.view("u4"))
+    assert np.array_equal(restored[2].view("u4"), equity.view("u4"))
+    assert len(json.dumps(packed, separators=(",", ":"))) < 100_000
+
+    legacy = {"start_ts": 0, "step_s": 900, "count": 2, "offsets_i32": None,
+        "cash_f32": base64.b64encode(np.array([100, 101], dtype="<f4").tobytes()).decode(),
+        "equity_f32": base64.b64encode(np.array([100, 102], dtype="<f4").tobytes()).decode(),
+        "capital_usdt": 100}
+    assert [row.tolist() for row in unpack_curve(legacy)] == [[0, 900], [100, 101], [100, 102]]
+
+    legacy_equivalent = {"start_ts": 0, "step_s": 900, "count": count, "offsets_i32": None,
+        "cash_f32": base64.b64encode(cash.tobytes()).decode(),
+        "equity_f32": base64.b64encode(equity.tobytes()).decode(), "capital_usdt": 100}
+    metrics_new = evaluate_portfolio([packed], capital_initial=100, target_usdt=1)
+    metrics_legacy = evaluate_portfolio([legacy_equivalent], capital_initial=100, target_usdt=1)
+    assert metrics_new == metrics_legacy
 
 
 def test_grid_a_earns_2_5_and_b_0_5_without_individual_targets():

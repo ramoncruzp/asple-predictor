@@ -311,3 +311,9 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - La pieza actual se estima por su símbolo, estrategia, rango, niveles, capital y margen reales mediante `rolling_7d_v3_equity` y la caché del plan. No requiere ser abrible de nuevo en Testnet. Las alternativas de rotación, apertura o reajuste siguen pasando el filtro de Testnet.
 - El resumen propio se guarda bajo `current_pieces[grid_id]` y se adjunta a la bitácora de revisión. Se presenta en Metas e Inteligencia con probabilidades histórica y ajustada, rango, niveles, capital y avance mediano.
 - Pruebas focalizadas: 108 passed acumuladas en operador/resiliencia, interfaz y benchmark, con 6 warnings; benchmark caliente 2,384 s frente a 2,39 s documentados en 41c-0 (−0,26 %). Sin suite completa ni validación en S1.
+
+
+## Fase 41-G1a ? compresi?n de curvas de replay
+
+- Las curvas de efectivo y patrimonio mantienen precisi?n `float32` y puntos cada 15 minutos; se almacenan con zlib y byte shuffle (formato 2).
+- Las curvas legacy siguen siendo legibles, pero las entradas persistentes con formato viejo se regeneran. Ninguna decisi?n ni m?trica cambia.
