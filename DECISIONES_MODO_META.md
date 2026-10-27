@@ -339,3 +339,8 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 ## Fase 41-G1e ? readiness sin registro
 
 - La ausencia de fila en `coin_readiness` se interpreta como readiness no disponible. El an?lisis Meta no crea filas; solo la ruta de Coin Registry inicializa `pendiente`. Prudente no trata `None` como completa.
+
+
+## Fase 41-G1f ? diagn?stico local para S1
+
+- `scripts/verificar_s1_meta.py` agrega lecturas SQLite `mode=ro` en un comando y nunca inicializa `DBManager` ni importa `.env`. Prec?lculo no tiene evento persistente: no se confunde la ?ltima cach? con la finalizaci?n del job.

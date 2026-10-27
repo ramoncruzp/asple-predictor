@@ -389,3 +389,12 @@ Verificaci?n dirigida: `tests/test_meta_signal_diagnostics.py tests/test_intelli
 `grid/meta_operator.py:2448-2485` toma `readiness` de `db.get_readiness(symbol)` y entrega `None` si no hay fila; `complete` solo es verdadero cuando existe una fila con `state="lista"` y pron?stico reciente. `database/db_manager.py:1412-1425` confirma que `get_readiness` no crea registros. La inicializaci?n pendiente se hace desde las rutas de Coin Registry al consultar/registrar una moneda (`api/routes/coins.py:83-86`), no al incluirla como candidata del operador. Por ello, XRP ?sin estado? significa sin fila de onboarding/readiness, no que sus estad?sticas sean completas ni un error del modelo; la exclusi?n prudente es correcta. No se modific? el dato ni el comportamiento.
 
 Parte de inspecci?n sin cambios ejecutables; no requiri? pytest.
+
+
+## Fase 41-G1f ? verificaci?n consolidada local para S1
+
+Nuevo `scripts/verificar_s1_meta.py:1-205` consulta SQLite mediante URI `mode=ro` y `PRAGMA query_only=ON`; no importa el runtime de la aplicaci?n ni carga `.env`. `--db` es obligatorio; acepta `--horas` (predeterminado 2) y `--journal`. Resume HEAD/hora, metas activas y piezas, valoraci?n reciente guardada, estimaciones `current_pieces`, revisiones y sombras, tiempos del plan, tama?o/tablas v?a `dbstat`, filas y fecha de cach?, ?ltima corrida de aprendizaje, coberturas/valores de se?ales y, opcionalmente, conteos de `journalctl`.
+
+El repositorio no persiste un evento de prec?lculo diario; por eso el script identifica ?no hay evento persistido? y muestra la ?ltima escritura de cach? solo como referencia, no como prueba de prec?lculo. `tests/test_meta_s1_diagnostic.py:1-49` usa un esquema sint?tico, verifica contenido y confirma que la conexi?n de diagn?stico rechaza escrituras. Resultado: **1 passed, 0 failed, 0,17 s**. No se ejecut? el script contra S1 ni una base de producci?n.
+
+Comando para S1: `venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 2 --journal`.

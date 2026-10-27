@@ -127,3 +127,8 @@ La cobertura activa se calcula sobre filas de muestra con se?al `direction` guar
 ## Fase 41-G1e ? XRP sin estado
 
 Se conserva el estado ausente: crear filas autom?ticamente durante an?lisis Meta ser?a una escritura ajena al alcance de lectura y podr?a alterar el flujo de Coin Registry. La explicaci?n es la falta de un registro de onboarding, y el perfil Prudente sigue exigiendo readiness lista.
+
+
+## Fase 41-G1f ? discrepancias
+
+MetaOperator no guarda un evento durable al completar su prec?lculo, as? que un script de solo lectura no puede reportar con certeza la hora/estado de ese job. Se informa la ausencia de registro y la ?ltima escritura de cach? como referencia expresamente no equivalente. `dbstat` y `journalctl` dependen de soporte del SQLite compilado y de que el script se ejecute en el host Linux; sus fallos se muestran como no disponibles.
