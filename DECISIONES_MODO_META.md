@@ -337,3 +337,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 ## Fase 41-G1f — diagnóstico S1
 
 - Verificador abre SQLite mode=ro. No afirma hora de precálculo sin evento persistido; caché es referencia.
+
+## Fase 41-G2 — estudios históricos
+
+- scripts/estudios_meta.py abre SQLite mode=ro. Calibración de dirección usa P(baja) y métricas de clasificación/calibración; no cambia señales.
+- Calibración de grid compara geometría real fija con velas públicas 5m/1m.
+- Replay activo y persistencia 1/2 se mantienen como no medidos hasta contar con un adaptador que conserve estado entre reajustes; replay pasivo no se presenta como política activa.
+- Para estudio intravela de 90 días: diferencia <2 pp con 11 ventanas conserva simulador; diferencia mayor se evalúa aparte.

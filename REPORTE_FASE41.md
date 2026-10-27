@@ -384,3 +384,18 @@ grid/meta_operator.py:2448-2485 recibe None cuando no existe fila; complete requ
 scripts/verificar_s1_meta.py abre SQLite mode=ro con query_only=ON, sin DBManager ni .env. Resume HEAD/hora, metas y piezas, valoración persistida, current_pieces, decisiones/rotación/asignación, timings, tamaños/dbstat/cache, corrida de aprendizaje, señales y opcionalmente journalctl. tests/test_meta_s1_diagnostic.py usa esquema sintético, verifica salida y rechazo de escrituras: 1 passed, 0 failed, 0,17 s.
 
 El precálculo diario no deja evento persistido; se informa no registrado y la fecha de caché solo como referencia. Comando S1: venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 2 --journal. No se ejecutó allí ni contra BD real.
+
+## Bloque 2 — estudios con replay histórico (G2)
+
+Nuevo scripts/estudios_meta.py guarda JSON+CSV bajo --out y ejecuta lecturas SQLite mode=ro. Calibración de dirección: predictions/outcomes para model_a_down 1h, interpretando probability_up como P(baja); calcula Brier, log-loss, AUC, deciles, acierto @0,60 y mejor umbral por símbolo. Calibración de grid carga datos públicos 5m/1m con BinanceClient público y HTTPS_PROXY del entorno, lee grid/levels/events en mode=ro y aplica una única geometría de la BD a ambas resoluciones.
+
+La prueba tests/test_estudios_meta.py valida métricas con datos sintéticos, aislamiento de escritura, salida JSON/CSV y grid con cliente simulado: **4 passed, 0 failed, 0,98 s**. No se ejecutó ningún subcomando contra red o BD real.
+
+Límite de 41e/41h: el runner existente es por lotes y no expone un estado serializable/reanudable para conservar órdenes e inventario mientras se recentra cada 15 minutos. El subcomando replay-activo informa el replay pasivo como referencia y marca active_status=not_modeled; persistencia marca cada valor not_modeled. No se fabrican resultados activos a partir de corridas segmentadas que reiniciarían capital e inventario. Para completarlos hace falta un adaptador de simulación estado-continuo dentro del alcance de estudio, sin alterar simuladores de producción.
+
+Comandos de S1, después de copiar datos/archivos de salida al directorio previsto:
+- Replay pasivo de referencia y estado activo explícito: HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py replay-activo --symbols JUPUSDT,ZROUSDT --days 180 --profile RAPIDO --source binance --out ./estudios_meta/
+- Calibrar grid 13 con mercado público: HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py calibrar-grid --grid-id 13 --db asple_predictor.db --out ./estudios_meta/
+- Calibrar dirección: venv2/bin/python scripts/estudios_meta.py calibrar-direccion --db asple_predictor.db --days 30 --out ./estudios_meta/
+
+Para repetir el estudio intravela de 90 días tras G1b: HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/medir_orden_intravela.py --symbols JUPUSDT,ZROUSDT,XRPUSDT --days 90 --source binance --out ./medicion_intravela/. Si la diferencia absoluta de probabilidad 5m/1m es <2 puntos porcentuales en 11 ventanas, dejar el simulador igual; si excede 2 pp, preparar evaluación separada. No se descargaron velas durante esta fase.

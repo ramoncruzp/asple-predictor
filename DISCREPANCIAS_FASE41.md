@@ -128,3 +128,7 @@ Se conserva readiness ausente; crear fila desde Meta sería escritura ajena a Co
 ## Fase 41-G1f — verificador
 
 Precálculo no tiene evento durable; timestamp de caché no se presenta como equivalente. dbstat y journalctl dependen del host.
+
+## Bloque 2 — discrepancias de replay activo
+
+41e/41h quedan pendientes, no certificados: el runner no expone la continuidad de órdenes/inventario necesaria para mover la geometría cada 15 minutos. scripts/estudios_meta.py ofrece replay pasivo de referencia, pero no etiqueta como activo una corrida estática ni reinicia capital por segmento. La política no se aproxima con un algoritmo nuevo ni se cambian simuladores. El calibrado de grid está limitado a estrategias Smart/Simple y a fills/eventos persistidos disponibles; el cliente descarga únicamente mercado público cuando Ramón corre el comando.
