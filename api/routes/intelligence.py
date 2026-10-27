@@ -228,7 +228,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     # Resumen verbal y B3: intervalos de diez puntos, medias cruda/suavizada y ventanas.
     sample_n = len(sample_rows)
     distinct_symbols = len({str(row[3]) for row in sample_rows})
-    plan_alternatives_today = sum(len(_json(row[0]).get("alternatives") or []) for row in plans_today)
+    plan_alternatives_today = sum(int(_json(row[0]).get("alternatives_total",
+        len(_json(row[0]).get("alternatives") or [])) or 0) for row in plans_today)
     alternatives_today = int(plan_alternatives_today or alternatives_today or 0)
     models_by_symbol = {}
     for row in forecasts:

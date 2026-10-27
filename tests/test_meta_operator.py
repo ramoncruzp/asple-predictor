@@ -480,6 +480,59 @@ def test_meta_cache_retention_skips_when_review_is_running(tmp_path):
         operator._review_guard.release()
 
 
+def test_old_plan_compaction_keeps_decisions_top_alternatives_and_sample_references(tmp_path):
+    import json
+    from sqlalchemy import select
+    from database.db_manager import DBManager
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-plan-compact.sqlite'}")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type="usdt", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="TESTNET", created_at=now
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_learning_samples.insert().values(sample_key="sample-1", meta_id=goal_id,
+            decision_id="plan-old", alternative_id="alt-17", symbol="XRPUSDT", profile="RAPIDO",
+            sample_at=now, source_kind="live", parameters_json="{}", signals_json="{}",
+            provenance_json="{}", created_at=now))
+        alternatives = [{"alternative_id": f"alt-{i}", "symbol": "XRPUSDT", "strategy": "simple",
+            "pieces": [{"symbol": "XRPUSDT", "strategy": "simple", "capital_usdt": 10}],
+            "estimate": {"probability_replay": 1 - i / 100, "median_progress_pct": 5},
+            "signals_omitted": [{"name": "touch_buy_to_sell", "reason": "sin velas"}],
+            "advisor_recommendations": [{"huge": "x" * 100}]}
+            for i in range(20)]
+        details = {"ledger_schema_version": 2, "decision_id": "plan-old", "plan_kind": "revision",
+            "profile": "RAPIDO", "target_usdt": 10, "deadline_days": 20, "capital_usage": {"used": 80},
+            "selection_reason": "mejor", "selected": alternatives[0],
+            "decision_choices": {"real": {"alternative_id": "alt-18"}},
+            "alternatives": alternatives, "advisor_comparisons": [{"huge": "x" * 1000}],
+            "candidates": [{"symbol": "XRPUSDT"}], "current_pieces": {"13": {}},
+            "allocation_shadow": {"descartes": {"ejemplos": [{"huge": "x" * 1000}], "total": 1}},
+            "combinations_evaluated": [], "sigma_bands": {}, "timings_s": {}}
+        ledger_id = conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
+            ts=now - timedelta(days=20), event_type="META_PLAN_EVALUATED",
+            details=json.dumps(details))).inserted_primary_key[0]
+    class Core:
+        def _profile_settings(self): return {"GLOBAL": {"ledger_plan_detail_days": 14}}
+    operator = MetaOperator(Core(), db, None, None, None)
+    assert operator.compact_old_plans()["plans_summarized"] == 1
+    with db.engine.connect() as conn:
+        compact = json.loads(conn.execute(select(db.meta_ledger.c.details).where(
+            db.meta_ledger.c.id == ledger_id)).scalar_one())
+    assert compact["ledger_schema_version"] == 3 and compact["ledger_detail"] == "resumido"
+    assert compact["alternatives_total"] == 20
+    kept = {row["alternative_id"] for row in compact["alternatives"]}
+    assert {"alt-1", "alt-18", "alt-17"} <= kept
+    # La importación legacy previa crea una muestra por alternativa; se conservan todas sus referencias.
+    assert len(kept) == 20
+    assert "advisor_comparisons" not in compact
+    assert compact["allocation_shadow"]["descartes"] == {"total": 1}
+    assert compact["signals_omitted_summary"] == [{"symbol": "XRPUSDT",
+        "name": "touch_buy_to_sell", "reason": "sin velas", "count": 20}]
+
+
 def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from database.db_manager import DBManager

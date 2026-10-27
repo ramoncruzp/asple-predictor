@@ -91,14 +91,18 @@ def test_diagnostic_reads_touch_omissions_from_ledger_v1_and_v2(tmp_path, capsys
         connection.execute("CREATE TABLE meta_ledger "
             "(id INTEGER PRIMARY KEY, meta_id INTEGER, ts TEXT, event_type TEXT, details TEXT)")
         connection.execute("INSERT INTO meta_goals VALUES (1, 'RAPIDO')")
-        for version in (None, 2):
+        for version in (None, 2, 3):
             details = {"decision_id": f"plan-{version}", "alternatives": [{"symbol": "XRPUSDT",
                 "signals_omitted": [{"name": "touch_buy_to_sell", "reason": "velas no disponibles"}]}]}
             if version is not None:
                 details["ledger_schema_version"] = version
                 details["advisor_comparisons"] = []
+            if version == 3:
+                details.update({"ledger_detail": "resumido", "alternatives": [],
+                    "signals_omitted_summary": [{"symbol": "XRPUSDT", "name": "touch_buy_to_sell",
+                        "reason": "velas no disponibles", "count": 1}]})
             connection.execute("INSERT INTO meta_ledger (meta_id, ts, event_type, details) VALUES (?, ?, ?, ?)",
                 (1, "2026-10-26T00:00:00+00:00", "META_PLAN_EVALUATED", json.dumps(details)))
     diagnose(database, days=36500, profile="RAPIDO")
     output = capsys.readouterr().out
-    assert "XRPUSDT: 2 alternativas — velas no disponibles" in output
+    assert "XRPUSDT: 3 alternativas — velas no disponibles" in output

@@ -76,6 +76,10 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
                 ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type='META_OPERATOR_REVIEW_DECISION',
                 details=json.dumps(details)))
+        conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
+            ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_PLAN_EVALUATED",
+            details=json.dumps({"ledger_schema_version": 3, "ledger_detail": "resumido",
+                "alternatives_total": 17, "alternatives": [{}]})))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -90,6 +94,7 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['data']['meta_signal_counts_by_symbol'] == [
         {'signal': 'touch_buy_to_sell', 'symbol': 'XRPUSDT', 'count': 1}]
     assert 'alternativas' in payload['data']['summary_text']
+    assert '17 alternativas' in payload['data']['summary_text']
     assert payload['replay']['chart'] and len(payload['replay']['chart']) == 10
     assert 'direction' in payload['hits'] and 'volatility' in payload['hits']
     assert 'replay_calibration' in payload['hits']
@@ -99,8 +104,10 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['hits']['volatility'][0]['n'] == 1
     page = client.get(f'/api/intelligence?meta_id={goal_id}&page_size=10',
         headers={'X-API-Token':'intelligence-secret'}).json()['decisions']
-    assert page['total'] == 2 and len(page['recent']) == 2
-    legacy, v2 = sorted(page['recent'], key=lambda event: event['details'].get('ledger_schema_version', 1))
+    assert page['total'] == 3 and len(page['recent']) == 3
+    review_events = [event for event in page['recent'] if event['event_type'] == 'META_OPERATOR_REVIEW_DECISION']
+    assert len(review_events) == 2
+    legacy, v2 = sorted(review_events, key=lambda event: event['details'].get('ledger_schema_version', 1))
     assert legacy['choices']['real']['symbol'] == v2['choices']['real']['symbol'] == 'XRPUSDT'
     assert legacy['details']['decision_choices']['real']['decision'] == 'mantener'
     assert v2['details']['ledger_schema_version'] == 2 and v2['details']['plan_decision_id'] == 'plan-v2'

@@ -147,6 +147,17 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
             details = json.loads(raw_details or "{}")
         except (TypeError, ValueError):
             continue
+        summarized = details.get("signals_omitted_summary")
+        if summarized is not None:
+            for item in summarized:
+                if item.get("name") != "touch_buy_to_sell":
+                    continue
+                symbol = str(item.get("symbol") or "?")
+                if profile and str(details.get("profile") or profile).upper() != profile.upper():
+                    continue
+                touch_omissions[(symbol, str(item.get("reason") or "sin motivo guardado"))] += int(
+                    item.get("count") or 0)
+            continue
         for alternative in details.get("alternatives") or []:
             symbol = str(alternative.get("symbol") or "?")
             if profile and str(alternative.get("profile") or profile).upper() != profile.upper():

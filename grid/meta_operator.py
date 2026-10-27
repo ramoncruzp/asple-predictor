@@ -314,6 +314,7 @@ class MetaOperator:
         self._review_guard = threading.Lock()
         self._precompute_guard = threading.Lock()
         self._learning_guard = threading.Lock()
+        self._legacy_import_attempted = False
         self._thread = None
         self._opener = None
         self.scheduler = BackgroundScheduler(timezone="UTC")
@@ -407,6 +408,7 @@ class MetaOperator:
                 "analysis_cache_kb_deleted": round(analysis_bytes / 1024, 2),
                 "learning_replay_rows_deleted": replay_removed,
                 "learning_replay_kb_estimated": round(replay_bytes / 1024, 2)}
+            result.update(self.compact_old_plans())
             logger.info("Meta maintenance cache cleanup %s", json.dumps(result, sort_keys=True))
             try:
                 from sqlalchemy import select as sql_select
@@ -424,6 +426,115 @@ class MetaOperator:
         finally:
             for guard in reversed(acquired):
                 guard.release()
+
+    @classmethod
+    def _summarize_old_plan(cls, details, referenced_ids):
+        alternatives = list(details.get("alternatives") or [])
+        ranked = sorted(alternatives, key=lambda row: (
+            -float((row.get("estimate") or {}).get("probability_replay",
+                (row.get("estimate") or {}).get("probability", 0)) or 0),
+            -float((row.get("estimate") or {}).get("median_progress_pct") or 0)))
+        keep_ids = set(referenced_ids)
+        selected = details.get("selected") or {}
+        if selected.get("alternative_id"):
+            keep_ids.add(str(selected["alternative_id"]))
+        top_ids = {str(row.get("alternative_id") or "") for row in ranked[:10]}
+        chosen = []
+        seen = set()
+        for row in [*ranked[:10], *alternatives]:
+            alt_id = str(row.get("alternative_id") or "")
+            if (alt_id in top_ids or alt_id in keep_ids) and alt_id not in seen:
+                chosen.append(cls._compact_plan_alternative(row))
+                seen.add(alt_id)
+
+        omitted = {}
+        for alternative in alternatives:
+            symbol = str(alternative.get("symbol") or "?")
+            for signal in alternative.get("signals_omitted") or []:
+                key = (symbol, str(signal.get("name") or ""),
+                    str(signal.get("reason") or "sin motivo guardado"))
+                omitted[key] = omitted.get(key, 0) + 1
+        summary = [{"symbol": symbol, "name": name, "reason": reason, "count": count}
+            for (symbol, name, reason), count in sorted(omitted.items())]
+        allocation = details.get("allocation_shadow")
+        if isinstance(allocation, dict):
+            allocation = dict(allocation)
+            discards = allocation.get("descartes")
+            if isinstance(discards, dict):
+                discards = dict(discards)
+                discards.pop("ejemplos", None)
+                discards.pop("examples", None)
+                allocation["descartes"] = discards
+        preserved = ("decision_id", "plan_kind", "profile", "target_usdt", "deadline_days",
+            "capital_usage", "selection_reason", "decision_choices", "current_pieces",
+            "combinations_evaluated", "sigma_bands", "timings_s", "candidates",
+            "selected", "shadow_decision", "base_method_version")
+        result = {key: details[key] for key in preserved if key in details}
+        result.update({"ledger_schema_version": 3, "ledger_detail": "resumido",
+            "alternatives_total": len(alternatives), "alternatives": chosen,
+            "selected": cls._compact_plan_alternative(selected) if selected else None,
+            "signals_omitted_summary": summary, "allocation_shadow": allocation})
+        return result
+
+    def compact_old_plans(self):
+        """Reduce planes antiguos en transacciones de hasta veinte filas."""
+        from sqlalchemy import select
+        settings = self.core._profile_settings().get("GLOBAL", {})
+        days = max(1, int(settings.get("ledger_plan_detail_days", 14)))
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        with self.db.engine.connect() as conn:
+            row_ids = conn.execute(select(self.db.meta_ledger.c.id)
+                .where(self.db.meta_ledger.c.event_type == "META_PLAN_EVALUATED",
+                    self.db.meta_ledger.c.ts < cutoff)
+                .order_by(self.db.meta_ledger.c.id)).all()
+        if row_ids and not self._legacy_import_attempted:
+            try:
+                imported = self._import_legacy_learning_samples()
+                self._legacy_import_attempted = True
+                logging.getLogger(__name__).info(
+                    "Meta compaction imported legacy learning samples count=%d", imported)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Se detiene la compactación: falló la importación previa de muestras legacy")
+                return {"plans_summarized": 0, "ledger_plan_detail_days": days,
+                    "status": "skipped", "reason": "falló importación de muestras legacy"}
+        changed = 0
+        for offset in range(0, len(row_ids), 20):
+            batch = [int(row[0]) for row in row_ids[offset:offset + 20]]
+            with self.db.engine.begin() as conn:
+                for ledger_id in batch:
+                    record = conn.execute(select(self.db.meta_ledger.c.details).where(
+                        self.db.meta_ledger.c.id == ledger_id)).first()
+                    if record is None:
+                        continue
+                    raw = record[0]
+                    details = json.loads(raw or "{}")
+                    if int(details.get("ledger_schema_version") or 0) < 2 or details.get("ledger_detail") == "resumido":
+                        continue
+                    decision_id = details.get("decision_id")
+                    referenced = set()
+                    def collect(value):
+                        if isinstance(value, dict):
+                            for key, item in value.items():
+                                if key in {"alternative_id", "alternativeId"} and item:
+                                    referenced.add(str(item))
+                                else:
+                                    collect(item)
+                        elif isinstance(value, list):
+                            for item in value:
+                                collect(item)
+                    collect(details.get("decision_choices") or {})
+                    collect(details.get("selected") or {})
+                    if decision_id and getattr(self.db, "meta_learning_samples", None) is not None:
+                        values = conn.execute(select(self.db.meta_learning_samples.c.alternative_id).where(
+                            self.db.meta_learning_samples.c.decision_id == str(decision_id))).scalars()
+                        referenced.update(str(value) for value in values if value)
+                    compact = self._summarize_old_plan(details, referenced)
+                    conn.execute(self.db.meta_ledger.update().where(
+                        self.db.meta_ledger.c.id == int(ledger_id)).values(
+                            details=json.dumps(compact, sort_keys=True, default=str)))
+                    changed += 1
+        return {"plans_summarized": changed, "ledger_plan_detail_days": days}
 
     def _cache_key(self, kind, payload):
         day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
