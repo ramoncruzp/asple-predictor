@@ -126,6 +126,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 41c-2a | Preservar `capital_usage` en eventos de plan v2 | Contrato probado; no se reprodujo la pérdida reportada en S1 |
 | 41c-2b | Asignación de efectivo libre con curvas v3 por monto | Motor en sombra; benchmark sintético con 30 USDT libres y 0,033 s de coste |
 | 41c-2c | Interruptor por perfil y presentación en Metas/Inteligencia | Apagado por defecto; 122 pruebas dirigidas verdes; sin despliegue |
+| 41c-2d | Asignación en sombra con geometría por monto, motivos de descarte y presupuesto de 30 s | Implementada y probada offline; decisión real comparada con HEAD; sigue en sombra |
 | 41f | Medición del efecto del orden intravela entre replays 5m y 1m | Script y pruebas sintéticas; pendiente ejecutar con datos públicos en S1. Si Δ de probabilidad <2 pp, conservar simulador; si >2 pp, evaluar corrección en fase aparte |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.

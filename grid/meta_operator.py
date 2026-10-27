@@ -879,8 +879,13 @@ class MetaOperator:
         margins = [float(cfg.get("min_margin_pct", .3)) + extra for extra in (0, .2, .4)]
         advisor_rows = []
         advisor_capital = float(cfg.get("_advisor_reference_capital", capital))
+        allocation_deadline = cfg.get("_allocation_shadow_deadline")
+        def check_allocation_deadline():
+            if allocation_deadline is not None and time.perf_counter() >= allocation_deadline:
+                raise TimeoutError("presupuesto agotado")
         if self.advisor is not None:
             for margin in margins:
+                check_allocation_deadline()
                 key = (self.clock() // 86400, symbol, round(advisor_capital, 4), round(float(margin), 4),
                        int(cfg.get("max_days", 20)))
                 in_process = self._advisor_cache.get(key)
@@ -906,6 +911,7 @@ class MetaOperator:
                     self._advisor_cache[key] = stored
                     self._persistent_cache_set("advisor", key, stored)
                     advisor_rows.append({"margin_target_pct": margin, "recommendation": advisory})
+                    check_allocation_deadline()
                 except Exception as exc:
                     advisor_rows.append({"margin_target_pct": margin, "error": str(exc)})
         else:
@@ -918,6 +924,7 @@ class MetaOperator:
                     structure.get("net_edge_pct_per_cycle", 0)}})
         alternatives = []
         for advisor_row in advisor_rows:
+            check_allocation_deadline()
             advisory = advisor_row.get("recommendation") or {}
             low, high = advisory.get("recommended_floor"), advisory.get("recommended_ceiling")
             if low is None or high is None or not float(low) < price < float(high):
@@ -938,8 +945,10 @@ class MetaOperator:
                     ranges.append((buy_x, sell_y, buy_distance_pct))
             for strategy in strategies:
                 for variant_low, variant_high, buy_distance in ranges:
+                    check_allocation_deadline()
                     alternative = self._evaluate(row, strategy, capital, target_usdt, variant_low, variant_high,
                         planned, cfg, margin_pct=advisor_row["margin_target_pct"])
+                    check_allocation_deadline()
                     alternative["mid_at_plan"] = price
                     alternative["advisor"] = advisory
                     alternative["advisor_margin_target_pct"] = advisor_row["margin_target_pct"]
@@ -978,72 +987,115 @@ class MetaOperator:
             context["times"][name] = context["times"].get(name, 0.0) + time.perf_counter() - started
 
     def _allocation_curve_variants(self, candidates, prepared, goal, cfg, free_cash, current_pieces):
-        """Reproduce curvas v3 en cada escalón de capital para una pieza adicional."""
+        """Regenera geometrías por monto y conserva las causas de descarte de la sombra."""
+        started = time.perf_counter()
+        deadline = started + 30.0
         capital_initial = float(goal.get("capital_initial") or 0)
         step = capital_initial * .05
         minimum = max(5.5, step)
+        diagnostics = {"conteo_por_motivo": {}, "ejemplos": [], "no_evaluados": 0}
+        def reject(symbol, kind, amount, stage, reason):
+            label = str(reason or stage)
+            diagnostics["conteo_por_motivo"][label] = diagnostics["conteo_por_motivo"].get(label, 0) + 1
+            if len(diagnostics["ejemplos"]) < 10:
+                diagnostics["ejemplos"].append({"symbol": symbol, "piece_type": kind,
+                    "amount_usdt": round(float(amount or 0), 4), "stage": stage, "reason": label})
         if step <= 0 or minimum <= 0:
-            return []
+            reject(None, None, 0, "mínimo de celda", "capital inicial insuficiente")
+            return [], diagnostics
         current_by_symbol = {}
+        current_grids = current_bots = 0
         for item in (current_pieces or {}).values():
             piece = item.get("piece") or {}
             symbol = piece.get("symbol")
             current_by_symbol[symbol] = current_by_symbol.get(symbol, 0.0) + float(piece.get("capital_usdt") or 0)
+            if piece.get("piece_type") == "individual_bot_grid":
+                current_bots += 1
+            else:
+                current_grids += 1
         prepared_by_symbol = {row.get("symbol"): row for row in prepared}
         coin_cap_pct = float(cfg.get("capital_per_coin_pct", 100))
         unique = {}
         for alternative in sorted(candidates,
                 key=lambda row: float(row.get("replay_probability") or 0), reverse=True):
             piece = (alternative.get("pieces") or [{}])[0]
-            geometry_key = (piece.get("symbol"), piece.get("piece_type"), piece.get("strategy"),
-                round(float(piece.get("floor") or 0), 12), round(float(piece.get("ceiling") or 0), 12),
-                int(piece.get("n_levels") or 0), round(float(piece.get("margin_pct") or 0), 8))
+            geometry_key = (piece.get("symbol"), piece.get("piece_type"))
             unique.setdefault(geometry_key, alternative)
         geometry_counts = {}
         selected = []
         for key, alternative in unique.items():
             symbol, kind = key[:2]
+            if time.perf_counter() >= deadline:
+                remaining = len(unique) - len(selected)
+                diagnostics["no_evaluados"] += max(0, remaining)
+                reject(symbol, kind, 0, "presupuesto agotado", f"presupuesto agotado; {remaining} candidatos sin evaluar")
+                break
             count_key = (symbol, kind)
             if geometry_counts.get(count_key, 0) >= 3:
                 continue
             geometry_counts[count_key] = geometry_counts.get(count_key, 0) + 1
-            source_piece = (alternative.get("pieces") or [{}])[0]
+            if kind == "individual_bot_grid" and current_bots >= int(cfg.get("max_bots", 0)):
+                reject(symbol, kind, 0, "límite de perfil", "límite de bots alcanzado")
+                continue
+            if kind != "individual_bot_grid" and current_grids >= int(cfg.get("max_grids", 0)):
+                reject(symbol, kind, 0, "límite de perfil", "límite de grids alcanzado")
+                continue
             coin_free = max(0.0, capital_initial * coin_cap_pct / 100 - current_by_symbol.get(symbol, 0.0))
             cap_limit = min(max(0.0, float(free_cash or 0)), coin_free)
             if cap_limit + 1e-8 < minimum:
+                reason = "tope por moneda insuficiente" if coin_free < minimum else "efectivo libre inferior al mínimo de celda"
+                reject(symbol, kind, cap_limit, "tope por moneda" if coin_free < minimum else "mínimo de celda", reason)
                 continue
             row = prepared_by_symbol.get(symbol)
             if row is None:
+                reject(symbol, kind, minimum, "sin evidencia", "no hay datos preparados para el símbolo")
                 continue
             cap = minimum
             variants = []
             while cap <= cap_limit + 1e-8:
-                piece = {**source_piece, "capital_usdt": round(cap, 4)}
+                if time.perf_counter() >= deadline:
+                    remaining_steps = max(1, int((cap_limit - cap) // step) + 1)
+                    diagnostics["no_evaluados"] += remaining_steps
+                    reject(symbol, kind, cap, "presupuesto agotado", f"presupuesto agotado; {remaining_steps} montos sin evaluar")
+                    break
+                variant_cfg = {**cfg, "_advisor_reference_capital": cap,
+                    "_allocation_shadow_deadline": deadline}
                 try:
-                    openability = self._plan_timed("allocation_testnet_openability",
-                        self._testnet_openability, piece, goal)
-                except Exception:
+                    regenerated, advisor_rows = self._plan_timed("allocation_candidate_alternatives",
+                        self._candidate_alternatives, row, cap, float(goal.get("target_usdt") or 0), variant_cfg)
+                except TimeoutError as exc:
+                    reject(symbol, kind, cap, "presupuesto agotado", str(exc))
+                    diagnostics["no_evaluados"] += 1
+                    break
+                except Exception as exc:
+                    reject(symbol, kind, cap, "replay", f"{type(exc).__name__}: {exc}")
                     cap += step
                     continue
-                if openability.get("allowed"):
-                    strategy = "individual_bot" if kind == "individual_bot_grid" else source_piece.get("strategy", "simple")
+                for advisor_row in advisor_rows:
+                    if advisor_row.get("error"):
+                        reject(symbol, kind, cap, "replay",
+                            f"Advisor: {advisor_row['error']}")
+                matching = [item for item in regenerated if (item.get("pieces") or [{}])[0].get("piece_type") == kind]
+                if not matching and not any(item.get("error") for item in advisor_rows):
+                    reject(symbol, kind, cap, "replay", "el Advisor no generó geometría compatible con el monto")
+                matching.sort(key=lambda item: float(item.get("replay_probability") or
+                    (item.get("estimate") or {}).get("probability_replay") or 0), reverse=True)
+                for generated in matching[:3]:
+                    piece = (generated.get("pieces") or [{}])[0]
                     try:
-                        evaluated = self._plan_timed("allocation_replay", self._evaluate, row, strategy,
-                            cap, float(goal.get("target_usdt") or 0), float(source_piece.get("floor") or 0),
-                            float(source_piece.get("ceiling") or 0), int(source_piece.get("n_levels") or 1), cfg,
-                            margin_pct=source_piece.get("margin_pct"))
-                    except Exception:
-                        cap += step
+                        openability = self._plan_timed("allocation_testnet_openability",
+                            self._testnet_openability, piece, goal)
+                    except Exception as exc:
+                        reject(symbol, kind, cap, "Testnet", f"{type(exc).__name__}: {exc}")
                         continue
-                    variants.append({**alternative, "pieces": evaluated.get("pieces") or [piece],
-                        "window_results": evaluated.get("window_results") or [],
-                        "estimate": evaluated.get("estimate") or {},
-                        "replay_probability": (evaluated.get("estimate") or {}).get("probability_replay"),
-                        "testnet_openability": openability})
+                    if not openability.get("allowed"):
+                        reject(symbol, kind, cap, "Testnet", openability.get("reason"))
+                        continue
+                    variants.append({**generated, "testnet_openability": openability})
                 cap += step
             if variants:
                 selected.append({**alternative, "capital_variants": variants})
-        return selected
+        return selected, diagnostics
 
     def _build_plan(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
         token = _PLAN_READ_CONTEXT.set({"owner": self, "reads": {}, "times": {},
@@ -1492,16 +1544,20 @@ class MetaOperator:
         try:
             from grid.meta_allocation import evaluate_extended_allocation
             allocation_cash = unused_capital if allocation_free_cash is None else allocation_free_cash
-            allocation_variants = self._allocation_curve_variants(allocation_candidates, prepared, goal,
+            allocation_variants, allocation_discards = self._allocation_curve_variants(allocation_candidates, prepared, goal,
                 cfg, allocation_cash, current_pieces)
             plan["allocation_shadow"] = evaluate_extended_allocation({"alternatives": allocation_variants}, current_pieces,
                 free_cash=allocation_cash,
                 capital_initial=capital, target_usdt=target_usdt,
                 window_days=int(cfg.get("max_days", 20)), limits=cfg,
                 tie_tolerance_pp=float(stored.get("allocation_tie_tolerance_pp", 5)))
+            plan["allocation_shadow"]["descartes"] = allocation_discards
         except Exception as exc:
             plan["allocation_shadow"] = {"decision": "no_agregar", "selected": None,
-                "reason": f"no se pudo evaluar: {type(exc).__name__}: {exc}", "evaluated_top": []}
+                "reason": f"no se pudo evaluar: {type(exc).__name__}: {exc}", "evaluated_top": [],
+                "descartes": {"conteo_por_motivo": {f"{type(exc).__name__}: {exc}": 1},
+                    "ejemplos": [{"symbol": None, "piece_type": None, "amount_usdt": 0,
+                        "stage": "replay", "reason": f"{type(exc).__name__}: {exc}"}], "no_evaluados": 0}}
         finally:
             plan["timings_s"]["allocation_shadow"] = round(time.perf_counter() - allocation_started, 6)
         if record:
@@ -3263,6 +3319,7 @@ class MetaOperator:
             allocation = plan.get("allocation_shadow") or {"decision": "no_agregar",
                 "selected": None, "reason": "no hay cálculo de sombra disponible", "evaluated_top": []}
             plan["allocation_shadow"] = allocation
+            allocation["real_free_cash_usdt"] = round(free, 4)
             shadow = allocation.get("selected")
             self._ledger(goal["id"], "META_OPERATOR_ALLOCATION_SHADOW", {
                 "decision": allocation.get("decision"), "symbol": shadow.get("symbol") if shadow else None,
@@ -3272,7 +3329,10 @@ class MetaOperator:
                 "probability_after": shadow.get("probability_after") if shadow else None,
                 "delta_probability_pp": shadow.get("delta_probability_pp") if shadow else None,
                 "progress_improvement_pct": shadow.get("progress_improvement_pct") if shadow else None,
-                "reason": allocation.get("reason"), "evaluated_top": allocation.get("evaluated_top", [])})
+                "reason": allocation.get("reason"), "real_free_cash_usdt": round(free, 4),
+                "capital_usage_basis": "mejor cartera propuesta desde cero",
+                "descartes": allocation.get("descartes"),
+                "evaluated_top": allocation.get("evaluated_top", [])})
             if plan.get("use_extended_allocation"):
                 selected = allocation.get("selected")
                 if selected and float(selected.get("capital_usdt") or 0) <= free + 1e-8:

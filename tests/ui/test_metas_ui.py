@@ -271,6 +271,7 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     assert "Activa" in active.locator("h2").inner_text()
     assert "50" in active.locator(".metas-live-facts").inner_text()
     assert "Plazo restante" in active.locator(".metas-live-facts").inner_text()
+    assert "Efectivo libre REAL de la Meta" in active.locator(".metas-live-facts").inner_text()
     assert "Ganancia extra realizada" in active.locator(".metas-live-facts").inner_text()
     page.check("[data-ledger-valuation]")
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")

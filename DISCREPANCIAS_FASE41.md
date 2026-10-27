@@ -88,3 +88,10 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 - `run_simulation` originalmente limita su cálculo interno de σ a 5m/1h. El script entrega un vector de σ ausente para 1m, manteniendo su motor de órdenes y fills. ADJUST, stop-loss y el cierre temporal están desactivados en ambos intervalos; este vector no constituye una nueva regla ni modifica el código del simulador.
 - La métrica de “ciclos perdidos” expresa el aumento de ciclos observado a 1m frente a 5m, dividido por los ciclos 1m; vale cero cuando 1m no completa ciclos. Toques exactos se cuentan por orden vigente, y velas ambiguas por vela, no por nivel.
 - La corrida de rendimiento usó velas sintéticas repetitivas, por lo que su resultado (37,83 s para 3 símbolos/30 días) verifica la escala del trabajo, no el tiempo de red ni la representatividad de mercado. El análisis Binance queda pendiente de la ejecución manual en S1.
+
+## Fase 41c-2d — diferencias y límites
+
+- El límite de 30 s se verifica en puntos seguros antes/después de cada alternativa, llamada al Advisor/replay y monto. Como el flujo es síncrono, una llamada que ya comenzó no es cancelable y podría rebasar el plazo; las siguientes evaluaciones sí se detienen y quedan contadas como pendientes.
+- La geometría se vuelve a generar por capital mediante el mismo `_candidate_alternatives` que el análisis. Se mantienen solo las alternativas del tipo candidato original y hasta tres opciones generadas por monto; esto limita la búsqueda y no pretende optimizar exhaustivamente cada monto.
+- Las pruebas usan exchange falso y replay local. No miden rendimiento con datos de mercado ni prueban un libro real de Testnet.
+- La prueba de paridad del flujo real lo compara con `_review_allocations` de HEAD con el interruptor de asignación apagado; la nueva información y los descartes solo amplían la sombra.

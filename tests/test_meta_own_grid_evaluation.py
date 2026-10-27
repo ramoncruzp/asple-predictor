@@ -243,8 +243,8 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     for key in allowed_new_fields:
         assert key in current_plan
     assert current_plan["current_pieces"] == {}
-    assert current_plan["allocation_shadow"]["decision"] == "no_agregar"
-    assert current_plan["allocation_shadow"]["selected"] is None
+    assert current_plan["allocation_shadow"]["decision"] == "agregar"
+    assert current_plan["allocation_shadow"]["selected"]["capital_usdt"] <= 30
     assert "capital_usage" in current_plan and current_plan["capital_usage"]["initial_capital_usdt"] == 100
     assert current_plan["capital_usage"]["unused_usdt"] == old_plan["capital_usage"]["unused_usdt"]
     assert current_plan["use_extended_allocation"] is False
@@ -267,10 +267,92 @@ def test_allocation_shadow_keeps_source_testnet_checked_alternative_id(monkeypat
     monkeypatch.setattr(allocation_module, "evaluate_extended_allocation", capture)
     operator, _, goal, _, _ = plan_setup(owner="manual")
     monkeypatch.setattr(operator, "_allocation_curve_variants",
-        lambda candidates, *_args: candidates)
+        lambda candidates, *_args: (candidates, {"conteo_por_motivo": {}, "ejemplos": [], "no_evaluados": 0}))
     plan = operator._build_plan(goal, record=False)
     by_id = {row["alternative_id"]: row for row in plan["alternatives"]}
     assert seen["alternatives"]
     assert all(row["alternative_id"] in by_id for row in seen["alternatives"])
     assert all(row["testnet_openability"].get("allowed") is True
         for row in seen["alternatives"])
+
+
+def test_shadow_allocation_regenerates_geometry_for_each_available_amount(monkeypatch):
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    generated_amounts = []
+    def generate(row, capital, target, cfg):
+        generated_amounts.append(capital)
+        piece = {"symbol": row["symbol"], "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": capital, "n_levels": 4, "floor": 100-capital/100,
+            "ceiling": 100+capital/100, "margin_pct": .3}
+        return [{"symbol": row["symbol"], "pieces": [piece],
+            "estimate": {"probability_replay": .2}, "replay_probability": .2,
+            "window_results": [{"window_start": "w1"}], "alternative_id": "new-geometry"}], []
+    monkeypatch.setattr(operator, "_candidate_alternatives", generate)
+    monkeypatch.setattr(operator, "_testnet_openability", lambda *_args, **_kwargs: {"allowed": True})
+    original = {"symbol": "XRPUSDT", "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
+        "strategy": "simple", "capital_usdt": 70, "n_levels": 8, "floor": 80, "ceiling": 120}],
+        "replay_probability": .8, "alternative_id": "large-geometry"}
+    selected, discards = operator._allocation_curve_variants([original],
+        [{"symbol": "XRPUSDT"}], goal, goal["config_snapshot"], 30, {})
+    assert generated_amounts
+    assert generated_amounts[0] < 30
+    assert selected[0]["capital_variants"]
+    variant_piece = selected[0]["capital_variants"][0]["pieces"][0]
+    assert variant_piece["floor"] != 80
+    assert variant_piece["capital_usdt"] == generated_amounts[0]
+    assert discards["conteo_por_motivo"] == {}
+
+
+def test_shadow_allocation_records_minimum_cell_discard(monkeypatch):
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    source = {"symbol": "XRPUSDT", "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid"}],
+        "replay_probability": .8}
+    variants, discards = operator._allocation_curve_variants([source],
+        [{"symbol": "XRPUSDT"}], goal, goal["config_snapshot"], 4, {})
+    assert variants == []
+    assert discards["conteo_por_motivo"]["efectivo libre inferior al mínimo de celda"] == 1
+    assert discards["ejemplos"][0] == {"symbol": "XRPUSDT", "piece_type": "grid",
+        "amount_usdt": 4.0, "stage": "mínimo de celda", "reason": "efectivo libre inferior al mínimo de celda"}
+
+
+def test_shadow_allocation_stops_candidate_generation_at_30_second_budget(monkeypatch):
+    import grid.meta_operator as module
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    clock_values = iter((0.0, 1.0, 2.0, 31.0))
+    monkeypatch.setattr(module.time, "perf_counter", lambda: next(clock_values))
+    called = []
+    def generate(_row, _capital, _target, cfg):
+        if module.time.perf_counter() >= cfg["_allocation_shadow_deadline"]:
+            raise TimeoutError("presupuesto agotado")
+        called.append(True)
+        return [], []
+    monkeypatch.setattr(operator, "_candidate_alternatives", generate)
+    source = {"symbol": "XRPUSDT", "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid"}],
+        "replay_probability": .8}
+    _, discards = operator._allocation_curve_variants([source],
+        [{"symbol": "XRPUSDT"}], goal, goal["config_snapshot"], 30, {})
+    assert not called
+    assert discards["no_evaluados"] >= 1
+    assert "presupuesto agotado" in discards["conteo_por_motivo"]
+
+
+def test_real_review_decision_matches_head_when_shadow_allocator_changes(monkeypatch):
+    import grid.meta_operator as module
+    source = subprocess.check_output(["git", "show", "HEAD:grid/meta_operator.py"]).decode("utf-8")
+    cls = next(node for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "MetaOperator")
+    method = next(node for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_review_allocations")
+    namespace = dict(vars(module))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "HEAD:_review_allocations", "exec"), namespace)
+    monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="plan-fijo"))
+    actual, _, goal, _, _ = plan_setup(owner="manual")
+    reference, _, _, _, _ = plan_setup(owner="manual")
+    reference._review_allocations = MethodType(namespace["_review_allocations"], reference)
+    plan = actual._build_plan(goal, record=False)
+    actual._add_piece_from_free_cash = lambda *_args, **_kwargs: None
+    reference._add_piece_from_free_cash = lambda *_args, **_kwargs: None
+    valuation = {"cash_usdt": 0, "free_capital_usdt": 0}
+    actual_result = actual._review_allocations(goal, valuation, plan=plan)
+    head_result = reference._review_allocations(goal, valuation, plan=plan)
+    assert actual_result == head_result

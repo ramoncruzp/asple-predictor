@@ -299,6 +299,7 @@
     slot.innerHTML = `
       <div class="metas-plan-section"><h4>Candidatas</h4>${candidatesTable(plan.candidates)}</div>
       <div class="metas-plan-section"><h4>Plan propuesto</h4>${piecesTable(plan.pieces)}</div>
+      ${plan.capital_usage ? `<div class="metas-plan-section metas-capital-usage"><span>Capital usado de la mejor cartera propuesta desde cero</span><b>${fmtMoney(plan.capital_usage.used_usdt)} USDT</b><span>Efectivo libre real de la Meta</span><b>${plan.allocation_shadow?.real_free_cash_usdt == null ? 'No disponible en este análisis' : `${fmtMoney(plan.allocation_shadow.real_free_cash_usdt)} USDT`}</b></div>` : ''}
       <div class="metas-plan-section"><h4>Estimación (histórica, nunca promesa)</h4>
         <div class="metas-estimate-grid">
           <div><span>Probabilidad histórica</span><b>${fmtPct((est.probability_replay || 0) * 100)}</b></div>
@@ -441,8 +442,10 @@
       const p = currentEstimate.piece || {}, e = currentEstimate.estimate || {};
       return `Pieza actual: ${p.symbol || ''} · ${fmtMoney(p.capital_usdt)} USDT · rango ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${p.n_levels ?? '—'} niveles · probabilidad histórica ${fmtMoney(Number(e.probability_replay || 0) * 100, 1)} % · ajustada ${fmtMoney(Number(e.probability_adjusted || e.probability || 0) * 100, 1)} % · avance mediano ${fmtMoney(e.median_progress_pct, 1)} %`;
     })() : '';
+    const allocationLine = event.event_type === 'META_OPERATOR_ALLOCATION_SHADOW'
+      ? `Capital_usage es de la mejor cartera propuesta desde cero · efectivo libre REAL de la Meta ${fmtMoney(details.real_free_cash_usdt)} USDT` : '';
     const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
-      oldNew, decision || reasonText || '', improvement, currentPieceLine].filter(Boolean).join(' · ');
+      oldNew, decision || reasonText || '', improvement, currentPieceLine, allocationLine].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
       <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
@@ -490,7 +493,7 @@
       ${statusNote}
       <div data-live-valuation>${valuationBlock(goal, valuation)}</div>
       <div class="metas-live-facts" data-live-facts><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
-        <span>Efectivo libre para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
+        <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
         <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span></div>
       <div data-live-progress>${progressBars(goal, valuation, profile)}</div>
       <div class="metas-pieces" data-live-pieces><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
@@ -795,7 +798,7 @@
     const profile = (config.profiles || {})[goal.profile] || {};
     panel.querySelector('[data-live-valuation]').innerHTML = valuationBlock(goal, valuation);
     panel.querySelector('[data-live-facts]').innerHTML = `<span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
-      <span>Efectivo libre para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
+      <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
       <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>`;
     panel.querySelector('[data-live-progress]').innerHTML = progressBars(goal, valuation, profile);
     panel.querySelector('[data-live-pieces]').innerHTML = `<h3>Piezas</h3>${piecesLinkList(valuation)}`;
