@@ -297,6 +297,7 @@ class MetaOperator:
         self.engine, self.settings, self.advisor = engine, settings, advisor
         self.alert = alert or (lambda *_args: None)
         self.clock, self.price_drift_pct = clock, float(price_drift_pct)
+        self._sleep = time.sleep
         self.cache_enabled = bool(cache_enabled)
         self.cache_writes = bool(cache_writes)
         self._lock = threading.RLock()
@@ -3146,23 +3147,29 @@ class MetaOperator:
 
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
-        value = self.core.valuation(meta_id)
-        if goal["status"] != "ACTIVE" or value.get("status") != "KNOWN":
-            if value.get("status") != "KNOWN":
-                logging.getLogger(__name__).warning("Revisión Meta %s cancelada por valoración desconocida: %s",
-                    meta_id, self._valuation_unknown_diagnostic(value))
-            self._reset_rotation_streaks(meta_id, "meta no activa o valor desconocido")
-            result = {"decision": "no_hacer_nada", "reason": "meta no activa o valoración DESCONOCIDO"}
+        if goal["status"] != "ACTIVE":
+            self._reset_rotation_streaks(meta_id, "meta no activa")
+            result = {"decision": "no_hacer_nada", "reason": f"meta no activa: estado {goal['status']}"}
+            value = None
             self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, None))
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "ledger_schema_version": 2, "plan_decision_id": None,
                 "decision": self._compact_review_result(result), "shadow_decision": None, "valuation": value,
-                **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
-                    if value.get("status") != "KNOWN" else {}),
                 "decision_choices": {"comparison_version": 2,
                     "real": {"decision": "mantener", "alternative_id": None},
                     "scanner_advisor": {"decision": "mantener", "alternative_id": None},
                     "learned": {"decision": "mantener", "alternative_id": None}}, "comparison_version": 2})
+            return result
+        value, valuation_attempts = self._valuation_with_retry(meta_id)
+        if value.get("status") != "KNOWN":
+            self._reset_rotation_streaks(meta_id, "valoración desconocida tras reintento")
+            diagnostic = self._valuation_unknown_diagnostic(value)
+            logging.getLogger(__name__).warning(
+                "Revisión Meta %s cancelada por valoración desconocida tras dos intentos: %s; intentos=%s",
+                meta_id, diagnostic, valuation_attempts)
+            result = {"decision": "no_hacer_nada", "reason": "valoración DESCONOCIDO tras dos intentos"}
+            self._record_review(meta_id, result, value, None,
+                diagnostics={"valuation_unknown": diagnostic, "valuation_attempts": valuation_attempts})
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
@@ -3182,14 +3189,22 @@ class MetaOperator:
             return result
         with self._operation_lock:
             current_goal = self.core.get_goal(meta_id)
-            current_value = self.core.valuation(meta_id)
-            if current_goal["status"] != "ACTIVE" or current_value.get("status") != "KNOWN":
-                if current_value.get("status") != "KNOWN":
-                    logging.getLogger(__name__).warning(
-                        "Revisión Meta %s cancelada durante análisis por valoración desconocida: %s",
-                        meta_id, self._valuation_unknown_diagnostic(current_value))
+            current_value = value
+            if current_goal["status"] == "ACTIVE":
+                current_value, retry_attempts = self._valuation_with_retry(meta_id)
+                valuation_attempts.extend(retry_attempts)
+            if current_goal["status"] != "ACTIVE":
                 self._reset_rotation_streaks(meta_id, "meta cambio durante analisis")
-                result = {"decision": "no_hacer_nada", "reason": "meta dejó de estar activa o valor DESCONOCIDO durante el análisis"}
+                result = {"decision": "no_hacer_nada",
+                    "reason": f"meta dejó de estar activa durante el análisis: estado {current_goal['status']}"}
+            elif current_value.get("status") != "KNOWN":
+                self._reset_rotation_streaks(meta_id, "valor desconocido durante analisis")
+                diagnostic = self._valuation_unknown_diagnostic(current_value)
+                logging.getLogger(__name__).warning(
+                    "Revisión Meta %s cancelada durante análisis por valoración desconocida: %s; intentos=%s",
+                    meta_id, diagnostic, valuation_attempts)
+                result = {"decision": "no_hacer_nada",
+                    "reason": "valoración DESCONOCIDO durante el análisis tras dos intentos"}
             elif float(current_value["result_pct"]) <= -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0)):
                 self._reset_rotation_streaks(meta_id, "bloqueo 75% durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida durante el análisis"}
@@ -3210,6 +3225,7 @@ class MetaOperator:
             "valuation": value,
             **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
                 if value.get("status") != "KNOWN" else {}),
+            "valuation_attempts": valuation_attempts,
                 "decision_choices": {**choices,
                 "learned_weights_enabled": bool(
                     (((plan or {}).get("learning") or {}).get("enabled"))),
@@ -3220,10 +3236,13 @@ class MetaOperator:
                 for item in (plan or {}).get("alternatives", [])]})
         if result.get("decision") == "no_hacer_nada":
             self._ledger(meta_id, "META_OPERATOR_NOOP", {
-                **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error})
+                **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error,
+                "valuation_attempts": valuation_attempts,
+                **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
+                    if value.get("status") != "KNOWN" else {})})
         return result
 
-    def _record_review(self, meta_id, result, value, shadow, plan=None):
+    def _record_review(self, meta_id, result, value, shadow, plan=None, diagnostics=None):
         choices = self._safe_active_review_choices(plan, result, meta_id)
         comparison_error = ({"decision_choices_error": choices["decision_choices_error"]}
             if "decision_choices_error" in choices else {})
@@ -3233,10 +3252,24 @@ class MetaOperator:
             "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
             **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
                 if value.get("status") != "KNOWN" else {}),
+            **(diagnostics or {}),
             "decision_choices": choices,
             "comparison_version": 2})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {
-            **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error})
+            **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error,
+            **(diagnostics or {})})
+
+    def _valuation_with_retry(self, meta_id):
+        attempts = []
+        value = self.core.valuation(meta_id)
+        attempts.append({"attempt": 1, "status": value.get("status"),
+            "diagnostic": self._valuation_unknown_diagnostic(value) if value.get("status") != "KNOWN" else None})
+        if value.get("status") != "KNOWN":
+            self._sleep(10)
+            value = self.core.valuation(meta_id)
+            attempts.append({"attempt": 2, "status": value.get("status"),
+                "diagnostic": self._valuation_unknown_diagnostic(value) if value.get("status") != "KNOWN" else None})
+        return value, attempts
 
     @classmethod
     def _noop_payload(cls, result, valuation, plan_decision_id):
@@ -3960,6 +3993,7 @@ class MetaOperator:
 
     def start(self):
         self.scheduler.add_job(self.review_active, "interval", minutes=15, id="meta_operator_review",
+                               next_run_time=datetime.now(timezone.utc) + timedelta(seconds=80),
                                replace_existing=True, max_instances=2, coalesce=True)
         self.scheduler.add_job(self.precompute_daily, "cron", hour=8, minute=0, timezone="UTC",
                                id="meta_daily_precompute", replace_existing=True,

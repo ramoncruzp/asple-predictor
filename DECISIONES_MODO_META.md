@@ -313,34 +313,27 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Pruebas focalizadas: 108 passed acumuladas en operador/resiliencia, interfaz y benchmark, con 6 warnings; benchmark caliente 2,384 s frente a 2,39 s documentados en 41c-0 (−0,26 %). Sin suite completa ni validación en S1.
 
 
-## Fase 41-G1a ? compresi?n de curvas de replay
 
-- Las curvas de efectivo y patrimonio mantienen precisi?n `float32` y puntos cada 15 minutos; se almacenan con zlib y byte shuffle (formato 2).
-- Las curvas legacy siguen siendo legibles, pero las entradas persistentes con formato viejo se regeneran. Ninguna decisi?n ni m?trica cambia.
+## Fase 41-G1a — compresión de replay
 
+- Curvas formato 2 con zlib/byte shuffle; float32 y marcas cada 15 min. Legacy legible; caché antigua se regenera. Sin cambios de métricas/decisiones.
 
-## Fase 41-G1b ? comparabilidad intravela
+## Fase 41-G1b — comparación intravela
 
-- La medici?n 5m/1m comparte la geometr?a determinada con 5m al inicio del periodo o ventana; se informa `same_geometry` y no se comparan filas con geometr?a desigual.
-- Es un script de estudio; no modifica simuladores ni decisiones del operador.
+- Geometría calculada con 5m al inicio y reutilizada en 1m; se informa same_geometry. No cambia simuladores/decisiones.
 
+## Fase 41-G1c — diagnóstico de valoración
 
-## Fase 41-G1c ? diagn?stico de valoraci?n desconocida
+- Inactividad y valoración desconocida tienen motivos separados. Una lectura no KNOWN espera 10 s y se reintenta una vez; ambos intentos quedan auditados. Revisión inicial ~20 s tras primer tick de MetaCore. Si persiste, no hay acción.
 
-- La revisi?n cancelada conserva s?mbolo, motivo/edad del libro disponible y estado de valoraci?n en la bit?cora y el log. Inteligencia muestra conteos m?viles de 24 horas y siete d?as con motivos recientes.
-- El diagn?stico es observabilidad; la valoraci?n DESCONOCIDA contin?a bloqueando piezas y cancelando la revisi?n como antes.
+## Fase 41-G1d — cobertura de dirección
 
+- Inteligencia diferencia cobertura activa P(baja) ≥0,60. La señal neutral 0 sigue contando como muestra; no se altera el modelo ni política real.
 
-## Fase 41-G1d ? cobertura de direcci?n
+## Fase 41-G1e — readiness ausente
 
-- Inteligencia y el diagn?stico diferencian direcci?n disponible de direcci?n activa (P(baja) ? 0,60). Valores menores siguen entrando al aprendizaje como se?al neutral 0 y cuentan para su muestra efectiva; no se alter? el modelo ni la decisi?n real.
+- Meta no inicializa coin_readiness; ausencia no satisface requisito Prudente.
 
+## Fase 41-G1f — diagnóstico S1
 
-## Fase 41-G1e ? readiness sin registro
-
-- La ausencia de fila en `coin_readiness` se interpreta como readiness no disponible. El an?lisis Meta no crea filas; solo la ruta de Coin Registry inicializa `pendiente`. Prudente no trata `None` como completa.
-
-
-## Fase 41-G1f ? diagn?stico local para S1
-
-- `scripts/verificar_s1_meta.py` agrega lecturas SQLite `mode=ro` en un comando y nunca inicializa `DBManager` ni importa `.env`. Prec?lculo no tiene evento persistente: no se confunde la ?ltima cach? con la finalizaci?n del job.
+- Verificador abre SQLite mode=ro. No afirma hora de precálculo sin evento persistido; caché es referencia.

@@ -1451,17 +1451,92 @@ def test_review_does_not_move_capital_when_valuation_unknown_or_loss_warning_rea
 
     core = Core()
     operator = MetaOperator(core, None, None, None, None)
+    operator._sleep = lambda _seconds: None
     first = operator.review_once(1)
     assert first["decision"] == "no_hacer_nada"
     assert "DESCONOCIDO" in first["reason"]
     review = next(row for row in core.ledger_rows if row[0][2] == "META_OPERATOR_REVIEW_DECISION")
     assert review[0][3]["valuation_unknown"]["symbol"] == "XRPUSDT"
     assert review[0][3]["valuation_unknown"]["reason"] == "timeout de lectura del libro"
+    assert [row["status"] for row in review[0][3]["valuation_attempts"]] == ["UNKNOWN", "UNKNOWN"]
     core.value = {"status": "KNOWN", "result_pct": "-6.0"}
     second = operator.review_once(1)
     assert second["decision"] == "no_hacer_nada"
     assert "75%" in second["reason"]
     assert sum(row[0][2] == "META_OPERATOR_REVIEW_DECISION" for row in core.ledger_rows) == 2
+
+
+def test_unknown_valuation_retries_once_and_separates_inactive_meta_reason(caplog):
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self, statuses): self.statuses, self.calls, self.events = list(statuses), 0, []
+        def get_goal(self, _id): return {"id": 1, "status": "ACTIVE", "config_snapshot": {}}
+        def valuation(self, _id):
+            self.calls += 1
+            status = self.statuses.pop(0)
+            return {"status": status, "symbol": "XRPUSDT", "reason": "libro aún sin dos lados"}
+        def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+
+    core = Core(["UNKNOWN", "KNOWN"])
+    op = MetaOperator(core, None, None, None, None)
+    waits = []
+    op._sleep = waits.append
+    value, attempts = op._valuation_with_retry(1)
+    assert value["status"] == "KNOWN" and waits == [10]
+    assert [row["status"] for row in attempts] == ["UNKNOWN", "KNOWN"]
+
+    inactive = Core([])
+    inactive.get_goal = lambda _id: {"id": 1, "status": "CANCELLED", "config_snapshot": {}}
+    op = MetaOperator(inactive, None, None, None, None)
+    result = op.review_once(1)
+    assert result["reason"] == "meta no activa: estado CANCELLED"
+    assert inactive.calls == 0
+
+
+def test_unknown_twice_cancels_with_both_attempts_and_detail_in_ledger(caplog):
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def __init__(self): self.calls, self.ledger_rows = 0, []
+        def get_goal(self, _id): return {"id": 8, "status": "ACTIVE", "config_snapshot": {}}
+        def valuation(self, _id):
+            self.calls += 1
+            return {"status": "DESCONOCIDO", "symbol": "XRPUSDT", "reason": f"lectura {self.calls} falló"}
+        def _ledger(self, *args, **kwargs): self.ledger_rows.append((args, kwargs))
+
+    core = Core()
+    op = MetaOperator(core, None, None, None, None)
+    op._sleep = lambda _seconds: None
+    result = op.review_once(8)
+    assert result["decision"] == "no_hacer_nada"
+    assert core.calls == 2
+    event = next(row for row in core.ledger_rows if row[0][2] == "META_OPERATOR_REVIEW_DECISION")
+    detail = event[0][3]
+    assert [row["status"] for row in detail["valuation_attempts"]] == ["DESCONOCIDO", "DESCONOCIDO"]
+    assert detail["valuation_unknown"]["symbol"] == "XRPUSDT"
+    assert "lectura 2 falló" in detail["valuation_unknown"]["reason"]
+    assert "dos intentos" in caplog.text
+
+
+def test_meta_review_scheduler_starts_twenty_seconds_after_monitor_tick():
+    from datetime import datetime, timezone
+    from grid.meta_operator import MetaOperator
+
+    class Scheduler:
+        running = False
+        def __init__(self): self.jobs = []
+        def add_job(self, fn, trigger, **kwargs): self.jobs.append((fn, trigger, kwargs))
+        def start(self): self.running = True
+
+    op = MetaOperator(None, None, None, None, None)
+    scheduler = Scheduler()
+    op.scheduler = scheduler
+    before = datetime.now(timezone.utc)
+    op.start()
+    first = scheduler.jobs[0][2]["next_run_time"]
+    assert 79 <= (first - before).total_seconds() <= 81
+    assert scheduler.jobs[0][1] == "interval" and scheduler.jobs[0][2]["minutes"] == 15
 
 
 

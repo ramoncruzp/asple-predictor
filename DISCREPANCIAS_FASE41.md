@@ -104,31 +104,27 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 - La estimación de espacio para `meta_learning_replay_cache` usa 96 bytes por fila y es aproximada. Ninguna base real se abrió y ningún VACUUM se ejecutó en esta fase.
 
 
-## Fase 41-G1a ? discrepancias
 
-No se eliminan las entradas de cach? antiguas durante el cambio: si contienen curvas de formato anterior, se consideran no reutilizables al leerlas y se regeneran; el borrado f?sico queda a cargo de la retenci?n ya existente. La validaci?n de tama?o usa una trayectoria sint?tica suave de 180 d?as; otras trayectorias con mayor entrop?a podr?an comprimir menos y deben observarse mediante tama?os reales al correr el mantenimiento en S1.
+## Fase 41-G1a — discrepancias
 
+Curvas anteriores se regeneran; retención las borrará después. El tamaño se midió con serie sintética suave; datos de más entropía podrían comprimir menos. No se reduce resolución.
 
-## Fase 41-G1b ? discrepancias
+## Fase 41-G1b — discrepancias
 
-La geometr?a com?n se deriva de los cierres 5m y de sigma 5m causal, aunque 1m puede mostrar otro recorrido dentro de la primera vela. Esa es la comparaci?n solicitada y evita que cada resoluci?n ajuste su propia estrategia. Las m?tricas 1m no constituyen una reconstrucci?n del orden real dentro de cada vela.
+Ambas resoluciones usan geometría causal de 5m aunque la primera vela 1m describa un recorrido distinto. Así se compara resolución/orden sin mezclar geometrías.
 
+## Fase 41-G1c — discrepancias
 
-## Fase 41-G1c ? discrepancias
+Concurrencia del watchdog es hipótesis, no causa demostrada localmente. Se esperan 10 s y se reintenta una vez; se cancela si sigue desconocido. Revalidación ocurre bajo ops_lock y puede mantenerlo hasta 10 s. Inicio a +80 s presupone orden actual en api/main.py. No se inventa causa si el proveedor no la informa.
 
-Los errores de excepci?n del proveedor quedan vinculados a la moneda del grid cuando MetaCore puede identificarla. Los libros con estado DESCONOCIDO registran el motivo ofrecido por `executable_value`; no se infiere la causa si el proveedor no la devuelve. Inteligencia limita el detalle a 20 motivos y el c?lculo a 5.000 decisiones recientes en siete d?as. No se cambi? la condici?n de cancelaci?n.
+## Fase 41-G1d — discrepancias
 
+Cobertura activa cuenta solo P(baja) ≥0,60; cobertura general sigue la presencia según el extractor. Son conceptos distintos. No se cambia entrenamiento.
 
-## Fase 41-G1d ? discrepancias
+## Fase 41-G1e — XRP
 
-La cobertura activa se calcula sobre filas de muestra con se?al `direction` guardada y usa `p_down` (con fallback al valor crudo); su porcentaje usa el total de muestras Meta consultadas como denominador para distinguirla de la cobertura general del extractor. El aprendizaje mantiene la sem?ntica existente: P(baja) < 0,60 aporta 0 neutral y cuenta como observaci?n presente.
+Se conserva readiness ausente; crear fila desde Meta sería escritura ajena a Coin Registry. Prudente no trata ausencia como lista.
 
+## Fase 41-G1f — verificador
 
-## Fase 41-G1e ? XRP sin estado
-
-Se conserva el estado ausente: crear filas autom?ticamente durante an?lisis Meta ser?a una escritura ajena al alcance de lectura y podr?a alterar el flujo de Coin Registry. La explicaci?n es la falta de un registro de onboarding, y el perfil Prudente sigue exigiendo readiness lista.
-
-
-## Fase 41-G1f ? discrepancias
-
-MetaOperator no guarda un evento durable al completar su prec?lculo, as? que un script de solo lectura no puede reportar con certeza la hora/estado de ese job. Se informa la ausencia de registro y la ?ltima escritura de cach? como referencia expresamente no equivalente. `dbstat` y `journalctl` dependen de soporte del SQLite compilado y de que el script se ejecute en el host Linux; sus fallos se muestran como no disponibles.
+Precálculo no tiene evento durable; timestamp de caché no se presenta como equivalente. dbstat y journalctl dependen del host.

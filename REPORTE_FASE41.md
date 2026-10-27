@@ -354,47 +354,33 @@ Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **
 - Pruebas finales: `tests/test_meta_db_maintenance.py`, `tests/test_meta_operator.py`, `tests/test_meta_signal_diagnostics.py`, `tests/test_intelligence_api.py`, `tests/test_app_settings_api.py` y `tests/test_meta_core.py`: **127 passed, 14 warnings, 0 failed; 8,68 s**. No se ejecutó la suite completa ni se usaron S1, Testnet, red, `.env` o BD real.
 
 
-## Fase 41-G1a ? compresi?n exacta de cach? v3
 
-`grid/sim/meta_portfolio.py:7-50` versiona las curvas como formato 2 y comprime los bytes `float32` con zlib y byte shuffle. La resoluci?n de 15 minutos y cada bit de efectivo/patrimonio se conservan. `unpack_curve` mantiene lectura del formato anterior. `grid/meta_operator.py:2582-2585` rechaza para regeneraci?n las curvas persistidas con formato anterior; no borra filas y la retenci?n ya existente las retirar?.
+## Fase 41-G1a — compresión exacta de caché v3
 
-Una curva sint?tica de 180 d?as (17.280 marcas) ocupa **84.350 bytes** serializada en JSON, frente a 138.240 bytes de efectivo y patrimonio sin comprimir (sin contar metadatos). La reducci?n del bloque num?rico serializado es aproximadamente **38,9 %**, por debajo del m?ximo de 100 KB por entrada solicitado.
+grid/sim/meta_portfolio.py:7-50 versiona las curvas como formato 2 y comprime bytes float32 con zlib y byte shuffle. Conserva marcas cada 15 minutos y cada bit de efectivo/patrimonio. El lector admite el formato anterior. grid/meta_operator.py:2582-2585 regenera las curvas persistidas antiguas; no borra filas. Una curva sintética de 180 días/17.280 puntos mide 84.350 bytes JSON frente a 138.240 bytes de arrays sin comprimir. tests/test_meta_portfolio_equity.py:21-53 compara bits, timestamps, métricas y lectura legacy: 13 passed, 0 failed, 0,37 s.
 
-Prueba: comando dirigido a `tests/test_meta_portfolio_equity.py`; **13 passed, 0 failed, 0,37 s**. La prueba compara bits de las curvas, timestamps, m?tricas de replay y lectura legacy. No se usaron red, Testnet, S1, `.env` ni BD real.
+## Fase 41-G1b — medición intravela con geometría común
 
+scripts/medir_orden_intravela.py:136-148,255-305 calcula con velas 5m y sigma causal una geometría por simulación/ventana y la aplica igual a 1m. Exporta same_geometry; discrepancias son error. Bots usan el precio 5m inicial. tests/test_measure_intracandle_order.py:27-59,151-158 valida ciclo ambiguo/geometría: 8 passed, 0 failed, 5,52 s.
 
-## Fase 41-G1b ? medici?n intravela con geometr?a com?n
+## Fase 41-G1c — valoración desconocida y concurrencia
 
-`scripts/medir_orden_intravela.py:136-148` calcula la geometr?a de grid con las velas 5m y la sigma causal disponible al inicio; los bots tambi?n derivan compra/venta del cierre 5m de inicio. La misma geometr?a se copia a 1m para el periodo completo y se recalcula desde 5m para cada ventana de 20 d?as (`:255-305`). Cada fila exporta `same_geometry`; una discrepancia produce error y no se presenta como comparaci?n v?lida.
+grid/meta.py conserva símbolo, estado y motivo disponibles; grid/meta_operator.py registra diagnóstico en bitácora/log. Inteligencia agrega conteos de 24 h/7 días y causas (api/routes/intelligence.py:170-192,385; frontend/intelligence.js:74-77). La regla de cancelar y no mover capital permanece.
 
-Prueba: `tests/test_measure_intracandle_order.py:27-59,151-158` confirma que la vela ambigua pierde el ciclo en 5m y el replay 1m lo completa, y que las filas medidas reutilizan exactamente piso, techo y niveles. Comando dirigido: `tests/test_measure_intracandle_order.py` ? **8 passed, 0 failed, 5,52 s**. Datos sint?ticos; sin red ni BD.
+La evidencia adicional de S1 de Ramón muestra lecturas KNOWN junto a revisiones clasificadas como desconocidas; la concurrencia del watchdog es hipótesis. El operador separa Meta inactiva de valoración desconocida; ante valor no KNOWN espera 10 s y reintenta una vez. Los estados, símbolo y motivos de ambos intentos quedan en META_OPERATOR_REVIEW_DECISION y META_OPERATOR_NOOP, y en el log. Si persiste UNKNOWN no opera. Primera revisión a +80 s del arranque: unos 20 s después del primer tick de MetaCore a 60 s; intervalo posterior de 15 min. Se conserva ops_lock.
 
+Pruebas de API/UI/MetaCore: 110 passed, 5 warnings, 11,61 s. Operador/resiliencia: 86 passed, 4 warnings, 22,38 s; repetición final del operador: 80 passed, 4 warnings, 20,36 s. No se consultó S1.
 
-## Fase 41-G1c ? causa de revisiones canceladas por valoraci?n desconocida
+## Fase 41-G1d — cobertura activa de dirección
 
-`grid/meta.py:470-599` conserva en la valoraci?n el s?mbolo y el error global de lectura; por pieza conserva el estado, el motivo y la marca de lectura del libro (`:580-584`). `grid/meta_operator.py:3147-3255` registra esa informaci?n en `META_OPERATOR_REVIEW_DECISION` y emite un aviso estructurado al log tanto al inicio como si el dato se vuelve desconocido durante el an?lisis. La cancelaci?n sigue teniendo la misma condici?n y no permite mover capital. `api/routes/intelligence.py:170-192,385` agrega conteos de 24 h/7 d?as y motivos recientes; `frontend/intelligence.js:74-77` los presenta en B1.
+API, Inteligencia y scripts/diagnostico_senales_meta.py separan cobertura activa P(baja) ≥0,60 de cobertura general. El aprendizaje conserva la semántica: una predicción menor es señal neutral 0, sigue presente y cuenta en la muestra; no se altera extractor ni decisión. Pruebas de diagnóstico/API/UI: 10 passed, 2 warnings, 0,42 s. node --check frontend/intelligence.js correcto.
 
-Verificaci?n dirigida: operador, MetaCore, API/UI de Inteligencia ? **110 passed, 5 warnings, 11,61 s**. `node --check frontend/intelligence.js`: correcto. El contador examina como m?ximo 5.000 revisiones de los ?ltimos siete d?as y muestra hasta 20 motivos.
+## Fase 41-G1e — XRP «sin estado»
 
+grid/meta_operator.py:2448-2485 recibe None cuando no existe fila; complete requiere estado lista y pronóstico reciente. database/db_manager.py:1412-1425 no crea fila; Coin Registry la inicia al consultar/registrar moneda (api/routes/coins.py:83-86). «Sin estado» indica registro de onboarding ausente, no defecto estadístico; Prudente debe excluirlo. No se cambió comportamiento.
 
-## Fase 41-G1d ? cobertura activa de direcci?n
+## Fase 41-G1f — verificador local para S1
 
-`api/routes/intelligence.py:221-258` expone `direction_active_coverage` para el subconjunto con P(baja) ? 0,60; `frontend/intelligence.js:58,85` lo muestra separado de cobertura total. `scripts/diagnostico_senales_meta.py:111-119,190-195` imprime el mismo subconjunto por s?mbolo. El aprendizaje sigue contando como presente una direcci?n bajo el umbral, con normalizaci?n neutral 0; no se cambi? el extractor ni ninguna probabilidad decisoria.
+scripts/verificar_s1_meta.py abre SQLite mode=ro con query_only=ON, sin DBManager ni .env. Resume HEAD/hora, metas y piezas, valoración persistida, current_pieces, decisiones/rotación/asignación, timings, tamaños/dbstat/cache, corrida de aprendizaje, señales y opcionalmente journalctl. tests/test_meta_s1_diagnostic.py usa esquema sintético, verifica salida y rechazo de escrituras: 1 passed, 0 failed, 0,17 s.
 
-Verificaci?n dirigida: `tests/test_meta_signal_diagnostics.py tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py` ? **10 passed, 2 warnings, 0,42 s**. `node --check frontend/intelligence.js`: correcto.
-
-
-## Fase 41-G1e ? diagn?stico de XRP ?sin estado?
-
-`grid/meta_operator.py:2448-2485` toma `readiness` de `db.get_readiness(symbol)` y entrega `None` si no hay fila; `complete` solo es verdadero cuando existe una fila con `state="lista"` y pron?stico reciente. `database/db_manager.py:1412-1425` confirma que `get_readiness` no crea registros. La inicializaci?n pendiente se hace desde las rutas de Coin Registry al consultar/registrar una moneda (`api/routes/coins.py:83-86`), no al incluirla como candidata del operador. Por ello, XRP ?sin estado? significa sin fila de onboarding/readiness, no que sus estad?sticas sean completas ni un error del modelo; la exclusi?n prudente es correcta. No se modific? el dato ni el comportamiento.
-
-Parte de inspecci?n sin cambios ejecutables; no requiri? pytest.
-
-
-## Fase 41-G1f ? verificaci?n consolidada local para S1
-
-Nuevo `scripts/verificar_s1_meta.py:1-205` consulta SQLite mediante URI `mode=ro` y `PRAGMA query_only=ON`; no importa el runtime de la aplicaci?n ni carga `.env`. `--db` es obligatorio; acepta `--horas` (predeterminado 2) y `--journal`. Resume HEAD/hora, metas activas y piezas, valoraci?n reciente guardada, estimaciones `current_pieces`, revisiones y sombras, tiempos del plan, tama?o/tablas v?a `dbstat`, filas y fecha de cach?, ?ltima corrida de aprendizaje, coberturas/valores de se?ales y, opcionalmente, conteos de `journalctl`.
-
-El repositorio no persiste un evento de prec?lculo diario; por eso el script identifica ?no hay evento persistido? y muestra la ?ltima escritura de cach? solo como referencia, no como prueba de prec?lculo. `tests/test_meta_s1_diagnostic.py:1-49` usa un esquema sint?tico, verifica contenido y confirma que la conexi?n de diagn?stico rechaza escrituras. Resultado: **1 passed, 0 failed, 0,17 s**. No se ejecut? el script contra S1 ni una base de producci?n.
-
-Comando para S1: `venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 2 --journal`.
+El precálculo diario no deja evento persistido; se informa no registrado y la fecha de caché solo como referencia. Comando S1: venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 2 --journal. No se ejecutó allí ni contra BD real.
