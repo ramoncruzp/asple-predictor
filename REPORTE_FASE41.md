@@ -270,3 +270,24 @@ Resultado: 143 passed, 9 warnings, 0 failed; 7,56 s. Cubre efectivo/patrimonio a
 Medición sintética de plan con caché caliente: 6 candidatas, 4 elegibles, 100 combinaciones, 297 alternativas de pieza y 894 cálculos de probabilidad. Análisis 5,07 s, decisión 0,16 s, total 5,23 s con lecturas ficticias de 50 ms. No usa S1 ni red. Los 148,26 s de 41c-0 provienen de otro fixture caliente y se conservan como referencia separada.
 
 No se cambió el cumplimiento real ni los límites de operación. La Fase 41c-2 queda fuera del alcance.
+
+
+## Fase 41b-12 — estimación de la pieza actual con su geometría real (2026-10-27)
+
+- `grid/meta_operator.py:1052, :1065-1141` recoge grids propios ACTIVE/PAUSED y evalúa cada pieza por separado con `_evaluate` (`:1087`), la geometría y capital actuales, replay `rolling_7d_v3_equity` y caché del plan. El Advisor se obtiene de la caché o del servicio (`:1094-1117`) y `_apply_intelligence` aplica las señales (`:1119`).. Esta ruta no consulta `_testnet_openability`.
+- `grid/meta_operator.py:1328` incluye `current_pieces[grid_id]` en el plan; `:1405-1417` compacta rango, niveles, capital, estimación, probabilidades y método para `META_PLAN_EVALUATED` v2 (`:1441`). Un error de replay se conserva en el plan como error de esa pieza y deja disponible el fallback existente.
+- `grid/meta_operator.py:2635-2648` adjunta la estimación a `decision_choices` y solo marca la alternativa actual como ausente si tampoco hay estimación propia. `:2856-2894` usa la geometría viva en `_rotation_gate`; `:2985-2991` la pasa a la comparación de revisión y `:3143-3155` la usa como base del reajuste. Las alternativas destino siguen filtradas por Testnet y su chequeo de apertura no cambia.
+- La diferencia es deliberada: «pieza actual» es una simulación de mantener la geometría ya abierta, no una nueva apertura; «alternativa» es un posible destino y debe poder abrirse ahora en Testnet. Por eso un grid ajeno puede excluir JUP Smart como destino sin borrar la estimación del JUP Smart propio.
+- `frontend/metas.js:439-445` presenta la estimación actual en la bitácora de Metas. `frontend/intelligence.js:34-37` la muestra en el detalle de decisiones de Inteligencia; la API ya transmite `decision_choices` y no requirió cambios.
+
+### Pruebas y rendimiento
+
+- `tests/test_meta_own_grid_evaluation.py:140-188`: escenario sintético JUP Smart propio, JUP ajeno HOLDING con ventas coincidentes y libro de Testnet unilateral para JUP. La pieza actual recibe estimación con geometría 90–110, cuatro niveles y 70 USDT; JUP Smart no aparece entre destinos y el chequeo de apertura conserva el conflicto. La revisión compara y registra la estimación sin `current_alternative_missing`.
+- `tests/test_meta_portfolio_performance.py:67-74`: control de tiempo contra la referencia documentada 41c-0 de 2,39 s, con tolerancia máxima de 10 %.
+- Pruebas focalizadas del operador y resiliencia: `tests/test_meta_own_grid_evaluation.py`, `tests/test_meta_operator.py`, `tests/test_meta_review_resilience.py`: **88 passed, 4 warnings, 0 failed; 5,47 s**.
+- UI de Metas e Inteligencia: `tests/ui/test_metas_ui.py`, `tests/ui/test_intelligence_ui.py`: **16 passed, 2 warnings, 0 failed; 28,56 s**.
+- Benchmark actual 41c-0, lectura ficticia de 50 ms, 100 combinaciones: plan **2,232 s**, decisión **0,152 s**, total **2,384 s**; replay de pieza propia incluido (**0,0002 s**). Frente a 2,39 s: **−0,26 %**, dentro del límite de +10 %. `tests/test_meta_portfolio_performance.py`: **4 passed, 0 failed; 3,56 s**.
+- `node --check frontend/metas.js` y `node --check frontend/intelligence.js`: correctos. No se ejecutó suite completa ni se usaron S1, Testnet, `.env`, red o BD real.
+
+
+Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **108 passed, 6 warnings, 0 failed; 33,58 s**, con `ASPLE_OFFLINE=1` y basetemp nuevo bajo TEMP.

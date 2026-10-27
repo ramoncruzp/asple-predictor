@@ -137,6 +137,67 @@ def test_excluding_own_grid_keeps_other_grid_sells_as_conflicts():
     assert "conflicto con niveles de venta vivos" in jup["excluded_reason"]
 
 
+def test_current_piece_uses_live_geometry_even_when_foreign_sell_blocks_jup_destination(monkeypatch):
+    operator, core, goal, _, records = plan_setup()
+    goal["config_snapshot"]["max_grids"] = 2
+    records[14] = {**records[12], "id": 14, "status": "HOLDING", "symbol": "JUPUSDT"}
+    operator._testnet_book_status = lambda symbol: ({"state": "one_sided", "reason": "sin asks"}
+        if symbol == "JUPUSDT" else {"state": "two_sided", "reason": None})
+    evaluated = []
+
+    def evaluate(row, strategy, capital, target, low, high, n, cfg, *, margin_pct=None):
+        evaluated.append((row["symbol"], strategy, low, high, n, capital))
+        return {"symbol": row["symbol"], "strategy": strategy,
+            "pieces": [{"symbol": row["symbol"], "strategy": strategy, "piece_type": "grid",
+                "capital_usdt": capital, "n_levels": n, "floor": low, "ceiling": high}],
+            "estimate": {"probability": .4, "probability_replay": .4, "days_median": 9,
+                "days_p10": 5, "days_p90": 14, "median_progress_pct": 42,
+                "independent_windows": 8, "evidence_sufficient": True}}
+
+    monkeypatch.setattr(operator, "_evaluate", evaluate)
+    advisor_calls, advisor_inputs = [], []
+    operator.advisor = lambda *args: (advisor_calls.append(args) or
+        {"net_per_cycle_after_dust_usdt": .5})
+    def apply_intelligence(alternative, *_args, advisor_result=None, **_kwargs):
+        advisor_inputs.append(advisor_result)
+        alternative["estimate"].update({"probability": .45, "probability_adjusted": .45})
+    monkeypatch.setattr(operator, "_apply_intelligence", apply_intelligence)
+    plan = operator._build_plan(goal, record=False, plan_kind="revision")
+
+    current = plan["current_pieces"]["12"]
+    assert current["piece"]["floor"] == 90 and current["piece"]["ceiling"] == 110
+    assert current["piece"]["n_levels"] == 4 and current["piece"]["capital_usdt"] == 70
+    assert current["estimate"]["probability_replay"] == .4
+    assert current["estimate"]["probability"] == .45
+    assert advisor_calls[0][0] == "JUPUSDT"
+    assert advisor_inputs == [{"net_per_cycle_after_dust_usdt": .5}]
+    assert evaluated == [("JUPUSDT", "smart", 90, 110, 4, 70.0)]
+    assert all(not (row["symbol"] == "JUPUSDT" and row["strategy"] == "smart")
+        for row in plan["alternatives"])
+    blocked = operator._testnet_openability({"symbol": "JUPUSDT", "strategy": "smart",
+        "piece_type": "grid", "capital_usdt": 70, "n_levels": 4, "floor": 90, "ceiling": 110},
+        goal, replacing_grid_id=12)
+    assert blocked["allowed"] is False
+    assert "conflicto con niveles de venta vivos" in blocked["reason"]
+
+    destination = {"alternative_id": "dest-xrp", "symbol": "XRPUSDT", "strategy": "simple",
+        "pieces": [{"symbol": "XRPUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 70, "n_levels": 4, "floor": 90, "ceiling": 110}],
+        "estimate": {"probability": .8, "probability_replay": .8,
+            "days_median": 5, "days_p90": 8, "median_progress_pct": 55,
+            "evidence_sufficient": True}}
+    plan["alternatives"].append(destination)
+    gate = operator._rotation_gate(goal, records[12], {"grid_id": 12}, destination, None, plan)
+    rotation = next(row["details"] for row in core.events
+        if row["event_type"] == "META_OPERATOR_ROTATION_EVALUATED")
+    assert rotation["current"]["estimate"]["probability_replay"] == .4
+    assert gate["reason"] != "no hay estimación comparable de la pieza actual"
+    choices = operator._active_review_choices(plan, {"grid_id": 12, "meta_id": 3,
+        "decision": "no_hacer_nada", "reason": "mantener"}, meta_id=3)
+    assert choices["current_piece_estimate"]["piece"]["floor"] == 90
+    assert not choices.get("current_alternative_missing")
+
+
 def test_grid_count_excludes_only_counted_own_grid_and_never_releases_holding_slot():
     operator, _, goal, _, records = plan_setup(max_grids=1)
     piece = {"symbol": "JUPUSDT", "strategy": "smart", "piece_type": "grid", "capital_usdt": 70,
@@ -173,6 +234,7 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     old_plan = reference._build_plan(goal, record=False)
     current_plan.pop("timings_s")
     old_plan.pop("timings_s")
+    current_plan.pop("current_pieces")
     from grid.meta_learning import REPLAY_METHOD_VERSION
     assert current_plan.pop("base_method_version") == REPLAY_METHOD_VERSION
     assert current_plan == old_plan

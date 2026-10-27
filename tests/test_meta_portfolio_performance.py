@@ -62,3 +62,12 @@ def test_plan_read_context_is_discarded_after_exception(monkeypatch):
     assert operator._plan_read(operator.db, "count_open_grids") == 1
     monkeypatch.setattr(operator.db, "count_open_grids", lambda: 4)
     assert operator._plan_read(operator.db, "count_open_grids") == 4
+
+
+def test_current_piece_estimation_keeps_41c0_warm_benchmark_within_ten_percent():
+    measured = scenario("working", .05)
+    # Referencia documentada en REPORTE_FASE41.md para el mismo fixture v3:
+    # 2,39 s de análisis más decisión antes de añadir la pieza actual.
+    assert measured["review_total_s"] <= 2.39 * 1.10
+    assert measured["combinations"] == 100
+    assert measured["plan"]["current_pieces"]["12"]["estimate"] is not None

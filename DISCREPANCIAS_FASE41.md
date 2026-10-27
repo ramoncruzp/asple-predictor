@@ -56,3 +56,10 @@
 - El método se versionó como rolling_7d_v3_equity. Las entradas v2 sin curva se recalculan; database/db_manager.py:517-521 compara con la versión vigente para no volver a marcar v3 en cada arranque. No se eliminaron filas ni versiones. Muestras y etiquetas incompatibles no se combinan.
 - Pruebas dirigidas: 143 passed, 9 warnings, 0 failed. No se ejecutó la suite completa. No se usaron S1, Testnet, .env, red ni base real.
 - Fase 41c-2 no implementada.
+
+
+## Fase 41b-12 — diferencias y límites (2026-10-27)
+
+- Sin discrepancias funcionales conocidas: la estimación propia usa la geometría viva, curvas del replay `rolling_7d_v3_equity` y las señales aplicables; el bloqueo de Testnet se conserva únicamente para alternativas de destino.
+- Si no hay velas/cache válida o falla el replay, el plan registra el error de esa pieza. Las rutas de revisión conservan el fallback a una alternativa equivalente cuando esté disponible; sin ambos resultados, la pieza se informa como no comparable.
+- El benchmark usa datos y proveedor ficticios, replay cacheado y latencia simulada; el resultado de tiempo no certifica el rendimiento en S1. No se usaron S1, Testnet, red, `.env` ni BD real.

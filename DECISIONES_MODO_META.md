@@ -298,3 +298,10 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - 41c-0 reutiliza lecturas de exchange/BD solo durante cada plan, con contexto aislado y descarte al terminar. Las ejecuciones vuelven a consultar los datos; las cachés no se comparten entre revisiones. No cambia números ni reglas en el escenario de regresión fijado a `a062e09`.
 - Desde 41c-1 la probabilidad de cada alternativa se mide con la trayectoria agregada de la cartera. El éxito exige efectivo atribuible agregado más capital no asignado >= capital inicial + objetivo, igual que grid/meta.py:718; el inventario no cuenta para cumplir. El patrimonio agregado, neto de comisión estimada de venta del 0,1 %, mide avance, drawdown y pérdida máxima. Se guardan curvas cada 15 minutos; el método rolling_7d_v3_equity separa cachés y etiquetas incompatibles.
 - 41c-2 queda fuera del alcance de esta entrega.
+
+
+## Fase 41b-12 — estimación comparable de piezas propias (2026-10-27)
+
+- La pieza actual se estima por su símbolo, estrategia, rango, niveles, capital y margen reales mediante `rolling_7d_v3_equity` y la caché del plan. No requiere ser abrible de nuevo en Testnet. Las alternativas de rotación, apertura o reajuste siguen pasando el filtro de Testnet.
+- El resumen propio se guarda bajo `current_pieces[grid_id]` y se adjunta a la bitácora de revisión. Se presenta en Metas e Inteligencia con probabilidades histórica y ajustada, rango, niveles, capital y avance mediano.
+- Pruebas focalizadas: 108 passed acumuladas en operador/resiliencia, interfaz y benchmark, con 6 warnings; benchmark caliente 2,384 s frente a 2,39 s documentados en 41c-0 (−0,26 %). Sin suite completa ni validación en S1.

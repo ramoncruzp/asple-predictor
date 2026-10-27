@@ -1049,13 +1049,97 @@ class MetaOperator:
         cfg["_advisor_reference_capital"] = capital * profile_cap / 100
         option_cache = {}
         own_grids_by_symbol = {}
+        current_pieces = {}
+        owned_active_grids = []
         owned_reader = getattr(self.core, "_owned_grids", None)
         if callable(owned_reader) and goal.get("id") is not None:
             for link in sorted(owned_reader(int(goal["id"])), key=lambda item: int(item["grid_id"])):
                 own_grid = self._plan_read(self.db, "get_grid", int(link["grid_id"]))
                 if own_grid and own_grid.get("status") in {"ACTIVE", "PAUSED", "OPENING", "HOLDING"}:
+                    if own_grid.get("status") in {"ACTIVE", "PAUSED"}:
+                        owned_active_grids.append((link, own_grid))
                     # Solo una pieza se evalúa como reemplazo; las demás siguen contando.
                     own_grids_by_symbol.setdefault(own_grid["symbol"], int(own_grid["id"]))
+        # La pieza viva se mide por separado de las alternativas abribles: mantenerla
+        # no requiere pasar el libro de apertura de Testnet.
+        raw_by_symbol = {str(row.get("symbol") or "").upper(): row for row in candidates}
+        for link, own_grid in owned_active_grids:
+            symbol = str(own_grid.get("symbol") or "").upper()
+            source = raw_by_symbol.get(symbol)
+            if source is None:
+                continue
+            try:
+                live_book = self._book_ticker(symbol)
+                live_price = (float(live_book.get("bid_price") or 0) +
+                              float(live_book.get("ask_price") or 0)) / 2
+                if live_price <= 0:
+                    continue
+                grid_params = own_grid.get("params") or {}
+                if isinstance(grid_params, str):
+                    grid_params = json.loads(grid_params)
+                is_bot = str(link.get("piece_type") or "") == "individual_bot_grid"
+                replay_strategy = "individual_bot" if is_bot else str(own_grid.get("strategy") or "simple")
+                n_levels = 1 if is_bot else int(own_grid.get("n_levels") or 4)
+                piece_margin = float(grid_params.get("margin_pct", grid_params.get(
+                    "target_margin_pct", cfg.get("min_margin_pct", .7))))
+                piece_row = {**source, "book": live_book, "price": live_price,
+                    "model_statistics": self._plan_read(self, "_model_snapshot", symbol)}
+                estimate_row = self._plan_timed("evaluate_current_piece", self._evaluate,
+                    piece_row, replay_strategy, float(own_grid.get("capital_total") or 0), target_usdt,
+                    float(own_grid["range_low"]), float(own_grid["range_high"]), n_levels, cfg,
+                    margin_pct=piece_margin)
+                advisor_result = None
+                if self.advisor is not None:
+                    advisor_capital = float(cfg.get("_advisor_reference_capital",
+                        capital * profile_cap / 100))
+                    advisor_key = (self.clock() // 86400, symbol, round(advisor_capital, 4),
+                        round(piece_margin, 4), int(cfg.get("max_days", 20)))
+                    cached_advisor = self._advisor_cache.get(advisor_key)
+                    advisor_result = (self._reanchor_advisor_cache(cached_advisor, live_price)
+                        if cached_advisor is not None else None)
+                    if advisor_result is None:
+                        persistent_advisor = self._persistent_cache_get("advisor", advisor_key)
+                        advisor_result = (self._reanchor_advisor_cache(persistent_advisor, live_price)
+                            if persistent_advisor is not None else None)
+                        if advisor_result is not None:
+                            self._advisor_cache[advisor_key] = persistent_advisor
+                            self._analysis_timing["advisor_cache_hits"] += 1
+                    if advisor_result is None:
+                        try:
+                            advisor_started = time.perf_counter()
+                            advisor_result = self.advisor(symbol, advisor_capital, piece_margin,
+                                int(cfg.get("max_days", 20)))
+                            self._analysis_timing["advisor_s"] += time.perf_counter() - advisor_started
+                            self._advisor_cache[advisor_key] = self._store_advisor_cache_entry(
+                                advisor_result, live_price)
+                            self._persistent_cache_set("advisor", advisor_key,
+                                self._advisor_cache[advisor_key])
+                        except Exception:
+                            advisor_result = None
+                self._plan_timed("apply_current_piece_intelligence", self._apply_intelligence,
+                    estimate_row, piece_row, live_price, float(own_grid["range_low"]),
+                    float(own_grid["range_high"]), cfg, advisor_result=advisor_result)
+                actual_piece = {"symbol": symbol, "strategy": str(own_grid.get("strategy") or "simple"),
+                    "piece_type": "individual_bot_grid" if is_bot else "grid",
+                    "capital_usdt": float(own_grid.get("capital_total") or 0),
+                    "n_levels": n_levels, "floor": float(own_grid["range_low"]),
+                    "ceiling": float(own_grid["range_high"]),
+                    "margin_pct": estimate_row["pieces"][0].get("margin_pct")}
+                current_pieces[str(int(own_grid["id"]))] = {"grid_id": int(own_grid["id"]),
+                    "piece": actual_piece, "estimate": estimate_row["estimate"],
+                    "probability_replay": estimate_row["estimate"].get("probability_replay"),
+                    "probability_adjusted": estimate_row["estimate"].get("probability"),
+                    "signals_used": estimate_row.get("signals_used", []),
+                    "replay_method": "rolling_7d_v3_equity"}
+            except Exception as exc:
+                current_pieces[str(int(own_grid["id"]))] = {"grid_id": int(own_grid["id"]),
+                    "piece": {"symbol": symbol, "strategy": own_grid.get("strategy"),
+                        "piece_type": link.get("piece_type", "grid"),
+                        "capital_usdt": float(own_grid.get("capital_total") or 0),
+                        "n_levels": int(own_grid.get("n_levels") or 1),
+                        "floor": own_grid.get("range_low"), "ceiling": own_grid.get("range_high")},
+                    "estimate": None, "error": f"{type(exc).__name__}: {exc}",
+                    "replay_method": "rolling_7d_v3_equity"}
         combination_started = time.perf_counter()
         max_pieces = max(1, min(3, int(cfg.get("max_grids", 1)) + int(cfg.get("max_bots", 0))))
         for piece_count in range(1, max_pieces + 1):
@@ -1241,6 +1325,7 @@ class MetaOperator:
         plan = {"profile": profile, "decision_id": decision_id, "base_method_version": REPLAY_METHOD_VERSION,
                 "candidates": prepared, "sigma_bands": {"q33": q33, "q67": q67},
                 "alternatives": public_alternatives, "combinations_evaluated": evaluated_combinations,
+                "current_pieces": current_pieces,
                 "pieces": pieces, "estimated_time": best["estimate"],
                 "piece_estimates": best.get("piece_estimates", []),
                 "advisor_comparisons": advisor_comparisons,
@@ -1316,6 +1401,21 @@ class MetaOperator:
         compact["advisor_refs"] = refs
         return compact
 
+    @staticmethod
+    def _compact_current_piece(item):
+        piece = item.get("piece") or {}
+        estimate = item.get("estimate") or {}
+        estimate_fields = ("probability", "probability_replay", "probability_adjusted",
+            "median_progress_pct", "days_median", "days_p10", "days_p90",
+            "independent_windows", "evidence_sufficient", "worst_drawdown_pct",
+            "worst_loss_vs_capital_pct", "loss_cut_windows")
+        return {"grid_id": item.get("grid_id"), "piece": {key: piece.get(key) for key in
+                ("symbol", "strategy", "piece_type", "capital_usdt", "n_levels", "floor", "ceiling", "margin_pct")},
+            "estimate": {key: estimate.get(key) for key in estimate_fields if key in estimate},
+            "probability_replay": item.get("probability_replay"),
+            "probability_adjusted": item.get("probability_adjusted"),
+            "replay_method": item.get("replay_method"), "error": item.get("error")}
+
     @classmethod
     def _plan_ledger_payload(cls, plan, candidates, selected, *, plan_kind):
         candidate_fields = ("symbol", "scanner_eligible", "hard_filters", "excluded_reason",
@@ -1338,6 +1438,8 @@ class MetaOperator:
             "target_usdt": plan.get("target_usdt"), "deadline_days": plan.get("deadline_days"),
             "capital_usage": plan.get("capital_usage"), "selection_reason": plan.get("selection_reason"),
             "candidates": compact_candidates, "alternatives": compact_alternatives,
+            "current_pieces": {key: cls._compact_current_piece(value) for key, value in
+                (plan.get("current_pieces") or {}).items()},
             "decision_choices": plan.get("decision_choices"),
             "advisor_comparisons": plan.get("advisor_comparisons"),
             "combinations_evaluated": plan.get("combinations_evaluated"),
@@ -2530,8 +2632,11 @@ class MetaOperator:
         current = next((row for row in (plan or {}).get("alternatives", []) if grid and
             row.get("symbol") == grid.get("symbol") and row.get("strategy") == grid.get("strategy") and
             len(row.get("pieces", [])) == 1), None)
-        current_est = (current or {}).get("estimate") or {}
-        if grid_id is not None and current is None:
+        current_piece = (plan or {}).get("current_pieces", {}).get(str(grid_id)) if grid_id is not None else None
+        current_est = ((current_piece or {}).get("estimate") or (current or {}).get("estimate") or {})
+        if current_piece and current_est:
+            choices["current_piece_estimate"] = self._compact_current_piece(current_piece)
+        if grid_id is not None and not (current_piece and current_piece.get("estimate")) and current is None:
             candidate_row = next((row for row in (plan or {}).get("candidates", [])
                 if grid and row.get("symbol") == grid.get("symbol")), None)
             choices["current_alternative_missing"] = True
@@ -2748,7 +2853,9 @@ class MetaOperator:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         new_est = alternative.get("estimate") or {}
-        old_est = current_alternative.get("estimate") if current_alternative else None
+        own_piece = (plan.get("current_pieces") or {}).get(str(int(grid["id"])))
+        old_est = ((own_piece or {}).get("estimate") or
+                   (current_alternative or {}).get("estimate"))
         if old_est is None:
             return {"allowed": False, "reason": "no hay estimación comparable de la pieza actual"}
         probability_delta = None
@@ -2780,8 +2887,9 @@ class MetaOperator:
             "progress_improvement_pct": progress_delta,
             "alternative": {"alternative_id": alternative.get("alternative_id"),
                 "symbol": alternative.get("symbol"), "strategy": alternative.get("strategy"),
-                "estimate": new_est}, "current": {"alternative_id": current_alternative.get("alternative_id"),
-                "symbol": current_alternative.get("symbol"), "strategy": current_alternative.get("strategy"),
+                "estimate": new_est}, "current": {"alternative_id": (current_alternative or {}).get("alternative_id"),
+                "symbol": ((own_piece or {}).get("piece") or {}).get("symbol") or (current_alternative or {}).get("symbol"),
+                "strategy": ((own_piece or {}).get("piece") or {}).get("strategy") or (current_alternative or {}).get("strategy"),
                 "estimate": old_est},
             "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
         required_reviews = max(2, int(cfg.get("rotation_persistence_reviews", 2)))
@@ -2874,6 +2982,11 @@ class MetaOperator:
             current_alternative = next((item for item in plan["alternatives"]
                 if item["symbol"] == grid["symbol"] and item["strategy"] == grid["strategy"]
                 and len(item.get("pieces", [])) == 1), None)
+            current_piece = (plan.get("current_pieces") or {}).get(str(int(grid["id"])))
+            if current_piece and current_piece.get("estimate"):
+                current_alternative = {"symbol": grid["symbol"], "strategy": grid["strategy"],
+                    "pieces": [current_piece.get("piece") or {}],
+                    "estimate": current_piece["estimate"], "current_piece": True}
             is_alternative = best["symbol"] != grid["symbol"] or best["strategy"] != grid["strategy"]
             rotation_gate = self._rotation_gate(goal, grid, link, best, current_alternative, plan)
             reconfiguration = self._consider_piece_reconfiguration(
@@ -3027,12 +3140,15 @@ class MetaOperator:
             and row.get("estimate", {}).get("evidence_sufficient") and row.get("pieces")]
         candidates = [row for row in candidates if (row["pieces"][0].get("piece_type") ==
             ("individual_bot_grid" if is_bot else "grid"))]
-        if len(candidates) < 2:
+        current_piece = (plan.get("current_pieces") or {}).get(str(int(grid["id"])))
+        old_est = (current_piece or {}).get("estimate") if current_piece else None
+        if old_est is None and len(candidates) >= 2:
+            current = min(candidates, key=lambda row: abs(float(row["pieces"][0]["floor"])
+                - float(grid["range_low"])) + abs(float(row["pieces"][0]["ceiling"])
+                - float(grid["range_high"])))
+            old_est = current["estimate"]
+        if len(candidates) < (1 if current_piece and current_piece.get("estimate") else 2) or old_est is None:
             return None
-        current = min(candidates, key=lambda row: abs(float(row["pieces"][0]["floor"])
-            - float(grid["range_low"])) + abs(float(row["pieces"][0]["ceiling"])
-            - float(grid["range_high"])))
-        old_est = current["estimate"]
         tie = float(cfg.get("reconfig_probability_tie_tolerance_pp", 2.0))
         material_candidates = []
         for alternative in candidates:

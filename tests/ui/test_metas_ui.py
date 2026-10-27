@@ -259,6 +259,12 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     grid = server.engine.create_grid("XRPUSDT", 90, 110, 4, capital=100)
     server.core.link_grid(goal["id"], grid["id"])
     server.core._ledger(goal["id"], None, "META_OPERATOR_NOOP", {"decision": "no_hacer_nada"})
+    server.core._ledger(goal["id"], None, "META_OPERATOR_REVIEW_DECISION", {
+        "decision_choices": {"current_piece_estimate": {"grid_id": grid["id"],
+            "piece": {"symbol": "XRPUSDT", "capital_usdt": 100, "floor": 90,
+                "ceiling": 110, "n_levels": 4},
+            "estimate": {"probability_replay": .42, "probability_adjusted": .45,
+                "median_progress_pct": 23}}}})
     page.goto(f"{server.url}/#metas")
     active = page.locator(".metas-active")
     page.wait_for_selector(".metas-live-facts")
@@ -268,6 +274,7 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     assert "Ganancia extra realizada" in active.locator(".metas-live-facts").inner_text()
     page.check("[data-ledger-valuation]")
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
+    assert "Pieza actual: XRPUSDT" in page.locator("[data-ledger-slot]").inner_text()
 
 
 def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):

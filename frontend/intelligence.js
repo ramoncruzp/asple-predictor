@@ -31,8 +31,10 @@
   function decisionTable(rows) {
     return `<div class="table-card"><table class="data-table"><thead><tr><th>Fecha</th><th>Meta</th><th>Tipo</th><th>Real</th><th>Scanner + Advisor</th><th>Aprendida</th><th>Detalle</th></tr></thead><tbody>${rows.length ? rows.map((x, i) => {
       const c = x.choices || {}, cells = ['real','scanner_advisor','learned'].map(k => decisionCell(c[k]));
+      const current = c.current_piece_estimate, piece = current?.piece || {}, estimate = current?.estimate || {};
+      const currentText = current ? `Pieza actual: ${piece.symbol || ''} · ${num(piece.capital_usdt)} USDT · rango ${num(piece.floor)}–${num(piece.ceiling)} · ${num(piece.n_levels)} niveles · probabilidad histórica ${pct(estimate.probability_replay)} · ajustada ${pct(estimate.probability_adjusted || estimate.probability)} · avance mediano ${num(estimate.median_progress_pct)} %` : '';
       const differ = new Set(cells).size > 1;
-      return `<tr class="${differ ? 'decision-diff' : ''}"><td>${esc(x.at)}</td><td>${num(x.meta_id)}</td><td>${esc(x.event_type)}</td>${cells.map(v => `<td>${esc(v)}</td>`).join('')}<td><details><summary>Ver JSON</summary><pre>${esc(JSON.stringify(x.details || {}, null, 2))}</pre></details></td></tr>`;
+      return `<tr class="${differ ? 'decision-diff' : ''}"><td>${esc(x.at)}</td><td>${num(x.meta_id)}</td><td>${esc(x.event_type)}</td>${cells.map(v => `<td>${esc(v)}</td>`).join('')}<td>${currentText ? `<p>${esc(currentText)}</p>` : ''}<details><summary>Ver JSON</summary><pre>${esc(JSON.stringify(x.details || {}, null, 2))}</pre></details></td></tr>`;
     }).join('') : '<tr><td colspan="7">Aún sin decisiones guardadas.</td></tr>'}</tbody></table></div>`;
   }
   function render(data) {

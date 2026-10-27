@@ -436,8 +436,13 @@
       ? ` · antes ${fmtPrice(details.old.floor)}–${fmtPrice(details.old.ceiling)} (${details.old.n_levels ?? '—'} niveles); ahora ${fmtPrice(details.new.floor)}–${fmtPrice(details.new.ceiling)} (${details.new.n_levels ?? '—'} niveles)` : '';
     const improvement = details.estimated_probability_improvement_pp == null ? ''
       : ` · mejora estimada ${fmtMoney(details.estimated_probability_improvement_pp, 1)} puntos`;
+    const currentEstimate = details.decision_choices?.current_piece_estimate;
+    const currentPieceLine = currentEstimate ? (() => {
+      const p = currentEstimate.piece || {}, e = currentEstimate.estimate || {};
+      return `Pieza actual: ${p.symbol || ''} · ${fmtMoney(p.capital_usdt)} USDT · rango ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${p.n_levels ?? '—'} niveles · probabilidad histórica ${fmtMoney(Number(e.probability_replay || 0) * 100, 1)} % · ajustada ${fmtMoney(Number(e.probability_adjusted || e.probability || 0) * 100, 1)} % · avance mediano ${fmtMoney(e.median_progress_pct, 1)} %`;
+    })() : '';
     const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
-      oldNew, decision || reasonText || '', improvement].filter(Boolean).join(' · ');
+      oldNew, decision || reasonText || '', improvement, currentPieceLine].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
       <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
