@@ -396,7 +396,8 @@ def test_daily_cache_persists_results_for_reuse(tmp_path):
     payload = ("XRPUSDT", 70, .3, 20)
     value = {"recommended_floor": 1.0, "recommended_ceiling": 2.0}
     operator._persistent_cache_set("advisor", payload, value)
-    assert operator._persistent_cache_get("advisor", payload) == value
+    assert operator._persistent_cache_get("advisor", payload) == {
+        **value, "method_version": operator.ADVISOR_CACHE_METHOD_VERSION}
 
 
 def test_medidor_cache_is_read_only_and_reports_separate_cache_sources(tmp_path):
@@ -410,7 +411,8 @@ def test_medidor_cache_is_read_only_and_reports_separate_cache_sources(tmp_path)
     clock = lambda: 1_800_000_000
     reader = MetaOperator(object(), db, None, None, None, clock=clock,
         cache_enabled=True, cache_writes=False)
-    payload, value = ("XRPUSDT", 70, .3, 20), {"recommended_floor": 1.0}
+    payload, value = ("XRPUSDT", 70, .3, 20), {"recommended_floor": 1.0,
+        "method_version": MetaOperator.ADVISOR_CACHE_METHOD_VERSION}
     key, day = reader._cache_key("advisor", payload)
     with db.engine.begin() as conn:
         conn.execute(db.meta_analysis_cache.insert().values(cache_key=key, cache_kind="advisor",
@@ -420,6 +422,62 @@ def test_medidor_cache_is_read_only_and_reports_separate_cache_sources(tmp_path)
     with db.engine.connect() as conn:
         assert conn.execute(db.meta_analysis_cache.select()).mappings().one()["value_json"] == json.dumps(value)
         assert conn.execute(select(func.count()).select_from(db.meta_analysis_cache)).scalar_one() == 1
+
+
+def test_meta_cache_retention_removes_old_and_wrong_versions_keeps_current(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from sqlalchemy import select, func
+    from database.db_manager import DBManager
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-retention.sqlite'}")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    today = now.date().isoformat()
+    rows = [
+        ("old", "advisor", today, {"method_version": "old"}, now - timedelta(days=8)),
+        ("wrong", "advisor", today, {"method_version": "old"}, now - timedelta(days=1)),
+        ("current", "advisor", today, {"method_version": MetaOperator.ADVISOR_CACHE_METHOD_VERSION}, now),
+        ("wrong_touch", "touch_signal", today, {"method_version": "old"}, now - timedelta(days=1)),
+    ]
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_analysis_cache.insert(), [{"cache_key": key, "cache_kind": kind,
+            "analysis_day": day, "value_json": json.dumps(value), "created_at": created}
+            for key, kind, day, value, created in rows])
+        conn.execute(db.meta_learning_replay_cache.insert().values(template_id="old-template",
+            window_start=1, reached=False, created_at=now - timedelta(days=8)))
+
+    class Core:
+        events = []
+        def _profile_settings(self): return {"GLOBAL": {"cache_retention_days": 7}}
+        def _ledger(self, *args, **kwargs): self.events.append(args)
+
+    core = Core()
+    operator = MetaOperator(core, db, None, None, None)
+    result = operator.maintain_database()
+    assert result["status"] == "completed"
+    assert result["analysis_cache_rows_deleted"] == 3
+    assert result["learning_replay_rows_deleted"] == 1
+    with db.engine.connect() as conn:
+        keys = set(conn.execute(select(db.meta_analysis_cache.c.cache_key)).scalars())
+        assert keys == {"current"}
+        assert conn.execute(select(func.count()).select_from(db.meta_learning_replay_cache)).scalar_one() == 0
+
+
+def test_meta_cache_retention_skips_when_review_is_running(tmp_path):
+    from database.db_manager import DBManager
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-retention-lock.sqlite'}")
+    class Core:
+        def _profile_settings(self): return {"GLOBAL": {}}
+    operator = MetaOperator(Core(), db, None, None, None)
+    operator._review_guard.acquire()
+    try:
+        assert operator.maintain_database() == {
+            "status": "skipped", "reason": "hay una operación Meta en curso"}
+    finally:
+        operator._review_guard.release()
 
 
 def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(tmp_path, monkeypatch):
@@ -455,7 +513,8 @@ def test_daily_precompute_obeys_switch_uses_no_ops_lock_and_warms_shared_cache(t
     assert result["workers"] == 1
     assert calls == [("PRUDENTE", False), ("RAPIDO", False)]
     assert result["cache_entries_after"] == 2
-    assert operator._persistent_cache_get("advisor", ("PRUDENTE",)) == {"ok": True}
+    assert operator._persistent_cache_get("advisor", ("PRUDENTE",)) == {
+        "ok": True, "method_version": operator.ADVISOR_CACHE_METHOD_VERSION}
     calls.clear()
     def one_profile_has_no_candidates(self, goal, *, record=True):
         calls.append(goal["profile"])

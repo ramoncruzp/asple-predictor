@@ -288,6 +288,8 @@ class MetaOperator:
     # calculó) y se reancla al precio actual al leer; si el precio se movió más
     # de este umbral (o quedó fuera del rango original), se recalcula.
     ADVISOR_REANCHOR_DRIFT_PCT = 3.0
+    ADVISOR_CACHE_METHOD_VERSION = "advisor_relative_v1"
+    TOUCH_CACHE_METHOD_VERSION = "touch_signal_v2"
 
     def __init__(self, core, db, scanner, engine, settings, *, advisor=None, alert=None,
                  clock=time.time, price_drift_pct=1.0, cache_enabled=True, cache_writes=True):
@@ -319,6 +321,109 @@ class MetaOperator:
 
     def _ledger(self, meta_id, event, details, **kwargs):
         self.core._ledger(meta_id, None, event, details, **kwargs)
+
+    def maintain_database(self):
+        """Retira cachés caducadas sin competir con revisión, precálculo o aprendizaje."""
+        logger = logging.getLogger(__name__)
+        guards = (self._review_guard, self._precompute_guard, self._learning_guard)
+        acquired = []
+        for guard in guards:
+            if not guard.acquire(blocking=False):
+                for held in reversed(acquired):
+                    held.release()
+                return {"status": "skipped", "reason": "hay una operación Meta en curso"}
+            acquired.append(guard)
+        try:
+            from sqlalchemy import select, delete
+            settings = self.core._profile_settings().get("GLOBAL", {})
+            retention_days = max(1, int(settings.get("cache_retention_days", 7)))
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
+            today = datetime.now(timezone.utc).date().isoformat()
+            analysis_removed, analysis_bytes = 0, 0
+            analysis = getattr(self.db, "meta_analysis_cache", None)
+            if analysis is not None:
+                with self.db.engine.connect() as conn:
+                    rows = conn.execute(select(analysis.c.cache_key, analysis.c.cache_kind,
+                        analysis.c.analysis_day, analysis.c.value_json, analysis.c.created_at)).mappings().all()
+                stale = []
+                from grid.meta_learning import REPLAY_METHOD_VERSION
+                active = {"replay": REPLAY_METHOD_VERSION,
+                    "advisor": self.ADVISOR_CACHE_METHOD_VERSION,
+                    "touch_signal": self.TOUCH_CACHE_METHOD_VERSION}
+                for row in rows:
+                    outdated = row["analysis_day"] != today and row["created_at"] < cutoff
+                    expected = active.get(str(row["cache_kind"]))
+                    if expected:
+                        try:
+                            payload = json.loads(row["value_json"] or "{}")
+                        except (TypeError, ValueError):
+                            payload = {}
+                        actual = payload.get("method_version")
+                        if actual != expected:
+                            outdated = True
+                    if outdated:
+                        stale.append((row["cache_key"], row["value_json"] or ""))
+                for offset in range(0, len(stale), 100):
+                    batch = stale[offset:offset + 100]
+                    keys = [key for key, _ in batch]
+                    with self.db.engine.begin() as conn:
+                        conn.execute(delete(analysis).where(analysis.c.cache_key.in_(keys)))
+                    analysis_removed += len(batch)
+                    analysis_bytes += sum(len(value.encode("utf-8")) for _, value in batch)
+
+            replay_removed, replay_bytes = 0, 0
+            replay = getattr(self.db, "meta_learning_replay_cache", None)
+            samples = getattr(self.db, "meta_learning_samples", None)
+            if replay is not None:
+                active_templates = set()
+                if samples is not None:
+                    from grid.meta_learning import stable_template
+                    with self.db.engine.connect() as conn:
+                        sample_rows = conn.execute(select(samples.c.parameters_json)).all()
+                    for (raw,) in sample_rows:
+                        try:
+                            params = json.loads(raw or "{}")
+                            template_id, _canonical = stable_template(params,
+                                meta_capital_usdt=params.get("capital_usdt"))
+                            active_templates.add(template_id)
+                        except (TypeError, ValueError, KeyError):
+                            continue
+                with self.db.engine.connect() as conn:
+                    rows = conn.execute(select(replay.c.template_id, replay.c.window_start,
+                        replay.c.created_at)).all()
+                stale_rows = [(template, window) for template, window, created in rows
+                    if created < cutoff or (active_templates and template not in active_templates)]
+                for offset in range(0, len(stale_rows), 100):
+                    batch = stale_rows[offset:offset + 100]
+                    with self.db.engine.begin() as conn:
+                        for template_id, window_start in batch:
+                            conn.execute(delete(replay).where(replay.c.template_id == template_id,
+                                replay.c.window_start == window_start))
+                    replay_removed += len(batch)
+                    replay_bytes += len(batch) * 96
+
+            result = {"status": "completed", "cache_retention_days": retention_days,
+                "analysis_cache_rows_deleted": analysis_removed,
+                "analysis_cache_kb_deleted": round(analysis_bytes / 1024, 2),
+                "learning_replay_rows_deleted": replay_removed,
+                "learning_replay_kb_estimated": round(replay_bytes / 1024, 2)}
+            logger.info("Meta maintenance cache cleanup %s", json.dumps(result, sort_keys=True))
+            try:
+                from sqlalchemy import select as sql_select
+                with self.db.engine.connect() as conn:
+                    goal_id = conn.execute(sql_select(self.db.meta_goals.c.id).order_by(
+                        self.db.meta_goals.c.id.desc()).limit(1)).scalar_one_or_none()
+                if goal_id is not None:
+                    self._ledger(int(goal_id), "META_MAINTENANCE", result)
+            except Exception:
+                logger.exception("No se pudo registrar META_MAINTENANCE en la bitácora")
+            return result
+        except Exception:
+            logger.exception("Falló la retención de cachés Meta")
+            return {"status": "failed"}
+        finally:
+            for guard in reversed(acquired):
+                guard.release()
 
     def _cache_key(self, kind, payload):
         day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
@@ -621,6 +726,7 @@ class MetaOperator:
         """Guarda la recomendación del Advisor en relativo (piso/techo sobre el
         precio de hoy) para poder reanclarla al precio actual al leerla."""
         entry = dict(advisory)
+        entry["method_version"] = self.ADVISOR_CACHE_METHOD_VERSION
         floor_val, ceiling_val = advisory.get("recommended_floor"), advisory.get("recommended_ceiling")
         if floor_val is not None and ceiling_val is not None and anchor_price > 0:
             entry["recommended_floor_ratio"] = float(floor_val) / anchor_price
@@ -637,7 +743,7 @@ class MetaOperator:
         un formato viejo sin ratio, si el precio se movió más del umbral, o si
         el precio actual quedó fuera del rango original con el que se calculó.
         """
-        if not entry or "recommended_floor_ratio" not in entry or "recommended_ceiling_ratio" not in entry:
+        if not entry or entry.get("method_version") != self.ADVISOR_CACHE_METHOD_VERSION or "recommended_floor_ratio" not in entry or "recommended_ceiling_ratio" not in entry:
             return None
         anchor_price = float(entry.get("anchor_price") or 0)
         if anchor_price <= 0 or price <= 0:
@@ -653,6 +759,7 @@ class MetaOperator:
         reanchored.pop("recommended_floor_ratio", None)
         reanchored.pop("recommended_ceiling_ratio", None)
         reanchored.pop("anchor_price", None)
+        reanchored.pop("method_version", None)
         return reanchored
 
     def _persistent_cache_get(self, kind, payload):
@@ -664,7 +771,13 @@ class MetaOperator:
             with self.db.engine.connect() as conn:
                 value = conn.execute(select(self.db.meta_analysis_cache.c.value_json).where(
                     self.db.meta_analysis_cache.c.cache_key == key)).scalar_one_or_none()
-            return None if value is None else json.loads(value)
+            result = None if value is None else json.loads(value)
+            expected = {"replay": __import__("grid.meta_learning", fromlist=["REPLAY_METHOD_VERSION"]).REPLAY_METHOD_VERSION,
+                "advisor": self.ADVISOR_CACHE_METHOD_VERSION,
+                "touch_signal": self.TOUCH_CACHE_METHOD_VERSION}.get(kind)
+            if expected and (not isinstance(result, dict) or result.get("method_version") != expected):
+                return None
+            return result
         except Exception:
             return None
 
@@ -675,7 +788,13 @@ class MetaOperator:
         try:
             from sqlalchemy import select
             table = self.db.meta_analysis_cache
-            encoded = json.dumps(value, sort_keys=True, default=str)
+            stored = dict(value) if isinstance(value, dict) else value
+            if isinstance(stored, dict):
+                expected = {"advisor": self.ADVISOR_CACHE_METHOD_VERSION,
+                    "touch_signal": self.TOUCH_CACHE_METHOD_VERSION}.get(kind)
+                if expected:
+                    stored["method_version"] = expected
+            encoded = json.dumps(stored, sort_keys=True, default=str)
             with self.db.engine.begin() as conn:
                 exists = conn.execute(select(table.c.cache_key).where(table.c.cache_key == key)).first()
                 values = {"cache_kind": kind, "analysis_day": day, "value_json": encoded,
@@ -2459,7 +2578,7 @@ class MetaOperator:
             step = (float(high) - float(low)) / int(n)
             lines = [float(low) + step * i for i in range(int(n) + 1)]
             cells = list(zip(lines[:-1], lines[1:]))
-        payload = {"version": 1, "symbol": symbol, "day": self.clock() // 86400,
+        payload = {"version": 2, "symbol": symbol, "day": self.clock() // 86400,
             "strategy": strategy, "n": int(n), "window_days": int(window_days),
             "buy_sell_relative": [[round(float(x) / ref, 10), round(float(y) / ref, 10)] for x, y in cells],
             "horizons": horizons}
@@ -2513,7 +2632,8 @@ class MetaOperator:
             aggregate[horizon_name] = value
         for observation in observations:
             observation["stats"].pop("sell_candles", None)
-        result = {"summary": {"horizons": aggregate, "cells": summary_cells,
+        result = {"method_version": self.TOUCH_CACHE_METHOD_VERSION,
+                  "summary": {"horizons": aggregate, "cells": summary_cells,
                               "weight": 0, "shadow_only": True},
                   "observations": observations}
         self._cache[process_key] = result
@@ -3705,8 +3825,12 @@ class MetaOperator:
         self.scheduler.add_job(self.run_learning_daily, "cron", hour=8, minute=30, timezone="UTC",
                                id="meta_learning_labels_daily", replace_existing=True,
                                max_instances=1, coalesce=True)
+        self.scheduler.add_job(self.maintain_database, "cron", hour=9, minute=30, timezone="UTC",
+                               id="meta_database_maintenance", replace_existing=True,
+                               max_instances=1, coalesce=True)
         if not self.scheduler.running:
             self.scheduler.start()
+            self.maintain_database()
 
     def stop(self):
         if self.scheduler.running:

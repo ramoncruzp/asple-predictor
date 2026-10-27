@@ -171,7 +171,31 @@ class MetaCore:
                 "learning_limits": {"max_templates_per_run": int(profiles.get("GLOBAL", {}).get(
                     "learning_max_templates_per_run", 30)), "time_budget_minutes": float(
                     profiles.get("GLOBAL", {}).get("learning_time_budget_minutes", 20))},
+                "maintenance": {"cache_retention_days": int(profiles.get("GLOBAL", {}).get(
+                    "cache_retention_days", 7)), "ledger_plan_detail_days": int(profiles.get("GLOBAL", {}).get(
+                    "ledger_plan_detail_days", 14))},
                 "profiles": {k: v for k, v in profiles.items() if k in DEFAULT_PROFILES}}
+
+    def set_maintenance_settings(self, *, cache_retention_days, ledger_plan_detail_days):
+        from sqlalchemy import select
+        cache_days, ledger_days = int(cache_retention_days), int(ledger_plan_detail_days)
+        if not 1 <= cache_days <= 90 or not 1 <= ledger_days <= 365:
+            raise ValueError("La retención de caché debe estar entre 1 y 90 días y la de planes entre 1 y 365.")
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values.update({"cache_retention_days": cache_days, "ledger_plan_detail_days": ledger_days})
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == "GLOBAL").values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=self._now()))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile="GLOBAL",
+                    settings=json.dumps({"max_active": 1, **values}, sort_keys=True), updated_at=self._now()))
+        return {"cache_retention_days": cache_days, "ledger_plan_detail_days": ledger_days}
 
     def set_max_active(self, value):
         from sqlalchemy import select

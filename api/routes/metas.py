@@ -66,6 +66,12 @@ class LearningLimits(BaseModel):
     time_budget_minutes: float = Field(ge=1, le=240)
 
 
+class MaintenanceSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cache_retention_days: int = Field(ge=1, le=90)
+    ledger_plan_detail_days: int = Field(ge=1, le=365)
+
+
 class LearningSwitch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     profile: str
@@ -116,6 +122,14 @@ def update_learning_limits(request: Request, body: LearningLimits):
     return _call(_core(request).set_learning_limits,
         max_templates_per_run=body.max_templates_per_run,
         time_budget_minutes=body.time_budget_minutes)
+
+
+@router.put("/config/maintenance")
+def update_maintenance_settings(request: Request, body: MaintenanceSettings):
+    _authorize(request)
+    return _call(_core(request).set_maintenance_settings,
+        cache_retention_days=body.cache_retention_days,
+        ledger_plan_detail_days=body.ledger_plan_detail_days)
 
 
 @router.get("/learning")

@@ -340,7 +340,7 @@ def test_slow_operator_review_does_not_block_monitor_loss_close(tmp_path):
     operator = MetaOperator(core, db, None, core.engine, settings)
     analysis_entered, allow_analysis_to_finish = threading.Event(), threading.Event()
 
-    def slow_plan(_goal):
+    def slow_plan(_goal, **_kwargs):
         analysis_entered.set()
         assert allow_analysis_to_finish.wait(5)
         return {"pieces": [], "alternatives": [], "candidates": [], "shadow_decision": None}
@@ -713,3 +713,14 @@ def test_compare_control_shows_only_plan_while_run_is_active(tmp_path):
     assert result["control_plan"] is not None
     assert result["control_result"] is None
     assert "activa" in result["note"]
+
+
+def test_database_maintenance_retention_settings_are_global_and_editable(tmp_path):
+    db, core = _core(tmp_path)
+    assert core.config()["maintenance"] == {"cache_retention_days": 7,
+        "ledger_plan_detail_days": 14}
+    saved = core.set_maintenance_settings(cache_retention_days=9, ledger_plan_detail_days=21)
+    assert saved == {"cache_retention_days": 9, "ledger_plan_detail_days": 21}
+    assert core.config()["maintenance"] == saved
+    with pytest.raises(ValueError):
+        core.set_maintenance_settings(cache_retention_days=0, ledger_plan_detail_days=21)
