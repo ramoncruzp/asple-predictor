@@ -132,3 +132,16 @@ Precálculo no tiene evento durable; timestamp de caché no se presenta como equ
 ## Bloque 2 — discrepancias de replay activo
 
 41e/41h quedan pendientes, no certificados: el runner no expone la continuidad de órdenes/inventario necesaria para mover la geometría cada 15 minutos. scripts/estudios_meta.py ofrece replay pasivo de referencia, pero no etiqueta como activo una corrida estática ni reinicia capital por segmento. La política no se aproxima con un algoritmo nuevo ni se cambian simuladores. El calibrado de grid está limitado a estrategias Smart/Simple y a fills/eventos persistidos disponibles; el cliente descarga únicamente mercado público cuando Ramón corre el comando.
+
+## Bloque 3 — discrepancias y límites
+
+- La 41e solicitaba replay activo con recentrado cada 15 minutos y la 41h comparar persistencia 1/2. El runner disponible no conserva estado de órdenes/inventario al reajustar. No se implementó un simulador aproximado ni se llamaron resultados pasivos “activos”; ambos siguen `not_modeled` y pendientes.
+- La señal centrada usa mediana/MAD del conjunto de alternativas evaluadas en una revisión y escala mínima 0,1. Es una definición robusta determinista; no fue calibrada con resultados reales.
+- `use_centered_signals` y `use_touch_bots` se almacenan por perfil pero no tienen ruta que afecte decisiones durante esta fase. Permanecen en sombra aunque una configuración se marque encendida; se requiere una fase posterior para definir activación explícita.
+- El bot selecciona con tasa causal histórica de 24 h y reporta también horizonte 72 h. La etiqueta forward usa velas OHLC y no resuelve recorridos compra/venta dentro de una misma vela; una venta solo cuenta en vela posterior.
+- No se consultó S1 ni se produjo conclusión estadística para `model_a_down`, grid 13 o el umbral de 2 pp intravela. Los comandos quedan documentados para ejecución manual.
+- La comparación con 5710a9f confirma que las cinco funciones decisorias enumeradas en REPORTE_FASE41.md permanecen idénticas; no se ejecutó un replay end-to-end contra datos/BD de ese commit, prohibido por el aislamiento requerido.
+
+## Seguimiento C17 — valoración simultánea
+
+La inspección de código confirmó que la hipótesis de concurrencia era posible: el monitor invoca la valoración dentro de `MetaCore._lock`, mientras la revisión Meta llamaba `core.valuation` sin adquirirlo. El cliente y la caché por símbolo son compartidos. La corrección serializa la valoración con ese mismo `RLock` y fija horarios cron UTC en segundos 0/20. No se probó contra S1 ni se atribuye como causa demostrada de los eventos históricos; la prueba local cubre una carrera sintética y la serialización. Queda como límite que otros consumidores del cliente Testnet fuera de estos dos caminos no toman `MetaCore._lock`.

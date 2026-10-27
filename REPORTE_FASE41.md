@@ -399,3 +399,47 @@ Comandos de S1, después de copiar datos/archivos de salida al directorio previs
 - Calibrar dirección: venv2/bin/python scripts/estudios_meta.py calibrar-direccion --db asple_predictor.db --days 30 --out ./estudios_meta/
 
 Para repetir el estudio intravela de 90 días tras G1b: HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/medir_orden_intravela.py --symbols JUPUSDT,ZROUSDT,XRPUSDT --days 90 --source binance --out ./medicion_intravela/. Si la diferencia absoluta de probabilidad 5m/1m es <2 puntos porcentuales en 11 ventanas, dejar el simulador igual; si excede 2 pp, preparar evaluación separada. No se descargaron velas durante esta fase.
+
+## Bloque 3 — señales con sentido y bots de toque en sombra (G3)
+
+### 3a — calibración de `model_a_down`
+
+El subcomando `scripts/estudios_meta.py calibrar-direccion` lee `predictions` y `outcomes` en SQLite `mode=ro` para `model_a_down` 1h. Por símbolo informa distribución de P(baja), Brier, log-loss, AUC, deciles, acierto en 0,50/0,60 y mejor umbral empírico. Mantiene la advertencia de uso Spot: la señal puede servir para evitar compras o gestionar inventario; no implica ventas cortas. No se ejecutó contra una BD real, así que la conclusión de rendimiento queda pendiente en S1. Prueba sintética incluida en G2.
+
+### 3b — Scanner y Advisor centrados
+
+`grid/meta_operator.py` agrega `centered_signal_snapshot`: por revisión, para cada señal usa mediana y MAD escalada por 1,4826, con piso de escala 0,1; centra y limita a [-1,1]. Calcula `signals_centered` y `probability_adjusted_centered` en campos separados, conserva intactos `signals_used` y la probabilidad ajustada real, y persiste ambas en `meta_learning_samples.signals_json`. Inteligencia compara log-loss y Brier de ambas probabilidades solo cuando madura la etiqueta. `grid/meta.py` agrega `use_centered_signals=False` por perfil; `use_touch_bots=False` se reserva igualmente por perfil. Son indicadores de configuración/sombra, no activan decisiones reales en esta fase.
+
+### 3c — bots de toque
+
+En cada revisión, con monedas presentes en alternativas elegibles, se prueban compras a 0,5; 0,75; 1; 1,5; 2; 2,5 y 3 % por debajo del precio. La venta se fija para dejar 0,95 % neto tras 0,1 % de comisión en compra y venta. La tasa se calcula con `causal_touch_buy_to_sell` y velas causales de los 30 días anteriores; para la estimación 72 h se usa `touch_stats` con ese horizonte. La mejor tasa de 24 h selecciona la propuesta y se guardan ambas tasas en `META_BOT_TOUCH_SHADOW`. Nunca se llama al motor de apertura.
+
+El job diario guarda `META_BOT_TOUCH_SHADOW_LABEL` cuando madura cada horizonte 24/72 h. La etiqueta requiere compra y una venta posterior, en vela distinta, y registra tiempos. Inteligencia presenta propuestas y tasas esperadas frente a las observadas. Es evidencia basada en velas OHLC; no identifica orden de movimientos dentro de una misma vela de 5 minutos.
+
+### Regresión y verificación
+
+Comparé con `5710a9f` los cuerpos de `signal_adjusted_probability`, `_apply_intelligence`, `_review_allocations`, `_consider_piece_reconfiguration` y `_rotation_gate`: los cinco son idénticos. La prueba de centrado conserva `signals_used`, probabilidad real y resultado del ajuste real; la prueba del bot cubre selección de tasa/objetivo neto y etiqueta buy→sell con velas sintéticas.
+
+Comando final dirigido, `ASPLE_OFFLINE=1`, basetemp temporal nuevo: `tests/test_estudios_meta.py tests/test_meta_learning.py tests/test_meta_operator.py tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py tests/test_meta_core.py`: **147 passed, 5 warnings, 0 failed; 49,53 s**. `node --check frontend/intelligence.js` y `py_compile` de Python terminaron sin errores. No se ejecutó suite completa.
+
+### Operación y límites pendientes
+
+Comandos manuales para S1, desde `/home/ubuntu/asple-predictor`; requieren proxy público y se deben ejecutar allí solo cuando Ramón lo decida:
+
+- Dirección: `venv2/bin/python scripts/estudios_meta.py calibrar-direccion --db asple_predictor.db --days 30 --out ./estudios_meta/`.
+- Grid 13: `HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py calibrar-grid --grid-id 13 --db asple_predictor.db --out ./estudios_meta/`.
+- Replay pasivo de referencia: `HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py replay-activo --symbols JUPUSDT,ZROUSDT --days 180 --profile RAPIDO --source binance --out ./estudios_meta/`. La salida marca `active_status=not_modeled`; no debe leerse como replay activo.
+- Persistencia 1/2 queda `not_modeled` hasta construir adaptador con estado continuo.
+- Intravela 90 días: `HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/medir_orden_intravela.py --symbols JUPUSDT,ZROUSDT,XRPUSDT --days 90 --source binance --out ./medicion_intravela/`. Diferencia <2 pp con 11 ventanas conserva el simulador; mayor diferencia requiere una fase de evaluación separada.
+
+No se usaron S1, Testnet, red, `.env` ni BD real durante esta implementación. El Bloque 2 queda parcial por el replay activo y el estudio de persistencia no modelados; la calibración empírica de dirección y los datos públicos intravela requieren corrida manual en S1.
+
+### Seguimiento 1c — serialización y motivo por moneda (C17, 2026-10-27)
+
+La inspección confirmó el solapamiento posible: `MetaCore.run_once` toma `MetaCore._lock`, pero las llamadas `MetaOperator.review_active → _review_once_locked → core.valuation` no lo tomaban. Ambos caminos comparten `MetaCore.exchange` y `_depth_cache`. `MetaCore.valuation` ahora serializa el cuerpo bajo el mismo `RLock` (el watchdog lo reentra); una lectura concurrente de la revisión espera y puede reutilizar la caché del libro, evitando carreras y lecturas duplicadas. Esto no evita concurrencia con llamadas ajenas a MetaCore, pero el incidente descrito corresponde a los dos caminos de Meta.
+
+Los estados desconocidos ahora devuelven `reason` agregado por símbolo y `symbol_valuations` con causa, edad de lectura, niveles bid/ask y mejores precios; las piezas conservan el motivo de su moneda. Un libro sin bids queda explícito como “libro sin compradores”. El calendario de MetaCore queda fijo en cada minuto UTC, segundo 0; el operador, cada 15 minutos UTC, segundo 20, por lo que el desfase no depende de la hora de reinicio. No se cambió la regla: una valoración UNKNOWN sigue bloqueando acciones y requiere los dos intentos ya implementados.
+
+Pruebas de regresión: dos llamadas concurrentes de valoración consultan el libro una vez y ambas terminan KNOWN; una profundidad sin bids registra causa por moneda; las pruebas verifican los segundos 0/20 de ambos jobs. Archivos afectados `grid/meta.py`, `grid/meta_operator.py`, `tests/test_meta_core.py` y `tests/test_meta_operator.py`. La comparación con `5710a9f` para las cinco funciones decisorias de G3 sigue idéntica.
+
+Verificación C17 dirigida de `tests/test_meta_core.py tests/test_meta_operator.py`: **115 passed, 4 warnings, 0 failed; 51,42 s**. El primer intento del conjunto final encontró un mock de prueba que no aceptaba un argumento posicional; corregido el mock, el archivo y el conjunto final pasaron. No fue un fallo de producción.

@@ -205,6 +205,8 @@ def test_one_sided_book_returns_unknown_and_records_alert(tmp_path):
             grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now))
     result = core.valuation(goal["id"])
     assert result["status"] == "DESCONOCIDO"
+    assert "XRPUSDT" in result["reason"] and "sin compradores" in result["reason"]
+    assert result["symbol_valuations"]["XRPUSDT"]["bid_levels"] == 0
     assert not any(row["event_type"] == "META_UNPROTECTED" for row in core.ledger(goal["id"]))
     assert not alerts
     clock_now[0] += timedelta(minutes=11)
@@ -724,3 +726,53 @@ def test_database_maintenance_retention_settings_are_global_and_editable(tmp_pat
     assert core.config()["maintenance"] == saved
     with pytest.raises(ValueError):
         core.set_maintenance_settings(cache_retention_days=0, ledger_plan_detail_days=21)
+
+
+def test_core_valuation_serializes_operator_and_watchdog_reads(tmp_path):
+    import time
+    class BlockingTestnet(FakeTestnet):
+        def __init__(self):
+            super().__init__(bid=10); self.entered=threading.Event(); self.release=threading.Event()
+            self.calls=0; self.active=0; self.max_active=0; self.guard=threading.Lock()
+        def get_order_book_depth(self, symbol, limit=5):
+            with self.guard:
+                self.calls += 1; self.active += 1; self.max_active=max(self.max_active,self.active)
+                self.entered.set()
+            self.release.wait(2)
+            with self.guard: self.active -= 1
+            return {"bids":[(Decimal("10"),Decimal("1000"))],"asks":[],"read_at":self.clock()}
+    exchange=BlockingTestnet(); db,core=_core(tmp_path,exchange=exchange)
+    goal=core.create_goal(100,10); now=datetime(2026,1,1)
+    with db.engine.begin() as conn:
+        grid_id=conn.execute(db.grids.insert().values(symbol="XRPUSDT",range_low=1,range_high=2,
+            n_levels=1,capital_total=100,reserve=0,status="ACTIVE",created_at=now,
+            environment="testnet",strategy="simple",params="{}",dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id,level_idx=0,price=1,capital=100,
+            state="HOLDING",held_qty=1,cycles_completed=0,pnl=0,fee_paid=0,updated_at=now))
+        run_id=conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],status="ACTIVE",
+            started_at=now,realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],run_id=run_id,
+            grid_id=grid_id,piece_type="grid",origin_grid_id=grid_id,created_at=now))
+    results=[]
+    one=threading.Thread(target=lambda: results.append(core.valuation(goal["id"])))
+    two=threading.Thread(target=lambda: results.append(core.valuation(goal["id"])))
+    one.start(); assert exchange.entered.wait(2); two.start(); time.sleep(.05); exchange.release.set()
+    one.join(3); two.join(3)
+    assert not one.is_alive() and not two.is_alive()
+    assert exchange.calls == 1 and exchange.max_active == 1
+    assert [result["status"] for result in results] == ["KNOWN", "KNOWN"]
+
+
+def test_meta_core_watchdog_uses_fixed_utc_minute_boundary(tmp_path):
+    class Scheduler:
+        running = False
+        def __init__(self): self.jobs=[]
+        def add_job(self, fn, trigger, **kwargs): self.jobs.append((fn,trigger,kwargs))
+        def start(self): self.running=True
+    _db, core = _core(tmp_path)
+    scheduler=Scheduler(); core.scheduler=scheduler
+    core.start()
+    fn, trigger, options=scheduler.jobs[0]
+    assert fn.__name__ == "run_once" and trigger == "cron"
+    assert options["minute"] == "*" and options["second"] == 0
+    assert options["timezone"] == "UTC"

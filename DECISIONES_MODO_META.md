@@ -325,6 +325,7 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 ## Fase 41-G1c — diagnóstico de valoración
 
 - Inactividad y valoración desconocida tienen motivos separados. Una lectura no KNOWN espera 10 s y se reintenta una vez; ambos intentos quedan auditados. Revisión inicial ~20 s tras primer tick de MetaCore. Si persiste, no hay acción.
+- Seguimiento C17: las valoraciones del watchdog y la revisión comparten `MetaCore._lock`; MetaCore corre al segundo 0 de cada minuto UTC y el operador al segundo 20 cada 15 minutos. Motivos de valoración DESCONOCIDA incluyen símbolo, libro y edad disponibles.
 
 ## Fase 41-G1d — cobertura de dirección
 
@@ -344,3 +345,12 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Calibración de grid compara geometría real fija con velas públicas 5m/1m.
 - Replay activo y persistencia 1/2 se mantienen como no medidos hasta contar con un adaptador que conserve estado entre reajustes; replay pasivo no se presenta como política activa.
 - Para estudio intravela de 90 días: diferencia <2 pp con 11 ventanas conserva simulador; diferencia mayor se evalúa aparte.
+
+| 41-G2/G3 | Estudios Meta de solo lectura, calibración de dirección, Scanner/Advisor centrados y bots de toque en sombra | G2: calibración/grid implementados; replay activo y persistencia pendientes. G3: centrado y bots en sombra; interruptores apagados. Sin resultados de S1 |
+
+## Fase 41-G3 — señales y bots en sombra
+
+- La calibración de dirección de `model_a_down` usa `scripts/estudios_meta.py calibrar-direccion`; no se ejecutó contra una base real, por lo que no se concluye que supere el azar.
+- `use_centered_signals` y `use_touch_bots` se guardan por perfil en falso. El centrado Scanner/Advisor y la propuesta de bot se calculan y guardan como sombra; ninguna de las dos opciones modifica la probabilidad, el ranking ni las acciones reales.
+- Las etiquetas del bot usan velas OHLC y exigen que la venta aparezca en una vela posterior a la compra.
+- Pendiente manual: ejecutar los estudios públicos/calibración en S1, inspeccionar métricas y decidir si se prepara otra fase.

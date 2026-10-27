@@ -113,6 +113,72 @@ def signal_adjusted_probability(replay_probability, signals, weights, max_abs_lo
     return 1 / (1 + math.exp(-max(-30, min(30, logit))))
 
 
+def centered_signal_snapshot(alternatives, weights, logit_cap=1.0):
+    """Calcula en sombra el centrado robusto de Scanner y Advisor por revisión."""
+    references = {}
+    for name in ("scanner", "advisor"):
+        values = [float(signal["normalized"]) for alternative in alternatives
+            for signal in alternative.get("signals_used", [])
+            if signal.get("name") == name and signal.get("normalized") is not None]
+        median = float(np.median(values)) if values else 0.0
+        mad = float(np.median(np.abs(np.asarray(values) - median))) if values else 0.0
+        references[name] = {"median": median, "scale": max(1.4826 * mad, 0.1)}
+    for alternative in alternatives:
+        centered = []
+        for signal in alternative.get("signals_used", []):
+            item = dict(signal)
+            reference = references.get(item.get("name"))
+            if reference and item.get("normalized") is not None:
+                item["centered_from"] = item["normalized"]
+                item["normalized"] = max(-1.0, min(1.0,
+                    (float(item["normalized"]) - reference["median"]) / reference["scale"]))
+            centered.append(item)
+        alternative["signals_centered"] = centered
+        estimate = alternative.get("estimate") or {}
+        replay = alternative.get("replay_probability", estimate.get("probability_replay"))
+        alternative["probability_adjusted_centered"] = (
+            None if replay is None else
+            signal_adjusted_probability(float(replay), centered, weights, logit_cap)
+            if estimate.get("evidence_sufficient") else float(replay))
+        alternative["centered_signal_reference"] = references
+    return alternatives
+
+
+def label_touch_bot_path(candles, *, proposed_at, buy_price, sell_price, horizon_hours):
+    """Etiqueta el primer toque de compra seguido de venta dentro del horizonte."""
+    times = np.asarray(candles.timestamp, dtype=np.int64)
+    start = int(np.searchsorted(times, int(proposed_at), side="right"))
+    end = int(np.searchsorted(times, int(proposed_at) + int(horizon_hours) * 3600, side="right"))
+    bought_at = sold_at = None
+    for index in range(start, end):
+        if bought_at is None and float(candles.low[index]) < float(buy_price):
+            bought_at = int(times[index])
+        elif bought_at is not None and int(times[index]) > bought_at and \
+                float(candles.high[index]) > float(sell_price):
+            sold_at = int(times[index])
+            break
+    return {"buy_touched": bought_at is not None, "sell_after_buy": sold_at is not None,
+        "hours_to_buy": None if bought_at is None else (bought_at-int(proposed_at))/3600,
+        "hours_to_sell": None if sold_at is None else (sold_at-int(proposed_at))/3600}
+
+
+def causal_touch_rate_horizon(candles, *, at, buy_price, sell_price, horizon_hours):
+    """Tasa causal de compra seguida por venta con horizonte de 24 o 72 horas."""
+    times = np.asarray(candles.timestamp, dtype=np.int64)
+    end = int(np.searchsorted(times, int(at), side="right"))
+    start = int(np.searchsorted(times, int(at) - 30 * 86400, side="left"))
+    if end - start < 2:
+        return None
+    from grid.sim.data import CandleData
+    from grid.sim.touch_stats import touch_stats
+    sample = CandleData(timestamp=times[start:end], open=np.asarray(candles.open)[start:end],
+        high=np.asarray(candles.high)[start:end], low=np.asarray(candles.low)[start:end],
+        close=np.asarray(candles.close)[start:end], gaps=0)
+    stats = touch_stats(sample, float(buy_price), float(sell_price),
+        min(int(horizon_hours) * 12, len(sample.timestamp) - 1))
+    return stats.get("sell_rate")
+
+
 def combine_aligned_replays(alternatives, target_usdt, window_days, *, capital_initial=None, max_loss_pct=None):
     """Suma resultados de piezas por inicio de ventana compartido."""
     maps = []
@@ -1791,6 +1857,12 @@ class MetaOperator:
                         "stage": "replay", "reason": f"{type(exc).__name__}: {exc}"}], "no_evaluados": 0}}
         finally:
             plan["timings_s"]["allocation_shadow"] = round(time.perf_counter() - allocation_started, 6)
+        # Capa de comparación: nunca reemplaza las señales ni la probabilidad decisoria.
+        centered_signal_snapshot(alternatives, cfg.get("signal_weights") or {},
+            float(cfg.get("signal_logit_cap", 1.0)))
+        plan["centered_signal_shadow"] = {"enabled": bool(cfg.get("use_centered_signals", False)),
+            "alternatives_count": len(alternatives),
+            "references": alternatives[0].get("centered_signal_reference") if alternatives else {}}
         if record:
             self._ledger(goal["id"], "META_PLAN_EVALUATED", self._plan_ledger_payload(
                 plan, prepared, best, plan_kind=plan_kind))
@@ -1802,7 +1874,10 @@ class MetaOperator:
     def _compact_plan_alternative(alternative):
         """Conserva la alternativa decisoria y sustituye Advisor completo por referencias."""
         compact = {key: value for key, value in alternative.items()
-            if key not in {"window_results", "_touch_observations", "advisor_recommendations"}}
+            if key not in {"window_results", "_touch_observations", "advisor_recommendations",
+                           "signals_centered", "centered_signal_reference"}}
+        compact["signals_centered"] = [{"name": item.get("name"),
+            "normalized": item.get("normalized")} for item in alternative.get("signals_centered", [])]
         refs = []
         recommendations = alternative.get("advisor_recommendations") or []
         for index, recommendation in enumerate(recommendations):
@@ -1865,6 +1940,7 @@ class MetaOperator:
             "advisor_comparisons": plan.get("advisor_comparisons"),
             "combinations_evaluated": plan.get("combinations_evaluated"),
             "shadow_decision": plan.get("shadow_decision"), "selected": compact_selected,
+            "centered_signal_shadow": plan.get("centered_signal_shadow"),
             "sigma_bands": plan.get("sigma_bands"), "timings_s": plan.get("timings_s")}
 
     @staticmethod
@@ -1945,6 +2021,9 @@ class MetaOperator:
             sample_key = hashlib.sha256(f"live:{decision_id}:{alt_id}".encode()).hexdigest()
             signals = {"signals_version": 2,
                 "signals_used": alternative.get("signals_used", []),
+                "signals_centered": alternative.get("signals_centered", []),
+                "probability_adjusted_actual": (alternative.get("estimate") or {}).get("probability_adjusted"),
+                "probability_adjusted_centered": alternative.get("probability_adjusted_centered"),
                 "touch_signal": alternative.get("touch_signal"),
                 "shadow_signals": alternative.get("shadow_signals", [])}
             replay_raw = alternative.get("replay_probability")
@@ -2240,6 +2319,11 @@ class MetaOperator:
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
                     "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0,
                     "replay_windows_new": 0, "replay_windows_cached": 0, "cuts_processed": 0}
+        try:
+            counters["touch_bot_labels"] = self._label_touch_bot_shadows(int(started.timestamp()))
+        except Exception:
+            logging.getLogger(__name__).exception("Falló el etiquetado diario de bots de toque en sombra")
+            counters["touch_bot_labels"] = 0
         priority_lowered = False
         run_id = None
         try:
@@ -3145,6 +3229,94 @@ class MetaOperator:
                     "probability": result.get("probability")},
                 "decision_choices_error": f"{type(exc).__name__}: {exc}"}
 
+    def _touch_bot_shadow_proposals(self, goal, plan):
+        """Propone bots de toque en sombra; no crea ni modifica grids."""
+        from grid.meta_learning import causal_touch_buy_to_sell
+        by_symbol = {}
+        for alternative in plan.get("alternatives", []):
+            for piece in alternative.get("pieces", []):
+                symbol = str(piece.get("symbol") or alternative.get("symbol") or "").upper()
+                if symbol:
+                    by_symbol.setdefault(symbol, piece)
+        proposals = []
+        at = int(self.clock())
+        for symbol, piece in sorted(by_symbol.items()):
+            reference = float(piece.get("mid_at_plan") or piece.get("current_price") or 0)
+            row = {"symbol": symbol, "profile": str(goal.get("profile") or "RAPIDO"),
+                "proposed_at": at, "status": "no_data", "lookback_days": 30,
+                "sale_net_target_pct": 0.95}
+            if reference <= 0:
+                row["reason"] = "precio de referencia ausente"
+                proposals.append(row); continue
+            try:
+                candles = self._load_candles(symbol)
+                tested = []
+                for distance_pct in (0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0):
+                    buy = reference * (1 - distance_pct / 100)
+                    sell = buy * (1 + 0.0095) / ((1 - 0.001) ** 2)
+                    result = causal_touch_buy_to_sell(at=at, candles=candles,
+                        buy_price=buy, sell_price=sell)
+                    rate = result.get("sell_rate")
+                    if rate is not None:
+                        rate_72h = causal_touch_rate_horizon(candles, at=at,
+                            buy_price=buy, sell_price=sell, horizon_hours=72)
+                        tested.append({"buy_price": buy, "sell_price": sell,
+                            "buy_distance_pct": distance_pct, "expected_sell_rate": float(rate),
+                            "expected_sell_rate_24h": float(rate),
+                            "expected_sell_rate_72h": None if rate_72h is None else float(rate_72h),
+                            "observations": int(result.get("observations", 0))})
+                if tested:
+                    chosen = max(tested, key=lambda item: (item["expected_sell_rate"],
+                        -item["buy_distance_pct"]))
+                    row.update(chosen); row["status"] = "proposed"
+                    row["alternatives_tested"] = len(tested)
+                    row["labels_due_hours"] = [24, 72]
+                else:
+                    row["reason"] = "sin observaciones causales disponibles"
+            except Exception as exc:
+                row["reason"] = f"{type(exc).__name__}: {exc}"
+            proposals.append(row)
+        return proposals
+
+    def _label_touch_bot_shadows(self, now=None):
+        """Guarda etiquetas 24/72 h al madurar las propuestas, sin operar."""
+        from sqlalchemy import select
+        now = int(self.clock() if now is None else now)
+        with self.db.engine.connect() as conn:
+            events = conn.execute(select(self.db.meta_ledger.c.id, self.db.meta_ledger.c.meta_id,
+                self.db.meta_ledger.c.details).where(
+                    self.db.meta_ledger.c.event_type == "META_BOT_TOUCH_SHADOW")).all()
+            existing = conn.execute(select(self.db.meta_ledger.c.details).where(
+                self.db.meta_ledger.c.event_type == "META_BOT_TOUCH_SHADOW_LABEL")).all()
+        done = {(int((json.loads(row[0] or "{}" )).get("source_event_id", 0)),
+                 int((json.loads(row[0] or "{}" )).get("horizon_hours", 0))) for row in existing}
+        created = 0
+        for event_id, meta_id, raw in events:
+            try:
+                proposal = json.loads(raw or "{}")
+                if proposal.get("status") != "proposed":
+                    continue
+                proposed_at = int(proposal["proposed_at"])
+                symbol = str(proposal["symbol"])
+                for horizon in (24, 72):
+                    key = (int(event_id), horizon)
+                    if key in done or now < proposed_at + horizon * 3600:
+                        continue
+                    candles = self._load_candles(symbol)
+                    outcome = label_touch_bot_path(candles, proposed_at=proposed_at,
+                        buy_price=proposal["buy_price"], sell_price=proposal["sell_price"],
+                        horizon_hours=horizon)
+                    label = {"source_event_id": int(event_id), "symbol": symbol,
+                        "horizon_hours": horizon, **outcome,
+                        "expected_sell_rate": proposal.get("expected_sell_rate"),
+                        "labeled_at": now}
+                    self._ledger(int(meta_id), "META_BOT_TOUCH_SHADOW_LABEL", label)
+                    created += 1; done.add(key)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo etiquetar propuesta de bot sombra, ledger_id=%s", event_id)
+        return created
+
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
         if goal["status"] != "ACTIVE":
@@ -3187,6 +3359,11 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}
             self._record_review(meta_id, result, value, None)
             return result
+        try:
+            touch_bot_proposals = self._touch_bot_shadow_proposals(goal, plan)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Falló la propuesta de bots de toque en sombra para Meta %s", meta_id)
+            touch_bot_proposals = [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
         with self._operation_lock:
             current_goal = self.core.get_goal(meta_id)
             current_value = value
@@ -3215,6 +3392,8 @@ class MetaOperator:
                 result = self._review_allocations(current_goal, current_value, plan=plan)
             value = current_value
         choices = self._safe_active_review_choices(plan, result, meta_id)
+        for proposal in touch_bot_proposals:
+            self._ledger(meta_id, "META_BOT_TOUCH_SHADOW", proposal)
         comparison_error = ({"decision_choices_error": choices["decision_choices_error"]}
             if "decision_choices_error" in choices else {})
         self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
@@ -3992,8 +4171,8 @@ class MetaOperator:
             self._precompute_guard.release()
 
     def start(self):
-        self.scheduler.add_job(self.review_active, "interval", minutes=15, id="meta_operator_review",
-                               next_run_time=datetime.now(timezone.utc) + timedelta(seconds=80),
+        self.scheduler.add_job(self.review_active, "cron", minute="*/15", second=20, timezone="UTC",
+                               id="meta_operator_review",
                                replace_existing=True, max_instances=2, coalesce=True)
         self.scheduler.add_job(self.precompute_daily, "cron", hour=8, minute=0, timezone="UTC",
                                id="meta_daily_precompute", replace_existing=True,

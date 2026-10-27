@@ -23,6 +23,7 @@ DEFAULT_PROFILES = {
                  "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                  "learning_alpha": 0.05,
                  "use_learned_weights": False, "use_extended_allocation": False,
+                 "use_centered_signals": False, "use_touch_bots": False,
                  "allocation_tie_tolerance_pp": 5.0,
                  "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                  "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
@@ -50,6 +51,7 @@ DEFAULT_PROFILES = {
                "learning_max_weight_delta": 0.05, "learning_regularization": 1.0,
                "learning_alpha": 0.05,
                  "use_learned_weights": False, "use_extended_allocation": False,
+                 "use_centered_signals": False, "use_touch_bots": False,
                  "allocation_tie_tolerance_pp": 5.0,
                "signal_weights": {"volatility": 0.25, "break_prob": 0.25,
                "direction": 0.25, "scanner": 0.25, "advisor": 0.25},
@@ -468,6 +470,12 @@ class MetaCore:
         return {"meta_id": int(meta_id), "grid_id": int(grid_id), "piece_type": piece_type}
 
     def valuation(self, meta_id):
+        # MetaCore.run_once y el operador comparten este cliente y esta caché.
+        # Serializar la lectura evita carreras de libro y de _depth_cache.
+        with self._lock:
+            return self._valuation_locked(meta_id)
+
+    def _valuation_locked(self, meta_id):
         from sqlalchemy import select
         goal = self.get_goal(meta_id)
         links = self._owned_grids(meta_id)
@@ -516,7 +524,7 @@ class MetaCore:
             cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw)
             profile_cfg = self._profile_settings().get(goal["profile"], {})
             haircut = cfg.get("valuation_haircut_pct", profile_cfg.get("valuation_haircut_pct", 1.0))
-            coin_values, state_rows = {}, []
+            coin_values, state_rows, symbol_diagnostics = {}, [], {}
             for symbol, quantity in quantities_by_symbol.items():
                 if quantity <= 0:
                     empty_value = {"status": "KNOWN", "reason": None, "received_net": "0",
@@ -547,6 +555,22 @@ class MetaCore:
                     book.get("read_at"), now, 60)
                 coin_values[symbol] = {**executable, "best_bid_gross": best_gross}
                 state_rows.append((symbol, executable))
+                read_at = book.get("read_at")
+                if read_at is not None and read_at.tzinfo is None:
+                    read_at = read_at.replace(tzinfo=timezone.utc)
+                age_s = (now - read_at).total_seconds() if read_at is not None else None
+                reason = executable.get("reason")
+                if executable["status"] == "DESCONOCIDO" and reason:
+                    if not book.get("bids"):
+                        reason = f"libro sin compradores; {reason}"
+                    elif age_s is not None and age_s > 60:
+                        reason = f"lectura de profundidad vieja ({age_s:.1f} s); {reason}"
+                symbol_diagnostics[symbol] = {"status": executable["status"], "reason": reason,
+                    "book_read_at": read_at.isoformat() if read_at is not None else None,
+                    "age_s": age_s, "bid_levels": len(book.get("bids") or []),
+                    "ask_levels": len(book.get("asks") or []),
+                    "best_bid": str(book.get("bids")[0][0]) if book.get("bids") else None,
+                    "best_ask": str(book.get("asks")[0][0]) if book.get("asks") else None}
             status = "KNOWN"
             for _symbol, result in state_rows:
                 if VALUATION_STATES[result["status"]] > VALUATION_STATES[status]:
@@ -564,7 +588,7 @@ class MetaCore:
                                               if coin.get("status") != "DESCONOCIDO" else None)
                 piece["value_best_bid"] = str(_d(coin.get("best_bid_gross")) * ratio) if coin.get("best_bid_gross") is not None else None
                 piece["status"] = coin.get("status", "KNOWN")
-                piece["valuation_reason"] = coin.get("reason")
+                piece["valuation_reason"] = symbol_diagnostics.get(piece["symbol"], {}).get("reason") or coin.get("reason")
                 piece["book_read_at"] = coin.get("book_read_at")
             self._update_valuation_state(meta_id, state_rows, profile_cfg)
             value_best = cash + inventory_best * (Decimal(1) - FEE)
@@ -581,7 +605,11 @@ class MetaCore:
                     self.db.meta_runs.c.meta_id == int(meta_id),
                     self.db.meta_runs.c.status == "ACTIVE").order_by(
                         self.db.meta_runs.c.id.desc())).mappings().first()
-            return {"status": status, "cash_usdt": str(cash), "free_capital_usdt": str(free_capital),
+            reasons = [f"{symbol}: {item['reason']}" for symbol, item in symbol_diagnostics.items()
+                if item["status"] == "DESCONOCIDO" and item.get("reason")]
+            return {"status": status, "reason": "; ".join(reasons) if reasons else None,
+                    "symbol_valuations": symbol_diagnostics,
+                    "cash_usdt": str(cash), "free_capital_usdt": str(free_capital),
                     "realized_extra_usdt": str(_d(run.get("realized_extra_usdt")) if run else Decimal(0)),
                     "inventory_bid_gross_usdt": str(inventory_best),
                     "inventory_executable_usdt": str(inventory_exec), "value_usdt": str(value_exec),
@@ -998,7 +1026,7 @@ class MetaCore:
             self._finish(goal["id"], terminal)
 
     def start(self):
-        self.scheduler.add_job(self.run_once, "interval", seconds=60, id="meta_watchdog",
+        self.scheduler.add_job(self.run_once, "cron", minute="*", second=0, timezone="UTC", id="meta_watchdog",
                                replace_existing=True, max_instances=1, coalesce=True)
         if not self.scheduler.running:
             self.scheduler.start()

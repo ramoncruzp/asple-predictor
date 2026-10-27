@@ -93,6 +93,10 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         allocation_shadow_rows = conn.execute(select(db.meta_ledger.c.meta_id, db.meta_ledger.c.ts,
             db.meta_ledger.c.details).where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")
             .order_by(db.meta_ledger.c.id.desc()).limit(10)).mappings().all()
+        bot_shadow_rows = conn.execute(select(db.meta_ledger.c.id, db.meta_ledger.c.meta_id,
+            db.meta_ledger.c.ts, db.meta_ledger.c.event_type, db.meta_ledger.c.details).where(
+                db.meta_ledger.c.event_type.in_(("META_BOT_TOUCH_SHADOW", "META_BOT_TOUCH_SHADOW_LABEL")))
+            .order_by(db.meta_ledger.c.id.desc()).limit(200)).mappings().all()
         sample_groups = conn.execute(select(db.meta_learning_samples.c.profile,
             db.meta_learning_samples.c.source_kind, db.meta_learning_samples.c.symbol,
             func.count().label("count"), func.min(db.meta_learning_samples.c.sample_at).label("first_at"),
@@ -189,6 +193,31 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     cutoff_24h = (now_utc - timedelta(hours=24)).isoformat(sep=" ")
     unknown_valuation_summary = {"last_24h": sum(row["at"] >= cutoff_24h for row in unknown_reviews),
         "last_7d": len(unknown_reviews), "reasons": unknown_reviews[:20]}
+    bot_labels = {}
+    bot_proposals = []
+    for row in bot_shadow_rows:
+        details = _json(row["details"])
+        if row["event_type"] == "META_BOT_TOUCH_SHADOW_LABEL":
+            bot_labels[(int(details.get("source_event_id", 0)), int(details.get("horizon_hours", 0)))] = details
+        else:
+            proposal = {**details, "event_id": int(row["id"]), "meta_id": int(row["meta_id"]),
+                "at": str(row["ts"]), "labels": {}}
+            for horizon in (24, 72):
+                if (int(row["id"]), horizon) in bot_labels:
+                    proposal["labels"][str(horizon)] = bot_labels[(int(row["id"]), horizon)]
+            bot_proposals.append(proposal)
+    for proposal in bot_proposals:
+        proposal["labels"] = {str(h): bot_labels[(proposal["event_id"], h)]
+            for h in (24, 72) if (proposal["event_id"], h) in bot_labels}
+    bot_label_metrics = {}
+    for horizon in (24, 72):
+        labels = [value for (event_id, h), value in bot_labels.items() if h == horizon]
+        bot_label_metrics[str(horizon)] = {"n": len(labels),
+            "sell_after_buy_rate": (sum(bool(item.get("sell_after_buy")) for item in labels) / len(labels)
+                if labels else None),
+            "mean_expected_rate": (statistics.fmean(float(item["expected_sell_rate"]) for item in labels
+                if item.get("expected_sell_rate") is not None) if any(item.get("expected_sell_rate") is not None
+                    for item in labels) else None)}
 
     observation_counts = Counter()
     observation_counts_by_symbol = Counter()
@@ -342,6 +371,35 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "predicted": statistics.fmean(values[0]), "observed": statistics.fmean(values[1]),
         "few_samples": len(values[0]) < 30}
         for (horizon, low), values in sorted(replay_groups.items())]
+    centered_rows = {horizon: {kind: [] for kind in ("actual", "centrada")}
+        for horizon in ("72h", "20d", "45d")}
+    for sample in sample_rows:
+        raw = _json(sample[7])
+        if not isinstance(raw, dict):
+            continue
+        for horizon in centered_rows:
+            label = labels_by_sample.get((int(sample[0]), horizon), {})
+            if label.get("status") != "labeled" or label.get("reached") is None:
+                continue
+            truth = int(bool(label["reached"]))
+            for kind, key in (("actual", "probability_adjusted_actual"),
+                              ("centrada", "probability_adjusted_centered")):
+                probability = raw.get(key)
+                if probability is not None:
+                    centered_rows[horizon][kind].append((
+                        max(1e-12, min(1 - 1e-12, float(probability))), truth))
+    centered_comparison = {}
+    for horizon, kinds in centered_rows.items():
+        centered_comparison[horizon] = {}
+        for kind, values in kinds.items():
+            if not values:
+                centered_comparison[horizon][kind] = {"n": 0, "brier": None, "log_loss": None}
+                continue
+            ps = [p for p, _ in values]; ys = [y for _, y in values]
+            centered_comparison[horizon][kind] = {"n": len(values),
+                "brier": statistics.fmean((p-y)**2 for p, y in values),
+                "log_loss": statistics.fmean(-y*math.log(p)-(1-y)*math.log(1-p)
+                    for p, y in values)}
     label_lookup = {}
     for sid, symbol, profile, sample_at, alt_id, horizon, raw in label_detail_rows:
         label = _json(raw); label_lookup[(str(alt_id), str(horizon))] = (label, profile)
@@ -377,6 +435,14 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         for profile in ("RAPIDO", "PRUDENTE"):
             profile_learning[profile] = operator.learning_status(profile)
     settings = getattr(request.app.state, "settings", None)
+    try:
+        meta_config = operator.core.config()
+        profile_configs = meta_config.get("profiles", {})
+    except Exception:
+        profile_configs = {}
+    shadow_switches = {profile: {"use_centered_signals": bool((profile_configs.get(profile) or {}).get(
+            "use_centered_signals", False)), "use_touch_bots": bool((profile_configs.get(profile) or {}).get(
+            "use_touch_bots", False))} for profile in ("RAPIDO", "PRUDENTE")}
     switches = {profile: {"enabled": bool(profile_learning.get(profile, {}).get("enabled", False)),
         "readiness": readiness[profile]} for profile in ("RAPIDO", "PRUDENTE")}
     global_flags = {name: getattr(settings, name, None) for name in (
@@ -395,6 +461,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             "meta_signal_counts_by_symbol": [{"signal": signal, "symbol": symbol, "count": count}
                 for (signal, symbol), count in observation_counts_by_symbol.items()],
             "unknown_valuation_reviews": unknown_valuation_summary,
+            "touch_bot_shadow": {"proposals": list(reversed(bot_proposals)), "labels": bot_label_metrics},
             "meta_ledger": [dict(row) for row in ledger]},
         "samples": {"by_profile_source_symbol": [dict(row) for row in sample_groups],
             "exclusions": [dict(row) for row in exclusions], "recalculate_pending": int(recalc),
@@ -414,6 +481,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "signals": signal_stats,
         "hits": {"direction": direction_accuracy, "volatility": volatility_accuracy,
             "touch_calibration": touch_calibration, "replay_calibration": replay_calibration,
+            "centered_signal_comparison": centered_comparison,
             "decision_rates": decision_rates},
         "regressions": {"versions": [{"id": int(row["id"]), "profile": row["profile"],
             "source": row["source_kind"], "status": row["status"], "created_at": str(row["created_at"]),
@@ -429,7 +497,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],
-        "switches": switches, "global_flags": global_flags,
+        "switches": switches, "shadow_switches": shadow_switches, "global_flags": global_flags,
         "models_link": "#models", "battle_link": "#battle"}
 
 

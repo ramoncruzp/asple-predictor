@@ -1532,11 +1532,11 @@ def test_meta_review_scheduler_starts_twenty_seconds_after_monitor_tick():
     op = MetaOperator(None, None, None, None, None)
     scheduler = Scheduler()
     op.scheduler = scheduler
-    before = datetime.now(timezone.utc)
     op.start()
-    first = scheduler.jobs[0][2]["next_run_time"]
-    assert 79 <= (first - before).total_seconds() <= 81
-    assert scheduler.jobs[0][1] == "interval" and scheduler.jobs[0][2]["minutes"] == 15
+    fn, trigger, options = scheduler.jobs[0]
+    assert fn.__name__ == "review_active"
+    assert trigger == "cron" and options["minute"] == "*/15"
+    assert options["second"] == 20 and options["timezone"] == "UTC"
 
 
 
@@ -2336,3 +2336,67 @@ def test_controlled_regression_matches_24f2ba7_except_three_repaired_signals(mon
     new_probability = module.signal_adjusted_probability(.5, alternative["signals_used"], weights)
     assert alternative["estimate"]["probability_adjusted"] == pytest.approx(new_probability)
     assert new_probability < old_probability
+
+
+def test_centered_signal_shadow_does_not_change_real_signals_or_probability():
+    from grid.meta_operator import centered_signal_snapshot
+    alternatives = [
+        {"alternative_id": "a", "replay_probability": .4,
+         "estimate": {"probability": .6, "probability_adjusted": .6, "evidence_sufficient": True},
+         "signals_used": [{"name": "scanner", "normalized": .2},
+                          {"name": "advisor", "normalized": .3}]},
+        {"alternative_id": "b", "replay_probability": .4,
+         "estimate": {"probability": .6, "probability_adjusted": .6, "evidence_sufficient": True},
+         "signals_used": [{"name": "scanner", "normalized": .8},
+                          {"name": "advisor", "normalized": .7}]},
+    ]
+    from grid.meta_operator import signal_adjusted_probability
+    actual_before = [signal_adjusted_probability(row["replay_probability"], row["signals_used"],
+        {"scanner": .25, "advisor": .25}) for row in alternatives]
+    before = [[dict(signal) for signal in row["signals_used"]] for row in alternatives]
+    centered_signal_snapshot(alternatives, {"scanner": .25, "advisor": .25})
+    actual_after = [signal_adjusted_probability(row["replay_probability"], row["signals_used"],
+        {"scanner": .25, "advisor": .25}) for row in alternatives]
+    assert actual_after == actual_before
+    assert [row["signals_used"] for row in alternatives] == before
+    assert [row["estimate"]["probability_adjusted"] for row in alternatives] == [.6, .6]
+    assert alternatives[0]["signals_centered"][0]["normalized"] == pytest.approx(-.674490759)
+    assert alternatives[1]["signals_centered"][0]["normalized"] == pytest.approx(.674490759)
+    assert alternatives[0]["probability_adjusted_centered"] < alternatives[1]["probability_adjusted_centered"]
+
+
+def test_touch_bot_shadow_chooses_best_causal_distance_without_opening_grid(monkeypatch):
+    from grid.meta_operator import MetaOperator
+    import grid.meta_learning as learning
+    operator = MetaOperator.__new__(MetaOperator)
+    operator.clock = lambda: 1_800_000_000
+    operator._load_candles = lambda _symbol: object()
+    rates = iter((.1, .2, .9, .3, .2, .1, .05))
+    monkeypatch.setattr(learning, "causal_touch_buy_to_sell",
+        lambda **_kwargs: {"sell_rate": next(rates), "observations": 10})
+    monkeypatch.setattr("grid.meta_operator.causal_touch_rate_horizon", lambda *_args, **_kwargs: .25)
+    plan = {"alternatives": [{"pieces": [{"symbol": "XRPUSDT", "mid_at_plan": 100.0}]}]}
+    rows = operator._touch_bot_shadow_proposals({"profile": "RAPIDO"}, plan)
+    assert len(rows) == 1 and rows[0]["status"] == "proposed"
+    assert rows[0]["buy_distance_pct"] == 1.0
+    assert rows[0]["expected_sell_rate"] == .9
+    assert rows[0]["expected_sell_rate_24h"] == .9
+    assert rows[0]["expected_sell_rate_72h"] == .25
+    assert rows[0]["sell_price"] / rows[0]["buy_price"] * (.999 ** 2) - 1 == pytest.approx(.0095)
+    assert rows[0]["labels_due_hours"] == [24, 72]
+
+
+def test_touch_bot_forward_label_requires_buy_then_later_sell():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from grid.meta_operator import label_touch_bot_path
+    candles = CandleData(timestamp=np.array([3600,7200,10800]),
+        open=np.array([100,99,100]), high=np.array([100,100,102]),
+        low=np.array([100,98,99]), close=np.array([100,99,101]), gaps=0)
+    result = label_touch_bot_path(candles, proposed_at=0, buy_price=99,
+        sell_price=101, horizon_hours=3)
+    assert result == {"buy_touched": True, "sell_after_buy": True,
+        "hours_to_buy": 2.0, "hours_to_sell": 3.0}
+    short = label_touch_bot_path(candles, proposed_at=0, buy_price=99,
+        sell_price=101, horizon_hours=2)
+    assert short["buy_touched"] is True and short["sell_after_buy"] is False

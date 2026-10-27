@@ -82,6 +82,15 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_PLAN_EVALUATED",
             details=json.dumps({"ledger_schema_version": 3, "ledger_detail": "resumido",
                 "alternatives_total": 17, "alternatives": [{}]})))
+        bot_event_id = conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
+            ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_BOT_TOUCH_SHADOW",
+            details=json.dumps({"symbol":"XRPUSDT", "status":"proposed", "buy_price":.99,
+                "sell_price":1.01, "buy_distance_pct":1.0, "expected_sell_rate":.4,
+                "proposed_at":int(datetime.now(timezone.utc).timestamp())-90000}))).inserted_primary_key[0]
+        conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
+            ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_BOT_TOUCH_SHADOW_LABEL",
+            details=json.dumps({"source_event_id":bot_event_id, "horizon_hours":24,
+                "sell_after_buy":True, "expected_sell_rate":.4})))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -105,6 +114,9 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['replay']['chart'] and len(payload['replay']['chart']) == 10
     assert 'direction' in payload['hits'] and 'volatility' in payload['hits']
     assert 'replay_calibration' in payload['hits']
+    assert payload['hits']['centered_signal_comparison']['72h']['actual']['n'] == 0
+    assert payload['data']['touch_bot_shadow']['proposals'][0]['labels']['24']['sell_after_buy'] is True
+    assert payload['data']['touch_bot_shadow']['labels']['24']['n'] == 1
     direction_hit = payload['hits']['direction'][0]
     assert direction_hit['n'] == 1 and direction_hit['accuracy'] == 1
     assert direction_hit['few_samples'] is True and direction_hit['wilson95'][0] < 1 and direction_hit['wilson95'][1] <= 1
