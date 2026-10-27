@@ -117,3 +117,8 @@ La geometr?a com?n se deriva de los cierres 5m y de sigma 5m causal, aunque 1m p
 ## Fase 41-G1c ? discrepancias
 
 Los errores de excepci?n del proveedor quedan vinculados a la moneda del grid cuando MetaCore puede identificarla. Los libros con estado DESCONOCIDO registran el motivo ofrecido por `executable_value`; no se infiere la causa si el proveedor no la devuelve. Inteligencia limita el detalle a 20 motivos y el c?lculo a 5.000 decisiones recientes en siete d?as. No se cambi? la condici?n de cancelaci?n.
+
+
+## Fase 41-G1d ? discrepancias
+
+La cobertura activa se calcula sobre filas de muestra con se?al `direction` guardada y usa `p_down` (con fallback al valor crudo); su porcentaje usa el total de muestras Meta consultadas como denominador para distinguirla de la cobertura general del extractor. El aprendizaje mantiene la sem?ntica existente: P(baja) < 0,60 aporta 0 neutral y cuenta como observaci?n presente.

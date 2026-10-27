@@ -213,12 +213,19 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         signal_stats.setdefault(name, {"observations": count})
     all_signals = Counter()
     feature_values = {}
+    direction_active_samples = 0
     try:
         from grid.meta_learning import extract_learning_features
     except ImportError:
         extract_learning_features = None
     for row in sample_rows:
         raw_signals = _json(row[7])
+        for signal in raw_signals.get("signals_used", []) if isinstance(raw_signals, dict) else []:
+            if signal.get("name") == "direction":
+                try:
+                    direction_active_samples += int(float(signal.get("p_down", signal.get("value"))) >= .60)
+                except (TypeError, ValueError):
+                    pass
         if extract_learning_features:
             try:
                 features, present = extract_learning_features(raw_signals)
@@ -243,6 +250,11 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         low = [success for value, success in labeled if value < threshold] if threshold is not None else []
         signal_stats[name]["high_success_rate"] = statistics.fmean(high) if high else None
         signal_stats[name]["low_success_rate"] = statistics.fmean(low) if low else None
+    signal_stats.setdefault("direction", {})["direction_active_coverage"] = {
+        "count": direction_active_samples,
+        "total": total_samples,
+        "coverage_pct": 100 * direction_active_samples / total_samples if total_samples else 0,
+        "threshold_p_down": .60}
 
     # Resumen verbal y B3: intervalos de diez puntos, medias cruda/suavizada y ventanas.
     sample_n = len(sample_rows)

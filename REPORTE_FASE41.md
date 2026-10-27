@@ -375,3 +375,10 @@ Prueba: `tests/test_measure_intracandle_order.py:27-59,151-158` confirma que la 
 `grid/meta.py:470-599` conserva en la valoraci?n el s?mbolo y el error global de lectura; por pieza conserva el estado, el motivo y la marca de lectura del libro (`:580-584`). `grid/meta_operator.py:3147-3255` registra esa informaci?n en `META_OPERATOR_REVIEW_DECISION` y emite un aviso estructurado al log tanto al inicio como si el dato se vuelve desconocido durante el an?lisis. La cancelaci?n sigue teniendo la misma condici?n y no permite mover capital. `api/routes/intelligence.py:170-192,385` agrega conteos de 24 h/7 d?as y motivos recientes; `frontend/intelligence.js:74-77` los presenta en B1.
 
 Verificaci?n dirigida: operador, MetaCore, API/UI de Inteligencia ? **110 passed, 5 warnings, 11,61 s**. `node --check frontend/intelligence.js`: correcto. El contador examina como m?ximo 5.000 revisiones de los ?ltimos siete d?as y muestra hasta 20 motivos.
+
+
+## Fase 41-G1d ? cobertura activa de direcci?n
+
+`api/routes/intelligence.py:221-258` expone `direction_active_coverage` para el subconjunto con P(baja) ? 0,60; `frontend/intelligence.js:58,85` lo muestra separado de cobertura total. `scripts/diagnostico_senales_meta.py:111-119,190-195` imprime el mismo subconjunto por s?mbolo. El aprendizaje sigue contando como presente una direcci?n bajo el umbral, con normalizaci?n neutral 0; no se cambi? el extractor ni ninguna probabilidad decisoria.
+
+Verificaci?n dirigida: `tests/test_meta_signal_diagnostics.py tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py` ? **10 passed, 2 warnings, 0,42 s**. `node --check frontend/intelligence.js`: correcto.

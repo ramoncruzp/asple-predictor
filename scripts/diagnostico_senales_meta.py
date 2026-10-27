@@ -102,6 +102,7 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
     present = defaultdict(int)
     version_counts = Counter()
     distinct_values = defaultdict(set)
+    direction_active = Counter()
     version_sample_counts = defaultdict(Counter)
     version_present = defaultdict(Counter)
     for symbol, raw_json in rows:
@@ -132,6 +133,13 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
             distinct_values[key].add(float(normalized))
             present[key] += 1
             version_present[(symbol, name)][version_label] += 1
+            if name == "direction":
+                try:
+                    p_down = float(signal.get("p_down", raw))
+                    if p_down >= .60:
+                        direction_active[symbol] += 1
+                except (TypeError, ValueError):
+                    pass
             if name == "volatility":
                 diagnostic = signal.get("diagnostic") or {}
                 reference = diagnostic.get("reference_sigma_24h")
@@ -180,6 +188,10 @@ def diagnose(db_path: Path, days: float = 1.0, profile: str | None = None):
             coverage = present[(symbol, name)]
             print(f"  {LABELS[name]}: cobertura {coverage}/{sample_symbols[symbol]} "
                   f"({(100*coverage/sample_symbols[symbol]):.1f} %)")
+            if name == "direction":
+                active = direction_active[symbol]
+                print(f"    cobertura activa P(baja) ≥ 0,60: {active}/{sample_symbols[symbol]} "
+                      f"({(100*active/sample_symbols[symbol]):.1f} %)")
             v1_total = version_sample_counts[symbol]["v1"]
             v2_total = version_sample_counts[symbol]["v2"]
             print(f"    cobertura por versión: v1 {version_present[(symbol, name)]['v1']}/{v1_total}; "

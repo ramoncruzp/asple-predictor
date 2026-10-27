@@ -90,6 +90,8 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['data']['unknown_valuation_reviews']['last_24h'] == 1
     assert payload['data']['unknown_valuation_reviews']['last_7d'] == 1
     assert payload['data']['unknown_valuation_reviews']['reasons'][0]['reason'] == 'libro obsoleto'
+    assert payload['signals']['direction']['direction_active_coverage'] == {
+        'count': 0, 'total': 0, 'coverage_pct': 0, 'threshold_p_down': 0.60}
     assert payload['data']['direction_predictions'][0]['count'] == 1
     assert payload['switches']['RAPIDO']['readiness']['status'] == 'gris'
     assert payload['switches']['RAPIDO']['enabled'] is False

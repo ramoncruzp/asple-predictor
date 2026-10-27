@@ -82,6 +82,22 @@ def test_diagnostic_counts_normalized_signal_without_raw_value_and_versions(tmp_
     assert "valores normalizados distintos: -0.5, 0" in output
 
 
+def test_direction_active_coverage_counts_only_down_probability_at_threshold(tmp_path, capsys):
+    database = tmp_path / "direction-active.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE meta_learning_samples "
+            "(symbol TEXT, source_kind TEXT, sample_at TEXT, profile TEXT, signals_json TEXT)")
+        for p_down, normalized in ((.59, 0.0), (.60, -0.0), (.8, -1.0)):
+            connection.execute("INSERT INTO meta_learning_samples VALUES (?, ?, ?, ?, ?)",
+                ("XRPUSDT", "live", "2026-10-26T00:00:00+00:00", "RAPIDO",
+                 json.dumps({"signals_version": 2, "signals_used": [{"name": "direction",
+                     "value": p_down, "p_down": p_down, "normalized": normalized}]})))
+    diagnose(database, days=36500)
+    output = capsys.readouterr().out
+    assert "cobertura 3/3" in output
+    assert "cobertura activa P(baja) ≥ 0,60: 2/3" in output
+
+
 def test_diagnostic_reads_touch_omissions_from_ledger_v1_and_v2(tmp_path, capsys):
     database = tmp_path / "diagnostic-ledger-schemas.sqlite"
     with sqlite3.connect(database) as connection:
