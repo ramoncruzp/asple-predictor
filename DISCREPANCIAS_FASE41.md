@@ -63,3 +63,7 @@
 - Sin discrepancias funcionales conocidas: la estimación propia usa la geometría viva, curvas del replay `rolling_7d_v3_equity` y las señales aplicables; el bloqueo de Testnet se conserva únicamente para alternativas de destino.
 - Si no hay velas/cache válida o falla el replay, el plan registra el error de esa pieza. Las rutas de revisión conservan el fallback a una alternativa equivalente cuando esté disponible; sin ambos resultados, la pieza se informa como no comparable.
 - El benchmark usa datos y proveedor ficticios, replay cacheado y latencia simulada; el resultado de tiempo no certifica el rendimiento en S1. No se usaron S1, Testnet, red, `.env` ni BD real.
+
+## Fase 41c-2a
+
+No se reprodujo la p?rdida de `capital_usage` en el serializador local de `ea6dc6d`: el campo ya estaba incluido. Se a?adi? una prueba de contrato del evento v2 para evitar regresiones. No se consult? S1 ni una base real, por lo que el origen del valor `None` observado all? queda sin confirmar.

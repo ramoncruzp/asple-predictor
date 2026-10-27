@@ -305,3 +305,4 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - La pieza actual se estima por su símbolo, estrategia, rango, niveles, capital y margen reales mediante `rolling_7d_v3_equity` y la caché del plan. No requiere ser abrible de nuevo en Testnet. Las alternativas de rotación, apertura o reajuste siguen pasando el filtro de Testnet.
 - El resumen propio se guarda bajo `current_pieces[grid_id]` y se adjunta a la bitácora de revisión. Se presenta en Metas e Inteligencia con probabilidades histórica y ajustada, rango, niveles, capital y avance mediano.
 - Pruebas focalizadas: 108 passed acumuladas en operador/resiliencia, interfaz y benchmark, con 6 warnings; benchmark caliente 2,384 s frente a 2,39 s documentados en 41c-0 (−0,26 %). Sin suite completa ni validación en S1.
+| 41c-2a | Preservar `capital_usage` en eventos de plan v2 | Contrato cubierto por prueba local; no se reprodujo la p?rdida reportada en S1 |

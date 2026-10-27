@@ -193,6 +193,19 @@ def test_plan_ledger_payload_keeps_timings():
     assert payload["timings_s"] == plan["timings_s"]
 
 
+def test_plan_ledger_payload_v2_preserves_capital_usage_c15():
+    from grid.meta_operator import MetaOperator
+    usage = {"initial_capital_usdt": 100.0, "used_usdt": 70.0,
+        "unused_usdt": 30.0, "reason": "quedan 30 USDT",
+        "best_higher_capital_alternative": {"symbols": ["XRPUSDT"],
+            "capital_used_usdt": 80.0, "probability_replay": .4,
+            "median_progress_pct": 60.0}}
+    payload = MetaOperator._plan_ledger_payload({"capital_usage": usage}, [],
+        {"symbol": "XRPUSDT"}, plan_kind="revision")
+    assert payload["ledger_schema_version"] == 2
+    assert payload["capital_usage"] == usage
+
+
 def test_individual_bot_replay_sells_once_and_never_rebuys():
     import numpy as np
     from grid.sim.data import CandleData

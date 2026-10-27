@@ -291,3 +291,7 @@ No se cambió el cumplimiento real ni los límites de operación. La Fase 41c-2 
 
 
 Corrida final conjunta de cierre (operador, benchmark, Metas e Inteligencia): **108 passed, 6 warnings, 0 failed; 33,58 s**, con `ASPLE_OFFLINE=1` y basetemp nuevo bajo TEMP.
+
+## Fase 41c-2a ? restauraci?n de capital_usage (2026-10-27)
+
+`_plan_ledger_payload` conserva `capital_usage` en el evento `META_PLAN_EVALUATED` v2. La prueba C15 fija expl?citamente los campos `initial_capital_usdt`, `used_usdt`, `unused_usdt`, `reason` y `best_higher_capital_alternative` en el payload serializado. La inspecci?n del ?rbol en `ea6dc6d` mostr? que la proyecci?n del payload ya copiaba ese bloque; la correcci?n de esta parte blinda el contrato con una regresi?n, sin alterar el c?lculo ni la decisi?n del operador. Prueba dirigida: `tests/test_meta_operator.py`, **72 passed, 4 warnings, 0 failed; 14,35 s**.
