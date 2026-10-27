@@ -382,3 +382,10 @@ Verificaci?n dirigida: operador, MetaCore, API/UI de Inteligencia ? **110 passed
 `api/routes/intelligence.py:221-258` expone `direction_active_coverage` para el subconjunto con P(baja) ? 0,60; `frontend/intelligence.js:58,85` lo muestra separado de cobertura total. `scripts/diagnostico_senales_meta.py:111-119,190-195` imprime el mismo subconjunto por s?mbolo. El aprendizaje sigue contando como presente una direcci?n bajo el umbral, con normalizaci?n neutral 0; no se cambi? el extractor ni ninguna probabilidad decisoria.
 
 Verificaci?n dirigida: `tests/test_meta_signal_diagnostics.py tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py` ? **10 passed, 2 warnings, 0,42 s**. `node --check frontend/intelligence.js`: correcto.
+
+
+## Fase 41-G1e ? diagn?stico de XRP ?sin estado?
+
+`grid/meta_operator.py:2448-2485` toma `readiness` de `db.get_readiness(symbol)` y entrega `None` si no hay fila; `complete` solo es verdadero cuando existe una fila con `state="lista"` y pron?stico reciente. `database/db_manager.py:1412-1425` confirma que `get_readiness` no crea registros. La inicializaci?n pendiente se hace desde las rutas de Coin Registry al consultar/registrar una moneda (`api/routes/coins.py:83-86`), no al incluirla como candidata del operador. Por ello, XRP ?sin estado? significa sin fila de onboarding/readiness, no que sus estad?sticas sean completas ni un error del modelo; la exclusi?n prudente es correcta. No se modific? el dato ni el comportamiento.
+
+Parte de inspecci?n sin cambios ejecutables; no requiri? pytest.

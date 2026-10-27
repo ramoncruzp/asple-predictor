@@ -334,3 +334,8 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 ## Fase 41-G1d ? cobertura de direcci?n
 
 - Inteligencia y el diagn?stico diferencian direcci?n disponible de direcci?n activa (P(baja) ? 0,60). Valores menores siguen entrando al aprendizaje como se?al neutral 0 y cuentan para su muestra efectiva; no se alter? el modelo ni la decisi?n real.
+
+
+## Fase 41-G1e ? readiness sin registro
+
+- La ausencia de fila en `coin_readiness` se interpreta como readiness no disponible. El an?lisis Meta no crea filas; solo la ruta de Coin Registry inicializa `pendiente`. Prudente no trata `None` como completa.

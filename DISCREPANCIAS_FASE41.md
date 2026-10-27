@@ -122,3 +122,8 @@ Los errores de excepci?n del proveedor quedan vinculados a la moneda del grid cu
 ## Fase 41-G1d ? discrepancias
 
 La cobertura activa se calcula sobre filas de muestra con se?al `direction` guardada y usa `p_down` (con fallback al valor crudo); su porcentaje usa el total de muestras Meta consultadas como denominador para distinguirla de la cobertura general del extractor. El aprendizaje mantiene la sem?ntica existente: P(baja) < 0,60 aporta 0 neutral y cuenta como observaci?n presente.
+
+
+## Fase 41-G1e ? XRP sin estado
+
+Se conserva el estado ausente: crear filas autom?ticamente durante an?lisis Meta ser?a una escritura ajena al alcance de lectura y podr?a alterar el flujo de Coin Registry. La explicaci?n es la falta de un registro de onboarding, y el perfil Prudente sigue exigiendo readiness lista.
