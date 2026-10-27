@@ -79,3 +79,12 @@ No se reprodujo la pérdida de `capital_usage` en el serializador local de `ea6d
 - C15 no requirió modificar el cálculo: el payload ya copiaba `capital_usage` en `ea6dc6d`; se agregó cobertura de contrato.
 - La paridad adapta el esquema solo para cuatro campos nuevos permitidos: `current_pieces`, `allocation_shadow`, `use_extended_allocation` y `allocation_tie_tolerance_pp`. Cada uno se afirma explícitamente; todo campo previo conserva comparación exacta y un campo inesperado hace fallar la prueba.
 - Benchmark y pruebas usan dobles locales. No se consultó S1 ni Testnet real.
+
+## Fase 41f — diferencias y límites
+
+- No se invoca el endpoint HTTP del Advisor ni un modelo persistido: el script replica la fórmula del rango centrado moderado y llama el selector compartido `grid.structure.select_levels` con σ realizada de las velas descargadas. Así la medición es reproducible y no necesita BD ni `.env`, pero no reproduce pronósticos guardados, widening, modo estructural ni filtros de disponibilidad del endpoint en cada fecha. La geometría queda identificada en la salida como procedencia; el resultado debe leerse como medición de esa estructura representativa.
+- Para `--source csv`, los archivos deben ser continuos y alineados a 5m/1m; se usan los filtros genéricos que trae el runner. Para Binance se consulta el filtro público de cada símbolo. La comparación mide solo el orden/precisión de velas y no simula profundidad ni ejecución intravela real.
+- El wrapper existente valida una lista de intervalos que omite `1m`; para esa resolución el script usa el mismo cliente público subyacente, sus reintentos y paginación `get_klines`. El adaptador se probó con un cliente falso, sin abrir conexión.
+- `run_simulation` originalmente limita su cálculo interno de σ a 5m/1h. El script entrega un vector de σ ausente para 1m, manteniendo su motor de órdenes y fills. ADJUST, stop-loss y el cierre temporal están desactivados en ambos intervalos; este vector no constituye una nueva regla ni modifica el código del simulador.
+- La métrica de “ciclos perdidos” expresa el aumento de ciclos observado a 1m frente a 5m, dividido por los ciclos 1m; vale cero cuando 1m no completa ciclos. Toques exactos se cuentan por orden vigente, y velas ambiguas por vela, no por nivel.
+- La corrida de rendimiento usó velas sintéticas repetitivas, por lo que su resultado (37,83 s para 3 símbolos/30 días) verifica la escala del trabajo, no el tiempo de red ni la representatividad de mercado. El análisis Binance queda pendiente de la ejecución manual en S1.
