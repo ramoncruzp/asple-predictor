@@ -717,3 +717,9 @@ venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --co
 ```
 
 No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el ahorro real de la BD quedan pendientes de esa medición manual.
+
+## Fase 41-C27a ? contrato com?n de evidencia
+
+- `grid/readiness.py:1-86` incorpora el contrato com?n del medidor, los cuatro estados, progreso `n/requerido`, fecha estimada con ritmo de los ?ltimos tres d?as e intervalo bootstrap determinista de 2.000 remuestreos. Es una funci?n descriptiva; no modifica interruptores ni decisiones.
+- `tests/test_intelligence_readiness.py:1-33`: **3 passed** (estados, contrato, estimaci?n e intervalo determinista). Ejecuci?n offline con carpeta temporal nueva.
+- Esta parte establece el n?cleo puro. El c?lculo de evidencia por interruptor, su publicaci?n en API/UI, alertas y verificador se integrar?n en las partes siguientes.

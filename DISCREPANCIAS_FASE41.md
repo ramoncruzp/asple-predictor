@@ -270,3 +270,8 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a10
 
 - La generación de variantes de bajo capital para grids y bots ya existía en el operador; no fue necesario cambiar el cálculo de alternativas ni el umbral del replay. Se agregaron pruebas integradas para cubrir esa ruta y se completó el detalle tipo/capital en el verificador. La bandera ampliada permanece apagada.
+
+## Fase 41-C27a
+
+- El prompt pide fecha estimada seg?n ritmo de los ?ltimos tres d?as, pero no define qu? hacer con ritmo cero o sin timestamps. Se eligi? `estimated_ready_at: null`; no se extrapola evidencia inexistente.
+- El estado `No conviene` se reserva para evidencia suficiente y un resultado adverso estad?sticamente distinguible de cero. El contrato com?n deja ese dictamen como entrada expl?cita para cada criterio espec?fico.

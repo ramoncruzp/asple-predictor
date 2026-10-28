@@ -376,3 +376,7 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 | 41-G1g6 | Cierre, comandos de consulta S1 y auditoría UTF-8 | Se documentan los cinco resultados y los límites: etiqueta histórica pendiente de dry-run; sombra síncrona hasta 30 s |
 | 41-C25i | Lanzamiento manual del aprendizaje Meta | Endpoint autenticado agenda una corrida de fondo; el estado y resumen de la última corrida son de solo lectura. Confirmación en Inteligencia. Sin cambio a decisiones del operador. |
+
+## Fase 41-C27 ? medidores informativos de evidencia
+
+Todos los interruptores de inteligencia conservan decisi?n manual. El medidor com?n informa `Recolectando datos`, `Evaluando`, `Listo para encender` o `No conviene`; nunca enciende un interruptor. C27a establece el contrato puro. Los criterios por se?al y perfil se detallan junto con su integraci?n.
