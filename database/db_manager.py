@@ -221,6 +221,22 @@ class DBManager:
             Column("event_type", String, nullable=False), Column("reason", String),
             Column("price", Float), Column("details", Text),
         )
+        self.grid_intel_recommendations = Table("grid_intel_recommendations", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("grid_id", Integer, ForeignKey("grids.id"), nullable=False),
+            Column("symbol", String(32), nullable=False), Column("strategy", String(16), nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("action", String(32), nullable=False), Column("candidate_json", Text, nullable=False),
+            Column("baseline_json", Text, nullable=False), Column("expected_gain_7d", Float),
+            Column("expected_gain_7d_baseline", Float), Column("drawdown", Float),
+            Column("signals_json", Text, nullable=False), Column("method_version", String(32), nullable=False),
+            Column("would_apply", Boolean, nullable=False, default=False))
+        self.grid_intel_labels = Table("grid_intel_labels", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("recommendation_id", Integer, ForeignKey("grid_intel_recommendations.id"), nullable=False),
+            Column("labeled_at", DateTime(timezone=True), nullable=False),
+            Column("status", String(24), nullable=False), Column("label_json", Text, nullable=False),
+            UniqueConstraint("recommendation_id", name="uq_grid_intel_label_recommendation"))
         self.app_flag_overrides = Table(
             "app_flag_overrides", self.metadata,
             Column("key", String, primary_key=True),
@@ -411,6 +427,9 @@ class DBManager:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monitor_runs_started_at ON monitor_runs(started_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_grid_ts ON grid_events(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_events_type_ts ON grid_events(event_type, ts)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_intel_recommendations_grid_time ON grid_intel_recommendations(grid_id, created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_intel_recommendations_time ON grid_intel_recommendations(created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_intel_labels_status_time ON grid_intel_labels(status, labeled_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_grid_ts ON grid_snapshots(grid_id, ts)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_grid_snapshots_run_id ON grid_snapshots(run_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_meta_signal_observations_decision ON meta_signal_observations(decision_id, alternative_id, horizon)"))
@@ -2179,6 +2198,9 @@ class DBManager:
         params = grid["params"] if isinstance(grid["params"], dict) else json.loads(grid["params"])
         if params.get("meta_piece_type") != "individual_bot_grid":
             return False
+        if params.get("origin_grid_id") is not None:
+            origin = self.get_grid(int(params["origin_grid_id"]))
+            return bool(origin and not self.is_meta_grid(int(params["origin_grid_id"])))
         with self.engine.connect() as conn:
             goal = conn.execute(select(self.meta_goals.c.id).where(
                 self.meta_goals.c.id == int(params.get("meta_id", -1)),
