@@ -551,15 +551,20 @@ class MetaCore:
                     now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
                     book_age_s = ((now_utc - read_at).total_seconds()
                                   if read_at is not None else None)
+                    used_depth_cache = book_age_s is not None and 0 <= book_age_s < DEPTH_CACHE_TTL_S
                     if book_age_s is None or not 0 <= book_age_s < DEPTH_CACHE_TTL_S:
                         getter = getattr(self.exchange, "get_order_book_depth", None)
-                        if callable(getter):
-                            book = getter(symbol, limit=5)
-                        else:
-                            ticker = self.exchange.get_book_ticker(symbol)
-                            book = {"bids": [(ticker.get("bid_price"), ticker.get("bid_qty"))],
-                                    "asks": [(ticker.get("ask_price"), ticker.get("ask_qty"))],
-                                    "read_at": now}
+                        try:
+                            if callable(getter):
+                                book = getter(symbol, limit=5)
+                            else:
+                                ticker = self.exchange.get_book_ticker(symbol)
+                                book = {"bids": [(ticker.get("bid_price"), ticker.get("bid_qty"))],
+                                        "asks": [(ticker.get("ask_price"), ticker.get("ask_qty"))],
+                                        "read_at": now}
+                        except Exception as exc:
+                            book = {"bids": [], "asks": [], "read_at": None,
+                                    "read_error": f"{type(exc).__name__}: {exc}"}
                         if not hasattr(self, "_depth_cache"):
                             self._depth_cache = {}
                         self._depth_cache[symbol] = (now, book)
@@ -574,6 +579,8 @@ class MetaCore:
                     read_at = read_at.replace(tzinfo=timezone.utc)
                 age_s = (now - read_at).total_seconds() if read_at is not None else None
                 reason = executable.get("reason")
+                if book.get("read_error"):
+                    reason = f"falló lectura de profundidad: {book['read_error']}"
                 if executable["status"] == "DESCONOCIDO" and reason:
                     if not book.get("bids"):
                         reason = f"libro sin compradores; {reason}"
@@ -583,6 +590,8 @@ class MetaCore:
                     "book_read_at": read_at.isoformat() if read_at is not None else None,
                     "age_s": age_s, "bid_levels": len(book.get("bids") or []),
                     "ask_levels": len(book.get("asks") or []),
+                    "depth_cache_used": used_depth_cache,
+                    "read_error": book.get("read_error"),
                     "best_bid": str(book.get("bids")[0][0]) if book.get("bids") else None,
                     "best_ask": str(book.get("asks")[0][0]) if book.get("asks") else None}
             status = "KNOWN"
@@ -735,12 +744,30 @@ class MetaCore:
                     if goal["status"] == "ACTIVE":
                         with self.db.engine.begin() as conn:
                             conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
-                        self._ledger(goal["id"], None, "META_PIECES_BLOCKED", {"reason": "valuation_unknown"})
+                        self._ledger(goal["id"], None, "META_PIECES_BLOCKED", {
+                            "reason": "valuation_unknown",
+                            "symbols": valuation.get("symbol_valuations", {}),
+                        }, reason="valuation_unknown")
                     results.append({"meta_id": goal["id"], "valuation": valuation, "new_pieces_allowed": False})
                     continue
                 if goal["status"] == "PIECES_BLOCKED":
+                    last_unknown_block = next((row for row in reversed(self.ledger(goal["id"]))
+                        if row.get("event_type") == "META_PIECES_BLOCKED"
+                        and (row.get("reason") == "valuation_unknown"
+                             or (row.get("details") or {}).get("reason") == "valuation_unknown")), None)
                     with self.db.engine.begin() as conn:
                         conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="ACTIVE"))
+                    if last_unknown_block:
+                        blocked_at = last_unknown_block.get("ts")
+                        if isinstance(blocked_at, str):
+                            blocked_at = datetime.fromisoformat(blocked_at)
+                        if blocked_at is not None and blocked_at.tzinfo is None:
+                            blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+                        duration = max(0.0, (self.clock() - blocked_at).total_seconds()) if blocked_at else None
+                        self._ledger(goal["id"], None, "META_PIECES_UNBLOCKED", {
+                            "reason": "valuation_known_again", "duration_s": duration,
+                            "duration_min": round(duration / 60, 2) if duration is not None else None,
+                        })
                 cfg = goal["config_snapshot"]
                 result_pct = _d(valuation["result_pct"])
                 with self.db.engine.begin() as conn:

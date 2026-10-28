@@ -468,3 +468,12 @@ La geometr?a inv?lida se guarda como etiqueta terminal `invalid_geometry`, con s
 Pruebas: `tests/test_meta_learning.py` y `tests/test_meta_operator.py`, comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g1-20261028-091000"`: **112 passed, 4 warnings, 0 failed; 21,97 s**. Una corrida anterior tuvo 1 fallo de fixture al asumir una muestra ?nica; el selector qued? limitado por `sample_key` y la corrida final pas?. La regresi?n fijada a a25818b conserva decisi?n y probabilidad. Sin S1, Testnet, red, `.env` ni BD real.
 
 El conteo de etiquetas hist?ricas cuyo s?mbolo tiene tick distinto de 0,0001 no se puede obtener sin consultar la BD real, expresamente excluida. No se afirma que haga falta re-etiquetar antes de un dry-run de S1.
+
+
+### Fase 41-G1g2 ? motivos de bloqueos transitorios
+
+`grid/meta.py:747` guarda en `META_PIECES_BLOCKED` el diagn?stico de cada s?mbolo, incluido error de lectura, estado, edad y si se reutiliz? la cach? (`grid/meta.py:593`). Una excepci?n al consultar profundidad queda convertida en un diagn?stico por moneda. Al recuperar KNOWN, si el ?ltimo bloqueo fue `valuation_unknown`, se registra `META_PIECES_UNBLOCKED` con duraci?n (`grid/meta.py:755`). El contador de p?rdida sigue reinici?ndose mientras la valoraci?n es DESCONOCIDO y no se permite abrir piezas.
+
+`scripts/verificar_s1_meta.py:72` resume en modo de solo lectura el conteo de eventos de bloqueo de las ?ltimas 24 h y agrupa sus motivos. La prueba tambi?n verifica que el diagn?stico no modifica la BD.
+
+Pruebas dirigidas: `tests/test_meta_core.py` y `tests/test_meta_s1_diagnostic.py`; comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py tests/test_meta_s1_diagnostic.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g2-20261028-100500"`: **37 passed, 0 failed; 8,51 s**. Cobertura: DESCONOCIDO bloquea y registra motivo, KNOWN restaura ACTIVE y registra duraci?n de 60 s; se conserva el reinicio del contador. Sin S1, Testnet, red, `.env` ni BD real.

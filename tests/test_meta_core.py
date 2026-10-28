@@ -278,6 +278,54 @@ def test_start_deducts_other_grid_idle_capital(tmp_path):
         core.start_goal(goal["id"])
 
 
+def test_valuation_unknown_block_records_diagnostics_then_unblocks_with_duration(tmp_path):
+    from sqlalchemy import select
+
+    clock_now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    exchange = FakeTestnet(bid=0)
+    db, core = _core(tmp_path, exchange=exchange)
+    core.clock = lambda: clock_now[0]
+    exchange.clock = lambda: clock_now[0]
+    goal = core.create_goal(100, 10)
+    now = clock_now[0].replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1, range_high=2,
+            n_levels=1, capital_total=100, reserve=0, status="ACTIVE", created_at=now,
+            environment="testnet", strategy="simple", params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0, price=1, capital=100,
+            state="HOLDING", held_qty=10, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now, realized_extra_usdt=0, loss_limit_breach_count=1)).inserted_primary_key[0]
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=now))
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
+            grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now))
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id,
+        event_type="BUY_FILLED", details={"cummulative_quote_qty": "100", "fee_usdt": "0"})
+
+    first = core.run_once()[0]
+    assert first["new_pieces_allowed"] is False
+    assert core.get_goal(goal["id"])["status"] == "PIECES_BLOCKED"
+    blocked = next(row for row in core.ledger(goal["id"]) if row["event_type"] == "META_PIECES_BLOCKED")
+    diagnostic = blocked["details"]["symbols"]["XRPUSDT"]
+    assert blocked["reason"] == "valuation_unknown"
+    assert diagnostic["status"] == "DESCONOCIDO"
+    assert "sin compradores" in diagnostic["reason"]
+    assert diagnostic["depth_cache_used"] is False
+    with db.engine.connect() as conn:
+        assert conn.execute(select(db.meta_runs.c.loss_limit_breach_count).where(
+            db.meta_runs.c.id == run_id)).scalar_one() == 0
+
+    clock_now[0] += timedelta(minutes=1)
+    exchange.bid = 10
+    core._depth_cache.clear()
+    core.run_once()
+    assert core.get_goal(goal["id"])["status"] == "ACTIVE"
+    unblocked = [row for row in core.ledger(goal["id"]) if row["event_type"] == "META_PIECES_UNBLOCKED"]
+    assert len(unblocked) == 1
+    assert 59 <= unblocked[0]["details"]["duration_s"] <= 61
+
+
 def test_meta_piece_links_allow_one_level_bot_grid_and_enforce_exclusive_ownership(tmp_path):
     db, core = _core(tmp_path)
     first = core.create_goal(100, 10)

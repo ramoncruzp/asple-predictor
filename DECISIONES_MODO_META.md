@@ -357,3 +357,6 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 
 | 41-G1g1 | Etiquetado de aprendizaje con filtros por s?mbolo y aislamiento de muestras inv?lidas | Implementado localmente; 112 pruebas dirigidas pasaron. La muestra inv?lida se conserva como `invalid_geometry`, no se entrena y no se reintenta. Sin medici?n en BD real |
+
+
+| 41-G1g2 | Diagn?stico de bloqueos transitorios por valoraci?n desconocida | Se conserva la regla de bloqueo; ledger incluye causa por moneda y duraci?n de recuperaci?n. El verificador consulta solo lectura las ?ltimas 24 h |

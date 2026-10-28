@@ -161,3 +161,8 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - La prueba solicitaba precio 0,0035, rango ?1 % y ocho niveles, pero esa geometr?a viola el m?nimo de separaci?n de celdas del motor (0,30 % por celda). Se us? ?2 % para reproducir el tick gen?rico repetido y mantener v?lida la geometr?a con tick 0,000001. No cambia producci?n.
 - No se cont? cu?ntas etiquetas existentes requieren rec?lculo: hacerlo exigir?a leer la BD real. Se documenta esa limitaci?n. En este checkout no existe un comando de re-etiquetado con `--dry-run`; no se propone ejecutar ni inventar uno. Antes de cualquier re-etiquetado en S1 habr? que a?adir primero un modo de previsualizaci?n que no escriba datos.
+
+
+## Fase 41-G1g2
+
+- La cach? solo registra `depth_cache_used` cuando la lectura est? dentro del TTL; una lectura nueva o una falla se marca como no reutilizada. Los eventos hist?ricos previos no contienen la causa por s?mbolo y no se reconstruyen.

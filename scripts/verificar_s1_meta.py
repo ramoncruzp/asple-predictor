@@ -72,6 +72,25 @@ def verify(db_path: Path, hours=2, journal=False):
         goals = _rows(conn, "meta_goals", ("id", "profile", "status", "capital_initial", "target_usdt", "environment"),
             "status IN ('ACTIVE','PIECES_BLOCKED','SURPLUS_WAIT')", (), "id")
         ledger = _ledger(conn, cutoff)
+        cutoff_24h = (now - timedelta(hours=24)).replace(tzinfo=None).isoformat(sep=" ")
+        blocks_24h = [row for row in _ledger(conn, cutoff_24h)
+            if row.get("event_type") == "META_PIECES_BLOCKED"]
+        block_reasons = Counter()
+        for row in blocks_24h:
+            details = _json(row.get("details"))
+            reason = row.get("reason") or details.get("reason") or "sin motivo"
+            diagnostics = [(symbol, item) for symbol, item in (details.get("symbols") or {}).items()
+                if item.get("status") == "DESCONOCIDO"]
+            if reason == "valuation_unknown" and diagnostics:
+                for symbol, diagnostic in diagnostics:
+                    block_reasons[f"{symbol}: {diagnostic.get('reason') or 'sin detalle'}"] += 1
+            else:
+                block_reasons[reason] += 1
+        print("\nBloqueos transitorios (24 h):")
+        print(f"  META_PIECES_BLOCKED: {len(blocks_24h)}")
+        for reason, count in sorted(block_reasons.items()):
+            print(f"  {reason}: {count}")
+        if not block_reasons: print("  sin motivos registrados")
         latest_plans = {}
         for row in ledger:
             if row.get("event_type") == "META_PLAN_EVALUATED":
