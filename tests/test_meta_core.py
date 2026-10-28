@@ -186,6 +186,46 @@ def test_valuation_uses_piece_cash_bid_and_estimated_sell_fee(tmp_path):
     assert value["pieces"][0]["grid_status"] == "ACTIVE"
 
 
+@pytest.mark.parametrize("book_age_s,expected_reads", [(59.9, 1), (10, 0)])
+def test_depth_cache_ttl_uses_book_read_age(tmp_path, book_age_s, expected_reads):
+    class CountingTestnet(FakeTestnet):
+        def __init__(self):
+            super().__init__(bid=10)
+            self.depth_reads = 0
+
+        def get_order_book_depth(self, symbol, limit=5):
+            self.depth_reads += 1
+            return {"bids": [(Decimal("10"), Decimal("100"))], "asks": [],
+                    "read_at": self.clock()}
+
+    exchange = CountingTestnet()
+    db, core = _core(tmp_path, exchange=exchange)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    core.clock = lambda: now
+    exchange.clock = lambda: now
+    goal = core.create_goal(100, 10)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1, range_high=2,
+            n_levels=1, capital_total=100, reserve=0, status="ACTIVE", created_at=now.replace(tzinfo=None),
+            environment="testnet", strategy="simple", params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0, price=1, capital=100,
+            state="HOLDING", held_qty=1, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now.replace(tzinfo=None)))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now.replace(tzinfo=None), realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
+            grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now.replace(tzinfo=None)))
+
+    cached_book = {"bids": [(Decimal("10"), Decimal("100"))], "asks": [],
+        "read_at": now - timedelta(seconds=book_age_s)}
+    # El timestamp de inserción es reciente en ambos casos; solo read_at
+    # determina si el libro aún es seguro para reutilizar.
+    core._depth_cache = {"XRPUSDT": (now, cached_book)}
+    value = core.valuation(goal["id"])
+
+    assert exchange.depth_reads == expected_reads
+    assert value["status"] == "KNOWN"
+
+
 def test_one_sided_book_returns_unknown_and_records_alert(tmp_path):
     alerts = []
     db, core = _core(tmp_path, exchange=FakeTestnet(bid=0), alert=lambda *args: alerts.append(args))

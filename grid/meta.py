@@ -12,6 +12,7 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 
 FEE = Decimal("0.001")
+DEPTH_CACHE_TTL_S = 20
 VALUATION_STATES = {"KNOWN": 0, "PARCIAL": 1, "DESCONOCIDO": 2}
 DEFAULT_PROFILES = {
     "PRUDENTE": {"capital_per_coin_pct": 40, "max_grids": 2, "max_bots": 4,
@@ -543,9 +544,14 @@ class MetaCore:
                 # Candado hoja: no invocar aquí rutas que pidan ops_lock o _lock.
                 with self._depth_read_lock:
                     cached = getattr(self, "_depth_cache", {}).get(symbol)
-                    if cached and (now - cached[0]).total_seconds() < 60:
-                        book = cached[1]
-                    else:
+                    book = cached[1] if cached else None
+                    read_at = book.get("read_at") if book else None
+                    if read_at is not None and read_at.tzinfo is None:
+                        read_at = read_at.replace(tzinfo=timezone.utc)
+                    now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+                    book_age_s = ((now_utc - read_at).total_seconds()
+                                  if read_at is not None else None)
+                    if book_age_s is None or not 0 <= book_age_s < DEPTH_CACHE_TTL_S:
                         getter = getattr(self.exchange, "get_order_book_depth", None)
                         if callable(getter):
                             book = getter(symbol, limit=5)

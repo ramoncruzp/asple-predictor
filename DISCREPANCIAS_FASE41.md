@@ -151,3 +151,7 @@ C17 confirmó una posibilidad de concurrencia entre el watchdog y la revisión, 
 La prueba local de 50 entrecruzamientos no reproduce el deadlock tras el cambio: la revisión no pide `core._lock` desde `ops_lock`; solo usa el candado hoja, que nunca pide candados superiores. El watchdog mantiene su ruta existente `core._lock → ops_lock` al cerrar, de modo que la convención para nuevas rutas debe evitar cualquier adquisición `ops_lock → core._lock`. Esto documenta una excepción real a la jerarquía recomendada `ops_lock → core._lock → _depth_read_lock`; no se modificó el comportamiento del cierre ni se cambió la decisión del operador.
 
 No se alteraron los motivos por moneda, el reintento único de 10 s, el cron (:00 / :20) ni los resultados normales. Se ejecutaron únicamente `tests/test_meta_core.py` y `tests/test_meta_operator.py` offline: 116 pasadas, 4 avisos, 0 fallos. Sin S1, Testnet, red, `.env` ni BD real.
+
+## Seguimiento C17c — vigencia por edad del libro
+
+La causa descrita por Ramón concuerda con el contrato local: `executable_value` rechaza un `read_at` de más de 60 s, mientras que el antiguo TTL de caché se medía desde el almacenamiento y permitía llegar al mismo borde. Se fija una ventana conservadora de 20 s medida desde `read_at`; no se cambia el umbral de 60 s de valoración. Las pruebas sintéticas pasan para 59,9 s (refresh) y 10 s (reuse). No se reproduce el incidente contra S1 ni se cambia ninguna decisión del operador.
