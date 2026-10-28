@@ -189,7 +189,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             unknown_reviews.append({"at": str(stamp), "meta_id": int(unknown_meta_id),
                 "symbol": diagnostic.get("symbol") or valuation.get("symbol"),
                 "reason": diagnostic.get("reason") or valuation.get("reason"),
-                "pieces": diagnostic.get("pieces", [])})
+                "pieces": diagnostic.get("pieces") or []})
     cutoff_24h = (now_utc - timedelta(hours=24)).isoformat(sep=" ")
     unknown_valuation_summary = {"last_24h": sum(row["at"] >= cutoff_24h for row in unknown_reviews),
         "last_7d": len(unknown_reviews), "reasons": unknown_reviews[:20]}
@@ -251,7 +251,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         extract_learning_features = None
     for row in sample_rows:
         raw_signals = _json(row[7])
-        for signal in raw_signals.get("signals_used", []) if isinstance(raw_signals, dict) else []:
+        for signal in (raw_signals.get("signals_used") or []) if isinstance(raw_signals, dict) else []:
             if signal.get("name") == "direction":
                 try:
                     direction_active_samples += int(float(signal.get("p_down", signal.get("value"))) >= .60)
@@ -346,7 +346,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             "few_samples": len(errors) < 30})
     touch_bins = {}
     for symbol, sample_at, signal_raw, stats_raw in touch_sample_rows:
-        stats = _json(stats_raw); signals = _json(signal_raw).get("signals_used", [])
+        stats = _json(stats_raw); signals = _json(signal_raw).get("signals_used") or []
         pred = next((float(item.get("normalized")) for item in signals if item.get("name") == "touch_buy_to_sell"
                      and item.get("normalized") is not None), None)
         if pred is None or stats.get("sell_rate") is None: continue
@@ -412,7 +412,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         if (label.get("status") != "labeled" or label.get("reached") is None or
                 v2.get("value") is None or actual_p is None or v2_p is None):
             continue
-        exits = [piece.get("exited") for piece in label.get("piece_range_exits", [])
+        exits = [piece.get("exited") for piece in (label.get("piece_range_exits") or [])
                  if piece.get("exited") is not None]
         break_v2_samples.append({"actual": float(actual_p), "v2": float(v2_p),
             "truth": int(bool(label["reached"])), "break": float(v2["value"]),
@@ -465,7 +465,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     decision_success = {name: {h: [0, 0] for h in ("72h", "20d", "45d")}
         for name in ("real", "scanner_advisor", "learned")}
     for event in all_decision_events:
-        choices = _json(event[0]).get("decision_choices", {})
+        choices = _json(event[0]).get("decision_choices") or {}
         for name in decision_success:
             choice = choices.get(name) or {}
             alt_id = choice.get("alternative_id")
@@ -496,7 +496,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     settings = getattr(request.app.state, "settings", None)
     try:
         meta_config = operator.core.config()
-        profile_configs = meta_config.get("profiles", {})
+        profile_configs = meta_config.get("profiles") or {}
     except Exception:
         profile_configs = {}
     shadow_switches = {profile: {"use_centered_signals": bool((profile_configs.get(profile) or {}).get(
@@ -551,7 +551,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "decisions": {"profiles": profile_learning, "total": int(ledger_total),
             "page": page, "page_size": page_size, "meta_filter": meta_id,
             "recent": [{"at": str(row["ts"]), "meta_id": int(row["meta_id"]),
-            "event_type": row["event_type"], "choices": _json(row["details"]).get("decision_choices", {}),
+            "event_type": row["event_type"], "choices": _json(row["details"]).get("decision_choices") or {},
             "details": _json(row["details"])} for row in ledger_events]},
         "allocation_shadow": [{"meta_id": int(row["meta_id"]), "at": str(row["ts"]),
             "details": _json(row["details"])} for row in allocation_shadow_rows],

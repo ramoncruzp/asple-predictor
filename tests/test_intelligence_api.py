@@ -95,7 +95,7 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
         conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
             ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_PLAN_EVALUATED",
             details=json.dumps({"ledger_schema_version": 3, "ledger_detail": "resumido",
-                "alternatives_total": 17, "alternatives": [{}]})))
+                "alternatives_total": 17, "alternatives": [{}], "decision_choices": None})))
         bot_event_id = conn.execute(db.meta_ledger.insert().values(meta_id=goal_id,
             ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_BOT_TOUCH_SHADOW",
             details=json.dumps({"symbol":"XRPUSDT", "status":"proposed", "buy_price":.99,
@@ -143,6 +143,8 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     page = client.get(f'/api/intelligence?meta_id={goal_id}&page_size=10',
         headers={'X-API-Token':'intelligence-secret'}).json()['decisions']
     assert page['total'] == 3 and len(page['recent']) == 3
+    plan_event = next(event for event in page['recent'] if event['event_type'] == 'META_PLAN_EVALUATED')
+    assert plan_event['choices'] == {}
     review_events = [event for event in page['recent'] if event['event_type'] == 'META_OPERATOR_REVIEW_DECISION']
     assert len(review_events) == 2
     legacy, v2 = sorted(review_events, key=lambda event: event['details'].get('ledger_schema_version', 1))

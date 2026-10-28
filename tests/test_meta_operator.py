@@ -98,6 +98,14 @@ def test_ledger_v2_compacts_advisor_and_review_plan_without_changing_choices():
     assert len(json.dumps(review, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) < 150 * 1024
 
 
+def test_plan_ledger_serializes_null_decision_choices_as_empty_object():
+    from grid.meta_operator import MetaOperator
+
+    payload = MetaOperator._plan_ledger_payload(
+        {"decision_choices": None, "alternatives": []}, [], {}, plan_kind="analysis")
+    assert payload["decision_choices"] == {}
+
+
 def test_touch_signal_omission_distinguishes_candle_loading_from_calculation(monkeypatch):
     import grid.meta_operator as module
     from grid.meta_operator import MetaOperator

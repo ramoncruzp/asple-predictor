@@ -2129,7 +2129,7 @@ class MetaOperator:
             "current_pieces": {key: cls._compact_current_piece(value) for key, value in
                 (plan.get("current_pieces") or {}).items()},
             "allocation_shadow": plan.get("allocation_shadow"),
-            "decision_choices": plan.get("decision_choices"),
+            "decision_choices": plan.get("decision_choices") or {},
             "advisor_comparisons": plan.get("advisor_comparisons"),
             "combinations_evaluated": plan.get("combinations_evaluated"),
             "shadow_decision": plan.get("shadow_decision"), "selected": compact_selected,
