@@ -44,6 +44,7 @@ from grid.volatility_provider import VolatilityProvider
 from alerts.dispatcher import AlertDispatcher
 from grid.meta import MetaCore
 from grid.meta_operator import MetaOperator
+from grid.intelligence_readiness import IntelligenceReadinessJob
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -168,6 +169,15 @@ async def lifespan(app: FastAPI):
     app.state.backup_loop = backup_loop
     app.state.widen_factor_loop = widen_factor_loop
     app.state.started_at = time.monotonic()
+    def evaluate_grid_readiness():
+        scope = {"type": "http", "method": "GET", "path": "/api/intelligence",
+            "query_string": b"", "headers": [], "app": app, "scheme": "http",
+            "server": ("localhost", 80), "client": ("127.0.0.1", 0)}
+        summary = intelligence._intelligence_summary(Request(scope), page=1, page_size=1)
+        return summary.get("readiness_switches") or {}
+    grid_intelligence_job = IntelligenceReadinessJob(evaluate_grid_readiness, alert_dispatcher)
+    app.state.grid_intelligence_job = grid_intelligence_job
+    grid_intelligence_job.start()
     prediction_loop.start()
     verification_loop.start()
     if vol_loop is not None:
@@ -198,6 +208,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception("No se pudo detener el servicio de preparación de monedas")
         if grid_monitor is not None:
             grid_monitor.stop()
+        grid_intelligence_job.stop()
         meta_core.stop()
         meta_operator.stop()
         grid_auto_open.stop()

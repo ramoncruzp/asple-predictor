@@ -153,6 +153,38 @@ def test_readiness_alert_sent_during_another_delivery_is_not_lost():
     assert [item["key"] for item in queued] == ["PRUDENTE:touch_bots:No conviene"]
 
 
+def test_hourly_readiness_job_queues_one_transition_without_screen_access():
+    from grid.intelligence_readiness import IntelligenceReadinessJob
+
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    calls = []
+    snapshot = {"RAPIDO": {"centered_signals": {"state": "Listo para encender",
+        "summary": "evidencia sintética", "n": 30, "n_required": 30}}}
+
+    class Scheduler:
+        running = False
+        def add_job(self, function, trigger, **kwargs):
+            self.job = (function, trigger, kwargs)
+        def start(self): self.running = True
+
+    scheduler = Scheduler()
+    job = IntelligenceReadinessJob(lambda: (calls.append(True) or snapshot), disp,
+        scheduler=scheduler, clock=lambda: datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc))
+    job.start()
+    function, trigger, args = scheduler.job
+    assert trigger == "cron" and args["minute"] == 37
+    assert function() ["cache"] == "miss"
+    disp.run_once()
+    assert function()["cache"] == "hit"
+    disp.run_once()
+    assert len(calls) == 1
+    assert len(sender.sent) == 1
+    assert "centered_signals" in sender.sent[0]
+
+
 def test_dust_cooldown_is_independent_for_different_assets():
     _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
     disp, sender = _dispatcher(db)

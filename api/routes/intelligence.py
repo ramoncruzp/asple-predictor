@@ -63,6 +63,10 @@ def _metrics_improved(summary):
 def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
                          meta_id: int | None = Query(None, ge=1)):
     _authorize(request)
+    return _intelligence_summary(request, page=page, page_size=page_size, meta_id=meta_id)
+
+
+def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=None):
     db = getattr(request.app.state, "db", None)
     if db is None:
         raise HTTPException(503, "Base de datos no disponible")
