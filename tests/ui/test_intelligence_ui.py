@@ -27,6 +27,7 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert '<summary>B6 \u00b7 Decisiones</summary>' in js
     assert 'replay_calibration' in js
     assert 'replay_calibration_source' in js and 'sin mezclar or' in js
+    assert "${d.piece_type || 'pieza'} · ${num(d.capital_usdt)} USDT" in js
     assert 'Ruptura v2 · comparación a 72 h' in js
     assert 'sin datos suficientes' in js
     assert 'salidas observadas del rango' in js

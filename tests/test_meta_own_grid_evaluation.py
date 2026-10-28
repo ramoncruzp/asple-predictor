@@ -315,6 +315,59 @@ def test_shadow_allocation_regenerates_geometry_for_each_available_amount(monkey
     assert discards["conteo_por_motivo"] == {}
 
 
+def test_shadow_allocation_evaluates_small_grids_and_bots_with_testnet_notional(monkeypatch):
+    import grid.meta_operator as module
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    generated = []
+    def generate(row, capital, _target, _cfg):
+        kind = "grid" if capital >= 22 else "individual_bot_grid"
+        piece = {"symbol": row["symbol"], "strategy": "simple", "piece_type": kind,
+            "capital_usdt": capital, "n_levels": 4 if kind == "grid" else 1,
+            "floor": 99.0, "ceiling": 101.0, "margin_pct": .3}
+        generated.append((kind, capital))
+        return [{"symbol": row["symbol"], "pieces": [piece],
+            "estimate": {"probability_replay": .2, "evidence_sufficient": True},
+            "replay_probability": .2, "window_results": [{"window_start": "w1",
+                "curve": {"curve_format_version": 3}}], "alternative_id": f"{kind}-{capital}"}], []
+    monkeypatch.setattr(operator, "_candidate_alternatives", generate)
+    monkeypatch.setattr(operator, "_testnet_openability", lambda piece, *_args, **_kwargs:
+        {"allowed": piece["capital_usdt"] >= (22.0 if piece["piece_type"] == "grid" else 10.0),
+         "reason": None if piece["capital_usdt"] >= (22.0 if piece["piece_type"] == "grid" else 10.0)
+                else "minimum notional"})
+    sources = [{"symbol": symbol, "pieces": [{"symbol": symbol, "piece_type": kind,
+        "strategy": "simple", "capital_usdt": 70, "n_levels": 4,
+        "floor": 90, "ceiling": 110}], "testnet_openability": {"allowed": True},
+        "replay_probability": .2, "alternative_id": f"source-{kind}"}
+        for symbol, kind in (("XRPUSDT", "grid"), ("JUPUSDT", "individual_bot_grid"))]
+    variants, discards = operator._allocation_curve_variants(sources,
+        [{"symbol": "XRPUSDT"}, {"symbol": "JUPUSDT"}], goal,
+        {**goal["config_snapshot"], "max_grids": 3, "max_bots": 3,
+            "capital_per_coin_pct": 100}, 30, {})
+    by_kind = {row["pieces"][0]["piece_type"]: row for row in variants}
+    assert {"grid", "individual_bot_grid"} <= set(by_kind), discards
+    grid_caps = [piece["pieces"][0]["capital_usdt"] for piece in by_kind["grid"]["capital_variants"]]
+    bot_caps = [piece["pieces"][0]["capital_usdt"] for piece in by_kind["individual_bot_grid"]["capital_variants"]]
+    assert 20.0 <= min(grid_caps) < 30 and 10.0 <= min(bot_caps) < 30
+    assert any(kind == "individual_bot_grid" and amount < 10 for kind, amount in generated)
+    assert any("minimum notional" in reason for reason in discards["conteo_por_motivo"])
+
+    def replay(alternatives, *_args, **_kwargs):
+        piece = alternatives[-1]["pieces"][0]
+        probability = .20 if piece["piece_type"] == "individual_bot_grid" else .12
+        return {"probability": probability, "median_progress_pct": 20,
+            "days_median": 4, "worst_drawdown_pct": 2}, []
+    monkeypatch.setattr(module, "combine_aligned_replays", replay)
+    from grid.meta_allocation import evaluate_extended_allocation
+    result = evaluate_extended_allocation({"alternatives": variants}, {},
+        free_cash=30, capital_initial=100, target_usdt=10, window_days=20,
+        limits={**goal["config_snapshot"], "max_grids": 3, "max_bots": 3,
+            "capital_per_coin_pct": 100})
+    assert result["decision"] == "agregar"
+    assert result["selected"]["piece_type"] == "individual_bot_grid"
+    assert result["selected"]["capital_usdt"] >= 10
+    assert result["selected"]["delta_probability_pp"] >= 2
+
+
 def test_shadow_allocation_records_minimum_cell_discard(monkeypatch):
     operator, _, goal, _, _ = plan_setup(owner="manual")
     source = {"symbol": "XRPUSDT", "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid"}],

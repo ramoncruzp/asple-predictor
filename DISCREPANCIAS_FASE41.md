@@ -266,3 +266,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a9
 
 - El intervalo se limita a `1h`, que es el contrato de los artefactos y las predicciones de model_b/c usados por la app. La evaluación requiere outcomes ya verificados; no completa outcomes faltantes con cotizaciones ni mezcla `model_a_down`.
+
+## Fase 41-C26a10
+
+- La generación de variantes de bajo capital para grids y bots ya existía en el operador; no fue necesario cambiar el cálculo de alternativas ni el umbral del replay. Se agregaron pruebas integradas para cubrir esa ruta y se completó el detalle tipo/capital en el verificador. La bandera ampliada permanece apagada.

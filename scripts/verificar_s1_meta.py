@@ -158,7 +158,10 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
                 print("    rotación:", json.dumps({k:d.get(k) for k in ("material", "streak", "improvement_pp", "destination", "reason") if k in d}, ensure_ascii=False))
             if event == "META_OPERATOR_ALLOCATION_SHADOW":
                 discards=d.get("discards") or {}
-                print("    asignación sombra:", json.dumps({"decision":d.get("decision"), "reason":d.get("reason"), "descartes":discards}, ensure_ascii=False))
+                print("    asignación sombra:", json.dumps({"decision":d.get("decision"),
+                    "symbol":d.get("symbol"), "piece_type":d.get("piece_type"),
+                    "capital_usdt":d.get("capital_usdt"), "reason":d.get("reason"),
+                    "descartes":discards}, ensure_ascii=False))
         print("\nTiempos de los últimos planes:")
         for mid, plan in list(latest_plans.items())[:8]:
             print(f"  meta={mid}: {json.dumps(plan.get('timings_s') or {}, ensure_ascii=False)}")
