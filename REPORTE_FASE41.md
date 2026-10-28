@@ -459,7 +459,7 @@ La causa raíz informada de C17 era la diferencia entre la edad de la entrada ca
 Pruebas: libro con `read_at` de 59,9 s se consulta de nuevo y devuelve KNOWN; libro de 10 s se reutiliza y devuelve KNOWN. Comando dirigido: `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-c17c-20261027-194200"`: **118 passed, 4 warnings, 0 failed; 18,87 s**.
 
 
-### Fase 41-G1g1 ? filtros reales y aislamiento de muestras
+### Fase 41-G1g1 — filtros reales y aislamiento de muestras
 
 `grid/meta_learning.py:628` acepta `filters_by_symbol` y lo propaga a `simulate_piece_curve`; `grid/meta_operator.py:2175` obtiene filtros mediante `_symbol_filters` y los entrega a reconstrucción, recálculo de bases y etiquetado diario (`grid/meta_operator.py:2309`). Si no están disponibles, se registra el fallback al filtro genérico y su símbolo.
 
@@ -469,19 +469,19 @@ Pruebas: `tests/test_meta_learning.py` y `tests/test_meta_operator.py`; comando 
 
 El conteo de etiquetas históricas cuyo símbolo tiene tick distinto de 0,0001 no se pudo obtener sin consultar la BD real, expresamente excluida. En este checkout no existe comando de re-etiquetado con `--dry-run`; no se propone uno.
 
-### Fase 41-G1g2 ? motivos de bloqueos transitorios
+### Fase 41-G1g2 — motivos de bloqueos transitorios
 
 `grid/meta.py:747` guarda en `META_PIECES_BLOCKED` el diagnóstico de cada símbolo, incluido error de lectura, estado, edad y si se reutilizó la caché (`grid/meta.py:593`). Una excepción al consultar profundidad queda convertida en diagnóstico por moneda. Al recuperar KNOWN, si el último bloqueo fue `valuation_unknown`, se registra `META_PIECES_UNBLOCKED` con duración (`grid/meta.py:755`). El contador de pérdida sigue reiniciándose mientras la valoración es DESCONOCIDO y no se permite abrir piezas.
 
 `scripts/verificar_s1_meta.py:72` resume en modo de solo lectura los bloqueos de las últimas 24 h y agrupa motivos. Pruebas: `tests/test_meta_core.py` y `tests/test_meta_s1_diagnostic.py`; comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py tests/test_meta_s1_diagnostic.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g2-20261028-100500"`: **37 passed, 0 failed; 8,51 s**. DESCONOCIDO bloquea y registra causa; KNOWN restaura ACTIVE y registra duración de 60 s. Sin S1, Testnet, red, `.env` ni BD real.
 
-### Fase 41-G1g3 ? formato de curvas y caché durable compacta
+### Fase 41-G1g3 — formato de curvas y caché durable compacta
 
 `grid/sim/meta_portfolio.py:7` sube `CURVE_FORMAT_VERSION` a 3. `pack_curve` codifica sin pérdida cada float32 como XOR de sus bits uint32 consecutivos antes de zlib; `unpack_curve` conserva lectura de formatos 1 y 2 y reconstruye v3 bit a bit (`grid/sim/meta_portfolio.py:10`, `:33`).
 
-Medición sintética: 180 días ? 96 marcas/día, 11 ventanas alineadas de 15 min. La entrada formato 2 ocupó 505.634 bytes: 504.310 curvas y 1.324 bytes de resto JSON (493,8 KiB). El formato 3 completo ocupó 636.326 bytes: 635.122 bytes de curvas y 1.204 bytes de resto. Delta XOR es reversible, pero para esta geometría no comprime mejor por sí solo. Se aplica retención: `_persistent_cache_set` conserva métricas y omite curvas al escribir caché replay durable (`grid/meta_operator.py:962`); entrada resultante 1.127 bytes (1,10 KiB), bajo 100 KB. Con 883 filas como referencia, la estimación ilustrativa es 0,95 MB si ese volumen representa las siete jornadas retenidas. Las curvas completas permanecen en memoria durante el análisis para `combine_aligned_replays` (`grid/meta_operator.py:182`, `:1643`) y `evaluate_extended_allocation` (`grid/meta_allocation.py:30`). Al recuperar una entrada durable sin curvas, se invalida y se vuelve a simular; no se pierden datos ni cambian métricas, a costa de repetir replay tras reinicio.
+Medición sintética: 180 días × 96 marcas/día, 11 ventanas alineadas de 15 min. La entrada formato 2 ocupó 505.634 bytes: 504.310 curvas y 1.324 bytes de resto JSON (493,8 KiB). El formato 3 completo ocupó 636.326 bytes: 635.122 bytes de curvas y 1.204 bytes de resto. Delta XOR es reversible, pero para esta geometría no comprime mejor por sí solo. Se aplica retención: `_persistent_cache_set` conserva métricas y omite curvas al escribir caché replay durable (`grid/meta_operator.py:962`); entrada resultante 1.127 bytes (1,10 KiB), bajo 100 KB. Con 883 filas como referencia, la estimación ilustrativa es 0,95 MB si ese volumen representa las siete jornadas retenidas. Las curvas completas permanecen en memoria durante el análisis para `combine_aligned_replays` (`grid/meta_operator.py:182`, `:1643`) y `evaluate_extended_allocation` (`grid/meta_allocation.py:30`). Al recuperar una entrada durable sin curvas, se invalida y se vuelve a simular; no se pierden datos ni cambian métricas, a costa de repetir replay tras reinicio.
 
-No se aplic? deduplicación porque no se garantizó igualdad exacta en ventanas realistas. `meta_learning_samples.parameters_json` guarda perfil y geometría reducida (`grid/meta_operator.py:1988`); `provenance_json` guarda conteos y resumen de `base_replay`, no curvas (`grid/meta_operator.py:2012`). Un ejemplo sintético de esos tres JSON sumó 1.261 bytes. No se pudo atribuir ni medir los 61 MB reportados en la BD de S1; no se compactaron muestras.
+No se aplicó deduplicación porque no se garantizó igualdad exacta en ventanas realistas. `meta_learning_samples.parameters_json` guarda perfil y geometría reducida (`grid/meta_operator.py:1988`); `provenance_json` guarda conteos y resumen de `base_replay`, no curvas (`grid/meta_operator.py:2012`). Un ejemplo sintético de esos tres JSON sumó 1.261 bytes. No se pudo atribuir ni medir los 61 MB reportados en la BD de S1; no se compactaron muestras.
 
 Pruebas: `tests/test_meta_portfolio_equity.py` y `tests/test_meta_operator.py`; comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_portfolio_equity.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g3-20261028-111500"`: **99 passed, 4 warnings, 0 failed; 21,64 s**. Igualdad bit a bit v2/v3, métricas, decisión de asignación en sombra y lectura v1 verificadas.
 

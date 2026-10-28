@@ -159,7 +159,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-G1g1
 
-- La prueba solicitaba precio 0,0035, rango ±1 % y ocho niveles, pero esa geometría viola el mínimo de separación de celdas del motor (0,30 % por celda). Se usó ?2 % para reproducir el tick genérico repetido y mantener válida la geometría con tick 0,000001. No cambia producción.
+- La prueba solicitaba precio 0,0035, rango ±1 % y ocho niveles, pero esa geometría viola el mínimo de separación de celdas del motor (0,30 % por celda). Se usó ±2 % para reproducir el tick genérico repetido y mantener válida la geometría con tick 0,000001. No cambia producción.
 - No se contó cuántas etiquetas existentes requieren recálculo: hacerlo exigiría leer la BD real. En este checkout no existe comando de re-etiquetado con `--dry-run`; no se propone ejecutar ni inventar uno.
 
 ## Fase 41-G1g2
@@ -168,7 +168,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-G1g3
 
-- El delta XOR v3 sin pérdida aument? el tamaño de la curva sintética completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en caché durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de métricas. Esto puede aumentar el tiempo tras reinicio.
+- El delta XOR v3 sin pérdida aumentó el tamaño de la curva sintética completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en caché durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de métricas. Esto puede aumentar el tiempo tras reinicio.
 - Se verificó por código que las muestras no guardan curvas en `parameters_json` ni en `provenance_json`; no fue posible explicar con medidas directas los 61 MB de la tabla real. La BD de S1 no se abrió.
 
 ## Fase 41-G1g4
