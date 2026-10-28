@@ -75,6 +75,22 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
 
     with _connect(db_path) as conn:
         tables = _tables(conn)
+        readiness_row = None
+        if "alert_state" in tables:
+            readiness_row = conn.execute("SELECT value, updated_at FROM alert_state WHERE key=?",
+                ("meta_intelligence_readiness_snapshot",)).fetchone()
+        print("\n¿Qué puedo encender? (última evaluación persistida):")
+        readiness_snapshot = _json(readiness_row[0]) if readiness_row else {}
+        if readiness_snapshot:
+            for switch_key, value in sorted(readiness_snapshot.items()):
+                state = value.get("state") if isinstance(value, dict) else value
+                n = value.get("n", 0) if isinstance(value, dict) else 0
+                required = value.get("n_required", 30) if isinstance(value, dict) else 30
+                estimate = value.get("estimated_ready_at") if isinstance(value, dict) else None
+                print(f"  {switch_key}: {state} · {n} / {required} · estimado: {estimate or 'sin ritmo suficiente'}")
+            print(f"  evaluado: {readiness_row[1]}")
+        else:
+            print("  sin evaluación guardada; abrir Inteligencia o Laboratorio para actualizarla")
         goals = _rows(conn, "meta_goals", ("id", "profile", "status", "capital_initial", "target_usdt", "environment"),
             "status IN ('ACTIVE','PIECES_BLOCKED','SURPLUS_WAIT')", (), "id")
         ledger = _ledger(conn, cutoff)

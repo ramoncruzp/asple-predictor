@@ -718,13 +718,20 @@ venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --co
 
 No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el ahorro real de la BD quedan pendientes de esa medición manual.
 
-## Fase 41-C27a \u2014 contrato com\u00fan de evidencia
+## Fase 41-C27a — contrato común de evidencia
 
-- `grid/readiness.py:1-126` define el contrato com\u00fan, los cuatro estados, progreso `n/requerido`, ETA seg\u00fan el ritmo de casos maduros de los \u00faltimos tres d\u00edas e intervalo bootstrap determinista de 2.000 remuestreos. No activa interruptores ni participa en la decisi\u00f3n del operador.
+- `grid/readiness.py:1-126` define el contrato común, los cuatro estados, progreso `n/requerido`, ETA según el ritmo de casos maduros de los últimos tres días e intervalo bootstrap determinista de 2.000 remuestreos. No activa interruptores ni participa en la decisión del operador.
 - `tests/test_intelligence_readiness.py:1-33`: 3 passed; estados, contrato, ETA e intervalo determinista.
 
-## Fase 41-C27b \u2014 evidencia por interruptor y presentaci\u00f3n
+## Fase 41-C27b — evidencia por interruptor y presentación
 
-- `api/routes/intelligence.py:540-655,711` publica seis medidores por perfil: pesos aprendidos, se\u00f1ales centradas, ruptura v2, bots de toque, asignaci\u00f3n ampliada y extensi\u00f3n de recomendaciones por grid. Se\u00f1ales centradas y ruptura comparan pares de etiquetas 72 h; sus intervalos de log-loss usan bootstrap fijo de 2.000 remuestreos. La ruptura verifica terciles por perfil.
-- `frontend/metas.js:575-690`, `frontend/lab.js:1-36`, `frontend/index.html:30`, `frontend/intelligence.js:42-54`, `frontend/metas.css:84` y `frontend/intelligence.css:6`: Laboratorio presenta los medidores junto a cada bandera y a\u00f1ade se\u00f1ales centradas y bots de toque; Inteligencia muestra la tarjeta global ordenada por estado. Encender fuera de \u00abListo para encender\u00bb requiere confirmar el aviso; no se cambia ning\u00fan valor autom\u00e1ticamente.
+- `api/routes/intelligence.py:540-655,711` publica seis medidores por perfil: pesos aprendidos, señales centradas, ruptura v2, bots de toque, asignación ampliada y extensión de recomendaciones por grid. Señales centradas y ruptura comparan pares de etiquetas 72 h; sus intervalos de log-loss usan bootstrap fijo de 2.000 remuestreos. La ruptura verifica terciles por perfil.
+- `frontend/metas.js:575-690`, `frontend/lab.js:1-36`, `frontend/index.html:30`, `frontend/intelligence.js:42-54`, `frontend/metas.css:84` y `frontend/intelligence.css:6`: Laboratorio presenta los medidores junto a cada bandera y añade señales centradas y bots de toque; Inteligencia muestra la tarjeta global ordenada por estado. Encender fuera de «Listo para encender» requiere confirmar el aviso; no se cambia ningún valor automáticamente.
 - Pruebas dirigidas: `tests/test_intelligence_api.py`, `tests/test_intelligence_readiness.py`, `tests/ui/test_laboratorio.py`, `tests/ui/test_intelligence_ui.py`, `tests/test_meta_learning_api.py`, `tests/test_alert_dispatcher.py`, `tests/test_meta_s1_diagnostic.py`: **51 passed, 13 warnings, 0 failed, 17,00 s**. `node --check` pas? para `frontend/metas.js`, `frontend/intelligence.js` y `frontend/lab.js`; `ASPLE_OFFLINE=1`, sin red ni BD real.
+
+## Fase 41-C27c — alertas y verificador
+
+- `alerts/dispatcher.py:172-230` conserva el estado anterior y una cola duradera en `alert_state`; encola una alerta al entrar en “Listo para encender” o “No conviene”, y la entrega con los límites normales del AlertDispatcher. `api/routes/intelligence.py:658-662` registra la evaluación al abrir la vista.
+- `scripts/verificar_s1_meta.py:78-95` muestra el último estado guardado por interruptor: perfil, estado, `n/requerido` y ETA. La BD se abre en modo solo lectura.
+- Pruebas de transición, deduplicación, salida del verificador y API: incluidas en la corrida C27 final (**51 passed, 13 warnings, 0 failed, 17,00 s**). No se usaron S1, Testnet, `.env`, red ni BD real.
+- No hubo cambios en valores de señales, probabilidades, activación automática ni decisiones reales.

@@ -8,6 +8,7 @@ untouched); this module only reads.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -95,6 +96,7 @@ class AlertDispatcher:
         self.monotonic = monotonic
         self._last_sent_monotonic: float | None = None
         self._startup_announced_this_process = False
+        self._intelligence_readiness_lock = threading.RLock()
         self.scheduler = scheduler or BackgroundScheduler(timezone="UTC")
 
     # -- lifecycle -------------------------------------------------------
@@ -161,10 +163,73 @@ class AlertDispatcher:
         self._process_startup(sender, cfg, now)
         self._process_events(sender, cfg, now, counters)
         counters["metas"] = self._process_meta_events(sender, cfg, now)
+        counters["intelligence_readiness"] = self._process_intelligence_readiness(sender, cfg, now)
         self._process_probe(sender, now)
         self._process_stale(sender, cfg, now)
         self._process_digest(sender, cfg, now)
         return {"status": "ok", **counters}
+
+    def note_intelligence_readiness(self, readiness_by_profile: dict) -> None:
+        """Queue one alert when a profile/switch enters either terminal verdict."""
+        terminal = {"Listo para encender", "No conviene"}
+        with self._intelligence_readiness_lock:
+            previous = self.db.get_alert_state("meta_intelligence_readiness_last") or {}
+            pending = self.db.get_alert_state("meta_intelligence_readiness_pending") or []
+            pending_keys = {item.get("key") for item in pending}
+            for profile, switches in (readiness_by_profile or {}).items():
+                for name, item in (switches or {}).items():
+                    state = str((item or {}).get("state") or "")
+                    key = f"{profile}:{name}"
+                    prior_state = previous.get(key)
+                    if isinstance(prior_state, dict):
+                        prior_state = prior_state.get("state")
+                    if state in terminal and prior_state != state:
+                        alert_key = f"{key}:{state}"
+                        if alert_key not in pending_keys:
+                            pending.append({"key": alert_key, "profile": profile, "name": name,
+                                "state": state, "summary": str((item or {}).get("summary") or state),
+                                "n": int((item or {}).get("n") or 0),
+                                "n_required": int((item or {}).get("n_required") or 30)})
+                            pending_keys.add(alert_key)
+                    previous[key] = {"state": state, "n": int((item or {}).get("n") or 0),
+                        "n_required": int((item or {}).get("n_required") or 30),
+                        "estimated_ready_at": (item or {}).get("estimated_ready_at"),
+                        "summary": str((item or {}).get("summary") or state),
+                        "evaluated_at": (item or {}).get("evaluated_at")}
+            self.db.set_alert_state("meta_intelligence_readiness_last", previous)
+            self.db.set_alert_state("meta_intelligence_readiness_pending", pending)
+            self.db.set_alert_state("meta_intelligence_readiness_snapshot", previous)
+
+    def _process_intelligence_readiness(self, sender, cfg, now) -> int:
+        with self._intelligence_readiness_lock:
+            pending = list(self.db.get_alert_state("meta_intelligence_readiness_pending") or [])
+        if not pending:
+            return 0
+        sent_count = 0
+        retained = []
+        titles = {"Listo para encender": "Evidencia lista para un interruptor Meta",
+                  "No conviene": "La evidencia no recomienda un interruptor Meta"}
+        for item in pending:
+            if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
+                retained.append(item)
+                continue
+            title = titles.get(item.get("state"), "Estado de evidencia Meta")
+            text = (f"{title}\n{item.get('name')} · perfil {item.get('profile')}\n"
+                    f"{item.get('summary')}\nMuestras maduras: {item.get('n')} de {item.get('n_required')}")
+            try:
+                success = self._send(sender, alert_key=f"meta_intelligence_readiness:{item.get('key')}",
+                    kind="operativa", text=text, now=now)
+            except Exception:
+                logger.exception("No se pudo enviar alerta de evidencia Meta: %s", item.get("key"))
+                retained.append(item)
+                continue
+            if success:
+                sent_count += 1
+            else:
+                retained.append(item)
+        with self._intelligence_readiness_lock:
+            self.db.set_alert_state("meta_intelligence_readiness_pending", retained)
+        return sent_count
 
     def _process_meta_events(self, sender, cfg, now) -> int:
         """Entrega los eventos de Meta usando el mismo límite y registro Telegram."""

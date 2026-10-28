@@ -107,6 +107,27 @@ def _queue_dust_events(db, assets):
         )
 
 
+@pytest.mark.parametrize("state", ["Listo para encender", "No conviene"])
+def test_intelligence_readiness_alerts_once_per_state_transition(state):
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    snapshot = {"RAPIDO": {"centered_signals": {"state": state, "summary": "resumen de prueba",
+        "n": 30, "n_required": 30}}}
+    disp.note_intelligence_readiness(snapshot)
+    disp.run_once()
+    assert len(sender.sent) == 1
+    assert "centered_signals" in sender.sent[0] and "RAPIDO" in sender.sent[0]
+    disp.note_intelligence_readiness(snapshot)
+    disp.run_once()
+    assert len(sender.sent) == 1
+    disp.note_intelligence_readiness({"RAPIDO": {"centered_signals": {"state": "Evaluando"}}})
+    disp.note_intelligence_readiness(snapshot)
+    disp.run_once()
+    assert len(sender.sent) == 2
+
+
 def test_dust_cooldown_is_independent_for_different_assets():
     _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
     disp, sender = _dispatcher(db)

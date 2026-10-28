@@ -25,7 +25,12 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
         CREATE TABLE meta_learning_samples(id INTEGER,symbol TEXT,sample_at TEXT,source_kind TEXT,signals_json TEXT,
             parameters_json TEXT,provenance_json TEXT);
         CREATE TABLE meta_learning_labels(id INTEGER,sample_id INTEGER,horizon TEXT,label_json TEXT,labeled_at TEXT);
+        CREATE TABLE alert_state(key TEXT,value TEXT,updated_at TEXT);
         ''')
+        conn.execute("INSERT INTO alert_state VALUES(?,?,?)", ("meta_intelligence_readiness_snapshot",
+            json.dumps({"RAPIDO:learned_weights":{"state":"Recolectando datos","n":12,
+                "n_required":30,"estimated_ready_at":"2026-11-02T00:00:00+00:00"}}),
+            "2026-10-28 12:00:00"))
         conn.execute("INSERT INTO meta_goals VALUES(1,'RAPIDO','ACTIVE',100,3,'TESTNET')")
         conn.execute("INSERT INTO grids VALUES(12,'XRPUSDT','smart','ACTIVE',70,.9,1.1,5)")
         conn.execute("INSERT INTO meta_piece_links VALUES(1,1,12,'grid',NULL)")
@@ -60,6 +65,8 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert module.verify(path,hours=10000)==0
     output=capsys.readouterr().out
     assert 'mode=ro' in output and 'Meta #1' in output and 'XRPUSDT smart ACTIVE' in output
+    assert '¿Qué puedo encender?' in output
+    assert 'RAPIDO:learned_weights: Recolectando datos · 12 / 30 · estimado: 2026-11-02T00:00:00+00:00' in output
     assert 'probability_replay' in output and 'allocation_shadow' in output
     assert 'Bloqueos transitorios (24 h):' in output
     assert 'XRPUSDT: libro sin compradores: 1' in output
