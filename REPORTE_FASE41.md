@@ -651,3 +651,11 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 
 - `scripts/verificar_s1_meta.py:116-117` imprime solo los tres motivos de descarte más frecuentes de `META_OPERATOR_ALLOCATION_SHADOW`, con sus conteos.
 - `tests/test_meta_s1_diagnostic.py:43-44,69-70` agrega cuatro causas sintéticas y verifica que se muestren las tres más frecuentes. Prueba: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a6-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_s1_diagnostic.py -q --basetemp $bt` — **1 passed**.
+
+## Fase 41-C26a7 — Deduplicación de detalles de modelo en señales
+
+- `database/db_manager.py:356-359` crea `meta_learning_signal_details`, indexada por SHA-256 del JSON canónico. `grid/meta_signal_storage.py:10-45` extrae y restaura sin redondeo `realized_volatility_24h`, `volatility_forecasts` y `direction_predictions`; mantiene en `signals_json` las señales y agrega referencias por símbolo.
+- `grid/meta_operator.py:2202-2244,2471` deduplica los detalles al guardar muestras nuevas y los expande en memoria antes del entrenamiento. Las filas antiguas no se cambian automáticamente.
+- `scripts/mantenimiento_bd_meta.py:360-402,461-469` agrega `--compactar-senales`: por defecto abre en solo lectura, informa bytes estimados y hash sin cambios; `--apply` exige `--backup-ok` o respaldo de hoy, y actualiza las filas existentes preservando el JSON lógico. Ejemplo de vista previa: `venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --compactar-senales`.
+- Medición sintética: dos muestras con el mismo detalle de ocho pronósticos y ocho predicciones ocuparon 3094 bytes inline; con referencias y un blob compartido, 1901 bytes estimados (ahorro 1193 bytes, 38,6 %). Prueba de ida y vuelta compara el objeto JSON y las features de entrenamiento exactamente.
+- Pruebas: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a7-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_signal_storage.py tests/test_meta_core.py tests/test_meta_learning.py -q --basetemp $bt` — **68 passed**. No se ejecutó `--apply` sobre ninguna BD real.

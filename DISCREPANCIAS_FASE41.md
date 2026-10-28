@@ -254,3 +254,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a6
 
 - El verificador muestra tres causas, aunque haya más, para mantener la salida de diagnóstico breve; el conteo agregado conserva todas en la base y el código solo lee la BD.
+
+## Fase 41-C26a7
+
+- Solo se extraen los campos de detalles de modelo que son pesados y repetidos; los valores de señal usados por la decisión quedan en cada fila. La compactación de filas previas requiere una ejecución explícita con respaldo confirmado. La medición de ahorro usa dos muestras sintéticas idénticas en los detalles; el ahorro real depende de cuántos bloques se repitan.

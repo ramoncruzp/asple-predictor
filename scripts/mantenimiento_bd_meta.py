@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from grid.meta_operator import MetaOperator
 from grid.meta_learning import REPLAY_METHOD_VERSION, stable_template
+from grid.meta_signal_storage import compact_signal_payload
 
 ADVISOR_VERSION = MetaOperator.ADVISOR_CACHE_METHOD_VERSION
 TOUCH_VERSION = MetaOperator.TOUCH_CACHE_METHOD_VERSION
@@ -356,6 +357,48 @@ def _backup_exists(today=None, home=None):
         for path in root.iterdir())
 
 
+def compact_signals(path: Path, *, apply=False, backup_ok=False):
+    """Vista previa o deduplicación explícita de los detalles de modelo en señales."""
+    if not path.is_file():
+        raise FileNotFoundError(f"No existe la BD indicada: {path}")
+    if apply and not backup_ok and not _backup_exists():
+        raise RuntimeError("falta respaldo de hoy en ~/respaldos/; usa --backup-ok tras verificarlo")
+    before_hash = _db_hash(path) if not apply else None
+    total_before = total_after_inline = rows_with_details = 0
+    blobs = {}
+    with _connect(path, read_only=not apply) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "meta_learning_samples" not in tables:
+            raise RuntimeError("la BD no contiene meta_learning_samples")
+        if apply:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta_learning_signal_details ("
+                "content_hash TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)")
+        rows = conn.execute("SELECT id, signals_json, created_at FROM meta_learning_samples ORDER BY id").fetchall()
+        for row in rows:
+            raw = row["signals_json"] or "{}"
+            compact, details = compact_signal_payload(json.loads(raw))
+            if not details:
+                continue
+            rows_with_details += 1
+            total_before += len(raw.encode("utf-8"))
+            compact_raw = json.dumps(compact, sort_keys=True, separators=(",", ":"), default=str)
+            total_after_inline += len(compact_raw.encode("utf-8"))
+            blobs.update(details)
+            if apply:
+                for content_hash, payload in details.items():
+                    conn.execute("INSERT OR IGNORE INTO meta_learning_signal_details "
+                        "(content_hash,payload_json,created_at) VALUES(?,?,?)",
+                        (content_hash, payload, row["created_at"]))
+                conn.execute("UPDATE meta_learning_samples SET signals_json=? WHERE id=?",
+                    (compact_raw, row["id"]))
+    detail_bytes = sum(len(value.encode("utf-8")) for value in blobs.values())
+    after = total_after_inline + detail_bytes
+    return {"mode": "apply" if apply else "dry-run", "rows_with_model_details": rows_with_details,
+        "unique_detail_blobs": len(blobs), "bytes_before": total_before,
+        "bytes_after_estimated": after, "bytes_saved_estimated": max(0, total_before-after),
+        "sha256_unchanged": before_hash == _db_hash(path) if not apply else None}
+
+
 def vacuum(path: Path, *, backup_ok=False, service_override=False, runner=subprocess.run):
     if not backup_ok and not _backup_exists():
         raise RuntimeError("falta respaldo de hoy en ~/respaldos/; usa --backup-ok tras verificarlo")
@@ -415,10 +458,18 @@ def main(argv=None):
     parser.add_argument("--apply", action="store_true", help="compacta y aplica retención")
     parser.add_argument("--vacuum", action="store_true", help="VACUUM después de --apply")
     parser.add_argument("--backup-ok", action="store_true", help="confirma que Ramón verificó el respaldo de hoy")
+    parser.add_argument("--compactar-senales", action="store_true",
+        help="mide por defecto; con --apply deduplica detalles de modelos en meta_learning_samples")
     parser.add_argument("--i-know-service-is-stopped", action="store_true",
         help="omitir systemctl solo en pruebas controladas")
     args = parser.parse_args(argv)
     try:
+        if args.compactar_senales:
+            if args.vacuum:
+                raise ValueError("--vacuum no se combina con --compactar-senales")
+            result = compact_signals(args.db, apply=args.apply, backup_ok=args.backup_ok)
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
         result = run(args.db, apply=args.apply, vacuum_after=args.vacuum,
             backup_ok=args.backup_ok, service_override=args.i_know_service_is_stopped)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

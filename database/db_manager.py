@@ -353,6 +353,10 @@ class DBManager:
             Column("training_exclusion_reason", Text), Column("parameters_json", Text, nullable=False),
             Column("signals_json", Text, nullable=False), Column("provenance_json", Text, nullable=False),
             Column("created_at", DateTime(timezone=True), nullable=False))
+        self.meta_learning_signal_details = Table("meta_learning_signal_details", self.metadata,
+            Column("content_hash", String(64), primary_key=True),
+            Column("payload_json", Text, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False))
         self.meta_learning_labels = Table("meta_learning_labels", self.metadata,
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("sample_id", Integer, ForeignKey("meta_learning_samples.id"), nullable=False),

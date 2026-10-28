@@ -2201,14 +2201,48 @@ class MetaOperator:
 
     def _store_learning_sample(self, values):
         from sqlalchemy import select
+        from grid.meta_signal_storage import compact_signal_payload
         table = self.db.meta_learning_samples
+        values = dict(values)
+        signals, details = compact_signal_payload(json.loads(values.get("signals_json") or "{}"))
+        values["signals_json"] = json.dumps(signals, sort_keys=True, separators=(",", ":"), default=str)
         with self.db.engine.begin() as conn:
             exists = conn.execute(select(table.c.id).where(
                 table.c.sample_key == values["sample_key"])).first()
             if exists:
                 return False
+            detail_table = getattr(self.db, "meta_learning_signal_details", None)
+            if detail_table is not None:
+                for content_hash, payload_json in details.items():
+                    present = conn.execute(select(detail_table.c.content_hash).where(
+                        detail_table.c.content_hash == content_hash)).first()
+                    if present is None:
+                        conn.execute(detail_table.insert().values(content_hash=content_hash,
+                            payload_json=payload_json, created_at=values["created_at"]))
             conn.execute(table.insert().values(**values))
         return True
+
+    def _expand_learning_signal_rows(self, samples):
+        """Resuelve referencias de detalle solo en memoria para lectores de aprendizaje."""
+        from sqlalchemy import select
+        from grid.meta_signal_storage import expand_signal_payload
+        rows = [dict(sample) for sample in samples]
+        refs = set()
+        for sample in rows:
+            payload = json.loads(sample.get("signals_json") or "{}")
+            refs.update((payload.get("model_details_refs") or {}).values())
+        detail_payloads = {}
+        detail_table = getattr(self.db, "meta_learning_signal_details", None)
+        if refs and detail_table is not None:
+            with self.db.engine.connect() as conn:
+                detail_payloads = {str(row[0]): str(row[1]) for row in conn.execute(select(
+                    detail_table.c.content_hash, detail_table.c.payload_json).where(
+                        detail_table.c.content_hash.in_(refs))).all()}
+        for sample in rows:
+            sample["signals_json"] = json.dumps(expand_signal_payload(
+                json.loads(sample.get("signals_json") or "{}"), detail_payloads),
+                sort_keys=True, separators=(",", ":"), default=str)
+        return rows
 
     def _persist_learning_samples(self, goal, decision_id, alternatives):
         """Congela señales y geometría puntuales, sin copiar filas de replay futuras."""
@@ -2434,6 +2468,7 @@ class MetaOperator:
         from sqlalchemy import select
         from grid.meta_learning import (effective_sample_rows, extract_learning_features,
             fit_signal_weights, temporal_learning_split, LEARNING_SIGNALS, REPLAY_METHOD_VERSION)
+        samples = self._expand_learning_signal_rows(samples)
         with self.db.engine.connect() as conn:
             label_rows = conn.execute(select(self.db.meta_learning_labels)).mappings().all()
             setting_rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
