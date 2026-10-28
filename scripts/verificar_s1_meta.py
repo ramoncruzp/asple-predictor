@@ -157,6 +157,14 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
         print("\nTiempos de los últimos planes:")
         for mid, plan in list(latest_plans.items())[:8]:
             print(f"  meta={mid}: {json.dumps(plan.get('timings_s') or {}, ensure_ascii=False)}")
+        process_cache_stats = next(((plan.get("timings_s") or {}).get("process_caches")
+            for plan in latest_plans.values() if (plan.get("timings_s") or {}).get("process_caches")), None)
+        print("\nCachés de proceso Meta (último análisis disponible):")
+        if process_cache_stats:
+            for name, value in process_cache_stats.items():
+                print(f"  {name}: filas={value.get('rows', 0)}; KB estimados={value.get('kb_estimated', 0)}")
+        else:
+            print("  sin métricas de caché guardadas")
 
         print("\nTamaños:")
         print(f"  archivo: {db_path.stat().st_size} bytes")

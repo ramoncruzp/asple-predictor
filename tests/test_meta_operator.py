@@ -212,6 +212,53 @@ def test_break_v2_is_shadowed_by_default_and_only_replaces_break_signal_when_ena
         assert before == after
     assert enabled["probability_adjusted_break_v2"] == enabled["estimate"]["probability"]
     assert enabled["probability_adjusted_break_current"] == disabled["estimate"]["probability"]
+    day = int(operator.clock() // 86400)
+    operator._cache[("replay-v", "XRPUSDT", day - 1, "simple")] = {
+        "estimate": {"probability": .99}}
+    operator._prune_process_caches()
+    after_prune = evaluate(False)
+    assert after_prune["signals_used"] == disabled["signals_used"]
+    assert after_prune["estimate"]["probability"] == disabled["estimate"]["probability"]
+
+
+def test_process_cache_day_pruning_lru_cap_and_mid_plan_safety():
+    import json
+    from collections import OrderedDict
+    from grid.meta_operator import MetaOperator
+
+    now = [1_800_000_000]
+    operator = MetaOperator(object(), object(), None, None, None, clock=lambda: now[0])
+    day = now[0] // 86400
+    operator._cache[("replay-v", "XRPUSDT", day - 1, "simple")] = {"value": 1}
+    operator._cache[("touch_signal", json.dumps({"day": day - 1}))] = {"value": 2}
+    operator._cache[("replay-v", "XRPUSDT", day, "simple")] = {"value": 3}
+    operator._advisor_cache[(day - 1, "XRPUSDT")] = {"value": 4}
+    operator._advisor_cache[(day, "XRPUSDT")] = {"value": 5}
+    operator._candles_cache[("XRPUSDT", day - 1)] = {"value": 6}
+    operator._candles_cache[("XRPUSDT", day)] = {"value": 7}
+    operator._touch_result_cache[("XRPUSDT", day - 1, 1, 2)] = {"value": 8}
+    operator._touch_result_cache[("XRPUSDT", day, 1, 2)] = {"value": 9}
+    operator._candles_failure_cache["XRPUSDT"] = (now[0] - 1, "fallo expirado")
+    operator._prune_process_caches(now=now[0])
+    assert list(operator._cache.values()) == [{"value": 3}]
+    assert list(operator._advisor_cache.values()) == [{"value": 5}]
+    assert list(operator._candles_cache.values()) == [{"value": 7}]
+    assert list(operator._touch_result_cache.values()) == [{"value": 9}]
+    assert not operator._candles_failure_cache
+    stats = operator._process_cache_stats()
+    assert stats["analysis"]["rows"] == 1 and stats["analysis"]["kb_estimated"] > 0
+
+    operator.PROCESS_CACHE_MAX_ENTRIES = 2
+    cache = operator._advisor_cache
+    cache.clear()
+    cache[(day, "first")] = 1
+    cache[(day, "second")] = 2
+    operator._process_cache_get(cache, (day, "first"))
+    operator._begin_process_cache_plan()
+    cache[(day, "third")] = 3
+    assert len(cache) == 3  # no poda dentro de un plan en curso
+    operator._end_process_cache_plan()
+    assert list(cache) == [(day, "first"), (day, "third")]
 
 
 def test_noop_payload_compacts_review_result_and_links_plan():

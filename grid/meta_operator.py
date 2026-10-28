@@ -10,9 +10,11 @@ import copy
 from contextvars import ContextVar
 import os
 import statistics
+import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import timedelta, datetime, timezone
 from decimal import Decimal
 
@@ -358,6 +360,7 @@ class MetaOperator:
     ADVISOR_REANCHOR_DRIFT_PCT = 3.0
     ADVISOR_CACHE_METHOD_VERSION = "advisor_relative_v1"
     TOUCH_CACHE_METHOD_VERSION = "touch_signal_v2"
+    PROCESS_CACHE_MAX_ENTRIES = 500
 
     def __init__(self, core, db, scanner, engine, settings, *, advisor=None, alert=None,
                  clock=time.time, price_drift_pct=1.0, cache_enabled=True, cache_writes=True):
@@ -371,11 +374,13 @@ class MetaOperator:
         self._lock = threading.RLock()
         self._jobs = {}
         self._plans = {}
-        self._cache = {}
-        self._advisor_cache = {}
-        self._candles_cache = {}
-        self._candles_failure_cache = {}
-        self._touch_result_cache = {}
+        self._cache = OrderedDict()
+        self._advisor_cache = OrderedDict()
+        self._candles_cache = OrderedDict()
+        self._candles_failure_cache = OrderedDict()
+        self._touch_result_cache = OrderedDict()
+        self._process_cache_lock = threading.RLock()
+        self._active_plan_count = 0
         self._above_ceiling_count = {}
         self._outside_range_count = {}
         self._hard_filter_misses = {}
@@ -391,6 +396,89 @@ class MetaOperator:
 
     def _ledger(self, meta_id, event, details, **kwargs):
         self.core._ledger(meta_id, None, event, details, **kwargs)
+
+    @staticmethod
+    def _process_cache_get(cache, key):
+        value = cache.get(key)
+        if value is not None and hasattr(cache, "move_to_end"):
+            cache.move_to_end(key)
+        return value
+
+    @staticmethod
+    def _process_cache_day(kind, key):
+        try:
+            if kind == "advisor": return int(key[0])
+            if kind in {"candles", "touch_result"}: return int(key[1])
+            if kind == "analysis":
+                if isinstance(key, tuple) and key and key[0] == "touch_signal":
+                    return int(json.loads(key[1]).get("day"))
+                return int(key[2])
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return None
+
+    def _prune_process_caches(self, *, now=None, enforce_limit=True):
+        """Poda en frontera de planes; no se llama mientras otro plan esté activo."""
+        day = int((self.clock() if now is None else now) // 86400)
+        caches = {"analysis": self._cache, "advisor": self._advisor_cache,
+            "candles": self._candles_cache, "candles_failure": self._candles_failure_cache,
+            "touch_result": self._touch_result_cache}
+        expired = self.clock() if now is None else now
+        for kind, cache in caches.items():
+            for key in list(cache):
+                old_day = self._process_cache_day(kind, key)
+                stale = old_day is not None and old_day < day
+                if kind == "candles_failure":
+                    value = cache.get(key)
+                    stale = stale or (value is not None and float(value[0]) <= float(expired))
+                if stale:
+                    cache.pop(key, None)
+            if enforce_limit:
+                while len(cache) > self.PROCESS_CACHE_MAX_ENTRIES:
+                    cache.popitem(last=False)
+        return self._process_cache_stats()
+
+    @classmethod
+    def _estimated_size(cls, value, seen=None):
+        seen = seen if seen is not None else set()
+        ident = id(value)
+        if ident in seen: return 0
+        seen.add(ident)
+        size = sys.getsizeof(value)
+        if isinstance(value, np.ndarray): return size + int(value.nbytes)
+        if isinstance(value, dict):
+            return size + sum(cls._estimated_size(k, seen) + cls._estimated_size(v, seen)
+                for k, v in value.items())
+        if isinstance(value, (list, tuple, set, frozenset, OrderedDict)):
+            return size + sum(cls._estimated_size(item, seen) for item in value)
+        if hasattr(value, "__dict__"):
+            return size + cls._estimated_size(vars(value), seen)
+        return size
+
+    def _process_cache_stats(self):
+        named = {"analysis": self._cache, "advisor": self._advisor_cache,
+            "candles": self._candles_cache, "candles_failure": self._candles_failure_cache,
+            "touch_result": self._touch_result_cache}
+        result = {}
+        for name, cache in named.items():
+            count = len(cache)
+            sample = list(cache.items())[:25]
+            sampled_bytes = sum(self._estimated_size(item) for item in sample)
+            estimated = sampled_bytes / len(sample) * count if sample else 0
+            result[name] = {"rows": count, "kb_estimated": round(estimated / 1024, 2)}
+        return result
+
+    def _begin_process_cache_plan(self):
+        with self._process_cache_lock:
+            if self._active_plan_count == 0:
+                self._prune_process_caches(enforce_limit=True)
+            self._active_plan_count += 1
+
+    def _end_process_cache_plan(self):
+        with self._process_cache_lock:
+            self._active_plan_count = max(0, self._active_plan_count - 1)
+            if self._active_plan_count == 0:
+                self._prune_process_caches(enforce_limit=True)
 
     def maintain_database(self):
         """Retira cachés caducadas sin competir con revisión, precálculo o aprendizaje."""
@@ -1198,7 +1286,7 @@ class MetaOperator:
                 check_allocation_deadline()
                 key = (self.clock() // 86400, symbol, round(advisor_capital, 4), round(float(margin), 4),
                        int(cfg.get("max_days", 20)))
-                in_process = self._advisor_cache.get(key)
+                in_process = self._process_cache_get(self._advisor_cache, key)
                 reanchored = self._reanchor_advisor_cache(in_process, price) if in_process is not None else None
                 if reanchored is not None:
                     self._analysis_timing["advisor_cache_hits"] += 1
@@ -1442,6 +1530,7 @@ class MetaOperator:
         return selected, diagnostics
 
     def _build_plan(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
+        self._begin_process_cache_plan()
         token = _PLAN_READ_CONTEXT.set({"owner": self, "reads": {}, "times": {},
             "read_calls": 0, "read_hits": 0})
         try:
@@ -1449,6 +1538,7 @@ class MetaOperator:
                 allocation_free_cash=allocation_free_cash)
         finally:
             _PLAN_READ_CONTEXT.reset(token)
+            self._end_process_cache_plan()
 
     def _build_plan_impl(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
         from grid.meta_learning import LEARNING_SIGNALS
@@ -1594,7 +1684,7 @@ class MetaOperator:
                         capital * profile_cap / 100))
                     advisor_key = (self.clock() // 86400, symbol, round(advisor_capital, 4),
                         round(piece_margin, 4), int(cfg.get("max_days", 20)))
-                    cached_advisor = self._advisor_cache.get(advisor_key)
+                    cached_advisor = self._process_cache_get(self._advisor_cache, advisor_key)
                     advisor_result = (self._reanchor_advisor_cache(cached_advisor, live_price)
                         if cached_advisor is not None else None)
                     if advisor_result is None:
@@ -1858,7 +1948,8 @@ class MetaOperator:
                     "portfolio_detail": {name: round(seconds, 6) for name, seconds in
                         _PLAN_READ_CONTEXT.get()["times"].items()},
                     "plan_read_calls": _PLAN_READ_CONTEXT.get()["read_calls"],
-                    "plan_read_cache_hits": _PLAN_READ_CONTEXT.get()["read_hits"]},
+                    "plan_read_cache_hits": _PLAN_READ_CONTEXT.get()["read_hits"],
+                    "process_caches": self._process_cache_stats()},
                 "warnings": (["El replay no modela los préstamos de grids Smart; la estimación no incluye capital prestado."]
                     if any(piece["strategy"] == "smart" for piece in pieces) else []),
                 "target_usdt": float(goal["target_usdt"]), "loss_max_usdt": capital * float(cfg.get("max_loss_pct", 0)) / 100,
@@ -2706,11 +2797,11 @@ class MetaOperator:
     def _load_candles(self, symbol):
         """Carga velas públicas una vez por símbolo y día UTC."""
         candle_key = (symbol, self.clock() // 86400)
-        candles = self._candles_cache.get(candle_key)
+        candles = self._process_cache_get(self._candles_cache, candle_key)
         if candles is not None:
             return candles
         now = float(self.clock())
-        failure = self._candles_failure_cache.get(symbol)
+        failure = self._process_cache_get(self._candles_failure_cache, symbol)
         if failure and now < failure[0]:
             raise RuntimeError(failure[1])
         if failure:
@@ -2761,7 +2852,7 @@ class MetaOperator:
         key = (REPLAY_METHOD_VERSION, symbol, self.clock() // 86400, strategy, round(target_usdt, 4), n,
                round(capital, 4), window_days, low_ratio, high_ratio,
                round(float(cfg.get("max_loss_pct", 0)), 4), float(cfg.get("_meta_capital_initial", capital)))
-        cached = self._cache.get(key)
+        cached = self._process_cache_get(self._cache, key)
         self._analysis_timing.setdefault("replay_cache_hits", 0)
         if cached is None:
             cached = self._persistent_cache_get("replay", key)
@@ -2899,7 +2990,7 @@ class MetaOperator:
         self._analysis_timing = getattr(self, "_analysis_timing", {})
         self._analysis_timing.setdefault("touch_signal_s", 0.0)
         self._analysis_timing.setdefault("touch_signal_cache_hits", 0)
-        cached = self._cache.get(process_key)
+        cached = self._process_cache_get(self._cache, process_key)
         if cached is None:
             cached = self._persistent_cache_get("touch_signal", payload)
         if cached is not None:
@@ -3048,7 +3139,7 @@ class MetaOperator:
                 reference = max(float(price), 1e-12)
                 touch_key = (str(row["symbol"]).upper(), self.clock() // 86400,
                     round(buy_price / reference * 10000), round(sell_price / reference * 10000))
-                touch = self._touch_result_cache.get(touch_key)
+                touch = self._process_cache_get(self._touch_result_cache, touch_key)
                 if touch is None:
                     touch_started = time.perf_counter()
                     touch = causal_touch_buy_to_sell(at=self.clock(), candles=candles,

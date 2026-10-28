@@ -32,7 +32,8 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
         now='2026-10-27 20:00:00'
         conn.execute("INSERT INTO meta_ledger VALUES(1,1,?,'META_PLAN_EVALUATED',NULL,NULL,?)",
             (now,json.dumps({'current_pieces':{'12':{'estimate':{'probability_replay':.5}}},
-                'timings_s':{'scanner':1.2,'portfolio':2.3,'allocation_shadow':.1}})))
+                'timings_s':{'scanner':1.2,'portfolio':2.3,'allocation_shadow':.1,
+                    'process_caches':{'analysis':{'rows':15,'kb_estimated':120.5}}}})))
         conn.execute("INSERT INTO meta_ledger VALUES(2,1,?,'META_OPERATOR_REVIEW_DECISION','mantener',12,?)",
             (now,json.dumps({'decision':{'decision':'no_hacer_nada','reason':'sin mejora'},
                 'valuation':{'status':'KNOWN','cash_usdt':'99.9'}})))
@@ -64,6 +65,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert 'XRPUSDT: libro sin compradores: 1' in output
     assert 'Asignación en sombra (24 h):' in output and 'descarte sin curva v3: 2' in output
     assert 'formato 2: 1 filas' in output and 'formato 3: 1 filas' in output
+    assert 'Cachés de proceso Meta' in output and 'analysis: filas=15; KB estimados=120.5' in output
     assert 'samples_failed' not in output and 'muestras fallidas: 1' in output
     assert 'etiquetas invalid_geometry desde la corrida: 1' in output
     assert 'muestras fallidas' in output and 'parameters_json:' in output

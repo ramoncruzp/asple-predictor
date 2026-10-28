@@ -200,3 +200,8 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - El replay de etiqueta no persist?a una bandera de salida de rango. Se agreg? una m?trica por pieza derivada de high/low futuros para el horizonte etiquetado. La medici?n usa cruce estricto del l?mite y no usa cierre ni el precio del monitor. Las comparaciones de probabilidad requieren que las muestras tengan los dos campos nuevos guardados; las filas viejas o sin v2 no se imputan.
 - Los terciles se forman por alternativas con se?al v2; cuando una alternativa contiene varias piezas, cada salida conocida cuenta como una observaci?n en el tercil de esa alternativa.
+
+## Fase 41-C25d
+
+- La poda ocurre al iniciar y terminar el plan cuando no hay otro plan activo. Si coinciden planes en varios hilos, se aplaza hasta que finaliza el ?ltimo; durante la ejecuci?n las inserciones pueden superar temporalmente 500. El siguiente l?mite de frontera aplica la poda LRU.
+- El tama?o reportado es estimado mediante muestreo de hasta 25 entradas por cach?. Las velas sint?ticas de la medici?n tienen 2.000 marcas, no el historial real completo de 180 d?as; no se infiere el uso de memoria de S1.
