@@ -283,6 +283,8 @@ def test_allocation_shadow_keeps_source_testnet_checked_alternative_id(monkeypat
     assert all(row["alternative_id"] in by_id for row in seen["alternatives"])
     assert all(row["testnet_openability"].get("allowed") is True
         for row in seen["alternatives"])
+    assert set(("preparacion_s", "evaluacion_s", "cierre_s", "total_s")) <= set(
+        plan["allocation_shadow"]["timings_s"])
 
 
 def test_shadow_allocation_regenerates_geometry_for_each_available_amount(monkeypatch):
@@ -336,8 +338,9 @@ def test_shadow_allocation_empty_input_has_counted_reason_and_stage_timings():
     assert "total" in discards["timings_s"]
 
 
-def test_shadow_allocation_stops_candidate_generation_at_30_second_budget(monkeypatch):
+def test_shadow_allocation_stops_candidate_generation_at_named_25_second_budget(monkeypatch):
     import grid.meta_operator as module
+    assert module.ALLOCATION_SHADOW_EVALUATION_BUDGET_S == 25.0
     operator, _, goal, _, _ = plan_setup(owner="manual")
     clock_values = iter((0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 31.0, 32.0, 33.0))
     monkeypatch.setattr(module.time, "perf_counter", lambda: next(clock_values))

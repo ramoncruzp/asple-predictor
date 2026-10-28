@@ -37,6 +37,9 @@ from grid.meta_learning import (BREAK_V2_HORIZON_H, BREAK_V2_MARGIN_PCT,
 # Contexto aislado por llamada e hilo: nunca comparte lecturas entre revisiones.
 _PLAN_READ_CONTEXT = ContextVar("meta_plan_reads", default=None)
 
+# Reserva hasta el límite general de 30 s para cerrar y registrar la sombra.
+ALLOCATION_SHADOW_EVALUATION_BUDGET_S = 25.0
+
 
 def summarize_replays(rows, independent_window_days=30, target_usdt=None):
     """Resume ventanas alineadas; separa cantidad solapada e independiente."""
@@ -1421,7 +1424,8 @@ class MetaOperator:
     def _allocation_curve_variants(self, candidates, prepared, goal, cfg, free_cash, current_pieces):
         """Regenera geometrías por monto y conserva las causas de descarte de la sombra."""
         started = time.perf_counter()
-        deadline = float(cfg.get("_allocation_shadow_deadline", started + 30.0))
+        deadline = float(cfg.get("_allocation_shadow_deadline",
+            started + ALLOCATION_SHADOW_EVALUATION_BUDGET_S))
         capital_initial = float(goal.get("capital_initial") or 0)
         step = capital_initial * .05
         minimum = max(5.5, step)
@@ -2007,13 +2011,17 @@ class MetaOperator:
                 "allocation_tie_tolerance_pp": float(stored.get("allocation_tie_tolerance_pp", 5))}
         plan["use_extended_allocation"] = use_extended_allocation
         allocation_started = time.perf_counter()
+        allocation_stage_timings = {"preparacion_s": 0.0, "evaluacion_s": 0.0,
+            "cierre_s": 0.0, "total_s": 0.0}
         try:
             from grid.meta_allocation import evaluate_extended_allocation
             allocation_cash = unused_capital if allocation_free_cash is None else allocation_free_cash
-            shadow_deadline = time.perf_counter() + 30.0
+            shadow_deadline = allocation_started + ALLOCATION_SHADOW_EVALUATION_BUDGET_S
             allocation_cfg = {**cfg, "_allocation_shadow_deadline": shadow_deadline}
             allocation_variants, allocation_discards = self._allocation_curve_variants(allocation_candidates, prepared, goal,
                 allocation_cfg, allocation_cash, current_pieces)
+            evaluation_started = time.perf_counter()
+            allocation_stage_timings["preparacion_s"] = round(evaluation_started - allocation_started, 6)
             combine_timings = {}
             def record_allocation_discard(symbol, kind, amount, stage, reason):
                 counts = allocation_discards.setdefault("conteo_por_motivo", {})
@@ -2032,6 +2040,8 @@ class MetaOperator:
                 tie_tolerance_pp=float(stored.get("allocation_tie_tolerance_pp", 5)),
                 deadline=shadow_deadline, timings=combine_timings,
                 discard_callback=record_allocation_discard)
+            closing_started = time.perf_counter()
+            allocation_stage_timings["evaluacion_s"] = round(closing_started - evaluation_started, 6)
             allocation_discards.setdefault("timings_s", {})["combinacion"] = round(
                 combine_timings.get("combine_aligned_replays_s", 0), 6)
             allocation_discards["timings_s"]["orden"] = round(
@@ -2042,6 +2052,8 @@ class MetaOperator:
                 allocation_discards["status"] = "budget_exceeded"
                 plan["allocation_shadow"]["status"] = "budget_exceeded"
             plan["allocation_shadow"]["descartes"] = allocation_discards
+            allocation_stage_timings["cierre_s"] = round(time.perf_counter() - closing_started, 6)
+            plan["allocation_shadow"]["timings_s"] = {**combine_timings, **allocation_stage_timings}
         except Exception as exc:
             plan["allocation_shadow"] = {"decision": "no_agregar", "selected": None,
                 "reason": f"no se pudo evaluar: {type(exc).__name__}: {exc}", "evaluated_top": [],
@@ -2049,7 +2061,10 @@ class MetaOperator:
                     "ejemplos": [{"symbol": None, "piece_type": None, "amount_usdt": 0,
                         "stage": "replay", "reason": f"{type(exc).__name__}: {exc}"}], "no_evaluados": 0}}
         finally:
-            plan["timings_s"]["allocation_shadow"] = round(time.perf_counter() - allocation_started, 6)
+            allocation_stage_timings["total_s"] = round(time.perf_counter() - allocation_started, 6)
+            if isinstance(plan.get("allocation_shadow"), dict):
+                plan["allocation_shadow"].setdefault("timings_s", {}).update(allocation_stage_timings)
+            plan["timings_s"]["allocation_shadow"] = allocation_stage_timings["total_s"]
         # Capa de comparación: nunca reemplaza las señales ni la probabilidad decisoria.
         centered_signal_snapshot(alternatives, cfg.get("signal_weights") or {},
             float(cfg.get("signal_logit_cap", 1.0)))

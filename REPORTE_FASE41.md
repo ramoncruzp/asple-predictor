@@ -628,3 +628,9 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 
 - `scripts/medir_orden_intravela.py:173-186,291-292,323-324,361-368`: los grids cuentan eventos `BUY_FILLED` y `SELL_FILLED`; los bots cuentan transiciones de inventario en la traza. JSON, CSV y tabla de consola incluyen compras y ventas de 5m/1m. No se cambiaron simuladores.
 - Prueba `tests/test_measure_intracandle_order.py:68-71`: dos pares de eventos simulados producen 2 compras y 2 ventas. Resultado: **9 passed**.
+
+## Fase 41-C26a3 — Presupuesto y tiempos de asignación en sombra
+
+- `grid/meta_operator.py:41` define `ALLOCATION_SHADOW_EVALUATION_BUDGET_S = 25.0`; el plazo se fija al comenzar la sombra y se comparte entre preparación y evaluación. El corte conserva el estado `budget_exceeded` y los descartes de alternativas que quedan sin evaluar.
+- `grid/meta_operator.py:2014-2068` registra en `allocation_shadow.timings_s` `preparacion_s`, `evaluacion_s`, `cierre_s` y `total_s`. El tiempo total también sigue disponible en `plan.timings_s.allocation_shadow`.
+- Verificación: comando `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a3-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_own_grid_evaluation.py -q --basetemp $bt` — **17 passed**. La prueba mantiene comparación de la decisión real contra `a25818b`; el cambio solo limita y mide la sombra.

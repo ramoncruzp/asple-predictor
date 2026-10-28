@@ -237,3 +237,8 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a2
 
 - Para bots, el replay solo expone la curva de efectivo/inventario en el callback; el conteo usa los cambios de inventario 0?positivo y positivo?0 de esa traza. Para grids se usan eventos de fill emitidos por el runner.
+
+## Fase 41-C26a3
+
+- El presupuesto de 25 s empieza antes de la preparación de variantes, en vez de conceder 25 s adicionales solo a la combinación. Esto deja más tiempo disponible para cerrar y registrar el resultado antes de la meta de 30 s, y puede producir `budget_exceeded` antes si la preparación consume una parte importante. No afecta la decisión real.
+- La medición de cierre cubre el armado de descartes, estado y tiempos; el tiempo total incluye la finalización del bloque `finally`.
