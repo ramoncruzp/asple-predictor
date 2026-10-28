@@ -485,7 +485,7 @@ No se aplic? deduplicación porque no se garantizó igualdad exacta en ventanas 
 
 Pruebas: `tests/test_meta_portfolio_equity.py` y `tests/test_meta_operator.py`; comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_portfolio_equity.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g3-20261028-111500"`: **99 passed, 4 warnings, 0 failed; 21,64 s**. Igualdad bit a bit v2/v3, métricas, decisión de asignación en sombra y lectura v1 verificadas.
 
-### Fase 41-G1g4 ? descartes y tiempos de asignación en sombra
+### Fase 41-G1g4 — descartes y tiempos de asignación en sombra
 
 `grid/meta_operator.py:1314` garantiza un motivo para entrada vacía y alternativas sin piezas/ventanas; se cuentan descartes en mínimos, topes, límites del perfil, preparación, Advisor, replay y Testnet, con hasta 10 ejemplos. El generador pasa callback de diagnóstico al Advisor y replay (`grid/meta_operator.py:1183`). `grid/meta_allocation.py:20` mide orden y combinaciones de curvas y respeta un deadline compartido de 30 s. Si se agota, el estado es `budget_exceeded`, con pendientes y ejemplos; `allocation_shadow.descartes.timings_s` separa carga/orden, variantes, Testnet, combinación y total.
 
@@ -493,8 +493,41 @@ Pruebas: `tests/test_meta_own_grid_evaluation.py`, `tests/test_meta_allocation.p
 
 Límite: la sombra aún se invoca sincrónicamente al final de `_build_plan`; el deadline limita el trabajo, pero no demuestra que una sombra lenta nunca demore la revisión. Separarla exige un contrato de resultado pendiente y no cambiar la disponibilidad inmediata de `allocation_shadow` en esta fase.
 
-### Fase 41-G1g5 ? salida resumida del verificador
+### Fase 41-G1g5 — salida resumida del verificador
 
 `scripts/verificar_s1_meta.py:40` conserva el modo SQLite `ro`, resume cada señal con mínimo, mediana, máximo, valores distintos y nulos; `--detalle` imprime la lista completa. Incluye última corrida, fallos e `invalid_geometry`, bloqueo transitorio, tamaños por versión de caché, bytes por campo JSON de muestras de aprendizaje y descartes/tiempos de asignación en sombra en 24 h.
 
 Prueba con BD sintética: `tests/test_meta_s1_diagnostic.py`; comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_s1_diagnostic.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g5-20261028-140500"`: **1 passed, 0 failed; 0,22 s**. La salida por defecto queda bajo 150 líneas, `--detalle` conserva los valores y la BD no cambia.
+
+
+### Fase 41-G1g6 — cierre y auditoría de codificación
+
+La sección existente `Fase 41-G1a` en `REPORTE_FASE41.md:358-360` ya estaba correctamente escrita en UTF-8, sin BOM y sin signos `?` dentro de palabras; no hizo falta modificarla. La misma comprobación se ejecutó sobre los tres Markdown de fase, incluido el texto nuevo. El verificador de codificación lee UTF-8, falla ante BOM o `?` entre letras y terminó con 0 fallos. No se ejecutaron nuevas pruebas de código en G1g6.
+
+Commits de esta continuación, en orden:
+
+1. `Fase 41-G1g1: filtros reales y aislamiento de muestras`
+2. `Fase 41-G1g2: diagnóstico de bloqueos transitorios`
+3. `Fase 41-G1g3: curvas v3 y caché compacta`
+4. `Fase 41-G1g4: descartes y tiempos de la sombra`
+5. `Fase 41-G1g5: resumen del verificador Meta`
+6. `Fase 41-G1g6: cierre y auditoría de codificación`
+
+Comandos de consulta local en S1 (el script fuerza SQLite `mode=ro` y `PRAGMA query_only=ON`; no usa `.env`, API ni Testnet):
+
+```sh
+cd ~/asple-predictor
+venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 24
+venv2/bin/python scripts/verificar_s1_meta.py --db asple_predictor.db --horas 24 --detalle
+```
+
+No hay comando de re-etiquetado con `--dry-run` en este checkout. Las etiquetas anteriores a los filtros por símbolo podrían requerir recálculo para muestras de monedas cuyo tick difiere de 0,0001; el número no se midió porque la BD real está excluida. No borrar ni recalcular etiquetas hasta implementar y revisar un modo de previsualización realmente de solo lectura.
+
+| Parte | Archivos y referencias | Prueba dirigida | Resultado | Decisión real con las mismas entradas |
+|---|---|---|---|---|
+| G1g1 | `grid/meta_learning.py:628-711`; `grid/meta_operator.py:2155-2252,2309-2512` | `tests/test_meta_learning.py`, `tests/test_meta_operator.py` | 112 passed; geometría inválida terminal; ciclo sigue con otras muestras | No inmediata; las etiquetas corregidas pueden afectar versiones de pesos futuras |
+| G1g2 | `grid/meta.py:593,747-767`; `scripts/verificar_s1_meta.py:72-93` | `tests/test_meta_core.py`, `tests/test_meta_s1_diagnostic.py` | 37 passed; motivo por símbolo y duración | No |
+| G1g3 | `grid/sim/meta_portfolio.py:7-48`; `grid/meta_operator.py:962-981` | `tests/test_meta_portfolio_equity.py`, `tests/test_meta_operator.py` | 99 passed; igualdad exacta, caché durable 1,10 KiB sintética | No; puede recalcular replay tras reinicio |
+| G1g4 | `grid/meta_operator.py:1183-1439,1888-1928`; `grid/meta_allocation.py:20-150` | `tests/test_meta_own_grid_evaluation.py`, `tests/test_meta_allocation.py`, `tests/test_meta_operator.py` | 109 passed; paridad de probabilidades y campos decisorios contra a25818b | No en la comparación; la sombra sigue síncrona y un deadline agotado puede dejar evaluación parcial |
+| G1g5 | `scripts/verificar_s1_meta.py:40-245` | `tests/test_meta_s1_diagnostic.py` | 1 passed; salida por defecto menor de 150 líneas | No |
+| G1g6 | `REPORTE_FASE41.md`, `DISCREPANCIAS_FASE41.md`, `DECISIONES_MODO_META.md` | Control Python UTF-8/BOM/interrogación incrustada | 0 fallos | No |

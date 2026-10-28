@@ -361,3 +361,5 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 | 41-G1g3 | Formato de curvas v3 y reducción de caché durable | Lector v1/v2 preservado; la caché durable guarda métricas sin curvas para quedar bajo 100 KB. Tras reinicio puede recalcular replay |
 | 41-G1g4 | Descartes, cronómetros y deadline de sombra | Se conserva decisión real contra a25818b. La sombra continúa síncrona y puede esperar hasta el deadline |
 | 41-G1g5 | Verificador resumido y bloques de diagnóstico | Salida sintética menor de 150 líneas; `--detalle` conserva la lista completa |
+
+| 41-G1g6 | Cierre, comandos de consulta S1 y auditoría UTF-8 | Se documentan los cinco resultados y los límites: etiqueta histórica pendiente de dry-run; sombra síncrona hasta 30 s |
