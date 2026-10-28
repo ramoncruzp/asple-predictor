@@ -54,6 +54,24 @@ def test_non_overlapping_samples_align_to_72h_utc_blocks():
     assert all(right - left == step for left, right in zip(starts, starts[1:]))
 
 
+def test_meta_break_prob_v2_reference_and_monotonicity():
+    from grid.meta_learning import (BREAK_V2_HORIZON_H, BREAK_V2_MARGIN_PCT,
+        BREAK_V2_METHOD_VERSION, BREAK_V2_SIGMA_SCALE, meta_break_prob_v2)
+
+    reference = meta_break_prob_v2(1.0, .9, 1.1, .04)
+    assert reference == pytest.approx(.30, abs=.02)
+    assert BREAK_V2_HORIZON_H == 72
+    assert BREAK_V2_MARGIN_PCT == 0
+    assert BREAK_V2_SIGMA_SCALE == 1.0
+    assert BREAK_V2_METHOD_VERSION == 1
+    assert meta_break_prob_v2(1.0, .9, 1.1, .06) > reference
+    assert meta_break_prob_v2(1.0, .9, 1.1, .04, horizon_h=96) > reference
+    assert meta_break_prob_v2(1.0, .8, 1.2, .04) < reference
+    assert meta_break_prob_v2(.89, .9, 1.1, .04) == 1.0
+    assert meta_break_prob_v2(1.11, .9, 1.1, .04) == 1.0
+    assert meta_break_prob_v2(1.0, .9, 1.1, 0.0) == 0.0
+
+
 def test_point_in_time_reconstruction_ignores_future_candles_forecasts_and_predictions():
     timestamps = np.arange(0, 601 * 300, 300, dtype=np.int64)
     lows, highs = np.full(len(timestamps), 100.0), np.full(len(timestamps), 100.2)

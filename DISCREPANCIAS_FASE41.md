@@ -186,3 +186,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 - El reporte G1a ya estaba limpio en este checkout. Las secciones G1g1-G1g5 sí se reconstruyeron porque el parche previo había guardado `?` en lugar de tildes; la auditoría final de los tres Markdown no detecta errores.
 - El recálculo histórico requeriría un `--dry-run` que no existe. Se documenta que pueden cambiar etiquetas en símbolos con tick distinto, sin contar muestras con BD real ni proponer una orden que escriba.
 - El deadline de G1g4 limita tiempo, pero no desacopla la sombra del hilo que construye el plan; queda pendiente una solución que mantenga el contrato del resultado y no altere decisiones reales.
+
+## Fase 41-C25a
+
+- La probabilidad usa suma de las colas normales en distancia logar?tmica, truncada a [0, 1], como en el modelo de dos barreras existente. La implementaci?n se conserva aislada y a?n no se conecta a ninguna decisi?n.

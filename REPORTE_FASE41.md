@@ -531,3 +531,9 @@ No hay comando de re-etiquetado con `--dry-run` en este checkout. Las etiquetas 
 | G1g4 | `grid/meta_operator.py:1183-1439,1888-1928`; `grid/meta_allocation.py:20-150` | `tests/test_meta_own_grid_evaluation.py`, `tests/test_meta_allocation.py`, `tests/test_meta_operator.py` | 109 passed; paridad de probabilidades y campos decisorios contra a25818b | No en la comparación; la sombra sigue síncrona y un deadline agotado puede dejar evaluación parcial |
 | G1g5 | `scripts/verificar_s1_meta.py:40-245` | `tests/test_meta_s1_diagnostic.py` | 1 passed; salida por defecto menor de 150 líneas | No |
 | G1g6 | `REPORTE_FASE41.md`, `DISCREPANCIAS_FASE41.md`, `DECISIONES_MODO_META.md` | Control Python UTF-8/BOM/interrogación incrustada | 0 fallos | No |
+
+### Fase 41-C25a ? probabilidad de ruptura Meta v2
+
+`grid/meta_learning.py:22-49` a?ade `meta_break_prob_v2`, separada de `grid.policy.break_prob`: horizonte 72 h, barreras en los l?mites del rango, escala de volatilidad 1,0 y versi?n de m?todo 1. Precio fuera del rango devuelve 1; volatilidad cero dentro devuelve 0. No cambia el c?lculo ni la decisi?n actuales.
+
+Prueba: `tests/test_meta_learning.py` ? `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py -q --tb=short --basetemp "$env:TEMP\asple-f41-c25a-20261028-120001"`: **29 passed**.

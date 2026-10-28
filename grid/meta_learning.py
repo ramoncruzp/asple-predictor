@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+from math import erfc, log, sqrt
 import numpy as np
 
 
@@ -17,6 +18,32 @@ LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor
 DEFAULT_SIGNAL_WEIGHTS = {name: .25 for name in LEARNING_SIGNALS}
 DEFAULT_SIGNAL_WEIGHTS["touch_buy_to_sell"] = 0.0
 REPLAY_CACHE_STEP = 0.0025
+BREAK_V2_HORIZON_H = 72
+BREAK_V2_MARGIN_PCT = 0.0
+BREAK_V2_SIGMA_SCALE = 1.0
+BREAK_V2_METHOD_VERSION = 1
+
+
+def meta_break_prob_v2(price, low, high, sigma_24h, *, horizon_h=BREAK_V2_HORIZON_H):
+    """Probabilidad de tocar cualquiera de los dos límites del rango Meta.
+
+    Usa distancias logarítmicas, barreras en los límites del rango y sigma
+    escalada por la raíz del horizonte. Es una señal experimental en sombra.
+    """
+    price, low, high, sigma_24h = map(float, (price, low, high, sigma_24h))
+    horizon_h = float(horizon_h)
+    if min(price, low, high) <= 0 or low >= high or sigma_24h < 0 or horizon_h <= 0:
+        raise ValueError("price, range, sigma_24h, or horizon_h is invalid")
+    if price < low or price > high:
+        return 1.0
+    sigma_h = sigma_24h * BREAK_V2_SIGMA_SCALE * sqrt(horizon_h / 24.0)
+    if sigma_h == 0:
+        return 0.0
+    z_low = log(price / low) / sigma_h
+    z_high = log(high / price) / sigma_h
+    lower = erfc(z_low / sqrt(2.0))
+    upper = erfc(z_high / sqrt(2.0))
+    return min(1.0, max(0.0, lower + upper))
 
 
 def normalize_down_probability(p_down, threshold=0.60):
