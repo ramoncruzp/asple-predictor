@@ -442,7 +442,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         profile_configs = {}
     shadow_switches = {profile: {"use_centered_signals": bool((profile_configs.get(profile) or {}).get(
             "use_centered_signals", False)), "use_touch_bots": bool((profile_configs.get(profile) or {}).get(
-            "use_touch_bots", False))} for profile in ("RAPIDO", "PRUDENTE")}
+            "use_touch_bots", False)), "use_break_prob_v2": bool((profile_configs.get(profile) or {}).get(
+            "use_break_prob_v2", False))} for profile in ("RAPIDO", "PRUDENTE")}
     switches = {profile: {"enabled": bool(profile_learning.get(profile, {}).get("enabled", False)),
         "readiness": readiness[profile]} for profile in ("RAPIDO", "PRUDENTE")}
     global_flags = {name: getattr(settings, name, None) for name in (

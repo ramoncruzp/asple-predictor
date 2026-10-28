@@ -174,6 +174,45 @@ def test_touch_result_cache_preserves_causal_result(monkeypatch):
     assert operator._analysis_timing["touch_signal_cache_hits"] == 1
 
 
+def test_break_v2_is_shadowed_by_default_and_only_replaces_break_signal_when_enabled(monkeypatch):
+    import grid.meta_operator as module
+    from grid.meta_operator import MetaOperator
+
+    class DB:
+        def get_latest_prediction(self, *_args): return None
+
+    operator = MetaOperator(object(), DB(), None, None, None)
+    operator._model_snapshot = lambda _symbol: {"volatility_forecasts": {}}
+    operator._load_candles = lambda _symbol: (_ for _ in ()).throw(OSError("sin velas"))
+    monkeypatch.setattr(module, "break_prob", lambda *_args: (.12, None, None, None))
+
+    def evaluate(enabled):
+        alternative = {"pieces": [{"symbol": "XRPUSDT", "capital_usdt": 100,
+            "floor": 90, "ceiling": 110}], "estimate": {"probability": .4,
+            "evidence_sufficient": True}, "replay_probability": .4}
+        row = {"symbol": "XRPUSDT", "sigma_24h_open": .04, "score": .7,
+            "model_statistics": {}}
+        operator._apply_intelligence(alternative, row, 100, 90, 110,
+            {"signal_weights": {"break_prob": .25}, "use_break_prob_v2": enabled})
+        return alternative
+
+    disabled = evaluate(False)
+    legacy = next(item for item in disabled["signals_used"] if item["name"] == "break_prob")
+    assert legacy["value"] == .12
+    assert disabled["break_prob_v2"]["value"] == pytest.approx(.30, abs=.02)
+    assert disabled["estimate"]["probability"] == pytest.approx(
+        signal_adjusted_probability(.4, disabled["signals_used"], {"break_prob": .25}, 1.0))
+
+    enabled = evaluate(True)
+    enabled_break = next(item for item in enabled["signals_used"] if item["name"] == "break_prob")
+    assert enabled_break["value"] == enabled["break_prob_v2"]["value"]
+    for name in ("volatility", "direction", "scanner", "advisor", "touch_buy_to_sell"):
+        before = next((x for x in disabled["signals_used"] if x["name"] == name), None)
+        after = next((x for x in enabled["signals_used"] if x["name"] == name), None)
+        assert before == after
+    assert enabled["probability_adjusted_break_v2"] == enabled["estimate"]["probability"]
+
+
 def test_noop_payload_compacts_review_result_and_links_plan():
     import json
     from grid.meta_operator import MetaOperator

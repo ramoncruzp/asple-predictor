@@ -28,6 +28,8 @@ from grid.guards import sell_level_conflicts
 from data.exchange_filters import SymbolFilters
 from apscheduler.schedulers.background import BackgroundScheduler
 from grid.policy import break_prob, DEFAULT_SMART_PARAMS, validate_params
+from grid.meta_learning import (BREAK_V2_HORIZON_H, BREAK_V2_MARGIN_PCT,
+    BREAK_V2_METHOD_VERSION, meta_break_prob_v2)
 
 
 # Contexto aislado por llamada e hilo: nunca comparte lecturas entre revisiones.
@@ -2093,6 +2095,8 @@ class MetaOperator:
                 "signals_centered": alternative.get("signals_centered", []),
                 "probability_adjusted_actual": (alternative.get("estimate") or {}).get("probability_adjusted"),
                 "probability_adjusted_centered": alternative.get("probability_adjusted_centered"),
+                "break_prob_v2": alternative.get("break_prob_v2"),
+                "probability_adjusted_break_v2": alternative.get("probability_adjusted_break_v2"),
                 "touch_signal": alternative.get("touch_signal"),
                 "shadow_signals": alternative.get("shadow_signals", [])}
             replay_raw = alternative.get("replay_probability")
@@ -2980,11 +2984,26 @@ class MetaOperator:
             params["min_free_cells"] = min(params["min_free_cells"], 1)
             sigma_for_break = float(np.median(usable_sigmas)) if usable_sigmas else float(row.get("sigma_24h_open") or 0)
             probability = break_prob(price, low, high, sigma_for_break, params)[0]
-            signals.append({"name": "break_prob", "value": probability,
-                            "sigma_24h": sigma_for_break,
-                            "normalized": max(-1.0, min(1.0, 1 - 2 * float(probability)))})
+            legacy_signal = {"name": "break_prob", "value": probability,
+                "sigma_24h": sigma_for_break,
+                "normalized": max(-1.0, min(1.0, 1 - 2 * float(probability)))}
+            v2_probability = meta_break_prob_v2(price, low, high, sigma_for_break)
+            v2_signal = {"name": "break_prob", "value": v2_probability,
+                "sigma_24h": sigma_for_break,
+                "normalized": max(-1.0, min(1.0, 1 - 2 * float(v2_probability)))}
+            break_v2 = {"value": v2_probability, "normalized": v2_signal["normalized"],
+                "horizon_h": BREAK_V2_HORIZON_H, "margin_pct": BREAK_V2_MARGIN_PCT,
+                "sigma_24h": sigma_for_break, "method_version": BREAK_V2_METHOD_VERSION}
+            effective_signal = v2_signal if cfg.get("use_break_prob_v2", False) else legacy_signal
+            signals.append(effective_signal)
         except Exception as exc:
             omitted.append({"name": "break_prob", "reason": str(exc)})
+            break_v2 = {"value": None, "normalized": None,
+                "horizon_h": BREAK_V2_HORIZON_H, "margin_pct": BREAK_V2_MARGIN_PCT,
+                "sigma_24h": None, "method_version": BREAK_V2_METHOD_VERSION,
+                "reason": str(exc)}
+            legacy_signal = None
+            v2_signal = None
         prediction = self._plan_read(self.db, "get_latest_prediction", row["symbol"], "1h", "model_a_down")
         fresh_direction = False
         if prediction and prediction.get("predicted_at") is not None:
@@ -3054,10 +3073,21 @@ class MetaOperator:
         logit_cap = float(cfg.get("signal_logit_cap", 1.0))
         adjusted = (signal_adjusted_probability(alternative["replay_probability"], signals, weights, logit_cap)
                     if enough_evidence else float(alternative["replay_probability"]))
+        v2_signals = [dict(item) for item in signals]
+        if legacy_signal is not None and v2_signal is not None:
+            for index, item in enumerate(v2_signals):
+                if item.get("name") == "break_prob":
+                    v2_signals[index] = v2_signal
+                    break
+        probability_adjusted_break_v2 = (signal_adjusted_probability(
+            alternative["replay_probability"], v2_signals, weights, logit_cap)
+            if enough_evidence else float(alternative["replay_probability"]))
         shadow_signals = [item for item in signals if item["name"] in {"scanner", "advisor"}]
         shadow_probability = (signal_adjusted_probability(alternative["replay_probability"],
             shadow_signals, weights, logit_cap) if enough_evidence else float(alternative["replay_probability"]))
         alternative["signals_used"] = signals
+        alternative["break_prob_v2"] = break_v2
+        alternative["probability_adjusted_break_v2"] = probability_adjusted_break_v2
         alternative["signals_omitted"] = omitted
         alternative["estimate"]["probability_adjusted"] = adjusted
         alternative["estimate"]["probability_replay"] = alternative["replay_probability"]

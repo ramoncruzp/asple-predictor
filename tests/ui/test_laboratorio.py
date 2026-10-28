@@ -18,6 +18,7 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
         {"key": "advisor_vol_spacing_enabled", "label": "Espaciado por volatilidad", "description": "Regla de prueba.",
          "current": False, "default": False, "origin": "default", "requires_restart": False},
     ]
+    profiles = {"RAPIDO": {"use_break_prob_v2": False}, "PRUDENTE": {"use_break_prob_v2": False}}
     now = datetime.now(timezone.utc).isoformat()
 
     def api(route):
@@ -39,6 +40,13 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
                         row["current"] = body["value"]
                         row["origin"] = "app"
                 route.fulfill(json={"dry_run": False, "changed": True, "flag": {"key": body["key"]}, "updated_at": now})
+        elif path == "/api/metas/config" and req.method == "GET":
+            route.fulfill(json={"profiles": profiles})
+        elif path == "/api/metas/config/profile" and req.method == "PUT":
+            body = req.post_data_json
+            profiles[body["profile"]].update(body["values"])
+            calls.append({"meta_profile": body["profile"], **body["values"]})
+            route.fulfill(json={"profile": body["profile"], "settings": profiles[body["profile"]]})
         elif path == "/api/grids":
             route.fulfill(json={"grids": [{"id": 17}]})
         elif path == "/api/grids/17/events":
@@ -69,6 +77,12 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     expect(ui_page.locator("#lab-method")).to_be_visible()
     expect(ui_page.locator('#lab-global-settings-content [data-flag-key="stoploss_enabled"]')).to_be_visible()
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("CELL_STOPLOSS")
+    expect(ui_page.locator("#lab-global-settings-content")).to_contain_text("Ruptura v2 de Meta")
+    rapid_v2 = ui_page.locator('[data-break-v2="RAPIDO"]')
+    expect(rapid_v2).to_have_text("Encender")
+    rapid_v2.click()
+    expect(ui_page.locator('[data-break-v2="RAPIDO"]')).to_have_text("Apagar")
+    assert {"meta_profile": "RAPIDO", "use_break_prob_v2": True} in calls
     ui_page.screenshot(path=str(shots / "desktop-after-laboratorio.png"), full_page=False)
     ui_page.set_viewport_size({"width": 390, "height": 844})
     ui_page.goto(f"{live_server.url}/#cuenta")
@@ -104,7 +118,7 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     expect(ui_page.locator("#lab-global-settings-status")).to_have_text("Ajuste global actualizado.")
     expect(host.locator(".global-flag-updated")).to_contain_text("Cambiado a las")
     assert ui_page.locator("#lab-global-settings-content .global-flag-updated").count() == 1
-    assert calls == [
+    assert [call for call in calls if "key" in call] == [
         {"key": "stoploss_enabled", "value": False, "dry_run": True, "confirm": False},
         {"key": "stoploss_enabled", "value": False, "dry_run": False, "confirm": False},
         {"key": "stoploss_enabled", "value": True, "dry_run": True, "confirm": False},

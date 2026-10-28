@@ -190,3 +190,8 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C25a
 
 - La probabilidad usa suma de las colas normales en distancia logar?tmica, truncada a [0, 1], como en el modelo de dos barreras existente. La implementaci?n se conserva aislada y a?n no se conecta a ninguna decisi?n.
+
+## Fase 41-C25b
+
+- La configuraci?n permite encender la se?al por perfil y el operador la aplica cuando est? activa. El valor por defecto permanece apagado; el c?lculo alternativo en sombra no sustituye la probabilidad actual mientras siga apagado. La vista del estado se a?adi? a Laboratorio e Inteligencia.
+- La UI guarda el interruptor v?a la API gen?rica de ajustes por perfil y no a?ade un evento de auditor?a dedicado. La API conserva control de acceso; no se solicit? un flujo de confirmaci?n adicional para esta opci?n.

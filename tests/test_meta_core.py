@@ -105,6 +105,15 @@ def test_prudent_verification_minimum_is_editable_in_profile_settings(tmp_path):
     assert updated["min_effective_verifications"] == 32
 
 
+def test_break_v2_profile_setting_defaults_off_and_is_exposed_by_config_api(tmp_path):
+    _db, core = _core(tmp_path)
+    assert core.config()["profiles"]["RAPIDO"]["use_break_prob_v2"] is False
+    assert core.config()["profiles"]["PRUDENTE"]["use_break_prob_v2"] is False
+    updated = core.set_config("RAPIDO", {"use_break_prob_v2": True})
+    assert updated["use_break_prob_v2"] is True
+    assert core.config()["profiles"]["RAPIDO"]["use_break_prob_v2"] is True
+
+
 def test_rotation_limits_and_materiality_are_editable_per_profile(tmp_path):
     _db, core = _core(tmp_path)
     updated = core.set_config("RAPIDO", {

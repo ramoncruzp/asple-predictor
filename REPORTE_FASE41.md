@@ -537,3 +537,9 @@ No hay comando de re-etiquetado con `--dry-run` en este checkout. Las etiquetas 
 `grid/meta_learning.py:22-49` a?ade `meta_break_prob_v2`, separada de `grid.policy.break_prob`: horizonte 72 h, barreras en los l?mites del rango, escala de volatilidad 1,0 y versi?n de m?todo 1. Precio fuera del rango devuelve 1; volatilidad cero dentro devuelve 0. No cambia el c?lculo ni la decisi?n actuales.
 
 Prueba: `tests/test_meta_learning.py` ? `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py -q --tb=short --basetemp "$env:TEMP\asple-f41-c25a-20261028-120001"`: **29 passed**.
+
+### Fase 41-C25b ? ruptura v2 en sombra y ajuste por perfil
+
+`grid/meta_operator.py:2980-3008,3078-3090` guarda `break_prob_v2` y recalcula `probability_adjusted_break_v2` con las mismas se?ales y pesos, sustituyendo ?nicamente `break_prob`. Por defecto `use_break_prob_v2=False` en ambos perfiles (`grid/meta.py:28,57`); la configuraci?n por API usa `PUT /api/metas/config/profile` (`api/routes/metas.py:109-111`) y Laboratorio permite cambiarlo (`frontend/lab.js:11-42`). La alternativa y su procedencia se guardan en muestras live (`grid/meta_operator.py:2088-2103`). Inteligencia informa el estado (`api/routes/intelligence.py:443-447`).
+
+Medici?n de f?rmula: 100.000 evaluaciones sint?ticas en 0,0573 s (0,57 microsegundos por llamada). Pruebas: `tests/test_meta_operator.py tests/test_meta_core.py tests/test_intelligence_api.py tests/ui/test_laboratorio.py` ? 129 passed, 7 warnings; `tests/ui/test_laboratorio.py` tras ampliar la prueba del interruptor ? 4 passed, 2 warnings. `node --check frontend/lab.js` pas?.
