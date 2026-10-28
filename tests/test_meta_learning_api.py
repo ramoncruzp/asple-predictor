@@ -75,6 +75,75 @@ def test_learning_api_requires_token_and_switch_endpoint_confirmation(tmp_path):
     assert client.put('/api/metas/learning/switch', json=payload, headers=auth).json()['enabled'] is True
 
 
+def test_manual_learning_endpoint_schedules_once_and_rejects_busy_guard(tmp_path):
+    db, operator, client = _operator(tmp_path)
+    auth = {'X-API-Token': 'learning-secret'}
+    try:
+        operator.maintain_database = lambda: None
+        operator.start()
+        scheduled = operator.scheduler.get_job('meta_learning_labels_daily')
+        assert scheduled is not None
+        assert scheduled.func.__func__ is MetaOperator.run_learning_daily
+        assert scheduled.trigger.__class__.__name__ == 'CronTrigger'
+        assert scheduled.trigger.fields[5].expressions[0].__str__() == '8'
+        assert scheduled.trigger.fields[6].expressions[0].__str__() == '30'
+        operator.scheduler.pause()
+        response = client.post('/api/metas/learning/run', headers=auth)
+        assert response.status_code == 202
+        assert response.json()['status'] == 'scheduled'
+        assert response.json()['job_id'] == 'meta_learning_manual'
+        assert response.json()['scheduled_at']
+        job = operator.scheduler.get_job('meta_learning_manual')
+        assert job is not None
+        assert job.func.__self__ is operator
+        assert job.func.__func__ is MetaOperator.run_learning_daily
+        assert job.kwargs == {'trigger': 'manual'}
+        assert job.max_instances == 1
+        assert job.misfire_grace_time >= 3600
+        assert job.trigger.__class__.__name__ == 'DateTrigger'
+        assert client.post('/api/metas/learning/run').status_code == 403
+        operator._learning_guard.acquire()
+        try:
+            busy = client.post('/api/metas/learning/run', headers=auth)
+        finally:
+            operator._learning_guard.release()
+        assert busy.status_code == 409
+        assert 'ya está en curso' in busy.json()['detail']
+    finally:
+        operator.stop()
+
+
+def test_learning_last_endpoint_returns_compact_latest_run(tmp_path):
+    db, _operator_obj, client = _operator(tmp_path)
+    auth = {'X-API-Token': 'learning-secret'}
+    now = datetime.now(timezone.utc)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_learning_runs.insert().values(started_at=now, finished_at=now,
+            status='completed', summary_json=json.dumps({'samples_failed': 2,
+                'labels_invalid_geometry': 3, 'failed_samples': [
+                    {'sample_id': 17, 'symbol': 'XRPUSDT', 'error': 'geometría inválida'}],
+                'timings_s': {'label_simulation_s': 1.25}, 'trigger': 'manual'})))
+    response = client.get('/api/metas/learning/last', headers=auth)
+    assert response.status_code == 200
+    stored_at = str(now.replace(tzinfo=None))
+    assert response.json()['run'] == {'started_at': stored_at, 'finished_at': stored_at,
+        'status': 'completed', 'samples_failed': 2, 'labels_invalid_geometry': 3,
+        'failed_samples': [{'sample_id': 17, 'symbol': 'XRPUSDT', 'error': 'geometría inválida'}],
+        'failed_samples_total': 1, 'timings_s': {'label_simulation_s': 1.25}, 'trigger': 'manual'}
+
+
+def test_learning_last_defaults_legacy_runs_to_scheduled(tmp_path):
+    db, _operator_obj, client = _operator(tmp_path)
+    auth = {'X-API-Token': 'learning-secret'}
+    now = datetime.now(timezone.utc)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_learning_runs.insert().values(started_at=now, status='completed',
+            summary_json=json.dumps({'samples_failed': 0})))
+    response = client.get('/api/metas/learning/last', headers=auth)
+    assert response.status_code == 200
+    assert response.json()['run']['trigger'] == 'scheduled'
+
+
 def test_extended_allocation_switch_is_off_by_default_and_audited(tmp_path):
     db, operator, client = _operator(tmp_path)
     auth = {'X-API-Token': 'learning-secret'}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from api.routes.grids import _authorize
@@ -135,6 +135,16 @@ def update_maintenance_settings(request: Request, body: MaintenanceSettings):
 @router.get("/learning")
 def learning_status(request: Request, profile: str = "RAPIDO"):
     return _operator(request).learning_status(profile)
+
+
+@router.get("/learning/last")
+def learning_last(request: Request):
+    return _operator(request).learning_last()
+
+
+@router.post("/learning/run", status_code=status.HTTP_202_ACCEPTED)
+def run_learning_manual(request: Request):
+    return _call(_operator(request).schedule_learning_manual)
 
 
 @router.put("/learning/switch")

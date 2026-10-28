@@ -950,6 +950,38 @@ class MetaOperator:
                 "actor": switch["actor"], "changed_at": str(switch["changed_at"]),
                 "weight_version_id": switch["weight_version_id"]}}
 
+    def schedule_learning_manual(self):
+        """Agenda el aprendizaje fuera del hilo HTTP y evita duplicar una corrida activa."""
+        if self._learning_guard.locked():
+            raise ValueError("El aprendizaje Meta ya está en curso.")
+        scheduled_at = datetime.now(timezone.utc)
+        self.scheduler.add_job(self.run_learning_daily, trigger="date",
+            run_date=scheduled_at, id="meta_learning_manual", replace_existing=True,
+            max_instances=1, misfire_grace_time=21600, kwargs={"trigger": "manual"})
+        return {"status": "scheduled", "job_id": "meta_learning_manual",
+            "scheduled_at": scheduled_at.isoformat()}
+
+    def learning_last(self):
+        """Devuelve el resumen pequeño de la última corrida persistida."""
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            row = conn.execute(select(self.db.meta_learning_runs).order_by(
+                self.db.meta_learning_runs.c.id.desc()).limit(1)).mappings().first()
+        if row is None:
+            return {"run": None}
+        summary = json.loads(row["summary_json"] or "{}")
+        failed_samples = summary.get("failed_samples") or []
+        failed_summary = [{"sample_id": item.get("sample_id"), "symbol": item.get("symbol"),
+            "error": str(item.get("error") or "")[:240]} for item in failed_samples[:20]
+            if isinstance(item, dict)]
+        return {"run": {"started_at": str(row["started_at"]),
+            "finished_at": str(row["finished_at"]) if row["finished_at"] else None,
+            "status": row["status"], "samples_failed": int(summary.get("samples_failed", 0)),
+            "labels_invalid_geometry": int(summary.get("labels_invalid_geometry", 0)),
+            "failed_samples": failed_summary, "failed_samples_total": len(failed_samples),
+            "timings_s": summary.get("timings_s", {}),
+            "trigger": summary.get("trigger", "scheduled")}}
+
     @staticmethod
     def _learned_is_worse(comparison):
         learned = (comparison or {}).get("learned", {}).get("72h", {})
@@ -2479,7 +2511,7 @@ class MetaOperator:
                 saved += 1
         return saved
 
-    def run_learning_daily(self):
+    def run_learning_daily(self, trigger="scheduled"):
         """Etiqueta en prioridad baja sin tomar ops_lock ni ejecutar órdenes."""
         from sqlalchemy import select
         if not bool(getattr(self.settings, "meta_mode_enabled", False)):
@@ -2709,6 +2741,7 @@ class MetaOperator:
                 except Exception:
                     logging.getLogger(__name__).exception("No se pudo comparar decisiones aprendidas Meta")
             summary = {**counters, "pending_template_ids": pending_ids,
+                "trigger": "manual" if trigger == "manual" else "scheduled",
                 "failed_samples": failed_samples, "filter_failure_details": filter_failure_details,
                 "candle_inventory": candle_inventory,
                 "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
@@ -2726,6 +2759,7 @@ class MetaOperator:
             return {"status": "completed", "run_id": run_id, **summary}
         except Exception as exc:
             summary = {**counters, "failed_samples": failed_samples,
+                       "trigger": "manual" if trigger == "manual" else "scheduled",
                        "filter_failure_details": filter_failure_details,
                        "timings_s": {key: round(value, 3) for key, value in timings.items()},
                        "candle_inventory": locals().get("candle_inventory", {}),

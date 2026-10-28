@@ -31,3 +31,10 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'salidas observadas del rango' in js
     assert 'JSON.stringify(x.details || {}, null, 2)' in js
     assert 'current_piece_estimate' in js and 'Pieza actual:' in js
+    assert 'Correr aprendizaje ahora' in html
+    assert "api.post('/api/metas/learning/run', {})" in js
+    assert "api.get('/api/metas/learning/last')" in js
+    assert 'learning-run-confirm-yes' in html
+    assert 'Tarda alrededor de 90 minutos y no ejecuta órdenes' in html
+    assert 'learning-last-refresh' in html
+    assert 'HTTP 202' in js and 'origen ${run.trigger}' in js
