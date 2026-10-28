@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+import threading
 from types import SimpleNamespace
 import time
 
@@ -262,7 +263,27 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
             parameters_json=json.dumps(invalid_params), signals_json="{}", provenance_json="{}",
             created_at=datetime.now(timezone.utc)))
 
-    result = operator.run_learning_daily()
+    entered_import = threading.Event()
+    allow_import = threading.Event()
+    original_import = operator._import_legacy_learning_samples
+    def pause_after_run_row_exists():
+        entered_import.set()
+        assert allow_import.wait(5)
+        return original_import()
+    operator._import_legacy_learning_samples = pause_after_run_row_exists
+    result_holder = {}
+    worker = threading.Thread(target=lambda: result_holder.setdefault(
+        "result", operator.run_learning_daily(trigger="manual")))
+    worker.start()
+    assert entered_import.wait(5)
+    with db.engine.connect() as conn:
+        running = conn.execute(select(db.meta_learning_runs)).mappings().one()
+    assert running["status"] == "RUNNING"
+    assert json.loads(running["summary_json"])["trigger"] == "manual"
+    allow_import.set()
+    worker.join(30)
+    assert not worker.is_alive()
+    result = result_holder["result"]
     assert result["status"] == "completed"
     assert result["labels_72h"] == 1
     assert result["samples_failed"] == 0
@@ -280,6 +301,7 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
     assert valid_label["reached"] is True
     assert invalid_label["reason"]["symbol"] == "XRPUSDT"
     assert run["status"] == "completed"
+    assert json.loads(run["summary_json"])["trigger"] == "manual"
     with db.engine.connect() as conn:
         sample = conn.execute(select(db.meta_learning_samples).where(
             db.meta_learning_samples.c.sample_key == "job-sample"

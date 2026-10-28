@@ -242,3 +242,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - El presupuesto de 25 s empieza antes de la preparación de variantes, en vez de conceder 25 s adicionales solo a la combinación. Esto deja más tiempo disponible para cerrar y registrar el resultado antes de la meta de 30 s, y puede producir `budget_exceeded` antes si la preparación consume una parte importante. No afecta la decisión real.
 - La medición de cierre cubre el armado de descartes, estado y tiempos; el tiempo total incluye la finalización del bloque `finally`.
+
+## Fase 41-C26a4
+
+- No se agregó una columna a la tabla: `trigger` se guarda en el JSON de resumen desde la inserción inicial. Esto evita una migración y hace visible el origen antes de que la corrida termine.

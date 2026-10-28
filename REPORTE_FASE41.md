@@ -634,3 +634,9 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 - `grid/meta_operator.py:41` define `ALLOCATION_SHADOW_EVALUATION_BUDGET_S = 25.0`; el plazo se fija al comenzar la sombra y se comparte entre preparación y evaluación. El corte conserva el estado `budget_exceeded` y los descartes de alternativas que quedan sin evaluar.
 - `grid/meta_operator.py:2014-2068` registra en `allocation_shadow.timings_s` `preparacion_s`, `evaluacion_s`, `cierre_s` y `total_s`. El tiempo total también sigue disponible en `plan.timings_s.allocation_shadow`.
 - Verificación: comando `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a3-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_own_grid_evaluation.py -q --basetemp $bt` — **17 passed**. La prueba mantiene comparación de la decisión real contra `a25818b`; el cambio solo limita y mide la sombra.
+
+## Fase 41-C26a4 — Disparador persistido desde RUNNING
+
+- `grid/meta_operator.py:2540-2573` normaliza `trigger` al iniciar y lo incluye en `meta_learning_runs.summary_json` en la misma inserción que crea la corrida RUNNING. El resumen final conserva el mismo valor; el disparador programado sigue usando `scheduled` por defecto.
+- `tests/test_meta_learning.py:218-303` bloquea el worker después de insertar la fila y verifica que una corrida manual ya visible como RUNNING tenga `trigger=manual`; luego comprueba el resumen final.
+- Prueba: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a4-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py -q --basetemp $bt` — **29 passed**.

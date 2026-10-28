@@ -2533,6 +2533,7 @@ class MetaOperator:
             return {"status": "disabled", "reason": "Modo Meta apagado"}
         if not self._learning_guard.acquire(blocking=False):
             return {"status": "skipped", "reason": "aprendizaje anterior sigue activo"}
+        run_trigger = "manual" if trigger == "manual" else "scheduled"
         from grid.meta_learning import (replay_alternative_labels, reconstruct_historical_samples,
             stable_template)
         started = datetime.now(timezone.utc)
@@ -2565,7 +2566,9 @@ class MetaOperator:
                 pass
             with self.db.engine.begin() as conn:
                 run_id = conn.execute(self.db.meta_learning_runs.insert().values(
-                    started_at=started, status="RUNNING", summary_json="{}")).inserted_primary_key[0]
+                    started_at=started, status="RUNNING",
+                    summary_json=json.dumps({"trigger": run_trigger}, sort_keys=True)
+                )).inserted_primary_key[0]
             t = time.perf_counter()
             counters["legacy_samples_imported"] = self._import_legacy_learning_samples()
             timings["legacy_import_s"] = time.perf_counter() - t
@@ -2756,7 +2759,7 @@ class MetaOperator:
                 except Exception:
                     logging.getLogger(__name__).exception("No se pudo comparar decisiones aprendidas Meta")
             summary = {**counters, "pending_template_ids": pending_ids,
-                "trigger": "manual" if trigger == "manual" else "scheduled",
+                "trigger": run_trigger,
                 "failed_samples": failed_samples, "filter_failure_details": filter_failure_details,
                 "candle_inventory": candle_inventory,
                 "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
@@ -2774,7 +2777,7 @@ class MetaOperator:
             return {"status": "completed", "run_id": run_id, **summary}
         except Exception as exc:
             summary = {**counters, "failed_samples": failed_samples,
-                       "trigger": "manual" if trigger == "manual" else "scheduled",
+                       "trigger": run_trigger,
                        "filter_failure_details": filter_failure_details,
                        "timings_s": {key: round(value, 3) for key, value in timings.items()},
                        "candle_inventory": locals().get("candle_inventory", {}),
