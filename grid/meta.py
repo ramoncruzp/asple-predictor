@@ -144,6 +144,9 @@ class MetaCore:
         self.alert = alert or (lambda _kind, _meta, _details: None)
         self.scheduler = scheduler or BackgroundScheduler(timezone="UTC")
         self._lock = threading.RLock()
+        # Candado hoja: protege exclusivamente la lectura del libro y su caché.
+        # No adquirir ops_lock ni _lock mientras se mantiene este candado.
+        self._depth_read_lock = threading.RLock()
         self._cancel_plans: dict[str, tuple[datetime, tuple[int, ...]]] = {}
 
     def _now(self):
@@ -470,10 +473,13 @@ class MetaCore:
         return {"meta_id": int(meta_id), "grid_id": int(grid_id), "piece_type": piece_type}
 
     def valuation(self, meta_id):
-        # MetaCore.run_once y el operador comparten este cliente y esta caché.
-        # Serializar la lectura evita carreras de libro y de _depth_cache.
-        with self._lock:
-            return self._valuation_locked(meta_id)
+        # El camino del operador puede conservar ops_lock al valorar, mientras
+        # run_once conserva _lock antes de pedir ops_lock para cerrar. Por eso
+        # la valoración no toma _lock; solo usa el candado hoja de profundidad.
+        # Orden recomendado para nuevas anidaciones: ops_lock -> _lock ->
+        # _depth_read_lock. La ruta watchdog _lock -> ops_lock ya existente no
+        # puede tener una arista inversa; el candado hoja nunca la crea.
+        return self._valuation_locked(meta_id)
 
     def _valuation_locked(self, meta_id):
         from sqlalchemy import select
@@ -534,21 +540,23 @@ class MetaCore:
                     state_rows.append((symbol, empty_value))
                     continue
                 now = self.clock()
-                cached = getattr(self, "_depth_cache", {}).get(symbol)
-                if cached and (now - cached[0]).total_seconds() < 60:
-                    book = cached[1]
-                else:
-                    getter = getattr(self.exchange, "get_order_book_depth", None)
-                    if callable(getter):
-                        book = getter(symbol, limit=5)
+                # Candado hoja: no invocar aquí rutas que pidan ops_lock o _lock.
+                with self._depth_read_lock:
+                    cached = getattr(self, "_depth_cache", {}).get(symbol)
+                    if cached and (now - cached[0]).total_seconds() < 60:
+                        book = cached[1]
                     else:
-                        ticker = self.exchange.get_book_ticker(symbol)
-                        book = {"bids": [(ticker.get("bid_price"), ticker.get("bid_qty"))],
-                                "asks": [(ticker.get("ask_price"), ticker.get("ask_qty"))],
-                                "read_at": now}
-                    if not hasattr(self, "_depth_cache"):
-                        self._depth_cache = {}
-                    self._depth_cache[symbol] = (now, book)
+                        getter = getattr(self.exchange, "get_order_book_depth", None)
+                        if callable(getter):
+                            book = getter(symbol, limit=5)
+                        else:
+                            ticker = self.exchange.get_book_ticker(symbol)
+                            book = {"bids": [(ticker.get("bid_price"), ticker.get("bid_qty"))],
+                                    "asks": [(ticker.get("ask_price"), ticker.get("ask_qty"))],
+                                    "read_at": now}
+                        if not hasattr(self, "_depth_cache"):
+                            self._depth_cache = {}
+                        self._depth_cache[symbol] = (now, book)
                 bid = _d(book.get("bids", [(0, 0)])[0][0]) if book.get("bids") else Decimal(0)
                 best_gross = quantity * bid if bid > 0 else None
                 executable = executable_value(quantity, book.get("bids"), 0.1, haircut,

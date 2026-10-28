@@ -763,6 +763,71 @@ def test_core_valuation_serializes_operator_and_watchdog_reads(tmp_path):
     assert [result["status"] for result in results] == ["KNOWN", "KNOWN"]
 
 
+def test_valuation_leaf_lock_avoids_operator_watchdog_deadlock_50_times(tmp_path):
+    import random
+    import time
+
+    db, core = _core(tmp_path)
+    ops_lock = threading.RLock()
+    core.monitor = SimpleNamespace(ops_lock=ops_lock)
+    goal = core.create_goal(100, 10)
+    core.start_goal(goal["id"])
+    # Valoración = capital inicial; objetivo cero en este fixture fuerza
+    # _target_met y la adquisición de ops_lock desde el watchdog.
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"])
+                     .values(target_usdt=0, status="ACTIVE"))
+
+    randomizer = random.Random(41017)
+    original_target_met = core._target_met
+    for _ in range(50):
+        entered_ops = threading.Event()
+        watchdog_waiting_for_ops = threading.Event()
+        errors = []
+
+        def target_met_with_signal(current_goal):
+            watchdog_waiting_for_ops.set()
+            return original_target_met(current_goal)
+
+        core._target_met = target_met_with_signal
+
+        def operator_review():
+            try:
+                with ops_lock:
+                    entered_ops.set()
+                    if not watchdog_waiting_for_ops.wait(4):
+                        raise AssertionError("run_once no llegó al cierre por objetivo")
+                    time.sleep(randomizer.uniform(0.0001, 0.003))
+                    assert core.valuation(goal["id"])["status"] == "KNOWN"
+            except BaseException as exc:
+                errors.append(exc)
+
+        def watchdog():
+            try:
+                if not entered_ops.wait(4):
+                    raise AssertionError("la revisión no tomó ops_lock")
+                time.sleep(randomizer.uniform(0.0001, 0.003))
+                core.run_once()
+            except BaseException as exc:
+                errors.append(exc)
+
+        review_thread = threading.Thread(target=operator_review, daemon=True)
+        watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+        review_thread.start()
+        assert entered_ops.wait(1)
+        watchdog_thread.start()
+        review_thread.join(5)
+        watchdog_thread.join(5)
+        assert not review_thread.is_alive(), "la revisión quedó bloqueada más de 5 s"
+        assert not watchdog_thread.is_alive(), "MetaCore.run_once quedó bloqueado más de 5 s"
+        assert not errors, errors
+        with db.engine.begin() as conn:
+            conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"])
+                         .values(status="ACTIVE"))
+
+    core._target_met = original_target_met
+
+
 def test_meta_core_watchdog_uses_fixed_utc_minute_boundary(tmp_path):
     class Scheduler:
         running = False

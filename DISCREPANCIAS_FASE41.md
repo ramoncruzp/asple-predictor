@@ -144,4 +144,10 @@ Precálculo no tiene evento durable; timestamp de caché no se presenta como equ
 
 ## Seguimiento C17 — valoración simultánea
 
-La inspección de código confirmó que la hipótesis de concurrencia era posible: el monitor invoca la valoración dentro de `MetaCore._lock`, mientras la revisión Meta llamaba `core.valuation` sin adquirirlo. El cliente y la caché por símbolo son compartidos. La corrección serializa la valoración con ese mismo `RLock` y fija horarios cron UTC en segundos 0/20. No se probó contra S1 ni se atribuye como causa demostrada de los eventos históricos; la prueba local cubre una carrera sintética y la serialización. Queda como límite que otros consumidores del cliente Testnet fuera de estos dos caminos no toman `MetaCore._lock`.
+C17 confirmó una posibilidad de concurrencia entre el watchdog y la revisión, no la causa histórica demostrada en S1. La primera solución serializó `valuation` con `MetaCore._lock`; C17b la reemplaza porque invertía el orden frente a `ops_lock`. La solución vigente usa un candado hoja dedicado a libro/caché. No se probó contra S1; consumidores externos de Testnet quedan fuera del alcance local.
+
+## Seguimiento C17b — deadlock de valoración corregido
+
+La prueba local de 50 entrecruzamientos no reproduce el deadlock tras el cambio: la revisión no pide `core._lock` desde `ops_lock`; solo usa el candado hoja, que nunca pide candados superiores. El watchdog mantiene su ruta existente `core._lock → ops_lock` al cerrar, de modo que la convención para nuevas rutas debe evitar cualquier adquisición `ops_lock → core._lock`. Esto documenta una excepción real a la jerarquía recomendada `ops_lock → core._lock → _depth_read_lock`; no se modificó el comportamiento del cierre ni se cambió la decisión del operador.
+
+No se alteraron los motivos por moneda, el reintento único de 10 s, el cron (:00 / :20) ni los resultados normales. Se ejecutaron únicamente `tests/test_meta_core.py` y `tests/test_meta_operator.py` offline: 116 pasadas, 4 avisos, 0 fallos. Sin S1, Testnet, red, `.env` ni BD real.
