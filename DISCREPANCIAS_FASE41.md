@@ -155,3 +155,9 @@ No se alteraron los motivos por moneda, el reintento único de 10 s, el cron (:0
 ## Seguimiento C17c — vigencia por edad del libro
 
 La causa descrita por Ramón concuerda con el contrato local: `executable_value` rechaza un `read_at` de más de 60 s, mientras que el antiguo TTL de caché se medía desde el almacenamiento y permitía llegar al mismo borde. Se fija una ventana conservadora de 20 s medida desde `read_at`; no se cambia el umbral de 60 s de valoración. Las pruebas sintéticas pasan para 59,9 s (refresh) y 10 s (reuse). No se reproduce el incidente contra S1 ni se cambia ninguna decisión del operador.
+
+
+## Fase 41-G1g1
+
+- La prueba solicitaba precio 0,0035, rango ?1 % y ocho niveles, pero esa geometr?a viola el m?nimo de separaci?n de celdas del motor (0,30 % por celda). Se us? ?2 % para reproducir el tick gen?rico repetido y mantener v?lida la geometr?a con tick 0,000001. No cambia producci?n.
+- No se cont? cu?ntas etiquetas existentes requieren rec?lculo: hacerlo exigir?a leer la BD real. Se documenta esa limitaci?n. En este checkout no existe un comando de re-etiquetado con `--dry-run`; no se propone ejecutar ni inventar uno. Antes de cualquier re-etiquetado en S1 habr? que a?adir primero un modo de previsualizaci?n que no escriba datos.

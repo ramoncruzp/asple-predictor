@@ -457,3 +457,14 @@ La prueba nueva fuerza el entrecruzamiento descrito: hilo A conserva `ops_lock` 
 La causa raíz informada de C17 era la diferencia entre la edad de la entrada cacheada y la edad real del libro: `executable_value` conserva su tope de 60 s, pero el caché podía reutilizar un libro casi en ese mismo límite. Ahora `DEPTH_CACHE_TTL_S = 20` y la reutilización se decide con `now - book.read_at`; `cached[0]` ya no determina vigencia. Si falta `read_at`, es futuro o tiene 20 s o más, se vuelve a leer. El límite de valoración `max_age_s=60`, el candado hoja, el reintento y los horarios quedan iguales.
 
 Pruebas: libro con `read_at` de 59,9 s se consulta de nuevo y devuelve KNOWN; libro de 10 s se reutiliza y devuelve KNOWN. Comando dirigido: `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-c17c-20261027-194200"`: **118 passed, 4 warnings, 0 failed; 18,87 s**.
+
+
+### Fase 41-G1g1 ? filtros reales y aislamiento de muestras
+
+`grid/meta_learning.py:628` acepta ahora `filters_by_symbol` y lo propaga a `simulate_piece_curve`; `grid/meta_operator.py:2175` obtiene los filtros mediante `_symbol_filters` y los entrega a reconstrucci?n, rec?lculo de bases y etiquetado diario (`grid/meta_operator.py:2309`). Si no est?n disponibles, queda registrado el fallback al filtro gen?rico y su s?mbolo.
+
+La geometr?a inv?lida se guarda como etiqueta terminal `invalid_geometry`, con s?mbolo, low, high, niveles, tick usado y error (`grid/meta_learning.py:680`, `grid/meta_operator.py:2155`). El entrenamiento omite esas muestras (`grid/meta_operator.py:2252`). Cada muestra del ciclo diario est? protegida individualmente; el fallo incrementa `samples_failed`, guarda hasta 20 detalles y el bucle contin?a (`grid/meta_operator.py:2512`).
+
+Pruebas: `tests/test_meta_learning.py` y `tests/test_meta_operator.py`, comando `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py tests/test_meta_operator.py -q --tb=short --basetemp "$env:TEMP\asple-f41-g1g1-20261028-091000"`: **112 passed, 4 warnings, 0 failed; 21,97 s**. Una corrida anterior tuvo 1 fallo de fixture al asumir una muestra ?nica; el selector qued? limitado por `sample_key` y la corrida final pas?. La regresi?n fijada a a25818b conserva decisi?n y probabilidad. Sin S1, Testnet, red, `.env` ni BD real.
+
+El conteo de etiquetas hist?ricas cuyo s?mbolo tiene tick distinto de 0,0001 no se puede obtener sin consultar la BD real, expresamente excluida. No se afirma que haga falta re-etiquetar antes de un dry-run de S1.

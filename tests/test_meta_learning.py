@@ -133,7 +133,71 @@ def test_synthetic_forward_replay_labels_known_bot_sale_at_72h():
     assert result["20d"]["status"] == "immature"
 
 
+def test_low_price_learning_grid_uses_symbol_tick_instead_of_generic_tick():
+    from data.exchange_filters import SymbolFilters
+    step = 300
+    timestamps = np.arange(0, 72 * 3600 + step, step, dtype=np.int64)
+    prices = np.full(len(timestamps), .0035)
+    candles = CandleData(timestamp=timestamps, open=prices.copy(), high=prices + .000002,
+        low=prices - .000002, close=prices.copy(), gaps=0)
+    params = {"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 1000,
+        "target_usdt": 10, "max_loss_pct": 10,
+        "pieces": [{"symbol": "LOWUSDT", "piece_type": "grid", "strategy": "simple",
+            "capital_usdt": 1000, "n_levels": 8, "floor": .00343, "ceiling": .00357,
+            "mid_at_plan": .0035}]}
+    filters = SymbolFilters.from_symbol_info({"filters": [
+        {"filterType": "PRICE_FILTER", "minPrice": ".000001", "maxPrice": "1000",
+         "tickSize": ".000001"},
+        {"filterType": "LOT_SIZE", "minQty": ".000001", "maxQty": "1000000000",
+         "stepSize": ".000001"},
+        {"filterType": "MIN_NOTIONAL", "minNotional": "5", "applyToMarket": True}]})
+
+    generic = replay_alternative_labels({"LOWUSDT": candles}, start_ts=0,
+        parameters=params, include_horizons=("72h",))
+    actual = replay_alternative_labels({"LOWUSDT": candles}, start_ts=0,
+        parameters=params, include_horizons=("72h",), filters_by_symbol={"LOWUSDT": filters})
+
+    assert generic["72h"]["status"] == "invalid_geometry"
+    assert generic["72h"]["reason"]["tick_used"] == "0.0001"
+    assert actual["72h"]["status"] == "labeled"
+
+
+def test_learning_invalid_geometry_is_terminal_and_has_diagnostics():
+    step = 300
+    timestamps = np.arange(0, 72 * 3600 + step, step, dtype=np.int64)
+    prices = np.full(len(timestamps), 100.0)
+    candles = _candles(timestamps, closes=prices)
+    result = replay_alternative_labels({"XRPUSDT": candles}, start_ts=0,
+        parameters={"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 100,
+            "target_usdt": 10, "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
+                "strategy": "simple", "capital_usdt": 100, "n_levels": 4,
+                "floor": 100.1, "ceiling": 101, "mid_at_plan": 100}]},
+        include_horizons=("72h",))
+    assert result["72h"]["status"] == "invalid_geometry"
+    assert result["72h"]["reason"] == {"symbol": "XRPUSDT", "low": 100.1,
+        "high": 101.0, "n": 4, "tick_used": "0.0001",
+        "error": "GridConfigError: exchange mid price must be strictly inside the grid range"}
+
+
+def test_normal_learning_label_is_unchanged_with_explicit_generic_filters():
+    from grid.sim.runner import FILTERS
+    step = 300
+    timestamps = np.arange(0, 72 * 3600 + step, step, dtype=np.int64)
+    prices = np.full(len(timestamps), 100.0)
+    candles = _candles(timestamps, closes=prices)
+    params = {"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 100,
+        "target_usdt": 10, "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
+            "strategy": "simple", "capital_usdt": 100, "n_levels": 8,
+            "floor": 96, "ceiling": 104, "mid_at_plan": 100}]}
+    before = replay_alternative_labels({"XRPUSDT": candles}, start_ts=0,
+        parameters=params, include_horizons=("72h",))
+    after = replay_alternative_labels({"XRPUSDT": candles}, start_ts=0,
+        parameters=params, include_horizons=("72h",), filters_by_symbol={"XRPUSDT": FILTERS})
+    assert after == before
+
+
 def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_calls(tmp_path):
+    from data.exchange_filters import SymbolFilters
     db = DBManager(f"sqlite:///{tmp_path / 'learning-job.sqlite'}")
     settings = SimpleNamespace(meta_mode_enabled=True)
     operator = MetaOperator(SimpleNamespace(monitor=None), db, None, None, settings)
@@ -147,6 +211,12 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
                          close=closes.copy(), gaps=0)
     operator._learning_candles = lambda _symbol: candles
     operator._learning_history_rows = lambda _symbol: ([], [])
+    operator._symbol_filters = lambda _symbol: SymbolFilters.from_symbol_info({"filters": [
+        {"filterType": "PRICE_FILTER", "minPrice": ".000001", "maxPrice": "100000",
+         "tickSize": ".0001"},
+        {"filterType": "LOT_SIZE", "minQty": ".000001", "maxQty": "1000000000",
+         "stepSize": ".000001"},
+        {"filterType": "MIN_NOTIONAL", "minNotional": "5", "applyToMarket": True}]})
     params = {"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 100,
         "target_usdt": 10, "max_loss_pct": 10,
         "pieces": [{"symbol": "XRPUSDT", "piece_type": "individual_bot_grid",
@@ -160,20 +230,40 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
             source_kind="historical_reconstructed", base_probability=.5,
             parameters_json=json.dumps(params), signals_json="{}", provenance_json="{}",
             created_at=datetime.now(timezone.utc)))
+        invalid_params = {**params, "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
+            "strategy": "simple", "capital_usdt": 100, "n_levels": 4,
+            "floor": 100.1, "ceiling": 101, "mid_at_plan": 100}]}
+        conn.execute(db.meta_learning_samples.insert().values(sample_key="job-invalid-sample",
+            meta_id=None, decision_id="job-decision-invalid", alternative_id="job-alt-invalid",
+            symbol="XRPUSDT", profile="RAPIDO",
+            sample_at=datetime.fromtimestamp(start_s, timezone.utc),
+            source_kind="historical_reconstructed", base_probability=.5,
+            base_method_version="rolling_7d_v3_equity", recalculate_base=False,
+            parameters_json=json.dumps(invalid_params), signals_json="{}", provenance_json="{}",
+            created_at=datetime.now(timezone.utc)))
 
     result = operator.run_learning_daily()
     assert result["status"] == "completed"
     assert result["labels_72h"] == 1
+    assert result["samples_failed"] == 0
+    assert result["labels_invalid_geometry"] == 1
     assert result["ops_lock"] is False
     assert "label_simulation_s" in result["timings_s"]
     with db.engine.connect() as conn:
-        stored = conn.execute(select(db.meta_learning_labels)).mappings().one()
+        stored = conn.execute(select(db.meta_learning_labels)).mappings().all()
         run = conn.execute(select(db.meta_learning_runs)).mappings().one()
-    assert stored["horizon"] == "72h"
-    assert json.loads(stored["label_json"])["reached"] is True
+    assert len(stored) == 2 and {row["horizon"] for row in stored} == {"72h"}
+    valid_label = next(json.loads(row["label_json"]) for row in stored
+        if "status" not in json.loads(row["label_json"]))
+    invalid_label = next(json.loads(row["label_json"]) for row in stored
+        if json.loads(row["label_json"]).get("status") == "invalid_geometry")
+    assert valid_label["reached"] is True
+    assert invalid_label["reason"]["symbol"] == "XRPUSDT"
     assert run["status"] == "completed"
     with db.engine.connect() as conn:
-        sample = conn.execute(select(db.meta_learning_samples)).mappings().one()
+        sample = conn.execute(select(db.meta_learning_samples).where(
+            db.meta_learning_samples.c.sample_key == "job-sample"
+        )).mappings().one()
         versions = conn.execute(select(db.meta_learning_weight_versions)).mappings().all()
     assert sample["base_method_version"] == "rolling_7d_v3_equity"
     assert sample["recalculate_base"] is False
@@ -187,7 +277,7 @@ def test_causal_replay_uses_seven_day_stride_and_only_windows_before_cut(monkeyp
     candles = _candles(np.arange(0, 121 * 86400 + step, step, dtype=np.int64))
     at = 100 * 86400
     seen = []
-    def fake_replay(_market, *, start_ts, parameters, include_horizons):
+    def fake_replay(_market, *, start_ts, parameters, include_horizons, filters_by_symbol=None):
         seen.append(start_ts)
         return {"20d": {"status": "labeled", "reached": start_ts % (14 * 86400) == 0}}
     monkeypatch.setattr(learning, "replay_alternative_labels", fake_replay)
@@ -243,7 +333,7 @@ def test_replay_window_cache_is_shared_without_changing_result(monkeypatch):
     step = 300
     candles = _candles(np.arange(0, 160 * 86400 + step, step, dtype=np.int64))
     calls = []
-    def fake_replay(_market, *, start_ts, parameters, include_horizons):
+    def fake_replay(_market, *, start_ts, parameters, include_horizons, filters_by_symbol=None):
         calls.append(start_ts)
         return {"20d": {"status": "labeled", "reached": start_ts % (14 * 86400) == 0}}
     monkeypatch.setattr(learning, "replay_alternative_labels", fake_replay)

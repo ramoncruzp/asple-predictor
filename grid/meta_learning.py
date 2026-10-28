@@ -114,7 +114,8 @@ def make_learning_label(*, horizon, net_advance_usdt, target_usdt,
 
 
 def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_days=BACKFILL_DAYS,
-                              fixed_week_anchor=False, window_cache=None, template_key=None):
+                              fixed_week_anchor=False, window_cache=None, template_key=None,
+                              filters_by_symbol=None):
     """Estima p_replay con ventanas del plazo y paso de siete días, antes del corte."""
     at_s = _utc_seconds(at)
     days = max(1, int(parameters.get("profile_days", 20)))
@@ -140,7 +141,8 @@ def causal_replay_probability(candles_by_symbol, *, at, parameters, lookback_day
             cached_count += 1
             continue
         labels = replay_alternative_labels(candles_by_symbol, start_ts=start_s,
-            parameters=parameters, include_horizons=(label_key,))
+            parameters=parameters, include_horizons=(label_key,),
+            filters_by_symbol=filters_by_symbol)
         label = labels.get(label_key, {})
         if label.get("status") == "labeled":
             outcomes.append(bool(label.get("reached")))
@@ -520,7 +522,7 @@ def causal_touch_buy_to_sell(*, at, candles, buy_price, sell_price):
 def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_by_symbol,
                                    now=None, lookback_days=BACKFILL_DAYS, existing_cuts=None,
                                    window_cache=None, max_new_cuts=None, deadline=None,
-                                   pause_callback=None):
+                                   pause_callback=None, filters_by_symbol=None):
     """Reconstruye snapshots contrafactuales; cada feature queda cortada en su fecha.
 
     La geometría sirve solo como plantilla de la alternativa. Valores de Scanner,
@@ -591,7 +593,8 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
             historical_params = {**params, "pieces": rebuilt_pieces}
             baseline = causal_replay_probability(candles_by_symbol, at=start_s,
                 parameters=historical_params, lookback_days=lookback_days,
-                fixed_week_anchor=True, window_cache=window_cache, template_key=template_id)
+                fixed_week_anchor=True, window_cache=window_cache, template_key=template_id,
+                filters_by_symbol=filters_by_symbol)
             output.append({"template_sample_key": template_id, "stable_sample_key": sample_key,
                 "profile": str(params.get("profile", "RAPIDO")).upper(),
                 "symbol": primary, "sample_at": start_s, "parameters": historical_params,
@@ -622,7 +625,8 @@ def reconstruct_historical_samples(templates, *, candles_by_symbol, source_rows_
             "simulated_windows": sum(int((row.get("provenance", {}).get("base_replay") or {}).get("simulated_windows") or 0) for row in output)}
 
 
-def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, include_horizons=None):
+def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters,
+                              include_horizons=None, filters_by_symbol=None):
     """Simula la misma cartera desde un corte y crea etiquetas 72 h y al plazo.
 
     `parameters` es la instantánea persistida en la evaluación: perfil, capital,
@@ -631,6 +635,8 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, includ
     from grid.sim.data import CandleData
     from grid.sim.meta_bot import run_meta_bot
     from grid.sim.runner import run_simulation
+    from grid.levels import GridConfigError
+    from grid.sim.runner import FILTERS as SIMULATION_FILTERS
 
     start_s = _utc_seconds(start_ts)
     profile_days = max(1, int(parameters.get("profile_days", 20)))
@@ -671,6 +677,7 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, includ
         from grid.sim.meta_portfolio import simulate_piece_curve, evaluate_portfolio
         curves = []
         required_total = proportional_target_usdt(target, profile_days, hours)
+        invalid_geometry = None
         for piece in pieces:
             capital = float(piece.get("capital_usdt", 0))
             if capital <= 0:
@@ -682,10 +689,27 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters, includ
             ceiling = float(piece.get("ceiling", piece.get("range_high", 0))) * scale
             strategy = ("individual_bot" if piece.get("piece_type") == "individual_bot_grid"
                 else piece.get("strategy", "simple"))
-            replay = simulate_piece_curve(sample, strategy=strategy,
-                n=max(1, int(piece.get("n_levels", 4))), capital=capital,
-                low=floor, high=ceiling, min_margin_pct=piece.get("margin_pct", .3))
+            n_levels = max(1, int(piece.get("n_levels", 4)))
+            filters = (filters_by_symbol or {}).get(str(piece.get("symbol") or "").upper())
+            try:
+                replay = simulate_piece_curve(sample, strategy=strategy,
+                    n=n_levels, capital=capital, low=floor, high=ceiling,
+                    filters=filters, min_margin_pct=piece.get("margin_pct", .3))
+            except (GridConfigError, ValueError) as exc:
+                if not isinstance(exc, GridConfigError) and not any(token in str(exc).lower()
+                        for token in ("n must", "low must", "valid low/high", "grid lines", "rounded grid")):
+                    raise
+                tick = getattr(filters or SIMULATION_FILTERS, "tick_size", None)
+                invalid_geometry = {"status": "invalid_geometry", "reason": {
+                    "symbol": str(piece.get("symbol") or "").upper(),
+                    "low": floor, "high": ceiling, "n": n_levels,
+                    "tick_used": str(tick) if tick is not None else None,
+                    "error": f"{type(exc).__name__}: {exc}"}}
+                break
             curves.append(replay["curve"])
+        if invalid_geometry is not None:
+            result[label_horizon] = invalid_geometry
+            continue
         outcome = evaluate_portfolio(curves, capital_initial=total_capital,
             target_usdt=required_total, max_loss_pct=parameters.get("max_loss_pct"))
         result[label_horizon] = make_learning_label(horizon=label_horizon,

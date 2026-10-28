@@ -1761,6 +1761,25 @@ def test_rotation_below_materiality_keeps_open_piece_even_with_two_review_candid
     assert engine.closed == []
 
 
+def test_g1g1_label_replay_changes_leave_a25818b_decision_and_probability_unchanged():
+    from grid.meta_operator import counterfactual_policy_decision, signal_adjusted_probability
+
+    probability = signal_adjusted_probability(.4,
+        [{"name": "scanner", "normalized": .2}], {"scanner": .25})
+    decision = counterfactual_policy_decision(
+        {"probability": .4, "median_progress_pct": 10},
+        [{"action": "reajustar", "alternative_id": "alt-1", "destination": 7,
+          "probability": .48, "median_progress_pct": 10}],
+        history=[{"material": True, "alternative_key": "alt-1"}],
+        state={"opened_at": 0, "actions_24h": 0}, now=7200)
+    assert probability == pytest.approx(.4121, abs=.0001)
+    assert decision == {"action": "reajustar", "destination": 7,
+        "alternative_key": "alt-1", "material": True, "streak": 2,
+        "probability_improvement_pp": pytest.approx(8),
+        "progress_improvement_pct": pytest.approx(0),
+        "reason": "alternativa material y persistente"}
+
+
 def test_free_cash_after_realized_loss_uses_attributable_cash_amount():
     from grid.meta_operator import MetaOperator
 

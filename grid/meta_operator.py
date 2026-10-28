@@ -2158,20 +2158,21 @@ class MetaOperator:
         inserted = 0
         with self.db.engine.begin() as conn:
             for horizon, label in labels.items():
-                if label.get("status") != "labeled":
+                if label.get("status") not in {"labeled", "invalid_geometry"}:
                     continue
                 exists = conn.execute(select(table.c.id).where(table.c.sample_id == int(sample_id),
                     table.c.horizon == str(horizon))).first()
                 if exists:
                     continue
                 payload = dict(label)
-                payload.pop("status", None)
+                if payload.get("status") == "labeled":
+                    payload.pop("status", None)
                 conn.execute(table.insert().values(sample_id=int(sample_id), horizon=str(horizon),
                     label_json=json.dumps(payload, sort_keys=True), labeled_at=now))
                 inserted += 1
         return inserted
 
-    def _recalculate_learning_bases(self, samples, candles_by_symbol):
+    def _recalculate_learning_bases(self, samples, candles_by_symbol, filters_by_symbol=None):
         """Actualiza bases históricas obsoletas sin borrar ni reemplazar muestras."""
         from grid.meta_learning import causal_replay_probability, REPLAY_METHOD_VERSION
         changed = 0
@@ -2187,7 +2188,8 @@ class MetaOperator:
             if not market or any(value is None for value in market.values()):
                 continue
             at = sample["sample_at"]
-            baseline = causal_replay_probability(market, at=at, parameters=params)
+            baseline = causal_replay_probability(market, at=at, parameters=params,
+                filters_by_symbol=filters_by_symbol)
             replay_windows_new += int(baseline.get("simulated_windows") or 0)
             provenance = json.loads(sample["provenance_json"] or "{}")
             provenance["base_replay"] = baseline
@@ -2247,6 +2249,9 @@ class MetaOperator:
                     row["base_probability_smoothed"] = sample.get("base_probability_smoothed")
                     row["label"] = labels.get((int(sample["id"]), "72h"))
                     row["profile_label"] = labels.get((int(sample["id"]), f"{days}d"))
+                    if any(label and label.get("status") == "invalid_geometry"
+                           for label in (row["label"], row["profile_label"])):
+                        continue
                     if any(label and label.get("base_method_version") != REPLAY_METHOD_VERSION
                            for label in (row["label"], row["profile_label"])):
                         continue
@@ -2318,7 +2323,10 @@ class MetaOperator:
                    "weight_training_s": 0.0, "yield_s": 0.0}
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
                     "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0,
+                    "samples_failed": 0, "labels_invalid_geometry": 0, "filter_failures": 0,
                     "replay_windows_new": 0, "replay_windows_cached": 0, "cuts_processed": 0}
+        failed_samples = []
+        filter_failure_details = []
         try:
             counters["touch_bot_labels"] = self._label_touch_bot_shadows(int(started.timestamp()))
         except Exception:
@@ -2346,19 +2354,30 @@ class MetaOperator:
                 labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
                     self.db.meta_learning_labels.c.horizon)).all()
             existing = {(int(row[0]), str(row[1])) for row in labels}
-            candles_by_symbol, sources = {}, {}
+            candles_by_symbol, sources, filters_by_symbol = {}, {}, {}
             t = time.perf_counter()
+            learning_symbols = set()
             for sample in samples:
                 params = json.loads(sample["parameters_json"])
                 for piece in params.get("pieces", []):
                     symbol = str(piece.get("symbol") or "").upper()
-                    if symbol and symbol not in candles_by_symbol:
-                        try:
-                            candles_by_symbol[symbol] = self._learning_candles(symbol)
-                            sources[symbol] = self._learning_history_rows(symbol)
-                        except Exception:
-                            counters["symbols_failed"] += 1
-                            candles_by_symbol[symbol] = None
+                    if symbol:
+                        learning_symbols.add(symbol)
+            for symbol in sorted(learning_symbols):
+                try:
+                    candles_by_symbol[symbol] = self._learning_candles(symbol)
+                    sources[symbol] = self._learning_history_rows(symbol)
+                except Exception:
+                    counters["symbols_failed"] += 1
+                    candles_by_symbol[symbol] = None
+                try:
+                    filters_by_symbol[symbol] = self._symbol_filters(symbol)
+                except Exception as exc:
+                    filters_by_symbol[symbol] = None
+                    counters["filter_failures"] += 1
+                    if len(filter_failure_details) < 20:
+                        filter_failure_details.append({"symbol": symbol,
+                            "error": f"{type(exc).__name__}: {exc}"})
             timings["market_history_s"] = time.perf_counter() - t
             candle_inventory = {symbol: self._candle_inventory(candles)
                 for symbol, candles in candles_by_symbol.items() if candles is not None}
@@ -2409,7 +2428,8 @@ class MetaOperator:
                                        if value is not None},
                     source_rows_by_symbol=sources, now=datetime.now(timezone.utc), lookback_days=180,
                     existing_cuts=existing_cuts, window_cache=replay_cache,
-                    deadline=run_monotonic + budget_seconds, pause_callback=lambda: time.sleep(.01))
+                    deadline=run_monotonic + budget_seconds, pause_callback=lambda: time.sleep(.01),
+                    filters_by_symbol=filters_by_symbol)
                 reconstructed = reconstruct_result["samples"]
                 counters["replay_windows_new"] += int(reconstruct_result.get("simulated_windows") or 0)
                 counters["replay_windows_cached"] += int(reconstruct_result.get("cached_windows") or 0)
@@ -2453,37 +2473,51 @@ class MetaOperator:
                         self.db.meta_learning_labels.c.horizon)).all()
                 existing = {(int(row[0]), str(row[1])) for row in labels}
             t = time.perf_counter()
-            counters["bases_recalculated"] = self._recalculate_learning_bases(samples, candles_by_symbol)
+            counters["bases_recalculated"] = self._recalculate_learning_bases(
+                samples, candles_by_symbol, filters_by_symbol)
             counters["replay_windows_new"] += int(getattr(self, "_last_base_recalculation_windows", 0))
             timings["base_recalculation_s"] = time.perf_counter() - t
             with self.db.engine.connect() as conn:
                 samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
             for sample in samples:
-                params = json.loads(sample["parameters_json"])
-                profile_horizon = f"{int(params.get('profile_days', 20))}d"
-                needed = [horizon for horizon in ("72h", profile_horizon)
-                          if (int(sample["id"]), horizon) not in existing]
-                if not needed:
-                    continue
-                symbols = {str(piece.get("symbol") or "").upper() for piece in params.get("pieces", [])}
-                market = {symbol: candles_by_symbol.get(symbol) for symbol in symbols}
-                if any(value is None for value in market.values()):
-                    counters["samples_immature"] += 1
-                    continue
-                start_s = int(sample["sample_at"].replace(tzinfo=timezone.utc).timestamp()
-                    if sample["sample_at"].tzinfo is None else sample["sample_at"].timestamp())
-                t = time.perf_counter()
-                outcomes = replay_alternative_labels(market, start_ts=start_s,
-                    parameters=params, include_horizons=needed)
-                timings["label_simulation_s"] += time.perf_counter() - t
-                fresh = {horizon: result for horizon, result in outcomes.items()
-                         if (int(sample["id"]), horizon) not in existing}
-                t = time.perf_counter()
-                count = self._persist_learning_labels(sample["id"], fresh, datetime.now(timezone.utc))
-                timings["persistence_s"] += time.perf_counter() - t
-                counters["labels_72h"] += int("72h" in fresh and fresh["72h"].get("status") == "labeled")
-                counters["labels_profile"] += sum(1 for horizon, label in fresh.items()
-                    if horizon != "72h" and label.get("status") == "labeled")
+                sample_id = int(sample["id"])
+                symbol = str(sample.get("symbol") or "").upper()
+                try:
+                    params = json.loads(sample["parameters_json"])
+                    profile_horizon = f"{int(params.get('profile_days', 20))}d"
+                    needed = [horizon for horizon in ("72h", profile_horizon)
+                              if (sample_id, horizon) not in existing]
+                    if not needed:
+                        continue
+                    symbols = {str(piece.get("symbol") or "").upper() for piece in params.get("pieces", [])}
+                    market = {piece_symbol: candles_by_symbol.get(piece_symbol) for piece_symbol in symbols}
+                    if any(value is None for value in market.values()):
+                        counters["samples_immature"] += 1
+                        continue
+                    start_s = int(sample["sample_at"].replace(tzinfo=timezone.utc).timestamp()
+                        if sample["sample_at"].tzinfo is None else sample["sample_at"].timestamp())
+                    t = time.perf_counter()
+                    outcomes = replay_alternative_labels(market, start_ts=start_s,
+                        parameters=params, include_horizons=needed,
+                        filters_by_symbol=filters_by_symbol)
+                    timings["label_simulation_s"] += time.perf_counter() - t
+                    fresh = {horizon: result for horizon, result in outcomes.items()
+                             if (sample_id, horizon) not in existing}
+                    t = time.perf_counter()
+                    self._persist_learning_labels(sample_id, fresh, datetime.now(timezone.utc))
+                    timings["persistence_s"] += time.perf_counter() - t
+                    counters["labels_72h"] += int("72h" in fresh and fresh["72h"].get("status") == "labeled")
+                    counters["labels_profile"] += sum(1 for horizon, label in fresh.items()
+                        if horizon != "72h" and label.get("status") == "labeled")
+                    counters["labels_invalid_geometry"] += sum(1 for label in fresh.values()
+                        if label.get("status") == "invalid_geometry")
+                except Exception as exc:
+                    counters["samples_failed"] += 1
+                    if len(failed_samples) < 20:
+                        failed_samples.append({"sample_id": sample_id, "symbol": symbol,
+                            "error": f"{type(exc).__name__}: {exc}"})
+                    logging.getLogger(__name__).exception(
+                        "Falló etiqueta de aprendizaje Meta sample_id=%s símbolo=%s", sample_id, symbol)
             t = time.perf_counter()
             counters["weight_versions_saved"] = self._train_learning_weights(samples)
             timings["weight_training_s"] = time.perf_counter() - t
@@ -2500,6 +2534,7 @@ class MetaOperator:
                 except Exception:
                     logging.getLogger(__name__).exception("No se pudo comparar decisiones aprendidas Meta")
             summary = {**counters, "pending_template_ids": pending_ids,
+                "failed_samples": failed_samples, "filter_failure_details": filter_failure_details,
                 "candle_inventory": candle_inventory,
                 "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
                 "limits": {"max_templates": max_templates, "time_budget_minutes": budget_seconds / 60},
@@ -2515,7 +2550,9 @@ class MetaOperator:
                         summary_json=json.dumps(summary, sort_keys=True)))
             return {"status": "completed", "run_id": run_id, **summary}
         except Exception as exc:
-            summary = {**counters, "timings_s": {key: round(value, 3) for key, value in timings.items()},
+            summary = {**counters, "failed_samples": failed_samples,
+                       "filter_failure_details": filter_failure_details,
+                       "timings_s": {key: round(value, 3) for key, value in timings.items()},
                        "candle_inventory": locals().get("candle_inventory", {}),
                        "candle_inventory_at": datetime.now(timezone.utc).isoformat(),
                        "error": str(exc)}

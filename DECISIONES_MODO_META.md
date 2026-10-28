@@ -354,3 +354,6 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - `use_centered_signals` y `use_touch_bots` se guardan por perfil en falso. El centrado Scanner/Advisor y la propuesta de bot se calculan y guardan como sombra; ninguna de las dos opciones modifica la probabilidad, el ranking ni las acciones reales.
 - Las etiquetas del bot usan velas OHLC y exigen que la venta aparezca en una vela posterior a la compra.
 - Pendiente manual: ejecutar los estudios públicos/calibración en S1, inspeccionar métricas y decidir si se prepara otra fase.
+
+
+| 41-G1g1 | Etiquetado de aprendizaje con filtros por s?mbolo y aislamiento de muestras inv?lidas | Implementado localmente; 112 pruebas dirigidas pasaron. La muestra inv?lida se conserva como `invalid_geometry`, no se entrena y no se reintenta. Sin medici?n en BD real |
