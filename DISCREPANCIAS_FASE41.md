@@ -189,35 +189,38 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-C25a
 
-- La probabilidad usa suma de las colas normales en distancia logar?tmica, truncada a [0, 1], como en el modelo de dos barreras existente. La implementaci?n se conserva aislada y a?n no se conecta a ninguna decisi?n.
+- La probabilidad usa suma de colas normales en distancia logarítmica, truncada a [0, 1], como en el modelo de dos barreras existente. La implementación queda aislada y no se conecta a una decisión mientras el interruptor siga apagado.
 
 ## Fase 41-C25b
 
-- La configuraci?n permite encender la se?al por perfil y el operador la aplica cuando est? activa. El valor por defecto permanece apagado; el c?lculo alternativo en sombra no sustituye la probabilidad actual mientras siga apagado. La vista del estado se a?adi? a Laboratorio e Inteligencia.
-- La UI guarda el interruptor v?a la API gen?rica de ajustes por perfil y no a?ade un evento de auditor?a dedicado. La API conserva control de acceso; no se solicit? un flujo de confirmaci?n adicional para esta opci?n.
+- La configuración permite activar la señal por perfil, pero el valor predeterminado permanece apagado. Con el interruptor apagado se conservan probabilidad y decisión actuales. La interfaz usa la API genérica de ajustes por perfil; no se añadió auditoría o confirmación adicional.
 
 ## Fase 41-C25c
 
-- El replay de etiqueta no persist?a una bandera de salida de rango. Se agreg? una m?trica por pieza derivada de high/low futuros para el horizonte etiquetado. La medici?n usa cruce estricto del l?mite y no usa cierre ni el precio del monitor. Las comparaciones de probabilidad requieren que las muestras tengan los dos campos nuevos guardados; las filas viejas o sin v2 no se imputan.
-- Los terciles se forman por alternativas con se?al v2; cuando una alternativa contiene varias piezas, cada salida conocida cuenta como una observaci?n en el tercil de esa alternativa.
+- El replay guarda una métrica por pieza derivada de high/low futuros. Usa cruce estricto del límite; filas viejas sin señales/probabilidades v2 no se imputan ni entran en la comparación.
+- Los terciles se forman por alternativas; cuando incluyen varias piezas, cada salida conocida cuenta como observación en el tercil de su alternativa.
 
 ## Fase 41-C25d
 
-- La poda ocurre al iniciar y terminar el plan cuando no hay otro plan activo. Si coinciden planes en varios hilos, se aplaza hasta que finaliza el ?ltimo; durante la ejecuci?n las inserciones pueden superar temporalmente 500. El siguiente l?mite de frontera aplica la poda LRU.
-- El tama?o reportado es estimado mediante muestreo de hasta 25 entradas por cach?. Las velas sint?ticas de la medici?n tienen 2.000 marcas, no el historial real completo de 180 d?as; no se infiere el uso de memoria de S1.
+- La poda ocurre al iniciar y terminar planes, y se aplaza si hay otro plan en curso. Las inserciones pueden superar temporalmente 500 hasta la siguiente frontera segura.
+- El tamaño usa muestreo de hasta 25 entradas por caché y velas sintéticas de 2.000 marcas; no estima memoria real de S1 ni equivale a 180 días de historial.
 
 ## Fase 41-C25e
 
-- Las filas durable de replay m?tricas que ya existan no se borran en esta fase. No sirven a consumidores que necesitan curvas; se cuentan como descartadas y se recalculan. La retenci?n existente las eliminar? al vencer su periodo. No se cambian m?tricas ni decisiones.
+- Las filas durables de replay métricas existentes no se borran. Se descartan para consumidores que necesitan curvas, se cuentan aparte y se recalculan; la retención las retirará al vencer. No cambian métricas ni decisiones.
 
 ## Fase 41-C25f
 
-- No se encontró un tick de precio persistido en los campos de muestra consultados (`parameters_json` y `provenance_json`). La vista previa los informa como desconocidos, salvo que el operador ejecute explícitamente `--exchange-info`; esa opción puede requerir red y no se ejecutó durante esta fase.
-- El corte para “anterior a G1g1” usa `meta_learning_labels.labeled_at` comparado con la fecha del commit G1g1, no la fecha de la alternativa. El marcado conserva la etiqueta previa anidada en `superseded_previous_label` para auditoría; el job diario la reemplaza solo tras generar una etiqueta nueva.
-- La vista previa no se ejecutó contra una BD real y no se presentan cantidades reales por símbolo.
+- No se encontró un tick persistido en los campos de muestra consultados (`parameters_json` y `provenance_json`). La vista previa informa desconocido salvo que el operador solicite `--exchange-info`; esa opción puede usar red y no se ejecutó aquí.
+- El corte usa `meta_learning_labels.labeled_at` comparado con el commit G1g1. Se conserva cada etiqueta anterior dentro de `superseded_previous_label`; el job diario la reemplaza solo después de generar una nueva.
+- No se leyó una BD real ni se presentan conteos por moneda de S1.
 
 ## Fase 41-C25h
 
 - Es una aproximación explícita: la simulación por tramos liquida y reabre, no preserva las órdenes/celdas del motor entre tramos ni modela rotaciones a monedas distintas. Las cifras solo sirven para medir la regla simplificada solicitada.
 - La comisión de venta se estima en 0,1 % al cierre y las velas se muestrean a intervalos de 15 minutos. Filtros sintéticos/genéricos aplican a CSV; para Binance se usan los filtros del runner existente. El modo CSV es apropiado para verificar la mecánica sin red.
 - No se ejecutaron los estudios Binance ni se inspeccionaron resultados de S1.
+
+## Fase 41-C25g
+
+- Se documenta que la señal v2 sigue apagada, que la lectura de activación requiere evidencia madura y que los comandos de medición pública/vista previa se reservan para S1. No se ejecutaron contra S1 ni contra datos reales.

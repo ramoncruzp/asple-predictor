@@ -532,41 +532,41 @@ No hay comando de re-etiquetado con `--dry-run` en este checkout. Las etiquetas 
 | G1g5 | `scripts/verificar_s1_meta.py:40-245` | `tests/test_meta_s1_diagnostic.py` | 1 passed; salida por defecto menor de 150 líneas | No |
 | G1g6 | `REPORTE_FASE41.md`, `DISCREPANCIAS_FASE41.md`, `DECISIONES_MODO_META.md` | Control Python UTF-8/BOM/interrogación incrustada | 0 fallos | No |
 
-### Fase 41-C25a ? probabilidad de ruptura Meta v2
+### Fase 41-C25a — Probabilidad de ruptura Meta v2
 
-`grid/meta_learning.py:22-49` a?ade `meta_break_prob_v2`, separada de `grid.policy.break_prob`: horizonte 72 h, barreras en los l?mites del rango, escala de volatilidad 1,0 y versi?n de m?todo 1. Precio fuera del rango devuelve 1; volatilidad cero dentro devuelve 0. No cambia el c?lculo ni la decisi?n actuales.
+`grid/meta_learning.py:22-49` añade `meta_break_prob_v2`, separada de `grid.policy.break_prob`: horizonte 72 h, barreras en los límites del rango, escala de volatilidad 1,0 y versión de método 1. Precio fuera del rango devuelve 1; volatilidad cero dentro devuelve 0. No cambia el cálculo ni la decisión actuales.
 
-Prueba: `tests/test_meta_learning.py` ? `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py -q --tb=short --basetemp "$env:TEMP\asple-f41-c25a-20261028-120001"`: **29 passed**.
+Prueba: `tests/test_meta_learning.py` → **29 passed**.
 
-### Fase 41-C25b ? ruptura v2 en sombra y ajuste por perfil
+### Fase 41-C25b — Ruptura v2 en sombra y ajuste por perfil
 
-`grid/meta_operator.py:2980-3008,3078-3090` guarda `break_prob_v2` y recalcula `probability_adjusted_break_v2` con las mismas se?ales y pesos, sustituyendo ?nicamente `break_prob`. Por defecto `use_break_prob_v2=False` en ambos perfiles (`grid/meta.py:28,57`); la configuraci?n por API usa `PUT /api/metas/config/profile` (`api/routes/metas.py:109-111`) y Laboratorio permite cambiarlo (`frontend/lab.js:11-42`). La alternativa y su procedencia se guardan en muestras live (`grid/meta_operator.py:2088-2103`). Inteligencia informa el estado (`api/routes/intelligence.py:443-447`).
+`grid/meta_operator.py:2980-3008,3078-3090` guarda `break_prob_v2` y recalcula `probability_adjusted_break_v2` con las mismas señales y pesos, sustituyendo únicamente `break_prob`. Por defecto `use_break_prob_v2=False` en ambos perfiles (`grid/meta.py:28,57`); la configuración por API usa `PUT /api/metas/config/profile` (`api/routes/metas.py:109-111`) y Laboratorio permite cambiarlo (`frontend/lab.js:11-42`). La alternativa y su procedencia se guardan en muestras live (`grid/meta_operator.py:2088-2103`).
 
-Medici?n de f?rmula: 100.000 evaluaciones sint?ticas en 0,0573 s (0,57 microsegundos por llamada). Pruebas: `tests/test_meta_operator.py tests/test_meta_core.py tests/test_intelligence_api.py tests/ui/test_laboratorio.py` ? 129 passed, 7 warnings; `tests/ui/test_laboratorio.py` tras ampliar la prueba del interruptor ? 4 passed, 2 warnings. `node --check frontend/lab.js` pas?.
+Medición de fórmula: 100.000 evaluaciones sintéticas en 0,0573 s (0,57 microsegundos por llamada). Pruebas dirigidas: **129 passed, 7 warnings**; UI tras ampliar la prueba del interruptor: **4 passed, 2 warnings**. `node --check frontend/lab.js` pasó.
 
-### Fase 41-C25c ? comparaci?n madura de ruptura v2
+### Fase 41-C25c — Comparación madura de ruptura v2
 
-`grid/meta_learning.py:748-770` a?ade a cada etiqueta de replay la salida del rango por pieza, comprobada con m?ximos y m?nimos estrictamente fuera del rango en velas futuras. `api/routes/intelligence.py:387-448` compara, sobre etiquetas maduras de 72 h con instant?nea v2, log-loss y Brier de probabilidad ajustada con la ruptura actual frente a la alternativa v2; tambi?n agrupa las salidas de pieza por terciles de la probabilidad v2 y devuelve intervalo de fechas y estado de muestra. Con menos de 30, la respuesta indica `sin datos suficientes`. `frontend/intelligence.js:65-70,103` presenta ambas tablas. `scripts/verificar_s1_meta.py:246-277` resume m?nimo, mediana, m?ximo, valores distintos y nulos de se?ales actuales y v2.
+`grid/meta_learning.py:748-770` añade a cada etiqueta de replay la salida del rango por pieza, comprobada con máximos y mínimos estrictamente fuera del rango en velas futuras. `api/routes/intelligence.py:387-448` compara etiquetas maduras de 72 h con instantánea v2: log-loss y Brier de probabilidad ajustada con ruptura actual frente a v2; también agrupa salidas por terciles y devuelve intervalo de fechas y estado de muestra. Con menos de 30 indica «sin datos suficientes». `frontend/intelligence.js:65-70,103` presenta las tablas. `scripts/verificar_s1_meta.py:246-277` resume mínimo, mediana, máximo, distintos y nulos de ambas señales.
 
-La etiqueta de salida usa m?ximos/m?nimos de las velas y exige cruce estricto (`< piso` o `> techo`); cuenta cada pieza del replay en el tercil de su alternativa. Pruebas: `tests/test_meta_learning.py tests/test_meta_operator.py tests/test_intelligence_api.py tests/test_meta_s1_diagnostic.py tests/ui/test_intelligence_ui.py` ? **119 passed, 5 warnings**; `node --check frontend/intelligence.js` pas?.
+La etiqueta usa máximos/mínimos futuros y cruce estricto (`< piso` o `> techo`); cuenta cada pieza del replay en el tercil de su alternativa. Pruebas dirigidas: **119 passed, 5 warnings**; `node --check frontend/intelligence.js` pasó.
 
-### Fase 41-C25d ? poda de cach?s del proceso
+### Fase 41-C25d — Poda de cachés del proceso
 
-`grid/meta_operator.py:363-481` introduce `PROCESS_CACHE_MAX_ENTRIES=500`, lectura LRU y poda por d?a UTC para an?lisis, Advisor, velas y toque; la cach? de fallos se limpia por expiraci?n de su TTL de 15 min. `_build_plan` abre/cierra una regi?n activa (`:1532`); no se poda mientras haya planes en curso. El plan incluye filas y KB estimados por cach? (`:1952`) y `scripts/verificar_s1_meta.py:160-167` los muestra desde el ?ltimo an?lisis persistido.
+`grid/meta_operator.py:363-481` introduce `PROCESS_CACHE_MAX_ENTRIES=500`, lectura LRU y poda por día UTC para análisis, Advisor, velas y toque; la caché de fallos se limpia por expiración de su TTL de 15 min. `_build_plan` abre/cierra una región activa (`:1532`); no se poda mientras haya planes en curso. El plan incluye filas y KB estimados por caché (`:1952`) y `scripts/verificar_s1_meta.py:160-167` los muestra.
 
-Medici?n sint?tica: 3 d?as ? 15 alternativas por d?a. Los valores representan 11 curvas comprimidas de 8 KB por campo, recomendaciones peque?as, velas con 2.000 marcas y res?menes de toque. Antes de podar: an?lisis 45 filas/586,76 KB; Advisor 45/49,04 KB; velas 45/7.082,31 KB; fallos 15/3,63 KB; toque 45/36,17 KB. Despu?s de pasar al tercer d?a: an?lisis 15/195,59 KB; Advisor 15/16,35 KB; velas 15/2.360,77 KB; fallos 15/3,63 KB; toque 15/12,06 KB. Son estimaciones del fixture, no tama?os medidos en S1.
+Medición sintética: 3 días × 15 alternativas por día. Antes de podar: análisis 45 filas/586,76 KB; Advisor 45/49,04 KB; velas 45/7.082,31 KB; fallos 15/3,63 KB; toque 45/36,17 KB. Tras podar al tercer día: análisis 15/195,59 KB; Advisor 15/16,35 KB; velas 15/2.360,77 KB; fallos 15/3,63 KB; toque 15/12,06 KB. Son estimaciones del fixture, no tamaños medidos en S1.
 
-Pruebas: `tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py` ? **88 passed, 4 warnings**. Se cubrieron poda diaria, LRU, no podar durante un plan, estad?sticas guardadas y probabilidad id?ntica tras retirar cach? obsoleta.
+Pruebas dirigidas: **88 passed, 4 warnings**. Se cubrieron poda diaria, LRU, no podar durante el plan, estadísticas guardadas y probabilidad idéntica tras retirar caché obsoleta.
 
-### Fase 41-C25e ? cach? durable de replay descartada
+### Fase 41-C25e — Caché durable de replay descartada
 
-`grid/meta_operator.py:1052-1054` deja de escribir entradas durables de `replay` sin curvas. En lectura, solo suma acierto cuando el candidato conserva todas las curvas y su formato es vigente; las filas m?tricas antiguas se descartan, el contador `replay_persistent_cache_discarded` aumenta y el replay se vuelve a calcular (`grid/meta_operator.py:2854-2879`). El contador aparece en tiempos del plan (`:1940-1941`). Los aciertos de cach? de Advisor y toque siguen su ruta existente.
+`grid/meta_operator.py:1052-1054` deja de escribir entradas durables de `replay` sin curvas. En lectura, solo suma acierto cuando el candidato conserva curvas y formato vigente; las filas métricas antiguas se descartan, aumenta `replay_persistent_cache_discarded` y el replay se recalcula (`grid/meta_operator.py:2854-2879`). Los aciertos de caché de Advisor y toque siguen su ruta.
 
-Prueba: `tests/test_meta_operator.py` ? **87 passed, 4 warnings**. Comprueba que no se escriban filas replay nuevas, que una fila vieja sin curvas se descarte y no cuente como hit, y que la cach? de proceso con curvas v?lidas s? cuente como hit.
+Prueba: `tests/test_meta_operator.py` → **87 passed, 4 warnings**. Las filas durables viejas sin curvas no se cuentan como hit y las curvas válidas sí.
 
 ### Fase 41-C25f — Vista previa y marcado de etiquetas antiguas
 
-`scripts/reetiquetar_meta.py:14-160` abre la base en `mode=ro` para la vista previa (predeterminada), cuenta etiquetas con `labeled_at` anterior al corte de G1g1 y compara el tick por símbolo cuando aparece en `provenance_json` o `parameters_json`. Si falta, el estado queda como desconocido; `--exchange-info` consulta filtros públicos mediante el cliente sin credenciales. `--apply` requiere un archivo de respaldo fechado hoy o `--backup-ok`, conserva la etiqueta anterior en el JSON y solo marca `superseded`; nunca recalcula ni elimina.
+`scripts/reetiquetar_meta.py:14-160` abre la base en `mode=ro` para la vista previa (predeterminada), cuenta etiquetas con `labeled_at` anterior al corte de G1g1 y compara el tick por símbolo cuando aparece en `provenance_json` o `parameters_json`. Si falta, el estado queda desconocido; `--exchange-info` consulta filtros públicos con el cliente sin credenciales. `--apply` requiere respaldo fechado hoy o `--backup-ok`, conserva la etiqueta anterior en el JSON y solo marca `superseded`; nunca recalcula ni elimina.
 
 `grid/meta_operator.py:2319-2340,2425-2428,2525-2531,2644-2650` vuelve pendientes las etiquetas superseded para el job diario, reemplaza su contenido al recalcular y las excluye del entrenamiento. `api/routes/intelligence.py:229-233,458-464` y `grid/meta_operator.py:845-846` no las cuentan en métricas ni comparaciones.
 
@@ -581,3 +581,32 @@ La salida declara siempre la limitación: política simplificada por salida de r
 Prueba: `tests/test_estudios_meta.py` → **6 passed**. Casos: sin salida de rango activo idéntico al pasivo, efectivo continuo tras liquidación, cooldown y máximo de cuatro por 24 h, N=2 igual o posterior a N=1. Sin red ni base real.
 
 Lectura del estudio: si la probabilidad activa N=1 supera a la pasiva en al menos 2 pp sin peor drawdown, vale la pena modelar el reajuste real; si N=2 no pierde frente a N=1, conservar persistencia 2.
+
+### Fase 41-C25g — Cierre y comandos de consulta
+
+La ruptura v2 estima la probabilidad de salir del rango a 72 h con barreras en el rango (margen 0 %) y escala de volatilidad 1,0. Las 72 h ofrecen una etiqueta temprana; las etiquetas maduras a 20/45 días sirven para validación posterior. El método queda aislado de `grid.policy.break_prob`, y el peso `break_prob` permanece en 0,25. Para recomendar activación se requieren al menos 30 etiquetas maduras, mejora tanto de log-loss como de Brier frente al cálculo actual y terciles de salidas ordenados. El sistema no activa el interruptor.
+
+Comandos preparados para S1; no ejecutados desde este entorno:
+
+```bash
+cd ~/asple-predictor
+venv2/bin/python scripts/verificar_s1_meta.py --db ./asple_predictor.db --horas 24
+venv2/bin/python scripts/reetiquetar_meta.py --db ./asple_predictor.db --dry-run
+HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py replay-activo --symbols JUPUSDT,ZROUSDT,XRPUSDT --days 180 --profile RAPIDO --source binance --out ./estudios_meta/
+HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/estudios_meta.py persistencia-reajuste --valores 1,2 --symbols JUPUSDT,ZROUSDT,XRPUSDT --days 180 --profile RAPIDO --source binance --out ./estudios_meta/
+```
+
+Los dos primeros scripts abren SQLite con `mode=ro`. `reetiquetar_meta.py` queda en vista previa; `--apply` requiere respaldo del día o `--backup-ok` tras verificarlo. Los estudios públicos descargan velas y escriben resultados en `./estudios_meta/`.
+
+Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e71e71` (e), `8f51cee` (f), `f493add` (h) y este commit (g). Sin push.
+
+| Parte | Archivos principales | Verificación | Resultado | Cambia decisiones reales |
+|---|---|---|---|---|
+| C25a | `grid/meta_learning.py:22-49` | `tests/test_meta_learning.py` | 29 passed | No; cálculo aislado |
+| C25b | `grid/meta_operator.py:2980-3090`, `grid/meta.py:28,57`, API/UI | pruebas operador, core, Inteligencia y Laboratorio; `node --check frontend/lab.js` | 129 passed; UI 4 passed | No; interruptor permaneció apagado |
+| C25c | `grid/meta_learning.py:748-770`, `api/routes/intelligence.py:387-448`, UI/verificador | pruebas aprendizaje, operador, API, diagnóstico y UI; node check | 119 passed, 5 warnings | No |
+| C25d | `grid/meta_operator.py:363-481,1532,1952`, verificador | pruebas operador y diagnóstico | 88 passed, 4 warnings | No; paridad verificada |
+| C25e | `grid/meta_operator.py:1052-1054,2854-2879` | pruebas de operador | 87 passed, 4 warnings | No; caché solamente |
+| C25f | `scripts/reetiquetar_meta.py:14-160`, `grid/meta_operator.py:2319-2650`, lectores | reetiquetado, aprendizaje, core e Inteligencia | 72 passed, 2 warnings | No; marca para recálculo futuro |
+| C25h | `scripts/meta_active_study.py:1-137`, `scripts/estudios_meta.py` | `tests/test_estudios_meta.py` | 6 passed | No; estudio aislado |
+| C25g | reportes y `DECISIONES_MODO_META.md` | auditoría UTF-8/BOM/LF/interrogaciones | 0 hallazgos | No |

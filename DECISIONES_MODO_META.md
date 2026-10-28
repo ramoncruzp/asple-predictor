@@ -129,8 +129,19 @@ Los números son punto de partida y se ajustan con los resultados.
 | 41c-2d | Asignación en sombra con geometría por monto, motivos de descarte y presupuesto de 30 s | Implementada y probada offline; decisión real comparada con HEAD; sigue en sombra |
 | 41f | Medición del efecto del orden intravela entre replays 5m y 1m | Script y pruebas sintéticas; pendiente ejecutar con datos públicos en S1. Si Δ de probabilidad <2 pp, conservar simulador; si >2 pp, evaluar corrección en fase aparte |
 | 41b-13 | Retención de cachés, resumen de planes de más de 14 días y herramienta manual dry-run/apply/VACUUM | Implementada y verificada offline; 127 pruebas dirigidas verdes; pendiente ejecución manual en S1 tras respaldo y detención del servicio |
+| 41-C25a-h | Ruptura Meta v2 en sombra, poda de cachés, reetiquetado y replay activo aproximado | Implementadas y verificadas localmente; interruptor apagado; mediciones públicas y vista previa de BD pendientes en S1 |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
+
+
+## Fase 41-C25 — Ruptura v2 y estudios (2026-10-28)
+
+- La señal de ruptura v2 estima salida del rango a 72 horas con el modelo de dos barreras, margen 0 % y escala de sigma 1,0. El horizonte corto da una etiqueta temprana; las etiquetas maduras a 20/45 días sirven para validación posterior.
+- La señal y su comparación quedan en sombra. El peso de ruptura permanece en 0,25 y `use_break_prob_v2` sigue apagado por defecto.
+- Solo se recomendará activarla con al menos 30 etiquetas maduras, mejora simultánea de log-loss y Brier frente al modelo actual y terciles de riesgo ordenados. Ramón decide si la activa.
+- C25h mide una política simplificada que liquida y reabre al salir del rango. No representa el operador Meta completo ni justifica cambiar una regla de producción por sí sola.
+
+
 
 ## 9. Otras decisiones del día (2026-10-21)
 
