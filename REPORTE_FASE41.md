@@ -640,3 +640,9 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 - `grid/meta_operator.py:2540-2573` normaliza `trigger` al iniciar y lo incluye en `meta_learning_runs.summary_json` en la misma inserción que crea la corrida RUNNING. El resumen final conserva el mismo valor; el disparador programado sigue usando `scheduled` por defecto.
 - `tests/test_meta_learning.py:218-303` bloquea el worker después de insertar la fila y verifica que una corrida manual ya visible como RUNNING tenga `trigger=manual`; luego comprueba el resumen final.
 - Prueba: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a4-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_learning.py -q --basetemp $bt` — **29 passed**.
+
+## Fase 41-C26a5 — B10 usa deciles de una versión identificada
+
+- `api/routes/intelligence.py:145-149,370-395,558-561` busca desde la versión más nueva la primera con deciles `replay_only` y usa solo ese conjunto de validación. Incluye id, perfil, `source_kind` y fecha; si no hay deciles, devuelve una lista vacía y `sin deciles guardados`.
+- `frontend/intelligence.js:62-66,107` muestra el origen/versionado en B10 y no combina etiquetas de otras corridas ni orígenes.
+- Pruebas: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a5-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py -q --basetemp $bt` — **3 passed, 2 warnings**. `node --check frontend/intelligence.js` correcto.

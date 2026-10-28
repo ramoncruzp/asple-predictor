@@ -105,6 +105,16 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
             ts=datetime.now(timezone.utc).replace(tzinfo=None), event_type="META_BOT_TOUCH_SHADOW_LABEL",
             details=json.dumps({"source_event_id":bot_event_id, "horizon_hours":24,
                 "sell_after_buy":True, "expected_sell_rate":.4})))
+        calibrated_version_id = conn.execute(db.meta_learning_weight_versions.insert().values(
+            created_at=datetime(2026, 10, 20, tzinfo=timezone.utc), profile="RAPIDO",
+            source_kind="live", status="updated", weights_json="{}",
+            summary_json=json.dumps({"calibration_deciles": {"model": [], "replay_only": [
+                {"decile": 1, "predicted_mean": .31, "success_rate": .4, "samples": 12}]}})
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_learning_weight_versions.insert().values(
+            created_at=datetime(2026, 10, 21, tzinfo=timezone.utc), profile="PRUDENTE",
+            source_kind="historical_reconstructed", status="updated", weights_json="{}",
+            summary_json=json.dumps({"calibration_deciles": {"model": [], "replay_only": []}})))
     before = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     response = client.get('/api/intelligence', headers={'X-API-Token':'intelligence-secret'})
     assert response.status_code == 200
@@ -129,6 +139,12 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['replay']['chart'] and len(payload['replay']['chart']) == 10
     assert 'direction' in payload['hits'] and 'volatility' in payload['hits']
     assert 'replay_calibration' in payload['hits']
+    assert payload['hits']['replay_calibration_source'] == {
+        'version_id': calibrated_version_id, 'profile': 'RAPIDO', 'source_kind': 'live',
+        'created_at': '2026-10-20 00:00:00', 'message': None}
+    assert payload['hits']['replay_calibration'] == [{
+        'horizon': 'validación temporal', 'bin': 'Decil 1', 'n': 12,
+        'predicted': .31, 'observed': .4, 'few_samples': True}]
     assert payload['hits']['centered_signal_comparison']['72h']['actual']['n'] == 1
     break_v2 = payload['hits']['break_v2_comparison']
     assert break_v2['n'] == 1 and break_v2['message'] == 'sin datos suficientes'

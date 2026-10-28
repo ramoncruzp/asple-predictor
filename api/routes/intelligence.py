@@ -135,6 +135,10 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
                 (page - 1) * page_size).limit(page_size)).mappings().all()
         version_rows = conn.execute(select(db.meta_learning_weight_versions).order_by(
             db.meta_learning_weight_versions.c.id.desc()).offset((page - 1) * page_size).limit(page_size)).mappings().all()
+        calibration_version_rows = conn.execute(select(db.meta_learning_weight_versions.c.id,
+            db.meta_learning_weight_versions.c.profile, db.meta_learning_weight_versions.c.source_kind,
+            db.meta_learning_weight_versions.c.created_at, db.meta_learning_weight_versions.c.summary_json)
+            .order_by(db.meta_learning_weight_versions.c.id.desc())).mappings().all()
         switch_rows = conn.execute(select(db.meta_learning_switch_events).order_by(
             db.meta_learning_switch_events.c.id.desc()).limit(20)).mappings().all()
         ledger_stmt = select(db.meta_ledger.c.id, db.meta_ledger.c.ts, db.meta_ledger.c.meta_id,
@@ -358,21 +362,26 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     touch_calibration = [{"bin": key, "n": len(pair[0]), "predicted": statistics.fmean(pair[0]),
         "observed": statistics.fmean(pair[1]), "few_samples": len(pair[0]) < 30}
         for key, pair in sorted(touch_bins.items())]
-    replay_groups = {}
-    for sample in sample_rows:
-        probability = sample[6] if sample[6] is not None else sample[5]
-        if probability is None: continue
-        for horizon in ("72h", "20d", "45d"):
-            label = labels_by_sample.get((int(sample[0]), horizon), {})
-            if label.get("status") != "labeled" or label.get("reached") is None: continue
-            value = max(0.0, min(.999999, float(probability)))
-            low = int(value * 10) * 10
-            bucket = replay_groups.setdefault((horizon, low), [[], []])
-            bucket[0].append(value); bucket[1].append(int(bool(label["reached"])))
-    replay_calibration = [{"horizon": horizon, "bin": f"{low}–{low+10}%", "n": len(values[0]),
-        "predicted": statistics.fmean(values[0]), "observed": statistics.fmean(values[1]),
-        "few_samples": len(values[0]) < 30}
-        for (horizon, low), values in sorted(replay_groups.items())]
+    replay_calibration, replay_calibration_source = [], {
+        "version_id": None, "profile": None, "source_kind": None, "created_at": None,
+        "message": "sin deciles guardados"}
+    for version in calibration_version_rows:
+        summary = _json(version["summary_json"])
+        deciles = summary.get("calibration_deciles") or {}
+        baseline_deciles = deciles.get("replay_only") or []
+        if not baseline_deciles:
+            continue
+        replay_calibration = [{"horizon": "validación temporal",
+            "bin": f"Decil {int(item.get('decile') or index + 1)}",
+            "n": int(item.get("samples") or 0),
+            "predicted": item.get("predicted_mean"),
+            "observed": item.get("success_rate"),
+            "few_samples": int(item.get("samples") or 0) < 30}
+            for index, item in enumerate(baseline_deciles)]
+        replay_calibration_source = {"version_id": int(version["id"]),
+            "profile": str(version["profile"]), "source_kind": str(version["source_kind"]),
+            "created_at": str(version["created_at"]), "message": None}
+        break
     centered_rows = {horizon: {kind: [] for kind in ("actual", "centrada")}
         for horizon in ("72h", "20d", "45d")}
     for sample in sample_rows:
@@ -541,6 +550,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "signals": signal_stats,
         "hits": {"direction": direction_accuracy, "volatility": volatility_accuracy,
             "touch_calibration": touch_calibration, "replay_calibration": replay_calibration,
+            "replay_calibration_source": replay_calibration_source,
             "centered_signal_comparison": centered_comparison,
             "break_v2_comparison": break_v2_comparison,
             "decision_rates": decision_rates},

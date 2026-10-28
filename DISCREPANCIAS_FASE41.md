@@ -246,3 +246,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a4
 
 - No se agregó una columna a la tabla: `trigger` se guarda en el JSON de resumen desde la inserción inicial. Esto evita una migración y hace visible el origen antes de que la corrida termine.
+
+## Fase 41-C26a5
+
+- B10 muestra los deciles de `replay_only` de una versión, no la calibración agregada por horizonte calculada antes desde todas las muestras. El resumen existente por etiquetas permanece en el gráfico general de replay; B10 identifica la versión, el perfil y el origen para evitar mezclar cohortes de validación.
