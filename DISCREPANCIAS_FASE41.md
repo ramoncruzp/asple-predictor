@@ -159,22 +159,23 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-G1g1
 
-- La prueba solicitaba precio 0,0035, rango ?1 % y ocho niveles, pero esa geometr?a viola el m?nimo de separaci?n de celdas del motor (0,30 % por celda). Se us? ?2 % para reproducir el tick gen?rico repetido y mantener v?lida la geometr?a con tick 0,000001. No cambia producci?n.
-- No se cont? cu?ntas etiquetas existentes requieren rec?lculo: hacerlo exigir?a leer la BD real. Se documenta esa limitaci?n. En este checkout no existe un comando de re-etiquetado con `--dry-run`; no se propone ejecutar ni inventar uno. Antes de cualquier re-etiquetado en S1 habr? que a?adir primero un modo de previsualizaci?n que no escriba datos.
-
+- La prueba solicitaba precio 0,0035, rango ±1 % y ocho niveles, pero esa geometría viola el mínimo de separación de celdas del motor (0,30 % por celda). Se usó ?2 % para reproducir el tick genérico repetido y mantener válida la geometría con tick 0,000001. No cambia producción.
+- No se contó cuántas etiquetas existentes requieren recálculo: hacerlo exigiría leer la BD real. En este checkout no existe comando de re-etiquetado con `--dry-run`; no se propone ejecutar ni inventar uno.
 
 ## Fase 41-G1g2
 
-- La cach? solo registra `depth_cache_used` cuando la lectura est? dentro del TTL; una lectura nueva o una falla se marca como no reutilizada. Los eventos hist?ricos previos no contienen la causa por s?mbolo y no se reconstruyen.
-
+- La caché solo registra `depth_cache_used` cuando la lectura está dentro del TTL; una lectura nueva o una falla se marca como no reutilizada. Los eventos históricos anteriores no contienen causa por símbolo y no se reconstruyen.
 
 ## Fase 41-G1g3
 
-- El delta XOR v3 sin p?rdida aument? el tama?o de la curva sint?tica completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en cach? durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de m?tricas. Esta es una decisi?n conservadora y puede aumentar tiempo tras reinicio.
-- Se verific? por c?digo que las muestras no guardan curvas en `parameters_json` ni en `provenance_json`; no fue posible explicar con medidas directas los 61 MB de la tabla real. La BD de S1 no se abri?.
-
+- El delta XOR v3 sin pérdida aument? el tamaño de la curva sintética completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en caché durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de métricas. Esto puede aumentar el tiempo tras reinicio.
+- Se verificó por código que las muestras no guardan curvas en `parameters_json` ni en `provenance_json`; no fue posible explicar con medidas directas los 61 MB de la tabla real. La BD de S1 no se abrió.
 
 ## Fase 41-G1g4
 
-- Se impone un deadline compartido de 30 s y se devuelve el estado `budget_exceeded`, pero la ejecuci?n contin?a en el hilo que arma el plan. No se puede afirmar que la revisi?n real no espere a la sombra. La alternativa as?ncrona cambia cu?ndo est? disponible el resultado del asignador y requiere otra fase/contrato; se conserva el resultado s?ncrono para no cambiar decisiones.
-- Los fixtures de compatibilidad sin curvas pero con m?tricas legacy siguen acept?ndose por `combine_aligned_replays`; una ausencia de filas o una excepci?n queda contabilizada. En producci?n, curvas v3 ausentes en cach? durable causan regeneraci?n antes de llegar a esa combinaci?n.
+- Se impone un deadline compartido de 30 s y se devuelve `budget_exceeded`, pero la ejecución sigue en el hilo que arma el plan. No se puede afirmar que la revisión real nunca espere a la sombra. La alternativa asíncrona cambia cuándo está disponible el resultado del asignador y requiere otra fase/contrato; se conserva el resultado síncrono para no cambiar decisiones.
+- Los fixtures de compatibilidad sin curvas pero con métricas legacy siguen aceptándose por `combine_aligned_replays`; ausencia de filas o excepción se contabiliza. En producción, curvas v3 ausentes en caché durable causan regeneración antes de combinar.
+
+## Fase 41-G1g5
+
+- El tamaño por campo JSON mide el payload de las filas, no páginas SQLite ni espacio libre/reutilizable. El script también informa `dbstat` cuando está disponible; solo una lectura local de S1 puede explicar el tamaño físico de la tabla.

@@ -356,13 +356,8 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 - Pendiente manual: ejecutar los estudios públicos/calibración en S1, inspeccionar métricas y decidir si se prepara otra fase.
 
 
-| 41-G1g1 | Etiquetado de aprendizaje con filtros por s?mbolo y aislamiento de muestras inv?lidas | Implementado localmente; 112 pruebas dirigidas pasaron. La muestra inv?lida se conserva como `invalid_geometry`, no se entrena y no se reintenta. Sin medici?n en BD real |
-
-
-| 41-G1g2 | Diagn?stico de bloqueos transitorios por valoraci?n desconocida | Se conserva la regla de bloqueo; ledger incluye causa por moneda y duraci?n de recuperaci?n. El verificador consulta solo lectura las ?ltimas 24 h |
-
-
-| 41-G1g3 | Formato de curvas v3 reversible y reducci?n de cach? durable | Lectura v1/v2 preservada; cach? durable guarda m?tricas sin curvas para quedar bajo 100 KB. Tras reinicio puede recalcular replay. No se midi? la BD real |
-
-
-| 41-G1g4 | Motivos de descarte, cron?metros y deadline de asignaci?n en sombra | Se contabiliza la entrada vac?a y los descartes; el resultado decisorio conserva los mismos campos contra a25818b. La ejecuci?n s?ncrona puede esperar hasta el deadline y queda pendiente desacoplarla |
+| 41-G1g1 | Etiquetado con filtros reales y aislamiento de muestras inválidas | 112 pruebas dirigidas pasaron; el conteo de etiquetas históricas que requerirían recálculo queda pendiente de una lectura segura de BD |
+| 41-G1g2 | Diagnóstico de bloqueos transitorios por valoración desconocida | Se mantiene la regla; el ledger guarda causa por moneda y duración de recuperación. El verificador consulta solo lectura las últimas 24 h |
+| 41-G1g3 | Formato de curvas v3 y reducción de caché durable | Lector v1/v2 preservado; la caché durable guarda métricas sin curvas para quedar bajo 100 KB. Tras reinicio puede recalcular replay |
+| 41-G1g4 | Descartes, cronómetros y deadline de sombra | Se conserva decisión real contra a25818b. La sombra continúa síncrona y puede esperar hasta el deadline |
+| 41-G1g5 | Verificador resumido y bloques de diagnóstico | Salida sintética menor de 150 líneas; `--detalle` conserva la lista completa |

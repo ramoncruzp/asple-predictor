@@ -8,6 +8,7 @@ import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from urllib.parse import quote
 
 
@@ -49,7 +50,7 @@ def _ledger(conn, since):
         "datetime(ts)>=datetime(?)", (since,), "id DESC", 2000)
 
 
-def verify(db_path: Path, hours=2, journal=False):
+def verify(db_path: Path, hours=2, journal=False, detail=False):
     if not db_path.is_file(): raise FileNotFoundError(db_path)
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=max(0, hours))).replace(tzinfo=None).isoformat(sep=" ")
@@ -91,6 +92,21 @@ def verify(db_path: Path, hours=2, journal=False):
         for reason, count in sorted(block_reasons.items()):
             print(f"  {reason}: {count}")
         if not block_reasons: print("  sin motivos registrados")
+        shadow_rows = [row for row in ledger if row.get("event_type") == "META_OPERATOR_ALLOCATION_SHADOW"]
+        shadow_discards, shadow_seconds = Counter(), []
+        for row in shadow_rows:
+            details = _json(row.get("details"))
+            discards = details.get("descartes") or {}
+            shadow_discards.update(discards.get("conteo_por_motivo") or {})
+            seconds = (discards.get("timings_s") or {}).get("total")
+            if seconds is not None: shadow_seconds.append(float(seconds))
+        print("\nAsignación en sombra (24 h):")
+        print(f"  eventos: {len(shadow_rows)}")
+        if shadow_seconds:
+            print(f"  tiempo total mediano/máximo: {median(shadow_seconds):.3f}/{max(shadow_seconds):.3f} s")
+        for reason, count in shadow_discards.most_common(10):
+            print(f"  descarte {reason}: {count}")
+        if not shadow_discards: print("  sin descartes registrados")
         latest_plans = {}
         for row in ledger:
             if row.get("event_type") == "META_PLAN_EVALUATED":
@@ -150,14 +166,40 @@ def verify(db_path: Path, hours=2, journal=False):
         except sqlite3.Error:
             print("  dbstat: no disponible")
         if "meta_analysis_cache" in tables:
-            count = conn.execute("SELECT COUNT(*) FROM meta_analysis_cache").fetchone()[0]
-            print(f"  meta_analysis_cache: {count} filas")
+            cache_rows = _rows(conn, "meta_analysis_cache", ("cache_kind", "value_json"), "", (), "", 1000000)
+            by_format = defaultdict(lambda: {"rows": 0, "bytes": 0})
+            for row in cache_rows:
+                payload = _json(row.get("value_json"))
+                versions = {str(curve.get("curve_format_version", 1))
+                    for result in payload.get("window_results", [])
+                    for curve in [result.get("curve") or {}] if curve}
+                fmt = ",".join(sorted(versions)) if versions else "sin curvas"
+                by_format[fmt]["rows"] += 1
+                by_format[fmt]["bytes"] += len(str(row.get("value_json") or "").encode("utf-8"))
+            print(f"  meta_analysis_cache: {len(cache_rows)} filas")
+            for fmt, counts in sorted(by_format.items()):
+                avg_kb = counts["bytes"] / max(1, counts["rows"]) / 1024
+                print(f"    formato {fmt}: {counts['rows']} filas; {counts['bytes']/1024/1024:.2f} MB; {avg_kb:.2f} KB/fila")
 
         print("\nAprendizaje y precálculo:")
         runs = _rows(conn, "meta_learning_runs", ("id", "started_at", "finished_at", "status", "summary_json"),
             "", (), "id DESC", 1)
         if runs:
             run=runs[0]; print(f"  última corrida: {run.get('started_at')} → {run.get('finished_at')} {run.get('status')}")
+            summary = _json(run.get("summary_json"))
+            print(f"  muestras fallidas: {summary.get('samples_failed', 0)}; geometrías inválidas: {summary.get('labels_invalid_geometry', 0)}")
+            for item in (summary.get("failed_samples") or [])[:20]:
+                print(f"    fallo sample={item.get('sample_id')} {item.get('symbol')}: {item.get('error')}")
+            if "meta_learning_labels" in tables and run.get("started_at"):
+                invalid = []
+                for row in _rows(conn, "meta_learning_labels", ("sample_id", "horizon", "label_json", "labeled_at"),
+                        "datetime(labeled_at)>=datetime(?)", (str(run["started_at"]),), "id DESC", 10000):
+                    label = _json(row.get("label_json"))
+                    if label.get("status") == "invalid_geometry": invalid.append((row, label))
+                print(f"  etiquetas invalid_geometry desde la corrida: {len(invalid)}")
+                for row, label in invalid[:20]:
+                    print(f"    sample={row.get('sample_id')} horizonte={row.get('horizon')}: "
+                          f"{json.dumps(label.get('reason') or {}, ensure_ascii=False)}")
         else: print("  última corrida: no registrada")
         precompute = [(row.get("ts"), _json(row.get("details"))) for row in ledger
             if "PRECOMPUTE" in str(row.get("event_type", "")).upper() or "PRECACHE" in str(row.get("event_type", "")).upper()]
@@ -167,9 +209,20 @@ def verify(db_path: Path, hours=2, journal=False):
             if "created_at" in cols:
                 cache=conn.execute("SELECT MAX(created_at) FROM meta_analysis_cache").fetchone()[0]
                 print(f"  última escritura de caché (referencia de precálculo, no equivalente): {cache}")
+        if "meta_learning_samples" in tables:
+            sample_rows = _rows(conn, "meta_learning_samples", ("parameters_json", "signals_json", "provenance_json"),
+                "", (), "", 1000000)
+            field_bytes = Counter()
+            for row in sample_rows:
+                for field in ("parameters_json", "signals_json", "provenance_json"):
+                    field_bytes[field] += len(str(row.get(field) or "").encode("utf-8"))
+            print(f"  meta_learning_samples: {len(sample_rows)} filas; payload JSON "
+                f"{sum(field_bytes.values())/1024/1024:.2f} MB")
+            for field, size in field_bytes.items():
+                print(f"    {field}: {size/1024/1024:.2f} MB")
 
         print("\nCobertura de señales (muestras recientes):")
-        signal_counts=defaultdict(Counter); values=defaultdict(lambda: defaultdict(set))
+        signal_counts=defaultdict(Counter); values=defaultdict(lambda: defaultdict(list)); null_counts=defaultdict(Counter)
         for row in _rows(conn,"meta_learning_samples",("symbol","sample_at","source_kind","signals_json"),
                 "datetime(sample_at)>=datetime(?)",(cutoff,),"sample_at DESC",100000):
             payload=_json(row.get("signals_json"))
@@ -177,10 +230,18 @@ def verify(db_path: Path, hours=2, journal=False):
                 name=signal.get("name")
                 if not name: continue
                 signal_counts[name][row.get("symbol")]+=1
-                if signal.get("normalized") is not None: values[name][row.get("symbol")].add(float(signal["normalized"]))
+                if signal.get("normalized") is not None: values[name][row.get("symbol")].append(float(signal["normalized"]))
+                else: null_counts[name][row.get("symbol")]+=1
         for name in sorted(signal_counts):
             for symbol,count in sorted(signal_counts[name].items()):
-                print(f"  {name} {symbol}: n={count}; normalizados distintos={sorted(values[name][symbol])}")
+                vals=values[name][symbol]
+                if vals:
+                    print(f"  {name} {symbol}: n={count}; mín={min(vals):.6g}; mediana={median(vals):.6g}; "
+                        f"máx={max(vals):.6g}; distintos={len(set(vals))}; nulos={null_counts[name][symbol]}")
+                else:
+                    print(f"  {name} {symbol}: n={count}; mín=NA; mediana=NA; máx=NA; distintos=0; nulos={null_counts[name][symbol]}")
+                if detail:
+                    print(f"    valores normalizados completos: {vals}")
         if not signal_counts: print("  sin muestras en el intervalo")
 
     if journal:
@@ -201,8 +262,9 @@ def main(argv=None):
     parser.add_argument("--db",required=True,type=Path,help="archivo SQLite; abre URI mode=ro")
     parser.add_argument("--horas",type=float,default=2)
     parser.add_argument("--journal",action="store_true")
+    parser.add_argument("--detalle",action="store_true",help="imprime todos los valores normalizados")
     args=parser.parse_args(argv)
-    try: return verify(args.db,args.horas,args.journal)
+    try: return verify(args.db,args.horas,args.journal,args.detalle)
     except (OSError,sqlite3.Error,ValueError) as exc:
         parser.exit(2,f"Error de verificación: {type(exc).__name__}: {exc}\n")
 
