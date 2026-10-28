@@ -209,3 +209,9 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C25e
 
 - Las filas durable de replay m?tricas que ya existan no se borran en esta fase. No sirven a consumidores que necesitan curvas; se cuentan como descartadas y se recalculan. La retenci?n existente las eliminar? al vencer su periodo. No se cambian m?tricas ni decisiones.
+
+## Fase 41-C25f
+
+- No se encontró un tick de precio persistido en los campos de muestra consultados (`parameters_json` y `provenance_json`). La vista previa los informa como desconocidos, salvo que el operador ejecute explícitamente `--exchange-info`; esa opción puede requerir red y no se ejecutó durante esta fase.
+- El corte para “anterior a G1g1” usa `meta_learning_labels.labeled_at` comparado con la fecha del commit G1g1, no la fecha de la alternativa. El marcado conserva la etiqueta previa anidada en `superseded_previous_label` para auditoría; el job diario la reemplaza solo tras generar una etiqueta nueva.
+- La vista previa no se ejecutó contra una BD real y no se presentan cantidades reales por símbolo.

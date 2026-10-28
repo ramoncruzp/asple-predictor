@@ -228,6 +228,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     labels_by_sample = {}
     for sample_id, horizon, raw in label_rows:
         label = _json(raw)
+        if label.get("status") == "superseded":
+            continue
         labels_by_sample[(int(sample_id), str(horizon))] = label
         label_summary[(horizon, label.get("status", "desconocida"),
             "cruzó" if label.get("reached") is True else "no cruzó" if label.get("reached") is False else "sin resultado")] += 1
@@ -456,7 +458,10 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "terciles": break_bins}
     label_lookup = {}
     for sid, symbol, profile, sample_at, alt_id, horizon, raw in label_detail_rows:
-        label = _json(raw); label_lookup[(str(alt_id), str(horizon))] = (label, profile)
+        label = _json(raw)
+        if label.get("status") == "superseded":
+            continue
+        label_lookup[(str(alt_id), str(horizon))] = (label, profile)
     decision_success = {name: {h: [0, 0] for h in ("72h", "20d", "45d")}
         for name in ("real", "scanner_advisor", "learned")}
     for event in all_decision_events:

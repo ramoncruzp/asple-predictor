@@ -842,7 +842,8 @@ class MetaOperator:
                 self.db.meta_learning_labels.c.horizon, self.db.meta_learning_labels.c.label_json).where(
                     self.db.meta_learning_labels.c.sample_id.in_(sample_ids))).all() if sample_ids else []
         alt_samples = {str(row[1]): (int(row[0]), json.loads(row[2] or "{}")) for row in sample_rows}
-        label_map = {(int(row[0]), str(row[1])): json.loads(row[2] or "{}") for row in label_rows}
+        label_map = {(int(row[0]), str(row[1])): json.loads(row[2] or "{}") for row in label_rows
+            if json.loads(row[2] or "{}").get("status") != "superseded"}
         comparison = {key: {"decisions": 0, "different_from_real": 0,
             "72h": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0},
             "profile": {"n": 0, "reached": 0, "log_loss": 0.0, "brier": 0.0}}
@@ -2316,16 +2317,25 @@ class MetaOperator:
         return [dict(row) for row in forecasts], [dict(row) for row in predictions]
 
     def _persist_learning_labels(self, sample_id, labels, now):
-        from sqlalchemy import select
+        from sqlalchemy import select, update
         table = self.db.meta_learning_labels
         inserted = 0
         with self.db.engine.begin() as conn:
             for horizon, label in labels.items():
                 if label.get("status") not in {"labeled", "invalid_geometry"}:
                     continue
-                exists = conn.execute(select(table.c.id).where(table.c.sample_id == int(sample_id),
+                exists = conn.execute(select(table.c.id, table.c.label_json).where(table.c.sample_id == int(sample_id),
                     table.c.horizon == str(horizon))).first()
                 if exists:
+                    old = json.loads(exists[1] or "{}")
+                    if old.get("status") != "superseded":
+                        continue
+                    payload = dict(label)
+                    if payload.get("status") == "labeled":
+                        payload.pop("status", None)
+                    conn.execute(update(table).where(table.c.id == int(exists[0])).values(
+                        label_json=json.dumps(payload, sort_keys=True), labeled_at=now))
+                    inserted += 1
                     continue
                 payload = dict(label)
                 if payload.get("status") == "labeled":
@@ -2412,7 +2422,7 @@ class MetaOperator:
                     row["base_probability_smoothed"] = sample.get("base_probability_smoothed")
                     row["label"] = labels.get((int(sample["id"]), "72h"))
                     row["profile_label"] = labels.get((int(sample["id"]), f"{days}d"))
-                    if any(label and label.get("status") == "invalid_geometry"
+                    if any(label and label.get("status") in {"invalid_geometry", "superseded"}
                            for label in (row["label"], row["profile_label"])):
                         continue
                     if any(label and label.get("base_method_version") != REPLAY_METHOD_VERSION
@@ -2515,8 +2525,9 @@ class MetaOperator:
             with self.db.engine.connect() as conn:
                 samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
                 labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
-                    self.db.meta_learning_labels.c.horizon)).all()
-            existing = {(int(row[0]), str(row[1])) for row in labels}
+                    self.db.meta_learning_labels.c.horizon, self.db.meta_learning_labels.c.label_json)).all()
+            existing = {(int(row[0]), str(row[1])) for row in labels
+                if json.loads(row[2] or "{}").get("status") != "superseded"}
             candles_by_symbol, sources, filters_by_symbol = {}, {}, {}
             t = time.perf_counter()
             learning_symbols = set()
@@ -2633,8 +2644,9 @@ class MetaOperator:
                 with self.db.engine.connect() as conn:
                     samples = conn.execute(select(self.db.meta_learning_samples)).mappings().all()
                     labels = conn.execute(select(self.db.meta_learning_labels.c.sample_id,
-                        self.db.meta_learning_labels.c.horizon)).all()
-                existing = {(int(row[0]), str(row[1])) for row in labels}
+                        self.db.meta_learning_labels.c.horizon, self.db.meta_learning_labels.c.label_json)).all()
+                existing = {(int(row[0]), str(row[1])) for row in labels
+                    if json.loads(row[2] or "{}").get("status") != "superseded"}
             t = time.perf_counter()
             counters["bases_recalculated"] = self._recalculate_learning_bases(
                 samples, candles_by_symbol, filters_by_symbol)

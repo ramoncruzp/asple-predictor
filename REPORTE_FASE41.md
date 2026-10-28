@@ -563,3 +563,11 @@ Pruebas: `tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py` ? **88 p
 `grid/meta_operator.py:1052-1054` deja de escribir entradas durables de `replay` sin curvas. En lectura, solo suma acierto cuando el candidato conserva todas las curvas y su formato es vigente; las filas m?tricas antiguas se descartan, el contador `replay_persistent_cache_discarded` aumenta y el replay se vuelve a calcular (`grid/meta_operator.py:2854-2879`). El contador aparece en tiempos del plan (`:1940-1941`). Los aciertos de cach? de Advisor y toque siguen su ruta existente.
 
 Prueba: `tests/test_meta_operator.py` ? **87 passed, 4 warnings**. Comprueba que no se escriban filas replay nuevas, que una fila vieja sin curvas se descarte y no cuente como hit, y que la cach? de proceso con curvas v?lidas s? cuente como hit.
+
+### Fase 41-C25f — Vista previa y marcado de etiquetas antiguas
+
+`scripts/reetiquetar_meta.py:14-160` abre la base en `mode=ro` para la vista previa (predeterminada), cuenta etiquetas con `labeled_at` anterior al corte de G1g1 y compara el tick por símbolo cuando aparece en `provenance_json` o `parameters_json`. Si falta, el estado queda como desconocido; `--exchange-info` consulta filtros públicos mediante el cliente sin credenciales. `--apply` requiere un archivo de respaldo fechado hoy o `--backup-ok`, conserva la etiqueta anterior en el JSON y solo marca `superseded`; nunca recalcula ni elimina.
+
+`grid/meta_operator.py:2319-2340,2425-2428,2525-2531,2644-2650` vuelve pendientes las etiquetas superseded para el job diario, reemplaza su contenido al recalcular y las excluye del entrenamiento. `api/routes/intelligence.py:229-233,458-464` y `grid/meta_operator.py:845-846` no las cuentan en métricas ni comparaciones.
+
+Pruebas: `tests/test_meta_relabel.py tests/test_meta_learning.py tests/test_meta_core.py tests/test_intelligence_api.py` → **72 passed, 2 warnings**. Cubre hash idéntico en dry-run, bloqueo de apply sin respaldo, marcado selectivo y reemplazo diario. No se inspeccionó una BD real; no hay tick persistido en los campos consultados del esquema local.
