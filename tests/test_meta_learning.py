@@ -148,6 +148,8 @@ def test_synthetic_forward_replay_labels_known_bot_sale_at_72h():
     assert result["72h"]["status"] == "labeled"
     assert result["72h"]["net_advance_usdt"] > 1.5
     assert result["72h"]["reached"] is True
+    assert result["72h"]["piece_range_exits"] == [{"symbol": "XRPUSDT",
+        "exited": True, "low": 99.0, "high": 101.0, "basis": "high_low_strict"}]
     assert result["20d"]["status"] == "immature"
 
 

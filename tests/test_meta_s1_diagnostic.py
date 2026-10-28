@@ -48,7 +48,8 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
         conn.execute("INSERT INTO meta_learning_labels VALUES(1,7,'72h',?,?)",
             (json.dumps({'status':'invalid_geometry','reason':{'symbol':'XRPUSDT','tick_used':'0.0001'}}),now))
         conn.execute("INSERT INTO meta_learning_samples(id,symbol,sample_at,source_kind,signals_json,parameters_json,provenance_json) VALUES(1,'XRPUSDT',?,'live',?,'{}','{}')",
-            (now,json.dumps({'signals_used':[{'name':'direction','normalized':0.0},
+            (now,json.dumps({'break_prob_v2':{'value':.4,'normalized':.2},
+                'signals_used':[{'name':'break_prob','normalized':.2}, {'name':'direction','normalized':0.0},
                 {'name':'direction','normalized':None},{'name':'touch_buy_to_sell','normalized':.4}]})))
         conn.execute("INSERT INTO meta_analysis_cache VALUES('c1','replay',?,?)",
             (json.dumps({'window_results':[{'curve':{'curve_format_version':3}}]}),now))
@@ -67,6 +68,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert 'etiquetas invalid_geometry desde la corrida: 1' in output
     assert 'muestras fallidas' in output and 'parameters_json:' in output
     assert 'direction XRPUSDT: n=2' in output and 'touch_buy_to_sell XRPUSDT: n=1' in output
+    assert 'Ruptura v2:' in output and 'señal actual: n=1' in output and 'v2: n=1' in output
     assert 'm\u00edn=0; mediana=0; m\u00e1x=0; distintos=1; nulos=1' in output
     assert len(output.splitlines()) <= 150
     assert path.read_bytes()==before

@@ -750,5 +750,23 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters,
             "cash_final": outcome["cash_final"], "loss_cut": outcome["loss_cut"],
             "worst_loss_vs_capital_pct": outcome["worst_loss_vs_capital_pct"],
             "max_advance_usdt": outcome["max_advance_usdt"]})
+        piece_range_exits = []
+        for piece in pieces:
+            symbol = str(piece.get("symbol") or "").upper()
+            sample = samples.get(symbol)
+            ref = float(piece.get("mid_at_plan") or piece.get("reference_price") or
+                        (sample.open[0] if sample is not None else 0))
+            if sample is None or ref <= 0:
+                piece_range_exits.append({"symbol": symbol, "exited": None,
+                    "reason": "sin velas o referencia de precio"})
+                continue
+            scale = float(sample.open[0]) / ref
+            floor = float(piece.get("floor", piece.get("range_low", 0))) * scale
+            ceiling = float(piece.get("ceiling", piece.get("range_high", 0))) * scale
+            exited = bool(np.any(np.asarray(sample.low) < floor) or
+                          np.any(np.asarray(sample.high) > ceiling))
+            piece_range_exits.append({"symbol": symbol, "exited": exited,
+                "low": floor, "high": ceiling, "basis": "high_low_strict"})
+        result[label_horizon]["piece_range_exits"] = piece_range_exits
     return result
 

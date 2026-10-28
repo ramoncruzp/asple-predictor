@@ -2096,6 +2096,7 @@ class MetaOperator:
                 "probability_adjusted_actual": (alternative.get("estimate") or {}).get("probability_adjusted"),
                 "probability_adjusted_centered": alternative.get("probability_adjusted_centered"),
                 "break_prob_v2": alternative.get("break_prob_v2"),
+                "probability_adjusted_break_current": alternative.get("probability_adjusted_break_current"),
                 "probability_adjusted_break_v2": alternative.get("probability_adjusted_break_v2"),
                 "touch_signal": alternative.get("touch_signal"),
                 "shadow_signals": alternative.get("shadow_signals", [])}
@@ -3074,11 +3075,19 @@ class MetaOperator:
         adjusted = (signal_adjusted_probability(alternative["replay_probability"], signals, weights, logit_cap)
                     if enough_evidence else float(alternative["replay_probability"]))
         v2_signals = [dict(item) for item in signals]
+        current_signals = [dict(item) for item in signals]
         if legacy_signal is not None and v2_signal is not None:
             for index, item in enumerate(v2_signals):
                 if item.get("name") == "break_prob":
                     v2_signals[index] = v2_signal
                     break
+            for index, item in enumerate(current_signals):
+                if item.get("name") == "break_prob":
+                    current_signals[index] = legacy_signal
+                    break
+        probability_adjusted_break_current = (signal_adjusted_probability(
+            alternative["replay_probability"], current_signals, weights, logit_cap)
+            if enough_evidence else float(alternative["replay_probability"]))
         probability_adjusted_break_v2 = (signal_adjusted_probability(
             alternative["replay_probability"], v2_signals, weights, logit_cap)
             if enough_evidence else float(alternative["replay_probability"]))
@@ -3087,6 +3096,7 @@ class MetaOperator:
             shadow_signals, weights, logit_cap) if enough_evidence else float(alternative["replay_probability"]))
         alternative["signals_used"] = signals
         alternative["break_prob_v2"] = break_v2
+        alternative["probability_adjusted_break_current"] = probability_adjusted_break_current
         alternative["probability_adjusted_break_v2"] = probability_adjusted_break_v2
         alternative["signals_omitted"] = omitted
         alternative["estimate"]["probability_adjusted"] = adjusted

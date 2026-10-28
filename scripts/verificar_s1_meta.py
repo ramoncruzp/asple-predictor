@@ -223,6 +223,7 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
 
         print("\nCobertura de señales (muestras recientes):")
         signal_counts=defaultdict(Counter); values=defaultdict(lambda: defaultdict(list)); null_counts=defaultdict(Counter)
+        break_values = {"actual": [], "v2": []}; break_nulls = Counter()
         for row in _rows(conn,"meta_learning_samples",("symbol","sample_at","source_kind","signals_json"),
                 "datetime(sample_at)>=datetime(?)",(cutoff,),"sample_at DESC",100000):
             payload=_json(row.get("signals_json"))
@@ -232,6 +233,12 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
                 signal_counts[name][row.get("symbol")]+=1
                 if signal.get("normalized") is not None: values[name][row.get("symbol")].append(float(signal["normalized"]))
                 else: null_counts[name][row.get("symbol")]+=1
+            current = next((item.get("normalized") for item in payload.get("signals_used", [])
+                if item.get("name") == "break_prob"), None)
+            v2 = (payload.get("break_prob_v2") or {}).get("normalized")
+            for key, value in (("actual", current), ("v2", v2)):
+                if value is None: break_nulls[key] += 1
+                else: break_values[key].append(float(value))
         for name in sorted(signal_counts):
             for symbol,count in sorted(signal_counts[name].items()):
                 vals=values[name][symbol]
@@ -243,6 +250,14 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
                 if detail:
                     print(f"    valores normalizados completos: {vals}")
         if not signal_counts: print("  sin muestras en el intervalo")
+        print("\nRuptura v2:")
+        for key, label in (("actual", "señal actual"), ("v2", "v2")):
+            vals = break_values[key]
+            if vals:
+                print(f"  {label}: n={len(vals)}; mín={min(vals):.6g}; mediana={median(vals):.6g}; "
+                    f"máx={max(vals):.6g}; distintos={len(set(vals))}; nulos={break_nulls[key]}")
+            else:
+                print(f"  {label}: n=0; mín=NA; mediana=NA; máx=NA; distintos=0; nulos={break_nulls[key]}")
 
     if journal:
         try:

@@ -26,5 +26,8 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'B10 \u00b7 Aciertos' in js
     assert '<summary>B6 \u00b7 Decisiones</summary>' in js
     assert 'replay_calibration' in js
+    assert 'Ruptura v2 · comparación a 72 h' in js
+    assert 'sin datos suficientes' in js
+    assert 'salidas observadas del rango' in js
     assert 'JSON.stringify(x.details || {}, null, 2)' in js
     assert 'current_piece_estimate' in js and 'Pieza actual:' in js

@@ -48,6 +48,20 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
         goal_id = conn.execute(db.meta_goals.insert().values(capital_initial=100, target_usdt=10,
             target_input_type='usdt', target_input_value=10, profile='RAPIDO', status='ACTIVE',
             environment='TESTNET', created_at=datetime.now(timezone.utc).replace(tzinfo=None))).inserted_primary_key[0]
+        sample_id = conn.execute(db.meta_learning_samples.insert().values(sample_key='break-v2-sample',
+            meta_id=goal_id, decision_id='break-v2-plan', alternative_id='break-v2-alt',
+            symbol='XRPUSDT', profile='RAPIDO', sample_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            source_kind='live', base_probability=.5, base_probability_smoothed=.5, base_window_count=3,
+            base_independent_windows=3, base_method_version='rolling_7d_v3_equity', recalculate_base=False,
+            parameters_json='{}', signals_json=json.dumps({'signals_used':[{'name':'break_prob','value':.12,'normalized':.76}],
+                'break_prob_v2':{'value':.12,'normalized':.76}, 'probability_adjusted_actual':.6,
+                'probability_adjusted_break_current':.6,
+                'probability_adjusted_break_v2':.7}), provenance_json='{}',
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None))).inserted_primary_key[0]
+        conn.execute(db.meta_learning_labels.insert().values(sample_id=sample_id, horizon='72h',
+            label_json=json.dumps({'status':'labeled','reached':True,'sample_start':100,'sample_end':200,
+                'piece_range_exits':[{'symbol':'XRPUSDT','exited':True}]}),
+            labeled_at=datetime.now(timezone.utc).replace(tzinfo=None)))
         conn.execute(db.predictions.insert().values(prediction_id='p1', symbol='XRPUSDT', interval='1h',
             model_name='model_a', predicted_at=datetime.now(timezone.utc),
             verify_at=datetime.now(timezone.utc), probability_up=.6, signal='UP', confidence='high',
@@ -100,7 +114,7 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['data']['unknown_valuation_reviews']['last_7d'] == 1
     assert payload['data']['unknown_valuation_reviews']['reasons'][0]['reason'] == 'libro obsoleto'
     assert payload['signals']['direction']['direction_active_coverage'] == {
-        'count': 0, 'total': 0, 'coverage_pct': 0, 'threshold_p_down': 0.60}
+        'count': 0, 'total': 1, 'coverage_pct': 0, 'threshold_p_down': 0.60}
     assert payload['data']['direction_predictions'][0]['count'] == 1
     assert payload['switches']['RAPIDO']['readiness']['status'] == 'gris'
     assert payload['switches']['RAPIDO']['enabled'] is False
@@ -115,7 +129,11 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['replay']['chart'] and len(payload['replay']['chart']) == 10
     assert 'direction' in payload['hits'] and 'volatility' in payload['hits']
     assert 'replay_calibration' in payload['hits']
-    assert payload['hits']['centered_signal_comparison']['72h']['actual']['n'] == 0
+    assert payload['hits']['centered_signal_comparison']['72h']['actual']['n'] == 1
+    break_v2 = payload['hits']['break_v2_comparison']
+    assert break_v2['n'] == 1 and break_v2['message'] == 'sin datos suficientes'
+    assert break_v2['actual']['log_loss'] != break_v2['break_v2']['log_loss']
+    assert break_v2['terciles'][0]['range_exit_rate'] == 1
     assert payload['data']['touch_bot_shadow']['proposals'][0]['labels']['24']['sell_after_buy'] is True
     assert payload['data']['touch_bot_shadow']['labels']['24']['n'] == 1
     direction_hit = payload['hits']['direction'][0]

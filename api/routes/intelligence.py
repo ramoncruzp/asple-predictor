@@ -400,6 +400,60 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
                 "brier": statistics.fmean((p-y)**2 for p, y in values),
                 "log_loss": statistics.fmean(-y*math.log(p)-(1-y)*math.log(1-p)
                     for p, y in values)}
+    break_v2_samples = []
+    for sample in sample_rows:
+        raw = _json(sample[7])
+        label = labels_by_sample.get((int(sample[0]), "72h"), {})
+        v2 = raw.get("break_prob_v2") or {}
+        actual_p = raw.get("probability_adjusted_break_current")
+        v2_p = raw.get("probability_adjusted_break_v2")
+        if (label.get("status") != "labeled" or label.get("reached") is None or
+                v2.get("value") is None or actual_p is None or v2_p is None):
+            continue
+        exits = [piece.get("exited") for piece in label.get("piece_range_exits", [])
+                 if piece.get("exited") is not None]
+        break_v2_samples.append({"actual": float(actual_p), "v2": float(v2_p),
+            "truth": int(bool(label["reached"])), "break": float(v2["value"]),
+            "piece_exits": exits,
+            "sample_start": label.get("sample_start"), "sample_end": label.get("sample_end")})
+
+    def probability_metrics(rows, key):
+        values = [(max(1e-12, min(1-1e-12, row[key])), row["truth"]) for row in rows]
+        if not values:
+            return {"n": 0, "brier": None, "log_loss": None}
+        return {"n": len(values), "brier": statistics.fmean((p-y)**2 for p, y in values),
+            "log_loss": statistics.fmean(-y*math.log(p)-(1-y)*math.log(1-p) for p, y in values)}
+
+    break_bins = []
+    ordered_breaks = sorted(row["break"] for row in break_v2_samples)
+    if ordered_breaks:
+        q33 = ordered_breaks[min(len(ordered_breaks)-1, len(ordered_breaks)//3)]
+        q67 = ordered_breaks[min(len(ordered_breaks)-1, 2*len(ordered_breaks)//3)]
+        grouped = {"bajo": [], "medio": [], "alto": []}
+        for row in break_v2_samples:
+            group = "bajo" if row["break"] <= q33 else "medio" if row["break"] <= q67 else "alto"
+            grouped[group].extend(row["piece_exits"])
+        for name, values in grouped.items():
+            observed = [bool(value) for value in values if value is not None]
+            break_bins.append({"tercile": name, "n": len(observed),
+                "break_prob_min": min((row["break"] for row in break_v2_samples
+                    if (row["break"] <= q33 if name == "bajo" else q33 < row["break"] <= q67
+                        if name == "medio" else row["break"] > q67)), default=None),
+                "break_prob_max": max((row["break"] for row in break_v2_samples
+                    if (row["break"] <= q33 if name == "bajo" else q33 < row["break"] <= q67
+                        if name == "medio" else row["break"] > q67)), default=None),
+                "range_exit_rate": statistics.fmean(int(value) for value in observed) if observed else None,
+                "few_samples": len(observed) < 30})
+    break_v2_comparison = {"status": "ready" if len(break_v2_samples) >= 30 else "insufficient_data",
+        "message": None if len(break_v2_samples) >= 30 else "sin datos suficientes",
+        "n": len(break_v2_samples),
+        "interval": {"first": min((row["sample_start"] for row in break_v2_samples
+            if row.get("sample_start") is not None), default=None),
+            "last": max((row["sample_end"] for row in break_v2_samples
+            if row.get("sample_end") is not None), default=None)},
+        "actual": probability_metrics(break_v2_samples, "actual"),
+        "break_v2": probability_metrics(break_v2_samples, "v2"),
+        "terciles": break_bins}
     label_lookup = {}
     for sid, symbol, profile, sample_at, alt_id, horizon, raw in label_detail_rows:
         label = _json(raw); label_lookup[(str(alt_id), str(horizon))] = (label, profile)
@@ -483,6 +537,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "hits": {"direction": direction_accuracy, "volatility": volatility_accuracy,
             "touch_calibration": touch_calibration, "replay_calibration": replay_calibration,
             "centered_signal_comparison": centered_comparison,
+            "break_v2_comparison": break_v2_comparison,
             "decision_rates": decision_rates},
         "regressions": {"versions": [{"id": int(row["id"]), "profile": row["profile"],
             "source": row["source_kind"], "status": row["status"], "created_at": str(row["created_at"]),

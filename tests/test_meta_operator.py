@@ -211,6 +211,7 @@ def test_break_v2_is_shadowed_by_default_and_only_replaces_break_signal_when_ena
         after = next((x for x in enabled["signals_used"] if x["name"] == name), None)
         assert before == after
     assert enabled["probability_adjusted_break_v2"] == enabled["estimate"]["probability"]
+    assert enabled["probability_adjusted_break_current"] == disabled["estimate"]["probability"]
 
 
 def test_noop_payload_compacts_review_result_and_links_plan():
