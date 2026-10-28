@@ -45,12 +45,22 @@
       const order = {'Listo para encender':0,'No conviene':1,'Evaluando':2,'Recolectando datos':3};
       const rows = Object.entries(data.readiness_switches || {}).flatMap(([profile, items]) => Object.entries(items || {}).map(([key, item]) => ({profile,key,item})))
         .sort((a,b) => (order[a.item.state] ?? 4) - (order[b.item.state] ?? 4));
+      const gridRows = (data.grid_intelligence?.grids || []).map(grid => {
+        const labels = grid.mature_labels || {}, actions = Object.entries(labels.readiness_by_action || {});
+        const recs = (grid.recommendations_24h || []).map(rec => `${esc(rec.action)} \u00b7 ${esc(rec.at)} \u00b7 ganancia ${num(rec.expected_gain_7d)} USDT (mantener ${num(rec.baseline_gain_7d)})`).join('<br>') || 'Sin recomendaciones en las \u00faltimas 24 h.';
+        const evidence = actions.length ? actions.map(([action, readiness]) => {
+          const criteria = (readiness.criteria || []).map(item => `<li>${item.ok ? 'Cumple' : 'Pendiente'}: ${esc(item.text)}</li>`).join('');
+          const estimate = readiness.estimated_ready_at ? ` \u00b7 estimado: ${esc(readiness.estimated_ready_at)}` : '';
+          return `<div><b>${esc(action)}: ${esc(readiness.state)}</b> \u00b7 ${num(readiness.n)}/${num(readiness.n_required)} etiquetas <progress max="${num(readiness.n_required || 30)}" value="${Math.min(Number(readiness.n_required || 30), Number(readiness.n || 0))}"></progress><small>${esc(readiness.summary || '')}${estimate}</small><ul>${criteria}</ul></div>`;
+        }).join('') : 'Sin datos suficientes de etiquetas maduras.';
+        return `<article class="intelligence-readiness ${grid.intel_apply_enabled ? 'amarillo' : 'gris'}"><h3>Grid ${num(grid.grid_id)} \u00b7 ${esc(grid.symbol || '')} \u00b7 ${esc(grid.strategy || '')}</h3><p>Aplicaci\u00f3n: ${grid.intel_apply_enabled ? 'ENCENDIDA' : 'APAGADA'}</p><p>${recs}</p><p>Etiquetas maduras por acci\u00f3n: ${evidence}</p></article>`;
+      }).join('');
       readinessHost.innerHTML = `<section class="card"><h2>¿Qué puedo encender?</h2><p>El medidor informa. Ramón decide; el sistema nunca activa interruptores automáticamente.</p>${rows.map(({profile,key,item}) => {
         const state = item.state || 'Recolectando datos', color = state === 'Listo para encender' ? 'verde' : state === 'No conviene' ? 'rojo' : state === 'Evaluando' ? 'amarillo' : 'gris';
         const estimate = item.estimated_ready_at ? `estimado: ${esc(item.estimated_ready_at)}` : 'estimado: sin ritmo suficiente';
         const destination = key === 'grid_recommendations' ? '#grids' : '#lab';
         return `<article class="intelligence-readiness ${color}"><h3>${esc(names[key] || key)} · Meta ${profile === 'RAPIDO' ? 'Rápido' : 'Prudente'}</h3><b>${esc(state)}</b> · ${num(item.n)} / ${num(item.n_required)} <progress max="${num(item.n_required || 30)}" value="${Math.min(Number(item.n_required || 30),Number(item.n || 0))}"></progress><p>${esc(estimate)} · interruptor ${item.enabled ? 'ENCENDIDO' : 'APAGADO'}</p><p>${esc(item.summary || '')}</p><ul>${(item.criteria || []).map(c => `<li>${c.ok ? '✓' : '×'} ${esc(c.text)}${c.value == null ? '' : ` · ${esc(typeof c.value === 'object' ? JSON.stringify(c.value) : c.value)}`}</li>`).join('')}</ul><a href="${destination}">Ir al interruptor</a></article>`;
-      }).join('')}</section>`;
+      }).join('')}<h3>Grids Smart y Simple</h3><p>Recomendaciones y resultados históricos por grid. Los interruptores por grid se mantienen apagados por defecto.</p>${gridRows || '<p>Sin recomendaciones de grids registradas.</p>'}</section>`;
     }
     const forecastRows = (d.volatility_forecasts || []).map(x => [x.symbol,x.model_name,`${x.horizon_h} h`,x.count,x.first_at,x.last_at]);
     const predictionRows = (d.direction_predictions || []).map(x => [x.symbol,x.model_name,x.interval,x.count,x.first_at,x.last_at]);

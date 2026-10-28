@@ -8,6 +8,7 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     html = (ROOT / 'frontend' / 'index.html').read_text(encoding='utf-8')
     app = (ROOT / 'frontend' / 'app.js').read_text(encoding='utf-8')
     js = (ROOT / 'frontend' / 'intelligence.js').read_text(encoding='utf-8')
+    grids = (ROOT / 'frontend' / 'grids.js').read_text(encoding='utf-8')
     assert 'data-route="intelligence">Inteligencia' in html
     assert 'id="screen-intelligence"' in html and 'intelligence.js' in html
     assert 'id="intelligence-readiness"' in html
@@ -42,3 +43,8 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'Tarda alrededor de 90 minutos y no ejecuta órdenes' in html
     assert 'learning-last-refresh' in html
     assert 'HTTP 202' in js and 'origen ${run.trigger}' in js
+    assert 'Grids Smart y Simple' in js and 'readiness.criteria' in js
+    assert '<progress max=' in js and 'readiness.estimated_ready_at' in js
+    assert 'grid-intelligence-switch' in grids and 'data-intel-switch' in grids
+    assert 'intel_apply_actor' in grids and 'intel_apply_changed_at' in grids
+    assert 'item.criteria' in grids and 'item.estimated_ready_at' in grids

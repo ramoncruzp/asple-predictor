@@ -194,7 +194,11 @@ def grid_detail(request: Request, grid_id: int):
     summary = _build_summary(request, grid, levels, now)
     cells = sv.cells_view(levels, summary["price"], float(request.app.state.settings.scanner_fee_pct),
                           grid_paused=(grid["status"] == "PAUSED"))
+    from api.routes.intelligence import _grid_intelligence_summary
+    grid_intel = next((item for item in _grid_intelligence_summary(db, target_grid_id=int(grid_id))["grids"]
+        if int(item["grid_id"]) == int(grid_id)), None)
     return {"summary": summary, "cells": cells, "config": grid.get("params") or {},
+            "grid_intelligence": grid_intel,
             "range_low": grid.get("range_low"), "range_high": grid.get("range_high"),
             "n_levels": grid.get("n_levels"), "environment": grid.get("environment")}
 

@@ -291,6 +291,26 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
             else:
                 print(f"  {label}: n=0; mín=NA; mediana=NA; máx=NA; distintos=0; nulos={break_nulls[key]}")
 
+        print("\nInteligencia de grids:")
+        if "grid_intel_recommendations" not in tables or "grid_intel_labels" not in tables:
+            print("  tablas de inteligencia de grids no instaladas")
+        else:
+            rec_count = conn.execute("SELECT COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours')").fetchone()[0]
+            action_rows = conn.execute("SELECT action, COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours') GROUP BY action ORDER BY action").fetchall()
+            mature = conn.execute("SELECT COUNT(*) FROM grid_intel_labels WHERE status='mature'").fetchone()[0]
+            applied = conn.execute("SELECT COUNT(*) FROM grid_events WHERE event_type='GRID_INTEL_APPLIED' AND datetime(ts) >= datetime('now','-24 hours')").fetchone()[0] if "grid_events" in tables else 0
+            summary_rows = _rows(conn, "grid_events", ("details", "ts"),
+                "event_type='GRID_INTEL_JOB_SUMMARY' AND datetime(ts) >= datetime('now','-24 hours')", (), "ts DESC", 1)
+            job_summary = _json(summary_rows[0].get("details")) if summary_rows else {}
+            print(f"  recomendaciones 24 h: {rec_count}; aplicadas 24 h: {applied}; etiquetas maduras: {mature}")
+            print("  acciones 24 h: " + (", ".join(f"{row[0]}={row[1]}" for row in action_rows) if action_rows else "ninguna"))
+            if job_summary:
+                print(f"  último job: {job_summary.get('status')}; duración={job_summary.get('duration_s')} s; incluidos={len(job_summary.get('included') or [])}; excluidos={len(job_summary.get('excluded') or [])}; budget_exceeded={job_summary.get('budget_exceeded', False)}")
+                reasons = Counter(item.get("reason", "sin motivo") for item in job_summary.get("excluded") or [])
+                print("  exclusiones: " + (", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items())) if reasons else "ninguna"))
+            else:
+                print("  último job: no registrado en las últimas 24 h")
+
     if journal:
         try:
             result=subprocess.run(["journalctl","-u","asple-predictor","--since",f"{hours} hours ago","--no-pager"],

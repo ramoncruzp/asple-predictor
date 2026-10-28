@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -26,6 +27,10 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
             parameters_json TEXT,provenance_json TEXT);
         CREATE TABLE meta_learning_labels(id INTEGER,sample_id INTEGER,horizon TEXT,label_json TEXT,labeled_at TEXT);
         CREATE TABLE alert_state(key TEXT,value TEXT,updated_at TEXT);
+        CREATE TABLE grid_intel_recommendations(id INTEGER,grid_id INTEGER,symbol TEXT,strategy TEXT,
+            created_at TEXT,action TEXT,expected_gain_7d REAL,expected_gain_7d_baseline REAL,drawdown REAL,would_apply INTEGER);
+        CREATE TABLE grid_intel_labels(id INTEGER,recommendation_id INTEGER,status TEXT,label_json TEXT,labeled_at TEXT);
+        CREATE TABLE grid_events(id INTEGER,ts TEXT,event_type TEXT,details TEXT);
         ''')
         conn.execute("INSERT INTO alert_state VALUES(?,?,?)", ("meta_intelligence_readiness_snapshot",
             json.dumps({"RAPIDO:learned_weights":{"state":"Recolectando datos","n":12,
@@ -34,7 +39,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
         conn.execute("INSERT INTO meta_goals VALUES(1,'RAPIDO','ACTIVE',100,3,'TESTNET')")
         conn.execute("INSERT INTO grids VALUES(12,'XRPUSDT','smart','ACTIVE',70,.9,1.1,5)")
         conn.execute("INSERT INTO meta_piece_links VALUES(1,1,12,'grid',NULL)")
-        now='2026-10-27 20:00:00'
+        now=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         conn.execute("INSERT INTO meta_ledger VALUES(1,1,?,'META_PLAN_EVALUATED',NULL,NULL,?)",
             (now,json.dumps({'current_pieces':{'12':{'estimate':{'probability_replay':.5}}},
                 'timings_s':{'scanner':1.2,'portfolio':2.3,'allocation_shadow':.1,
@@ -61,6 +66,13 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
             (json.dumps({'window_results':[{'curve':{'curve_format_version':3}}]}),now))
         conn.execute("INSERT INTO meta_analysis_cache VALUES('c2','replay',?,?)",
             (json.dumps({'window_results':[{'curve':{'curve_format_version':2}}]}),now))
+        recent=now
+        conn.execute("INSERT INTO grid_intel_recommendations VALUES(1,99,'ADAUSDT','simple',?,'mantener',.2,.2,1,0)",(recent,))
+        conn.execute("INSERT INTO grid_intel_labels VALUES(1,1,'mature',?,?)",
+            (json.dumps({'gain_difference_usdt':.1}),recent))
+        conn.execute("INSERT INTO grid_events VALUES(1,?,'GRID_INTEL_JOB_SUMMARY',?)",
+            (recent,json.dumps({'status':'completed','duration_s':4.2,'included':[99],
+                'excluded':[{'grid_id':12,'reason':'pieza ligada a Meta'}],'budget_exceeded':False})))
     before=path.read_bytes()
     assert module.verify(path,hours=10000)==0
     output=capsys.readouterr().out
@@ -81,6 +93,8 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert 'muestras fallidas' in output and 'parameters_json:' in output
     assert 'direction XRPUSDT: n=2' in output and 'touch_buy_to_sell XRPUSDT: n=1' in output
     assert 'Ruptura v2:' in output and 'señal actual: n=1' in output and 'v2: n=1' in output
+    assert 'Inteligencia de grids:' in output and 'recomendaciones 24 h: 1' in output
+    assert 'último job: completed; duración=4.2 s; incluidos=1; excluidos=1' in output
     assert 'm\u00edn=0; mediana=0; m\u00e1x=0; distintos=1; nulos=1' in output
     assert len(output.splitlines()) <= 150
     assert path.read_bytes()==before

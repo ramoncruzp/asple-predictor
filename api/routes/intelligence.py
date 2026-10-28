@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func, select
 
 from api.routes.grids import _authorize
+from grid.readiness import evaluate_readiness, paired_bootstrap_mean_ci
 
 router = APIRouter()
 
@@ -57,6 +58,85 @@ def _metrics_improved(summary):
     baseline = (summary.get("baseline_validation") or {}).get("baseline") or {}
     return bool(model and baseline and model.get("log_loss", 1e9) < baseline.get("log_loss", -1)
         and model.get("brier", 1e9) < baseline.get("brier", -1))
+
+
+def _grid_intelligence_summary(db, target_grid_id=None):
+    now = datetime.now(timezone.utc)
+    recommendation_query = select(db.grid_intel_recommendations).where(
+        db.grid_intel_recommendations.c.created_at >= now - timedelta(hours=24))
+    if target_grid_id is not None:
+        recommendation_query = recommendation_query.where(
+            db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
+    with db.engine.connect() as conn:
+        recommendations = conn.execute(recommendation_query.order_by(
+            db.grid_intel_recommendations.c.created_at.desc())).mappings().all()
+        label_query = select(db.grid_intel_labels.c.recommendation_id, db.grid_intel_labels.c.label_json).where(
+            db.grid_intel_labels.c.status == "mature")
+        grid_query = select(db.grids)
+        if target_grid_id is not None:
+            label_query = label_query.join(db.grid_intel_recommendations,
+                db.grid_intel_recommendations.c.id == db.grid_intel_labels.c.recommendation_id).where(
+                    db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
+            grid_query = grid_query.where(db.grids.c.id == int(target_grid_id))
+        labels = conn.execute(label_query).all()
+        grids = {int(row["id"]): dict(row) for row in conn.execute(grid_query).mappings().all()}
+    label_by_rec = {int(row[0]): _json(row[1]) for row in labels}
+    grouped = {}
+    for recommendation in recommendations:
+        grid_id = int(recommendation["grid_id"])
+        grid = grids.get(grid_id) or {}
+        params = _json(grid.get("params"))
+        item = grouped.setdefault(grid_id, {"grid_id": grid_id,
+            "symbol": recommendation["symbol"], "strategy": recommendation["strategy"],
+            "intel_apply_enabled": bool(params.get("intel_apply_enabled", False)),
+            "recommendations_24h": [], "mature_labels": []})
+        item["recommendations_24h"].append({"at": str(recommendation["created_at"]),
+            "action": recommendation["action"], "expected_gain_7d": recommendation["expected_gain_7d"],
+            "baseline_gain_7d": recommendation["expected_gain_7d_baseline"],
+            "drawdown": recommendation["drawdown"], "would_apply": bool(recommendation["would_apply"])})
+    # Las etiquetas se agrupan por grid y acción usando la recomendación de origen.
+    with db.engine.connect() as conn:
+        rec_query = (select(db.grid_intel_recommendations.c.id,
+            db.grid_intel_recommendations.c.grid_id, db.grid_intel_recommendations.c.action,
+            db.grid_intel_recommendations.c.candidate_json,
+            db.grid_intel_recommendations.c.baseline_json).join(db.grid_intel_labels,
+                db.grid_intel_labels.c.recommendation_id == db.grid_intel_recommendations.c.id)
+            .where(db.grid_intel_labels.c.status == "mature"))
+        if target_grid_id is not None:
+            rec_query = rec_query.where(db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
+        rec_rows = conn.execute(rec_query).all()
+    stats_by_grid = {}
+    for rec_id, grid_id, action, candidate_json, baseline_json in rec_rows:
+        label = label_by_rec.get(int(rec_id)) or {}
+        diff = label.get("gain_difference_usdt")
+        if diff is None:
+            continue
+        current = stats_by_grid.setdefault(int(grid_id), {"values": [], "actions": {}})
+        current["values"].append(float(diff))
+        evaluated_action = label.get("evaluated_action") or action
+        current["actions"].setdefault(str(evaluated_action), []).append(float(diff))
+    for grid_id, metrics in stats_by_grid.items():
+        item = grouped.setdefault(grid_id, {"grid_id": grid_id, "recommendations_24h": [],
+            "mature_labels": [], "intel_apply_enabled": bool(_json(grids.get(grid_id, {}).get("params")).get("intel_apply_enabled", False))})
+        values = metrics["values"]
+        ci = paired_bootstrap_mean_ci(values) if values else None
+        n = len(values)
+        readiness_by_action = {}
+        for action, action_values in metrics["actions"].items():
+            action_ci = paired_bootstrap_mean_ci(action_values) if len(action_values) >= 2 else None
+            action_mean = statistics.fmean(action_values) if action_values else None
+            criteria = [{"text": "Al menos 30 etiquetas maduras", "ok": len(action_values) >= 30, "value": len(action_values)},
+                {"text": "Ganancia media de aplicar mayor que mantener", "ok": action_mean is not None and action_mean > 0, "value": action_mean},
+                {"text": "El intervalo de confianza no cruza cero", "ok": bool(action_ci and action_ci[0] > 0), "value": action_ci}]
+            readiness_by_action[action] = evaluate_readiness(n=len(action_values), required=30,
+                criteria=criteria, sample_times=(), summary="evidencia suficiente" if len(action_values) >= 30 else "sin datos suficientes")
+        item["mature_labels"] = {"n": n, "mean_gain_vs_maintain_usdt": statistics.fmean(values) if values else None,
+            "ci95": ci, "win_rate": statistics.fmean(1.0 if value > 0 else 0.0 for value in values) if values else None,
+            "by_action": {key: {"n": len(rows), "mean_gain_vs_maintain_usdt": statistics.fmean(rows)}
+                for key, rows in metrics["actions"].items()}, "readiness_by_action": readiness_by_action,
+            "status": "evidencia disponible" if n >= 30 else "sin datos suficientes"}
+    return {"updated_at": now.isoformat(), "method": "replay de 7 días sobre la parte afectada",
+        "grids": list(grouped.values())}
 
 
 @router.get("")
@@ -735,6 +815,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],
+        "grid_intelligence": _grid_intelligence_summary(db),
         "switches": switches, "shadow_switches": shadow_switches,
         "readiness_switches": readiness_switches, "global_flags": global_flags,
         "models_link": "#models", "battle_link": "#battle"}
