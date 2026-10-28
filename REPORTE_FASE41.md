@@ -676,6 +676,44 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 ## Fase 41-C26a10 — Asignación en sombra con grids y bots pequeños
 
 - `grid/meta_operator.py:1421-1559` ya regenera por capital; `_candidate_alternatives` deriva geometría de grid o bot individual del Advisor según el monto. `grid/meta_allocation.py:24-170` filtra por Testnet y compara resultados del replay con los umbrales actuales (+2 pp o empate dentro de 2 pp y +10 % de avance). No se cambiaron esos umbrales ni `use_extended_allocation` (continúa apagado por defecto).
-- `tests/test_meta_own_grid_evaluation.py:319-366` cubre grid peque?o y bot con efectivo libre 30 USDT, rechaza notional insuficiente y verifica que el replay elija el bot que mejor resulta. El mismo archivo compara la decisión real contra `a25818b`; no cambia mientras la extensión esté apagada.
+- `tests/test_meta_own_grid_evaluation.py:319-366` cubre grid pequeño y bot con efectivo libre 30 USDT, rechaza notional insuficiente y verifica que el replay elija el bot que mejor resulta. El mismo archivo compara la decisión real contra `a25818b`; no cambia mientras la extensión esté apagada.
 - `scripts/verificar_s1_meta.py:160-165` ahora imprime símbolo, tipo y capital seleccionado. `frontend/intelligence.js:76-82` ya mostraba tipo y capital en la tabla; `tests/ui/test_intelligence_ui.py` lo afirma.
 - Prueba: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a10-check-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_s1_diagnostic.py tests/ui/test_intelligence_ui.py -q --basetemp $bt` — **20 passed**. No cambia ninguna decisión real.
+
+## Cierre Fase 41-C26
+
+Los diez bloques se entregaron en commits separados, en orden. No hubo cambios en las decisiones reales del operador: donde se tocó `grid/` se conservó la prueba de paridad con `a25818b`; `use_extended_allocation` continúa apagado. No se usaron S1, Testnet, red, `.env` ni una BD real.
+
+| Parte | Archivo(s) principal(es) | Verificación final | Resultado | Decisiones reales |
+|---|---|---|---|---|
+| C26a1 | `scripts/reetiquetar_meta.py:13`, `verificar_s1_meta.py:15`, `mantenimiento_bd_meta.py:13`, `meta_active_study.py:12,147` | `tests/test_script_entrypoints.py` | 1 passed; seis herramientas desde raíz y carpeta externa | No |
+| C26a2 | `scripts/medir_orden_intravela.py:173-186,291-292,323-324,361-368` | `tests/test_measure_intracandle_order.py` | 9 passed; dos pares dan 2 compras/2 ventas | No |
+| C26a3 | `grid/meta_operator.py:41,1424,2011-2067` | `tests/test_meta_own_grid_evaluation.py` | 17 passed; deadline 25 s, tiempos por etapa y paridad | No |
+| C26a4 | `grid/meta_operator.py:2540-2573` | `tests/test_meta_learning.py` | 29 passed; `trigger` visible durante RUNNING | No |
+| C26a5 | `api/routes/intelligence.py:145-149,370-395,558-561`; `frontend/intelligence.js:62-66,107` | API/UI, `node --check` | 3 passed, 2 warnings; origen de calibración explícito | No |
+| C26a6 | `scripts/verificar_s1_meta.py:116-117` | `tests/test_meta_s1_diagnostic.py` | 1 passed; muestra tres motivos | No |
+| C26a7 | `database/db_manager.py:356-359`; `grid/meta_signal_storage.py:10-45`; `scripts/mantenimiento_bd_meta.py:360-402,461-469` | storage, core y aprendizaje | 68 passed; ida/vuelta exacta, ahorro sintético 38,6 % | No |
+| C26a8 | `scripts/estudios_meta.py:59-122,391-400` | `tests/test_estudios_meta.py` | 7 passed; parseo CLI; sin descarga | No |
+| C26a9 | `scripts/estudios_meta.py:124-184,398-404` | `tests/test_estudios_meta.py` | 8 passed; parseo CLI; SQLite sintética | No |
+| C26a10 | `grid/meta_operator.py:1421-1559`; `grid/meta_allocation.py:24-170`; `scripts/verificar_s1_meta.py:160-165` | operador, diagnóstico y UI | 20 passed; paridad con `a25818b` | No |
+
+Commits de las diez partes: `6943b76`, `23c041b`, `882227f`, `86f94b8`, `44b97e0`, `ee55089`, `8ad7b74`, `7ba5184`, `fed555c`, `d9bc251`. Sin push.
+
+### Comandos reservados para S1
+
+Desde `cd ~/asple-predictor`, usando la BD local solo cuando se indique:
+
+```bash
+venv2/bin/python scripts/verificar_s1_meta.py --db ./asple_predictor.db
+venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --compactar-senales
+venv2/bin/python scripts/estudios_meta.py sesgo-volatilidad --db ./asple_predictor.db --symbols XRPUSDT,JUPUSDT --days 30 --source binance --out ./estudios_meta/
+venv2/bin/python scripts/estudios_meta.py calibrar-modelo --db ./asple_predictor.db --model model_b --symbol XRPUSDT --days 30 --out ./estudios_meta/
+```
+
+Los dos estudios son explícitos; sesgo-volatilidad usa velas públicas y respeta `HTTPS_PROXY`. La vista previa de compactación abre la BD en modo solo lectura. Si Ramón decide aplicarla después de revisar el resumen y confirmar el respaldo del día, el comando es:
+
+```bash
+venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --compactar-senales --apply --backup-ok
+```
+
+No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el ahorro real de la BD quedan pendientes de esa medición manual.

@@ -130,6 +130,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 41f | Medición del efecto del orden intravela entre replays 5m y 1m | Script y pruebas sintéticas; pendiente ejecutar con datos públicos en S1. Si Δ de probabilidad <2 pp, conservar simulador; si >2 pp, evaluar corrección en fase aparte |
 | 41b-13 | Retención de cachés, resumen de planes de más de 14 días y herramienta manual dry-run/apply/VACUUM | Implementada y verificada offline; 127 pruebas dirigidas verdes; pendiente ejecución manual en S1 tras respaldo y detención del servicio |
 | 41-C25a-h | Ruptura Meta v2 en sombra, poda de cachés, reetiquetado y replay activo aproximado | Implementadas y verificadas localmente; interruptor apagado; mediciones públicas y vista previa de BD pendientes en S1 |
+| 41-C26a1-a10 | Herramientas S1, mediciones de replay, disparador manual, calibración, almacenamiento y asignación en sombra | Implementadas en commits separados; pruebas sintéticas/offline; sin uso de S1, Testnet, red ni BD real; decisiones reales sin cambios |
 
 Cada fase: diseño → OK de Ramón → código → pruebas → reporte → revisión → commit → despliegue.
 

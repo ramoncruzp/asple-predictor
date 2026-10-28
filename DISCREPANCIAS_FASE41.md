@@ -236,7 +236,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-C26a2
 
-- Para bots, el replay solo expone la curva de efectivo/inventario en el callback; el conteo usa los cambios de inventario 0?positivo y positivo?0 de esa traza. Para grids se usan eventos de fill emitidos por el runner.
+- Para bots, el replay solo expone la curva de efectivo/inventario en el callback; el conteo usa los cambios de inventario 0→positivo y positivo→0 de esa traza. Para grids se usan eventos de fill emitidos por el runner.
 
 ## Fase 41-C26a3
 
