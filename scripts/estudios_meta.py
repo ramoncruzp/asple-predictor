@@ -127,9 +127,11 @@ def _read_candles_csv(path: Path):
     return CandleData(np.asarray(timestamps), np.asarray(o), np.asarray(h), np.asarray(l), np.asarray(c), 0)
 
 
-def passive_baseline(symbols, days, profile, source, csv_dir):
-    """Reproduce baseline pasivo; el resultado activo se deja sin afirmar."""
-    from grid.sim.runner import FILTERS, run_simulation
+def passive_baseline(symbols, days, profile, source, csv_dir, persistence_values=(1,)):
+    """Compara baseline pasivo y replay activo aproximado, sin escritura de BD."""
+    from grid.sim.runner import FILTERS
+    from grid.meta import DEFAULT_PROFILES
+    from scripts.meta_active_study import active_replay, evaluate_active_curve
     from grid.sim.sweep import build_windows, _slice
     from grid.sim.data import ewma_sigma_24h
     horizon = 20 if profile == "RAPIDO" else 45
@@ -146,6 +148,10 @@ def passive_baseline(symbols, days, profile, source, csv_dir):
             from scripts.medir_orden_intravela import _from_frame
             loaded[symbol] = _from_frame(frame, 300)
     rows = []
+    profile_cfg = DEFAULT_PROFILES[profile]
+    cooldown_s = int(float(profile_cfg.get("rotation_cooldown_hours", 1.0)) * 3600)
+    max_reconfigurations = int(profile_cfg.get("max_reconfigurations_per_24h", 4))
+    loss_pct = float(profile_cfg["max_loss_pct"])
     for symbol, candles in loaded.items():
         windows = build_windows(candles, horizon, 7)
         for number, window in enumerate(windows, 1):
@@ -158,27 +164,66 @@ def passive_baseline(symbols, days, profile, source, csv_dir):
                 sigma = 0.0
             half_width = min(.12, max(.02, 1.5 * sigma * math.sqrt(horizon / 20)))
             low, high = reference * (1 - half_width), reference * (1 + half_width)
-            row = {"symbol": symbol, "window_start": int(window["start"]),
+            base_row = {"symbol": symbol, "window_start": int(window["start"]),
                 "window_end": int(window["end_exclusive"]), "profile": profile,
-                "persistence": None, "passive_status": "not_run", "active_status": "not_modeled",
-                "active_replay_limitation": "El simulador por lotes no conserva estado al recentrar.",
+                "passive_status": "not_run", "active_status": "not_run",
                 "low": low, "high": high, "n_levels": 6, "days_outside_range": None}
             try:
-                result = run_simulation(sample, strategy="simple", n=6, capital=100,
-                    low=low, high=high, filters=FILTERS, fee_pct=.1,
-                    close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
-                    meta_max_loss_pct=None, sigma_values=np.full(len(sample.timestamp), np.nan))
-                metrics = result.get("metrics", {})
-                row.update({"passive_status": "measured", "passive_reached_plus_3": bool(metrics.get("target_reached", False)),
-                    "passive_days_to_target": metrics.get("days_to_target"),
-                    "passive_progress_pct": metrics.get("progress_pct"),
-                    "passive_realized_loss_usdt": metrics.get("realized_loss_usdt"),
-                    "passive_cycles": metrics.get("cycles"), "passive_pnl_usdt": metrics.get("pnl_total_net_usdt")})
+                passive = active_replay(sample, low=low, high=high, n=6, capital=100,
+                    persistence=len(sample.timestamp) + 1, cooldown_s=cooldown_s,
+                    max_per_24h=max_reconfigurations, filters=FILTERS)
+                passive_metrics = evaluate_active_curve(passive, capital=100,
+                    target_usdt=3, max_loss_pct=loss_pct)
+                base_row.update({"passive_status": "measured", "passive_reached_plus_3": passive_metrics["reached"],
+                    "passive_days_to_target": passive_metrics["days"],
+                    "passive_progress_usdt": passive_metrics["max_advance_usdt"],
+                    "passive_drawdown_pct": passive_metrics["drawdown_pct"],
+                    "passive_worst_loss_pct": passive_metrics["worst_loss_vs_capital_pct"],
+                    "passive_pnl_usdt": passive_metrics["pnl_usdt"]})
             except Exception as exc:
-                row["passive_status"] = f"error: {type(exc).__name__}: {exc}"
-            rows.append(row)
-            print(f"[{number}/{len(windows)}] {symbol} ventana {row['window_start']}: pasivo {row['passive_status']}; activo no afirmado", flush=True)
+                base_row["passive_status"] = f"error: {type(exc).__name__}: {exc}"
+            for persistence in persistence_values:
+                row = {**base_row, "persistence": int(persistence),
+                    "active_status": "not_run", "approximation": "aproximación: política simplificada por salida de rango; reajuste = liquidar y reabrir; no modela rotación a otra moneda ni decisión por probabilidad"}
+                try:
+                    active = active_replay(sample, low=low, high=high, n=6, capital=100,
+                        persistence=int(persistence), cooldown_s=cooldown_s,
+                        max_per_24h=max_reconfigurations, filters=FILTERS)
+                    active_metrics = evaluate_active_curve(active, capital=100,
+                        target_usdt=3, max_loss_pct=loss_pct)
+                    row.update({"active_status": "approximated", "active_reached_plus_3": active_metrics["reached"],
+                        "active_days_to_target": active_metrics["days"],
+                        "active_progress_usdt": active_metrics["max_advance_usdt"],
+                        "active_drawdown_pct": active_metrics["drawdown_pct"],
+                        "active_worst_loss_pct": active_metrics["worst_loss_vs_capital_pct"],
+                        "active_pnl_usdt": active_metrics["pnl_usdt"],
+                        "reconfigurations": active_metrics["reconfigurations"],
+                        "commissions_usdt": float(active["commissions_usdt"]),
+                        "continuity_checks": len(active["reconfigurations"])})
+                except Exception as exc:
+                    row["active_status"] = f"error: {type(exc).__name__}: {exc}"
+                rows.append(row)
+                print(f"[{number}/{len(windows)}] {symbol} {profile} N={persistence}: pasivo {row['passive_status']}; activo {row['active_status']}", flush=True)
     return rows
+
+
+def replay_summary(rows):
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(row["symbol"], row["profile"], int(row.get("persistence") or 1))].append(row)
+    summary = []
+    for (symbol, profile, persistence), items in sorted(grouped.items()):
+        good = [row for row in items if row.get("active_status") == "approximated"]
+        summary.append({"symbol": symbol, "profile": profile, "persistence": persistence,
+            "windows": len(good), "probability_reached_pct": 100 * sum(bool(row.get("active_reached_plus_3")) for row in good) / len(good) if good else None,
+            "passive_probability_pct": 100 * sum(bool(row.get("passive_reached_plus_3")) for row in good) / len(good) if good else None,
+            "median_days": float(np.median([row["active_days_to_target"] for row in good if row.get("active_days_to_target") is not None])) if any(row.get("active_days_to_target") is not None for row in good) else None,
+            "median_advance_usdt": float(np.median([row.get("active_progress_usdt", 0) for row in good])) if good else None,
+            "worst_drawdown_pct": max((row.get("active_drawdown_pct", 0) for row in good), default=None),
+            "reconfigurations": sum(int(row.get("reconfigurations", 0)) for row in good),
+            "commissions_usdt": sum(float(row.get("commissions_usdt", 0)) for row in good),
+            "approximation": "aproximación: política simplificada por salida de rango; reajuste = liquidar y reabrir; no modela rotación a otra moneda ni decisión por probabilidad"})
+    return summary
 
 
 def calibrate_grid(grid_id: int, db_path: Path):
@@ -265,7 +310,7 @@ def main(argv=None):
     active.add_argument("--source", choices=("binance", "csv"), default="binance")
     active.add_argument("--csv-dir", type=Path, default=Path("."))
     active.add_argument("--out", type=Path, default=Path("./estudios_meta"))
-    persist = sub.add_parser("persistencia")
+    persist = sub.add_parser("persistencia-reajuste", aliases=["persistencia"])
     persist.add_argument("--valores", default="1,2")
     persist.add_argument("--symbols", required=True)
     persist.add_argument("--days", type=int, default=180)
@@ -287,13 +332,20 @@ def main(argv=None):
                 print(f"{row['symbol']}: n={row['n']} Brier={row['brier']:.4f} log-loss={row['log_loss']:.4f} "
                     f"AUC={row['auc']} acierto@0,60={row['accuracy_threshold_0_60']:.3f} "
                     f"umbral mejor={row['best_threshold']:.3f}", flush=True)
-        elif args.command in {"replay-activo", "persistencia"}:
+        elif args.command in {"replay-activo", "persistencia-reajuste", "persistencia"}:
             if args.command == "replay-activo":
                 rows = passive_baseline([s.strip().upper().replace("/", "") for s in args.symbols.split(",")],
                     args.days, args.profile, args.source, args.csv_dir)
             else:
-                rows = persistence_study(args.valores, args.symbols, args.days, args.profile)
-            _write(rows, args.out, args.command, {"read_only": True})
+                values = [int(value) for value in str(args.valores).split(",") if value.strip()]
+                rows = passive_baseline([s.strip().upper().replace("/", "") for s in args.symbols.split(",")],
+                    args.days, args.profile, args.source, args.csv_dir, persistence_values=values)
+            summary = replay_summary(rows)
+            _write(rows, args.out, "persistencia_reajuste" if args.command != "replay-activo" else "replay_activo",
+                {"read_only": True, "summary": summary, "active_status": "approximated",
+                 "approximation": "aproximación: política simplificada por salida de rango; reajuste = liquidar y reabrir; no modela rotación a otra moneda ni decisión por probabilidad"})
+            for row in summary:
+                print(f"{row['symbol']} N={row['persistence']}: activo {row['probability_reached_pct']} %; pasivo {row['passive_probability_pct']} %; reajustes {row['reconfigurations']}; {row['approximation']}", flush=True)
         else:
             rows = calibrate_grid(args.grid_id, args.db)
             _write(rows, args.out, "calibrar_grid", {"read_only_db": True, "public_market_data": True})

@@ -571,3 +571,13 @@ Prueba: `tests/test_meta_operator.py` ? **87 passed, 4 warnings**. Comprueba que
 `grid/meta_operator.py:2319-2340,2425-2428,2525-2531,2644-2650` vuelve pendientes las etiquetas superseded para el job diario, reemplaza su contenido al recalcular y las excluye del entrenamiento. `api/routes/intelligence.py:229-233,458-464` y `grid/meta_operator.py:845-846` no las cuentan en métricas ni comparaciones.
 
 Pruebas: `tests/test_meta_relabel.py tests/test_meta_learning.py tests/test_meta_core.py tests/test_intelligence_api.py` → **72 passed, 2 warnings**. Cubre hash idéntico en dry-run, bloqueo de apply sin respaldo, marcado selectivo y reemplazo diario. No se inspeccionó una BD real; no hay tick persistido en los campos consultados del esquema local.
+
+### Fase 41-C25h — Replay activo aproximado y persistencia de reajuste
+
+`scripts/meta_active_study.py:1-150` implementa un adaptador aislado de estudio que encadena segmentos de `run_simulation`, decide solo en cierres de 15 minutos, liquida el tramo con comisión estimada de venta del 0,1 % y pasa el efectivo al siguiente. Mantiene el ancho relativo y los niveles, y aplica cooldown y máximo diario tomados de `grid/meta.py:DEFAULT_PROFILES`. `scripts/estudios_meta.py:127-218,319-378` reemplaza `not_modeled` en `replay-activo` y agrega `persistencia-reajuste` (N=1/N=2), CSV, JSON y resumen de probabilidad de +3 USDT con `evaluate_portfolio` (éxito por efectivo; pérdida y avance por patrimonio).
+
+La salida declara siempre la limitación: política simplificada por salida de rango; reajuste = liquidar y reabrir; no modela rotación a otra moneda ni decisión por probabilidad. Los comandos de S1 son solo instrucciones y no se ejecutaron.
+
+Prueba: `tests/test_estudios_meta.py` → **6 passed**. Casos: sin salida de rango activo idéntico al pasivo, efectivo continuo tras liquidación, cooldown y máximo de cuatro por 24 h, N=2 igual o posterior a N=1. Sin red ni base real.
+
+Lectura del estudio: si la probabilidad activa N=1 supera a la pasiva en al menos 2 pp sin peor drawdown, vale la pena modelar el reajuste real; si N=2 no pierde frente a N=1, conservar persistencia 2.

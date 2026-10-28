@@ -215,3 +215,9 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 - No se encontró un tick de precio persistido en los campos de muestra consultados (`parameters_json` y `provenance_json`). La vista previa los informa como desconocidos, salvo que el operador ejecute explícitamente `--exchange-info`; esa opción puede requerir red y no se ejecutó durante esta fase.
 - El corte para “anterior a G1g1” usa `meta_learning_labels.labeled_at` comparado con la fecha del commit G1g1, no la fecha de la alternativa. El marcado conserva la etiqueta previa anidada en `superseded_previous_label` para auditoría; el job diario la reemplaza solo tras generar una etiqueta nueva.
 - La vista previa no se ejecutó contra una BD real y no se presentan cantidades reales por símbolo.
+
+## Fase 41-C25h
+
+- Es una aproximación explícita: la simulación por tramos liquida y reabre, no preserva las órdenes/celdas del motor entre tramos ni modela rotaciones a monedas distintas. Las cifras solo sirven para medir la regla simplificada solicitada.
+- La comisión de venta se estima en 0,1 % al cierre y las velas se muestrean a intervalos de 15 minutos. Filtros sintéticos/genéricos aplican a CSV; para Binance se usan los filtros del runner existente. El modo CSV es apropiado para verificar la mecánica sin red.
+- No se ejecutaron los estudios Binance ni se inspeccionaron resultados de S1.

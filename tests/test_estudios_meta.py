@@ -48,11 +48,69 @@ def test_direction_calibration_uses_read_only_join_and_reports_expected_metrics(
             raise AssertionError("la conexión permitió escritura")
 
 
-def test_persistence_study_marks_stateful_policy_unavailable_instead_of_claiming_results():
-    rows = studies.persistence_study("1,2", "XRPUSDT,ZROUSDT", 180, "RAPIDO")
-    assert len(rows) == 4
-    assert {row["status"] for row in rows} == {"not_modeled"}
-    assert all("conserve \u00f3rdenes e inventario" in row["reason"] for row in rows)
+def test_active_study_no_range_exit_matches_passive_exactly():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from scripts.meta_active_study import active_replay, evaluate_active_curve
+    candles = CandleData(np.arange(0, 3600, 300), np.full(12, 100.), np.full(12, 101.),
+        np.full(12, 99.), np.full(12, 100.), 0)
+    def simulator(segment, *, cash, trace, **_kwargs):
+        for i, stamp in enumerate(segment.timestamp):
+            trace.append({"candle": i, "timestamp": int(stamp), "equity": cash, "cells": []})
+        return {"metrics": {"equity_final_after_repository_liquidation": cash,
+            "fees_usdt": 0, "base_final": 0}}
+    passive = active_replay(candles, low=95, high=105, persistence=20, simulator=simulator)
+    active = active_replay(candles, low=95, high=105, persistence=1, simulator=simulator)
+    assert active["reconfigurations"] == []
+    assert np.array_equal(active["cash"], passive["cash"])
+    assert np.array_equal(active["equity"], passive["equity"])
+    assert evaluate_active_curve(active, capital=100, target_usdt=3, max_loss_pct=18) == \
+        evaluate_active_curve(passive, capital=100, target_usdt=3, max_loss_pct=18)
+
+
+def test_active_study_liquidates_and_carries_cash_continuously():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from scripts.meta_active_study import active_replay
+    times = np.arange(0, 7200, 300)
+    close = np.asarray([100.] * 6 + [120.] * (len(times) - 6))
+    candles = CandleData(times, close, close + .1, close - .1, close, 0)
+    def simulator(segment, *, cash, trace, **_kwargs):
+        for i, stamp in enumerate(segment.timestamp):
+            trace.append({"candle": i, "timestamp": int(stamp), "equity": cash, "cells": []})
+        return {"metrics": {"equity_final_after_repository_liquidation": cash,
+            "fees_usdt": 0, "base_final": 0}}
+    result = active_replay(candles, low=95, high=105, persistence=1, simulator=simulator)
+    assert result["reconfigurations"]
+    action = result["reconfigurations"][0]
+    assert action["cash_before"] == action["cash_after_liquidation"] == 100
+    assert result["cash_final"] == result["cash"][-1] == 100
+
+
+def test_active_study_obeys_cooldown_daily_cap_and_persistence_order():
+    import numpy as np
+    from grid.sim.data import CandleData
+    from scripts.meta_active_study import active_replay
+    times = np.arange(0, 4 * 86400, 300)
+    closes = []
+    review_price = 100.0
+    for index, stamp in enumerate(times):
+        if stamp % 900 == 0 and stamp:
+            review_price *= 1.07
+        closes.append(review_price)
+    close = np.asarray(closes)
+    candles = CandleData(times, close, close + .1, close - .1, close, 0)
+    def simulator(segment, *, cash, trace, **_kwargs):
+        for i, stamp in enumerate(segment.timestamp):
+            trace.append({"candle": i, "timestamp": int(stamp), "equity": cash, "cells": []})
+        return {"metrics": {"equity_final_after_repository_liquidation": cash,
+            "fees_usdt": 0, "base_final": 0}}
+    one = active_replay(candles, low=95, high=105, persistence=1, simulator=simulator)
+    two = active_replay(candles, low=95, high=105, persistence=2, simulator=simulator)
+    actions = one["reconfigurations"]
+    assert len(actions) <= 16
+    assert all(b["at"] - a["at"] >= 3600 for a, b in zip(actions, actions[1:]))
+    assert two["reconfigurations"][0]["at"] >= one["reconfigurations"][0]["at"]
 
 
 def test_study_json_and_csv_writer(tmp_path):
