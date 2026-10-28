@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from grid.readiness import (
     STATE_COLLECTING, STATE_EVALUATING, STATE_NOT_RECOMMENDED, STATE_READY,
-    evaluate_readiness, paired_bootstrap_mean_ci,
+    evaluate_readiness, evaluate_allocation_readiness, paired_bootstrap_mean_ci,
 )
 
 
@@ -45,3 +45,18 @@ def test_probability_comparison_detects_improvement_with_paired_bootstrap():
     assert result["candidate_log_loss"] < result["actual_log_loss"]
     assert result["candidate_brier"] < result["actual_brier"]
     assert result["log_loss_delta_ci95"][1] < 0
+
+
+def test_allocation_readiness_requires_mature_72h_and_profile_horizons():
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    labels = [{"source_kind": "live", "labeled_at": now.isoformat(), "labels": {
+        horizon: {"status": "labeled", "advance_delta_usdt": 1.0}
+        for horizon in ("72h", "20d")}} for _ in range(30)]
+    result = evaluate_allocation_readiness(labels, profile_days=20, now=now)
+    assert result["n"] == 30
+    assert result["state"] == STATE_READY
+    assert result["metrics"]["72h"]["ci95_usdt"] == [1.0, 1.0]
+    assert result["metrics"]["20d"]["mean_delta_usdt"] == 1.0
+
+    immature = evaluate_allocation_readiness(labels[:29], profile_days=20, now=now)
+    assert immature["state"] == STATE_COLLECTING

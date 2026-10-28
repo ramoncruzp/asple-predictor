@@ -770,3 +770,33 @@ def replay_alternative_labels(candles_by_symbol, *, start_ts, parameters,
         result[label_horizon]["piece_range_exits"] = piece_range_exits
     return result
 
+
+def replay_allocation_counterfactual(candles_by_symbol, *, start_ts, base_parameters,
+                                     with_piece_parameters, filters_by_symbol=None,
+                                     include_horizons=None):
+    """Etiqueta el efecto de agregar una pieza comparando dos carteras alineadas."""
+    horizons = tuple(include_horizons or ("72h", f"{int(base_parameters.get('profile_days', 20))}d"))
+    base = replay_alternative_labels(candles_by_symbol, start_ts=start_ts,
+        parameters=base_parameters, include_horizons=horizons,
+        filters_by_symbol=filters_by_symbol)
+    added = replay_alternative_labels(candles_by_symbol, start_ts=start_ts,
+        parameters=with_piece_parameters, include_horizons=horizons,
+        filters_by_symbol=filters_by_symbol)
+    labels = {}
+    for horizon in horizons:
+        left, right = base.get(horizon) or {}, added.get(horizon) or {}
+        if left.get("status") != "labeled" or right.get("status") != "labeled":
+            labels[horizon] = {"status": left.get("status") if left.get("status") != "labeled"
+                else right.get("status"), "base": left, "with_piece": right}
+            continue
+        labels[horizon] = {"status": "labeled", "base_advance_usdt": left["net_advance_usdt"],
+            "with_piece_advance_usdt": right["net_advance_usdt"],
+            "advance_delta_usdt": right["net_advance_usdt"] - left["net_advance_usdt"],
+            "base_reached": bool(left["reached"]), "with_piece_reached": bool(right["reached"]),
+            "reached_delta": int(bool(right["reached"])) - int(bool(left["reached"])),
+            "base_drawdown_pct": left.get("drawdown_pct"),
+            "with_piece_drawdown_pct": right.get("drawdown_pct"),
+            "sample_start": left.get("sample_start"), "sample_end": left.get("sample_end"),
+            "base_method_version": REPLAY_METHOD_VERSION}
+    return labels
+

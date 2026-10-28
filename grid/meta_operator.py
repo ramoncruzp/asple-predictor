@@ -2426,6 +2426,103 @@ class MetaOperator:
                 inserted += 1
         return inserted
 
+    @staticmethod
+    def _allocation_label_spec(goal, plan, selected):
+        """Guarda dos carteras compactas para medir el efecto de agregar."""
+        if not selected or not selected.get("piece"):
+            return None
+        cfg = goal.get("config_snapshot") or {}
+        base_pieces = []
+        for item in (plan.get("current_pieces") or {}).values():
+            piece = dict(item.get("piece") or {})
+            if not piece.get("symbol") or piece.get("floor") is None or piece.get("ceiling") is None:
+                continue
+            piece.setdefault("mid_at_plan", (float(piece["floor"]) + float(piece["ceiling"])) / 2)
+            base_pieces.append(piece)
+        addition = dict(selected["piece"])
+        if not addition.get("mid_at_plan"):
+            addition["mid_at_plan"] = (float(addition["floor"]) + float(addition["ceiling"])) / 2
+        common = {"profile": str(goal.get("profile") or "RAPIDO").upper(),
+            "profile_days": int(cfg.get("max_days", 20)),
+            "capital_usdt": float(goal.get("capital_initial") or 0),
+            "target_usdt": float(goal.get("target_usdt") or 0),
+            "max_loss_pct": cfg.get("max_loss_pct")}
+        if not base_pieces or common["capital_usdt"] <= 0:
+            return None
+        return {"base_parameters": {**common, "pieces": base_pieces},
+            "with_piece_parameters": {**common, "pieces": base_pieces + [addition]}}
+
+    def _label_allocation_shadows(self, candles_by_symbol, filters_by_symbol, now_s):
+        """Etiqueta propuestas maduras con velas posteriores al momento de decisión."""
+        from sqlalchemy import select
+        from grid.meta_learning import replay_allocation_counterfactual
+        with self.db.engine.connect() as conn:
+            proposals = conn.execute(select(self.db.meta_ledger.c.id, self.db.meta_ledger.c.meta_id,
+                self.db.meta_ledger.c.ts, self.db.meta_ledger.c.details).where(
+                    self.db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")).mappings().all()
+            label_rows = conn.execute(select(self.db.meta_ledger.c.details).where(
+                self.db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_LABEL")).all()
+        labeled_horizons = {}
+        for (raw,) in label_rows:
+            detail = json.loads(raw or "{}")
+            event_id = detail.get("allocation_event_id")
+            if event_id is not None:
+                labeled_horizons.setdefault(int(event_id), set()).update(
+                    horizon for horizon, label in (detail.get("labels") or {}).items()
+                    if label.get("status") in {"labeled", "invalid_geometry"})
+        created = 0
+        for row in proposals:
+            event_id = int(row["id"])
+            stamp = self._as_utc(row.get("ts"))
+            if stamp is None:
+                continue
+            details = json.loads(row.get("details") or "{}")
+            spec = details.get("allocation_label_spec")
+            if not spec:
+                continue
+            age_s = float(now_s) - stamp.timestamp()
+            profile_days = int(spec["base_parameters"].get("profile_days", 20))
+            due = set()
+            if age_s >= 72 * 3600:
+                due.add("72h")
+            if age_s >= profile_days * 86400:
+                due.add(f"{profile_days}d")
+            needed = sorted(due - labeled_horizons.get(event_id, set()))
+            if not needed:
+                continue
+            symbols = {str(piece.get("symbol") or "").upper()
+                for key in ("base_parameters", "with_piece_parameters")
+                for piece in spec[key].get("pieces", [])}
+            for symbol in symbols:
+                if candles_by_symbol.get(symbol) is None:
+                    try:
+                        candles_by_symbol[symbol] = self._learning_candles(symbol)
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "No se pudieron cargar velas para etiqueta de asignación %s", symbol)
+                        candles_by_symbol[symbol] = None
+                if symbol not in filters_by_symbol:
+                    try:
+                        filters_by_symbol[symbol] = self._symbol_filters(symbol)
+                    except Exception:
+                        filters_by_symbol[symbol] = None
+            market = {symbol: candles_by_symbol.get(symbol) for symbol in symbols}
+            if not symbols or any(candles is None for candles in market.values()):
+                continue
+            labels = replay_allocation_counterfactual(market, start_ts=int(stamp.timestamp()),
+                base_parameters=spec["base_parameters"],
+                with_piece_parameters=spec["with_piece_parameters"],
+                filters_by_symbol=filters_by_symbol, include_horizons=needed)
+            self._ledger(int(row["meta_id"]), "META_OPERATOR_ALLOCATION_LABEL", {
+                "allocation_event_id": event_id, "decision": details.get("decision"),
+                "symbol": details.get("symbol"), "labels": labels,
+                "source_kind": "live", "labeled_at": datetime.now(timezone.utc).isoformat()})
+            labeled_horizons.setdefault(event_id, set()).update(
+                horizon for horizon, label in labels.items()
+                if label.get("status") in {"labeled", "invalid_geometry"})
+            created += 1
+        return created
+
     def _recalculate_learning_bases(self, samples, candles_by_symbol, filters_by_symbol=None):
         """Actualiza bases históricas obsoletas sin borrar ni reemplazar muestras."""
         from grid.meta_learning import causal_replay_probability, REPLAY_METHOD_VERSION
@@ -2580,6 +2677,7 @@ class MetaOperator:
         counters = {"legacy_samples_imported": 0, "historical_samples_created": 0, "labels_72h": 0,
                     "labels_profile": 0, "samples_immature": 0, "symbols_failed": 0,
                     "samples_failed": 0, "labels_invalid_geometry": 0, "filter_failures": 0,
+                    "allocation_labels": 0,
                     "replay_windows_new": 0, "replay_windows_cached": 0, "cuts_processed": 0}
         failed_samples = []
         filter_failure_details = []
@@ -2638,6 +2736,11 @@ class MetaOperator:
                         filter_failure_details.append({"symbol": symbol,
                             "error": f"{type(exc).__name__}: {exc}"})
             timings["market_history_s"] = time.perf_counter() - t
+            try:
+                counters["allocation_labels"] = self._label_allocation_shadows(
+                    candles_by_symbol, filters_by_symbol, int(started.timestamp()))
+            except Exception:
+                logging.getLogger(__name__).exception("Falló el etiquetado de asignación Meta")
             candle_inventory = {symbol: self._candle_inventory(candles)
                 for symbol, candles in candles_by_symbol.items() if candles is not None}
             templates_by_id = {}
@@ -4149,7 +4252,9 @@ class MetaOperator:
                 "reason": allocation.get("reason"), "real_free_cash_usdt": round(free, 4),
                 "capital_usage_basis": "mejor cartera propuesta desde cero",
                 "descartes": allocation.get("descartes"),
-                "evaluated_top": allocation.get("evaluated_top", [])})
+                "evaluated_top": allocation.get("evaluated_top", []),
+                "allocation_label_spec": (self._allocation_label_spec(goal, plan, shadow)
+                    if allocation.get("decision") == "agregar" else None)})
             if plan.get("use_extended_allocation"):
                 selected = allocation.get("selected")
                 if selected and float(selected.get("capital_usdt") or 0) <= free + 1e-8:

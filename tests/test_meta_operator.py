@@ -98,6 +98,25 @@ def test_ledger_v2_compacts_advisor_and_review_plan_without_changing_choices():
     assert len(json.dumps(review, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) < 150 * 1024
 
 
+def test_allocation_label_spec_persists_base_and_added_piece_geometries():
+    from grid.meta_operator import MetaOperator
+
+    goal = {"profile": "RAPIDO", "capital_initial": 100, "target_usdt": 10,
+        "config_snapshot": {"max_days": 20, "max_loss_pct": 10}}
+    plan = {"current_pieces": {"7": {"piece": {"symbol": "XRPUSDT", "strategy": "simple",
+        "piece_type": "grid", "capital_usdt": 70, "n_levels": 4,
+        "floor": 90, "ceiling": 110, "margin_pct": .3}}}}
+    selected = {"piece": {"symbol": "ADAUSDT", "strategy": "smart", "piece_type": "grid",
+        "capital_usdt": 30, "n_levels": 5, "floor": 1, "ceiling": 2,
+        "margin_pct": .4, "mid_at_plan": 1.5}}
+    spec = MetaOperator._allocation_label_spec(goal, plan, selected)
+    assert [piece["symbol"] for piece in spec["base_parameters"]["pieces"]] == ["XRPUSDT"]
+    assert [piece["symbol"] for piece in spec["with_piece_parameters"]["pieces"]] == [
+        "XRPUSDT", "ADAUSDT"]
+    assert spec["base_parameters"]["pieces"][0]["mid_at_plan"] == 100
+    assert spec["with_piece_parameters"]["pieces"][1]["capital_usdt"] == 30
+
+
 def test_plan_ledger_serializes_null_decision_choices_as_empty_object():
     from grid.meta_operator import MetaOperator
 

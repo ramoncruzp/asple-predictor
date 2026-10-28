@@ -20,6 +20,7 @@ from grid.meta_learning import (
     non_overlapping_72h_starts,
     point_in_time_signals,
     replay_alternative_labels,
+    replay_allocation_counterfactual,
     temporal_learning_split,
     stable_template,
 )
@@ -152,6 +153,29 @@ def test_synthetic_forward_replay_labels_known_bot_sale_at_72h():
     assert result["72h"]["piece_range_exits"] == [{"symbol": "XRPUSDT",
         "exited": True, "low": 99.0, "high": 101.0, "basis": "high_low_strict"}]
     assert result["20d"]["status"] == "immature"
+
+
+def test_allocation_counterfactual_labels_base_and_added_piece_on_same_synthetic_candles():
+    step = 300
+    timestamps = np.arange(0, 72 * 3600 + step, step, dtype=np.int64)
+    closes = np.full(len(timestamps), 10.0)
+    lows, highs = closes - .07, closes + .07
+    candles = _candles(timestamps, lows=lows, highs=highs, closes=closes)
+    base = {"profile": "RAPIDO", "profile_days": 20, "capital_usdt": 100,
+        "target_usdt": 10, "max_loss_pct": 10,
+        "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid", "strategy": "simple",
+            "capital_usdt": 70, "n_levels": 4, "floor": 9, "ceiling": 11,
+            "mid_at_plan": 10}]}
+    with_piece = {**base, "pieces": base["pieces"] + [{"symbol": "XRPUSDT",
+        "piece_type": "individual_bot_grid", "strategy": "simple", "capital_usdt": 30,
+        "n_levels": 1, "floor": 9.95, "ceiling": 10.095, "mid_at_plan": 10}]}
+    labels = replay_allocation_counterfactual({"XRPUSDT": candles}, start_ts=0,
+        base_parameters=base, with_piece_parameters=with_piece, include_horizons=("72h",))
+    label = labels["72h"]
+    assert label["status"] == "labeled"
+    assert label["advance_delta_usdt"] == pytest.approx(
+        label["with_piece_advance_usdt"] - label["base_advance_usdt"])
+    assert label["base_method_version"] == "rolling_7d_v3_equity"
 
 
 def test_low_price_learning_grid_uses_symbol_tick_instead_of_generic_tick():

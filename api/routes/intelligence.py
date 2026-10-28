@@ -96,6 +96,9 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         allocation_readiness_rows = conn.execute(select(db.meta_goals.c.profile, db.meta_ledger.c.details)
             .select_from(db.meta_ledger.join(db.meta_goals, db.meta_goals.c.id == db.meta_ledger.c.meta_id))
             .where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")).all()
+        allocation_label_rows = conn.execute(select(db.meta_goals.c.profile, db.meta_ledger.c.details)
+            .select_from(db.meta_ledger.join(db.meta_goals, db.meta_goals.c.id == db.meta_ledger.c.meta_id))
+            .where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_LABEL")).all()
         bot_shadow_rows = conn.execute(select(db.meta_ledger.c.id, db.meta_ledger.c.meta_id,
             db.meta_ledger.c.ts, db.meta_ledger.c.event_type, db.meta_ledger.c.details).where(
                 db.meta_ledger.c.event_type.in_(("META_BOT_TOUCH_SHADOW", "META_BOT_TOUCH_SHADOW_LABEL")))
@@ -540,9 +543,21 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     # Evidencia por interruptor/perfil. Se calcula en lectura y queda separada
     # de los valores efectivos: esta respuesta nunca escribe ni activa flags.
     from grid.readiness import (MIN_MATURE_CASES, STATE_READY, evaluate_readiness,
-        paired_bootstrap_mean_ci, probability_comparison)
+        evaluate_allocation_readiness, paired_bootstrap_mean_ci, probability_comparison)
     readiness_switches = {}
     allocation_decision_counts = Counter()
+    allocation_labels_by_profile = {"RAPIDO": {}, "PRUDENTE": {}}
+    for profile_name, raw_detail in allocation_label_rows:
+        profile_key = str(profile_name or "").upper()
+        detail = _json(raw_detail)
+        event_id = detail.get("allocation_event_id")
+        if profile_key in allocation_labels_by_profile and event_id is not None:
+            combined = allocation_labels_by_profile[profile_key].setdefault(int(event_id),
+                {"source_kind": detail.get("source_kind"), "labels": {},
+                 "labeled_at": detail.get("labeled_at")})
+            combined["labels"].update(detail.get("labels") or {})
+            combined["labeled_at"] = max(str(combined.get("labeled_at") or ""),
+                str(detail.get("labeled_at") or ""))
     for profile_name, raw_detail in allocation_readiness_rows:
         detail = _json(raw_detail)
         allocation_decision_counts[(str(profile_name or "").upper(),
@@ -645,11 +660,10 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         bot_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_touch_bots", False))
 
         allocation_n = int(allocation_decision_counts.get((profile, "agregar"), 0))
-        allocation_ready = evaluate_readiness(n=0, criteria=[
-            {"text": "30 propuestas de agregar con etiquetas maduras 72 h y al plazo", "ok": False, "value": allocation_n},
-            {"text": "La cartera mejora frente a no agregar, con IC que no cruza cero", "ok": False, "value": None}],
-            summary=("Todavía no hubo propuestas de agregar" if allocation_n == 0 else
-                     "Las propuestas no tienen etiquetas maduras enlazadas para comparar cartera"))
+        profile_days = 45 if profile == "PRUDENTE" else 20
+        allocation_ready = evaluate_allocation_readiness(
+            allocation_labels_by_profile[profile].values(), profile_days=profile_days)
+        allocation_ready["proposals"] = allocation_n
         allocation_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_extended_allocation", False))
         recommendations_ready = evaluate_readiness(n=0, criteria=[
             {"text": "Extensión Fase 42: no existe almacenamiento de recomendaciones por grid", "ok": False, "value": "punto de extensión"}],

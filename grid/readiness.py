@@ -118,3 +118,48 @@ def probability_comparison(actual: Iterable[tuple[float, int]],
         "actual_brier": sum(x[1] for x in actual_losses) / len(paired),
         "candidate_brier": sum(x[1] for x in candidate_losses) / len(paired),
         "log_loss_delta_ci95": ci}
+
+
+def evaluate_allocation_readiness(labels: Iterable[dict], *, profile_days: int,
+                                  now: datetime | None = None) -> dict:
+    """Evalúa comparaciones maduras de carteras base frente a cartera ampliada."""
+    from statistics import fmean
+    rows = list(labels)
+    profile_horizon = f"{int(profile_days)}d"
+    paired = {horizon: [] for horizon in ("72h", profile_horizon)}
+    times = []
+    for row in rows:
+        if row.get("source_kind") != "live":
+            continue
+        horizons = row.get("labels") or {}
+        valid = True
+        for horizon in paired:
+            label = horizons.get(horizon) or {}
+            delta = label.get("advance_delta_usdt")
+            if label.get("status") != "labeled" or delta is None:
+                valid = False
+                break
+            paired[horizon].append(float(delta))
+        if valid and row.get("labeled_at"):
+            try:
+                stamp = datetime.fromisoformat(str(row["labeled_at"]).replace("Z", "+00:00"))
+                times.append(stamp)
+            except ValueError:
+                pass
+    n = min((len(values) for values in paired.values()), default=0)
+    metrics = {horizon: {"n": len(values), "mean_delta_usdt": fmean(values) if values else None,
+        "ci95_usdt": paired_bootstrap_mean_ci(values)} for horizon, values in paired.items()}
+    criteria = [
+        {"text": "Al menos 30 comparaciones con etiquetas a 72 h y al plazo", "ok": n >= MIN_MATURE_CASES, "value": n},
+        *[{"text": f"La cartera ampliada mejora a {horizon}",
+           "ok": bool(values and fmean(values) > 0 and metrics[horizon]["ci95_usdt"]
+                      and metrics[horizon]["ci95_usdt"][0] > 0),
+           "value": metrics[horizon]} for horizon, values in paired.items()],
+    ]
+    adverse = any(metrics[horizon]["ci95_usdt"] and metrics[horizon]["ci95_usdt"][1] < 0
+                  for horizon in paired)
+    result = evaluate_readiness(n=n, criteria=criteria, adverse_significant=adverse,
+        sample_times=times, now=now,
+        summary="Comparación de cartera propuesta frente a mantener la cartera base")
+    result["metrics"] = metrics
+    return result
