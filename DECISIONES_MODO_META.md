@@ -395,3 +395,8 @@ C27a define los estados compartidos y C27b conecta datos y presentación. «No c
 ### C27 — alertas de evidencia
 
 Cuando una evaluación entra en “Listo para encender” o “No conviene”, se genera una alerta por transición mediante AlertDispatcher. Las alertas obedecen la configuración y el límite diario existentes; si no se pueden entregar, quedan pendientes. La confirmación y activación siguen siendo manuales.
+
+
+### C27d — elegibilidad de datos y entrega de alertas
+
+Los medidores de evidencia cuentan solo muestras del método vigente y admitidas para entrenamiento. Las alertas de preparación conservan eventos encolados durante envíos concurrentes. Ninguno de estos cambios activa interruptores ni altera decisiones del operador.

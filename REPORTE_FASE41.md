@@ -727,7 +727,7 @@ No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el a
 
 - `api/routes/intelligence.py:540-655,711` publica seis medidores por perfil: pesos aprendidos, señales centradas, ruptura v2, bots de toque, asignación ampliada y extensión de recomendaciones por grid. Señales centradas y ruptura comparan pares de etiquetas 72 h; sus intervalos de log-loss usan bootstrap fijo de 2.000 remuestreos. La ruptura verifica terciles por perfil.
 - `frontend/metas.js:575-690`, `frontend/lab.js:1-36`, `frontend/index.html:30`, `frontend/intelligence.js:42-54`, `frontend/metas.css:84` y `frontend/intelligence.css:6`: Laboratorio presenta los medidores junto a cada bandera y añade señales centradas y bots de toque; Inteligencia muestra la tarjeta global ordenada por estado. Encender fuera de «Listo para encender» requiere confirmar el aviso; no se cambia ningún valor automáticamente.
-- Pruebas dirigidas: `tests/test_intelligence_api.py`, `tests/test_intelligence_readiness.py`, `tests/ui/test_laboratorio.py`, `tests/ui/test_intelligence_ui.py`, `tests/test_meta_learning_api.py`, `tests/test_alert_dispatcher.py`, `tests/test_meta_s1_diagnostic.py`: **51 passed, 13 warnings, 0 failed, 17,00 s**. `node --check` pas? para `frontend/metas.js`, `frontend/intelligence.js` y `frontend/lab.js`; `ASPLE_OFFLINE=1`, sin red ni BD real.
+- Pruebas dirigidas: `tests/test_intelligence_api.py`, `tests/test_intelligence_readiness.py`, `tests/ui/test_laboratorio.py`, `tests/ui/test_intelligence_ui.py`, `tests/test_meta_learning_api.py`, `tests/test_alert_dispatcher.py`, `tests/test_meta_s1_diagnostic.py`: **51 passed, 13 warnings, 0 failed, 17,00 s**. `node --check` pasó para `frontend/metas.js`, `frontend/intelligence.js` y `frontend/lab.js`; `ASPLE_OFFLINE=1`, sin red ni BD real.
 
 ## Fase 41-C27c — alertas y verificador
 
@@ -735,3 +735,11 @@ No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el a
 - `scripts/verificar_s1_meta.py:78-95` muestra el último estado guardado por interruptor: perfil, estado, `n/requerido` y ETA. La BD se abre en modo solo lectura.
 - Pruebas de transición, deduplicación, salida del verificador y API: incluidas en la corrida C27 final (**51 passed, 13 warnings, 0 failed, 17,00 s**). No se usaron S1, Testnet, `.env`, red ni BD real.
 - No hubo cambios en valores de señales, probabilidades, activación automática ni decisiones reales.
+
+
+## Fase 41-C27d — elegibilidad de evidencia y alertas concurrentes
+
+- `api/routes/intelligence.py:133,408-411,440-444,550-553,584-586,618-622` filtra las mediciones de preparación para que solo cuenten muestras del método `rolling_7d_v3_equity` sin exclusión de entrenamiento. Las propuestas de bots de toque también deben declarar ese método.
+- `grid/meta_operator.py:3576-3590,3651-3655` guarda la versión del método en propuestas y etiquetas de bots de toque; `tests/test_meta_operator.py:2527` verifica el campo.
+- `alerts/dispatcher.py:209-230` elimina de la cola solo las alertas entregadas, releyendo la cola bajo el candado para conservar transiciones agregadas mientras Telegram envía otra alerta. `tests/test_alert_dispatcher.py:131-155` reproduce la llegada concurrente.
+- Pruebas dirigidas: `tests/test_intelligence_api.py tests/test_intelligence_readiness.py tests/test_meta_operator.py tests/test_alert_dispatcher.py tests/test_meta_s1_diagnostic.py`: **123 passed, 5 warnings, 0 failed, 34,29 s**. No se cambió la lógica de decisiones ni se usaron S1, Testnet, `.env`, red o BD real.

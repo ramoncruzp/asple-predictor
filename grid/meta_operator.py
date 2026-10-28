@@ -3573,7 +3573,7 @@ class MetaOperator:
 
     def _touch_bot_shadow_proposals(self, goal, plan):
         """Propone bots de toque en sombra; no crea ni modifica grids."""
-        from grid.meta_learning import causal_touch_buy_to_sell
+        from grid.meta_learning import REPLAY_METHOD_VERSION, causal_touch_buy_to_sell
         by_symbol = {}
         for alternative in plan.get("alternatives", []):
             for piece in alternative.get("pieces", []):
@@ -3586,7 +3586,7 @@ class MetaOperator:
             reference = float(piece.get("mid_at_plan") or piece.get("current_price") or 0)
             row = {"symbol": symbol, "profile": str(goal.get("profile") or "RAPIDO"),
                 "proposed_at": at, "status": "no_data", "lookback_days": 30,
-                "sale_net_target_pct": 0.95}
+                "sale_net_target_pct": 0.95, "method_version": REPLAY_METHOD_VERSION}
             if reference <= 0:
                 row["reason"] = "precio de referencia ausente"
                 proposals.append(row); continue
@@ -3651,6 +3651,7 @@ class MetaOperator:
                     label = {"source_event_id": int(event_id), "symbol": symbol,
                         "horizon_hours": horizon, **outcome,
                         "expected_sell_rate": proposal.get("expected_sell_rate"),
+                        "method_version": proposal.get("method_version"),
                         "labeled_at": now}
                     self._ledger(int(meta_id), "META_BOT_TOUCH_SHADOW_LABEL", label)
                     created += 1; done.add(key)

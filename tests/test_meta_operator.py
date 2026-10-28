@@ -2524,6 +2524,7 @@ def test_touch_bot_shadow_chooses_best_causal_distance_without_opening_grid(monk
     assert rows[0]["expected_sell_rate"] == .9
     assert rows[0]["expected_sell_rate_24h"] == .9
     assert rows[0]["expected_sell_rate_72h"] == .25
+    assert rows[0]["method_version"] == "rolling_7d_v3_equity"
     assert rows[0]["sell_price"] / rows[0]["buy_price"] * (.999 ** 2) - 1 == pytest.approx(.0095)
     assert rows[0]["labels_due_hours"] == [24, 72]
 

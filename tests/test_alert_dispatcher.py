@@ -128,6 +128,31 @@ def test_intelligence_readiness_alerts_once_per_state_transition(state):
     assert len(sender.sent) == 2
 
 
+def test_readiness_alert_sent_during_another_delivery_is_not_lost():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    disp.note_intelligence_readiness({"RAPIDO": {"centered_signals": {"state": "Listo para encender",
+        "summary": "primera", "n": 30}}})
+    original_send = sender.send
+    queued_during_send = False
+
+    def send(text):
+        nonlocal queued_during_send
+        result = original_send(text)
+        if not queued_during_send and "centered_signals" in text:
+            queued_during_send = True
+            disp.note_intelligence_readiness({"PRUDENTE": {"touch_bots": {"state": "No conviene",
+                "summary": "segunda", "n": 30}}})
+        return result
+
+    sender.send = send
+    disp.run_once()
+    queued = db.get_alert_state("meta_intelligence_readiness_pending")
+    assert [item["key"] for item in queued] == ["PRUDENTE:touch_bots:No conviene"]
+
+
 def test_dust_cooldown_is_independent_for_different_assets():
     _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
     disp, sender = _dispatcher(db)

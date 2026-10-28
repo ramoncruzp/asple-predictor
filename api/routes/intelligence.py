@@ -129,7 +129,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             db.meta_learning_samples.c.base_probability_smoothed,
             db.meta_learning_samples.c.signals_json,
             db.meta_learning_samples.c.training_exclusion_reason,
-            db.meta_learning_samples.c.sample_at).order_by(
+            db.meta_learning_samples.c.sample_at,
+            db.meta_learning_samples.c.base_method_version).order_by(
                 db.meta_learning_samples.c.id.desc()).limit(10000)).all()
         latest_run = conn.execute(select(db.meta_learning_runs).order_by(
             db.meta_learning_runs.c.id.desc()).limit(1)).mappings().first()
@@ -407,7 +408,9 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             if horizon == "72h":
                 actual = raw.get("probability_adjusted_actual")
                 centered = raw.get("probability_adjusted_centered")
-                if actual is not None and centered is not None:
+                if (actual is not None and centered is not None
+                        and sample[10] == "rolling_7d_v3_equity"
+                        and not sample[8]):
                     profile = str(sample[1]).upper()
                     if profile in centered_by_profile:
                         centered_by_profile[profile].append((float(actual), float(centered), truth,
@@ -437,7 +440,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         exits = [piece.get("exited") for piece in (label.get("piece_range_exits") or [])
                  if piece.get("exited") is not None]
         break_v2_samples.append({"profile": str(sample[1]).upper(),
-            "sample_at": sample[9], "actual": float(actual_p), "v2": float(v2_p),
+            "sample_at": sample[9], "method_version": sample[10],
+            "excluded": bool(sample[8]), "actual": float(actual_p), "v2": float(v2_p),
             "truth": int(bool(label["reached"])), "break": float(v2["value"]),
             "piece_exits": exits,
             "sample_start": label.get("sample_start"), "sample_end": label.get("sample_end")})
@@ -546,6 +550,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
     for profile in ("RAPIDO", "PRUDENTE"):
         learning_mature_times = [row[9] for row in sample_rows
             if str(row[1]).upper() == profile and row[9] is not None
+            and row[10] == "rolling_7d_v3_equity" and not row[8]
             and labels_by_sample.get((int(row[0]), "72h"), {}).get("status") == "labeled"]
         learning_item = profile_learning.get(profile) or {}
         learning_n = int((learning_item.get("readiness") or {}).get("best_effective_samples") or 0)
@@ -579,7 +584,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         centered_ready["metrics"] = centered_eval
         centered_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_centered_signals", False))
 
-        break_rows = [item for item in break_v2_samples if item["profile"] == profile]
+        break_rows = [item for item in break_v2_samples if item["profile"] == profile
+            and item["method_version"] == "rolling_7d_v3_equity" and not item["excluded"]]
         break_eval = probability_comparison(((x["actual"], x["truth"]) for x in break_rows),
             ((x["v2"], x["truth"]) for x in break_rows))
         exits_by_probability = sorted((item["break"], bool(exited)) for item in break_rows
@@ -611,6 +617,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         bot_pairs = []
         for proposal in bot_proposals:
             if str(proposal.get("profile") or "RAPIDO").upper() != profile:
+                continue
+            if proposal.get("method_version") != "rolling_7d_v3_equity":
                 continue
             label = proposal.get("labels", {}).get("72") or {}
             if label.get("sell_after_buy") is not None:

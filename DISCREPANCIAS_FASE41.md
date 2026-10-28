@@ -286,3 +286,9 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - Las alertas se detectan cuando Inteligencia o Laboratorio consulta el estado. Si AlertDispatcher está desactivado o sin credenciales, la notificación permanece pendiente; no se crea un canal paralelo ni se envían mensajes desde la petición HTTP.
 - La consulta de Inteligencia persiste únicamente el último snapshot y las transiciones pendientes en `alert_state` para deduplicar y alimentar el dispatcher. No guarda velas ni modifica datos de trading.
+
+
+### Fase 41-C27d
+
+- La preparación de evidencia excluye muestras con método de replay obsoleto o excluidas del entrenamiento. Las propuestas de bots anteriores sin `method_version` no cuentan hasta tener etiquetas compatibles; se conserva el criterio estricto para no mezclar métodos.
+- La cola de alertas se re-lee después del envío para evitar perder transiciones concurrentes. El envío sigue limitado al ciclo y a los topes existentes de AlertDispatcher.

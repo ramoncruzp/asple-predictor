@@ -206,12 +206,11 @@ class AlertDispatcher:
         if not pending:
             return 0
         sent_count = 0
-        retained = []
+        delivered_keys = set()
         titles = {"Listo para encender": "Evidencia lista para un interruptor Meta",
                   "No conviene": "La evidencia no recomienda un interruptor Meta"}
         for item in pending:
             if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
-                retained.append(item)
                 continue
             title = titles.get(item.get("state"), "Estado de evidencia Meta")
             text = (f"{title}\n{item.get('name')} · perfil {item.get('profile')}\n"
@@ -221,14 +220,16 @@ class AlertDispatcher:
                     kind="operativa", text=text, now=now)
             except Exception:
                 logger.exception("No se pudo enviar alerta de evidencia Meta: %s", item.get("key"))
-                retained.append(item)
                 continue
             if success:
                 sent_count += 1
-            else:
-                retained.append(item)
+                delivered_keys.add(item.get("key"))
         with self._intelligence_readiness_lock:
-            self.db.set_alert_state("meta_intelligence_readiness_pending", retained)
+            # Re-read under the lock so a transition queued while Telegram was
+            # sending another alert is not overwritten by a stale snapshot.
+            current = list(self.db.get_alert_state("meta_intelligence_readiness_pending") or [])
+            remaining = [item for item in current if item.get("key") not in delivered_keys]
+            self.db.set_alert_state("meta_intelligence_readiness_pending", remaining)
         return sent_count
 
     def _process_meta_events(self, sender, cfg, now) -> int:
