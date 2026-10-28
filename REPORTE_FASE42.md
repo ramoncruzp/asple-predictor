@@ -26,7 +26,7 @@ Todos los cambios se validaron localmente con datos sintéticos. No se usaron S1
 ## 42b — Etiquetas, vista y medidor
 
 - `grid/grid_intelligence.py:531-608` etiqueta las recomendaciones al madurar siete días con velas posteriores; compara mantener con la rama recomendada. Para una recomendación "mantener", compara contra la mejor alternativa evaluada.
-- `api/routes/intelligence.py:63-135, 818` resume recomendaciones de 24 h y resultados maduros por acción: diferencia media, intervalo bootstrap, tasa de victoria y preparación. "Listo para encender" exige 30 etiquetas, diferencia media positiva e intervalo enteramente por encima de cero.
+- `api/routes/intelligence.py:63-151, 774-829` resume recomendaciones de 24 h y resultados maduros por acción: diferencia media, intervalo bootstrap, tasa de victoria y preparación. "Listo para encender" exige 30 etiquetas, diferencia media positiva e intervalo enteramente por encima de cero. Los resultados por grid y acción llegan a C35 para alertas de transición deduplicadas.
 - `frontend/intelligence.js:48-61` presenta recomendaciones, barra de avance, criterios y fecha estimada. `api/routes/grid_status.py:197-201` incluye el resumen al consultar el detalle del grid.
 - `scripts/verificar_s1_meta.py:294-315` muestra recomendaciones, acciones, aplicaciones, etiquetas, duración del job y exclusiones. Abre SQLite en `mode=ro`.
 
@@ -40,8 +40,8 @@ Todos los cambios se validaron localmente con datos sintéticos. No se usaron S1
 
 ## Verificación local
 
-- Comando final: `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_grid_intelligence.py tests/test_intelligence_api.py tests/test_grid_engine.py tests/test_grid_monitor_policy.py tests/test_meta_s1_diagnostic.py tests/test_script_entrypoints.py tests/ui/test_intelligence_ui.py tests/ui/test_grids_ui.py -q --basetemp <carpeta-nueva-en-TEMP>`.
-- Resultado: **77 passed, 6 warnings, 0 failed, 8,83 s**. Incluye replay sintético de siete días, etiqueta futura sintética, compuerta de aplicación, switch apagado, resumen/API y verificador.
+- Comando final: `$env:ASPLE_OFFLINE='1'; .\venv\Scripts\python.exe -m pytest tests/test_alert_dispatcher.py tests/test_grid_intelligence.py tests/test_intelligence_api.py tests/test_grid_engine.py tests/test_grid_monitor_policy.py tests/test_meta_s1_diagnostic.py tests/test_script_entrypoints.py tests/ui/test_intelligence_ui.py tests/ui/test_grids_ui.py tests/ui/test_laboratorio.py -q --basetemp <carpeta-nueva-en-TEMP>`.
+- Resultado: **112 passed, 6 warnings, 0 failed, 24,10 s**. Incluye replay sintético de siete días, etiqueta futura sintética, compuerta de aplicación, switch apagado, resumen/API y verificador.
 - `node --check frontend/grids.js` y `node --check frontend/intelligence.js`: correctos. `py_compile` de los módulos Python tocados y `git diff --check`: correctos.
 - No se ejecutó la suite completa ni el job con datos reales. La duración real y el agotamiento del presupuesto de 60 s quedan por medir en S1.
 
@@ -62,4 +62,5 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 - `7397981 Fase 42-C35: evaluación horaria de alertas de evidencia`
 - `70bb961 Fase 42-42a: recomendaciones de grids en sombra`
 - `a750418 Fase 42-42b: etiquetas y medidores de grids`
-- `86dc338 Fase 42-42c: activaci?n opcional por grid`
+- `f45e365 Fase 42-42c: activación opcional por grid`
+- `3328f6f Fase 42-42c: alertas C27 para grids`

@@ -207,13 +207,15 @@ class AlertDispatcher:
             return 0
         sent_count = 0
         delivered_keys = set()
-        titles = {"Listo para encender": "Evidencia lista para un interruptor Meta",
-                  "No conviene": "La evidencia no recomienda un interruptor Meta"}
+        titles = {"Listo para encender": "Evidencia lista para un interruptor de Inteligencia",
+                  "No conviene": "La evidencia no recomienda un interruptor de Inteligencia"}
         for item in pending:
             if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
                 continue
             title = titles.get(item.get("state"), "Estado de evidencia Meta")
-            text = (f"{title}\n{item.get('name')} · perfil {item.get('profile')}\n"
+            owner = ("grid" if item.get("profile") == "GRIDS"
+                else f"perfil {item.get('profile')}")
+            text = (f"{title}\n{item.get('name')} · {owner}\n"
                     f"{item.get('summary')}\nMuestras maduras: {item.get('n')} de {item.get('n_required')}")
             try:
                 success = self._send(sender, alert_key=f"meta_intelligence_readiness:{item.get('key')}",

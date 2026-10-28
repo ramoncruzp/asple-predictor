@@ -130,6 +130,10 @@ def _grid_intelligence_summary(db, target_grid_id=None):
                 {"text": "El intervalo de confianza no cruza cero", "ok": bool(action_ci and action_ci[0] > 0), "value": action_ci}]
             readiness_by_action[action] = evaluate_readiness(n=len(action_values), required=30,
                 criteria=criteria, sample_times=(), summary="evidencia suficiente" if len(action_values) >= 30 else "sin datos suficientes")
+            if action_ci and action_ci[1] < 0:
+                readiness_by_action[action] = evaluate_readiness(n=len(action_values), required=30,
+                    criteria=criteria, adverse_significant=True, sample_times=(),
+                    summary="la evidencia indica un resultado adverso")
         item["mature_labels"] = {"n": n, "mean_gain_vs_maintain_usdt": statistics.fmean(values) if values else None,
             "ci95": ci, "win_rate": statistics.fmean(1.0 if value > 0 else 0.0 for value in values) if values else None,
             "by_action": {key: {"n": len(rows), "mean_gain_vs_maintain_usdt": statistics.fmean(rows)}
@@ -137,6 +141,15 @@ def _grid_intelligence_summary(db, target_grid_id=None):
             "status": "evidencia disponible" if n >= 30 else "sin datos suficientes"}
     return {"updated_at": now.isoformat(), "method": "replay de 7 días sobre la parte afectada",
         "grids": list(grouped.values())}
+
+
+def _grid_intelligence_readiness_alerts(grid_summary):
+    """Devuelve medidores terminales con claves estables por grid y acción."""
+    return {
+        f"grid_{int(grid['grid_id'])}_{action}": readiness
+        for grid in (grid_summary or {}).get("grids") or []
+        for action, readiness in ((grid.get("mature_labels") or {}).get("readiness_by_action") or {}).items()
+    }
 
 
 @router.get("")
@@ -749,23 +762,20 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
             allocation_labels_by_profile[profile].values(), profile_days=profile_days)
         allocation_ready["proposals"] = allocation_n
         allocation_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_extended_allocation", False))
-        recommendations_ready = evaluate_readiness(n=0, criteria=[
-            {"text": "Extensión Fase 42: no existe almacenamiento de recomendaciones por grid", "ok": False, "value": "punto de extensión"}],
-            summary="Punto de extensión: aplicar recomendaciones por grid aún no existe")
-        recommendations_ready["enabled"] = False
         readiness_switches[profile] = {
             "learned_weights": learned_ready,
             "centered_signals": centered_ready,
             "break_prob_v2": break_ready,
             "touch_bots": bot_ready,
             "extended_allocation": allocation_ready,
-            "grid_recommendations": recommendations_ready,
         }
 
+    grid_intelligence = _grid_intelligence_summary(db)
+    grid_readiness_alerts = _grid_intelligence_readiness_alerts(grid_intelligence)
     dispatcher = getattr(request.app.state, "alert_dispatcher", None)
     note_readiness = getattr(dispatcher, "note_intelligence_readiness", None)
     if callable(note_readiness):
-        note_readiness(readiness_switches)
+        note_readiness({**readiness_switches, "GRIDS": grid_readiness_alerts})
     return {"updated_at": datetime.now(timezone.utc).isoformat(),
         "data": {"summary_text": eval_msg + coverage_msg + forecast_msg + learning_msg,
             "candles": {"available": False,
@@ -815,7 +825,8 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],
-        "grid_intelligence": _grid_intelligence_summary(db),
+        "grid_intelligence": grid_intelligence,
+        "grid_intelligence_readiness": grid_readiness_alerts,
         "switches": switches, "shadow_switches": shadow_switches,
         "readiness_switches": readiness_switches, "global_flags": global_flags,
         "models_link": "#models", "battle_link": "#battle"}

@@ -246,7 +246,8 @@ async def lifespan(app: FastAPI):
             "query_string": b"", "headers": [], "app": app, "scheme": "http",
             "server": ("localhost", 80), "client": ("127.0.0.1", 0)}
         summary = intelligence._intelligence_summary(Request(scope), page=1, page_size=1)
-        return summary.get("readiness_switches") or {}
+        return {**(summary.get("readiness_switches") or {}),
+            "GRIDS": summary.get("grid_intelligence_readiness") or {}}
     grid_intelligence_job = IntelligenceReadinessJob(evaluate_grid_readiness, alert_dispatcher)
     app.state.grid_intelligence_job = grid_intelligence_job
     grid_intelligence_job.start()

@@ -128,6 +128,23 @@ def test_intelligence_readiness_alerts_once_per_state_transition(state):
     assert len(sender.sent) == 2
 
 
+def test_grid_readiness_alert_is_deduplicated_by_grid_and_action():
+    _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
+    disp, sender = _dispatcher(db)
+    disp.run_once()
+    sender.sent.clear()
+    snapshot = {"GRIDS": {"grid_7_cambiar_n_5": {
+        "state": "Listo para encender", "summary": "30 etiquetas y mejora positiva",
+        "n": 30, "n_required": 30}}}
+    disp.note_intelligence_readiness(snapshot)
+    disp.run_once()
+    assert len(sender.sent) == 1
+    assert "grid_7_cambiar_n_5" in sender.sent[0] and "grid" in sender.sent[0]
+    disp.note_intelligence_readiness(snapshot)
+    disp.run_once()
+    assert len(sender.sent) == 1
+
+
 def test_readiness_alert_sent_during_another_delivery_is_not_lost():
     _engine, db, _exchange = make_engine(fee_rate="0", fee_asset="USDT")
     disp, sender = _dispatcher(db)

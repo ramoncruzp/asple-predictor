@@ -23,7 +23,7 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
         "progress_pct": 0, "criteria": [{"text": "30 casos maduros", "ok": False, "value": 0}],
         "estimated_ready_at": None, "summary": "Sin muestras maduras todavía", "enabled": False}
         for key in ("learned_weights", "centered_signals", "break_prob_v2", "touch_bots",
-                    "extended_allocation", "grid_recommendations")}
+                    "extended_allocation")}
         for profile in ("RAPIDO", "PRUDENTE")}
     now = datetime.now(timezone.utc).isoformat()
 

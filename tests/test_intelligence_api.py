@@ -130,7 +130,8 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['switches']['RAPIDO']['enabled'] is False
     assert set(payload['readiness_switches']['RAPIDO']) == {
         'learned_weights', 'centered_signals', 'break_prob_v2', 'touch_bots',
-        'extended_allocation', 'grid_recommendations'}
+        'extended_allocation'}
+    assert payload['grid_intelligence_readiness'] == {}
     for profile in ('RAPIDO', 'PRUDENTE'):
         for readiness in payload['readiness_switches'][profile].values():
             assert readiness['state'] == 'Recolectando datos'

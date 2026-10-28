@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from database.db_manager import DBManager
 from grid.grid_intelligence import GridIntelligenceJob, recommend_grid_action, retained_inventory_metrics
+from api.routes.intelligence import _grid_intelligence_readiness_alerts
 from api.routes import grids as grids_api
 from grid.sim.runner import FILTERS
 
@@ -108,6 +109,12 @@ def test_disabled_grid_intelligence_switch_never_calls_apply_callback(tmp_path):
     assert result is None
     assert calls == []
     db.engine.dispose()
+
+
+def test_grid_readiness_alert_snapshot_uses_grid_and_action_key():
+    snapshot = _grid_intelligence_readiness_alerts({"grids": [{"grid_id": 7,
+        "mature_labels": {"readiness_by_action": {"cambiar_n_5": {"state": "Listo para encender"}}}}]})
+    assert snapshot == {"grid_7_cambiar_n_5": {"state": "Listo para encender"}}
 
 
 def test_recommendations_are_persisted_as_shadow_only(tmp_path):
