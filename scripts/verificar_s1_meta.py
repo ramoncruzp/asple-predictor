@@ -5,11 +5,16 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from urllib.parse import quote
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _connect(path: Path):

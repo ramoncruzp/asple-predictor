@@ -229,3 +229,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - El POST comprueba `_learning_guard` antes de agendar. Si una corrida empieza entre esa comprobación y el job, la protección interna de `run_learning_daily` mantiene la exclusión; la petición HTTP no ejecuta el aprendizaje.
 - Seis horas es la tolerancia amplia de retraso del job manual; no altera el cron ni la política de exclusión. El resumen de errores de GET se limita a veinte elementos para mantener la respuesta acotada.
+
+## Fase 41-C26a1
+
+- `meta_active_study.py` era un módulo auxiliar sin CLI. Se añadió solo un parser de ayuda; invocarlo sin argumentos no ejecuta nada ni accede a datos.

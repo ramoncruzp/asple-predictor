@@ -10,7 +10,9 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from grid.meta_operator import MetaOperator
 from grid.meta_learning import REPLAY_METHOD_VERSION, stable_template

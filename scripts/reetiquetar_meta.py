@@ -5,9 +5,14 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import sys
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 GENERIC_TICK = 0.0001
 G1G1_AT = "2026-10-28 09:45:46"

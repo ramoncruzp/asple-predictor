@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import math
+import argparse
+import sys
 from collections import deque
+from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 APPROXIMATION_NOTE = ("aproximación: política simplificada por salida de rango; "
     "reajuste = liquidar y reabrir; no modela rotación a otra moneda ni decisión por probabilidad")
@@ -135,3 +142,8 @@ def evaluate_active_curve(replay, *, capital, target_usdt, max_loss_pct):
         max_loss_pct=max_loss_pct)
     return {**metrics, "reconfigurations": len(replay["reconfigurations"]),
         "commissions_and_liquidation_in_equity": True, "active_status": "approximated"}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()

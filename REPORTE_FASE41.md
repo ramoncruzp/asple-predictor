@@ -618,3 +618,8 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 - `frontend/index.html:30` y `frontend/intelligence.js:119-147`: la confirmación indica que tarda alrededor de 90 minutos y no ejecuta órdenes. La interfaz muestra HTTP 202/409, hora agendada y el estado de la última corrida; **Actualizar estado** consulta el GET.
 - Pruebas: comando exacto: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c25i-rev-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_learning_api.py tests/ui/test_intelligence_ui.py -q --basetemp $bt` — 13 passed, 10 warnings. `node --check frontend/intelligence.js`: correcto.
 - Uso en S1: abrir Inteligencia, pulsar **Correr aprendizaje ahora**, revisar el aviso y confirmar; usar **Actualizar estado** para consultar la corrida. Alternativa desde la máquina del servicio, con el token guardado en una variable de entorno sin imprimirlo: `curl -i -X POST http://127.0.0.1:8000/api/metas/learning/run -H "X-API-Token: ${GRID_API_TOKEN}" -H "Content-Type: application/json" -d '{}'`. No se ejecutó en S1.
+
+## Fase 41-C26a1 — Scripts ejecutables desde cualquier carpeta
+
+- `scripts/reetiquetar_meta.py:13`, `scripts/estudios_meta.py:18`, `scripts/medir_orden_intravela.py:16`, `scripts/verificar_s1_meta.py:15`, `scripts/mantenimiento_bd_meta.py:13` y `scripts/meta_active_study.py:12`: agregan la raíz del repo a `sys.path` con el mismo patrón antes de importar módulos propios. `meta_active_study.py:147` acepta `--help` como herramienta autónoma sin iniciar un estudio.
+- Prueba `tests/test_script_entrypoints.py`: cada uno de los seis scripts se ejecuta con `--help`, desde la raíz y desde una carpeta temporal externa, sin `PYTHONPATH`; **1 passed**.
