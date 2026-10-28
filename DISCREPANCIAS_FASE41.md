@@ -205,3 +205,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - La poda ocurre al iniciar y terminar el plan cuando no hay otro plan activo. Si coinciden planes en varios hilos, se aplaza hasta que finaliza el ?ltimo; durante la ejecuci?n las inserciones pueden superar temporalmente 500. El siguiente l?mite de frontera aplica la poda LRU.
 - El tama?o reportado es estimado mediante muestreo de hasta 25 entradas por cach?. Las velas sint?ticas de la medici?n tienen 2.000 marcas, no el historial real completo de 180 d?as; no se infiere el uso de memoria de S1.
+
+## Fase 41-C25e
+
+- Las filas durable de replay m?tricas que ya existan no se borran en esta fase. No sirven a consumidores que necesitan curvas; se cuentan como descartadas y se recalculan. La retenci?n existente las eliminar? al vencer su periodo. No se cambian m?tricas ni decisiones.

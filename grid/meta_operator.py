@@ -1050,6 +1050,8 @@ class MetaOperator:
             return None
 
     def _persistent_cache_set(self, kind, payload, value):
+        if kind == "replay":
+            return
         if not self.cache_enabled or not self.cache_writes or self.db is None or not hasattr(self.db, "meta_analysis_cache"):
             return
         key, day = self._cache_key(kind, payload)
@@ -1058,13 +1060,6 @@ class MetaOperator:
             table = self.db.meta_analysis_cache
             stored = dict(value) if isinstance(value, dict) else value
             if isinstance(stored, dict):
-                if kind == "replay":
-                    # Las curvas permanecen completas en memoria durante el plan
-                    # para combinar alternativas; la caché durable conserva métricas.
-                    stored["window_results"] = [
-                        {key: field for key, field in row.items() if key != "curve"}
-                        for row in stored.get("window_results", [])]
-                    stored["curves_omitted"] = True
                 expected = {"advisor": self.ADVISOR_CACHE_METHOD_VERSION,
                     "touch_signal": self.TOUCH_CACHE_METHOD_VERSION}.get(kind)
                 if expected:
@@ -1548,7 +1543,8 @@ class MetaOperator:
                                  "touch_signal_s": 0.0, "touch_signal_cache_hits": 0,
                                  "advisor_cache_hits": 0, "replay_cache_hits": 0,
                                  "advisor_process_cache_hits": 0, "advisor_persistent_cache_hits": 0,
-                                 "replay_process_cache_hits": 0, "replay_persistent_cache_hits": 0}
+                                 "replay_process_cache_hits": 0, "replay_persistent_cache_hits": 0,
+                                 "replay_persistent_cache_discarded": 0}
         scan = self.scanner.scan(capital=float(goal["capital_initial"]), with_sim=False)
         scan_seconds = time.perf_counter() - timing_started
         candidates = list(scan.get("results", []))
@@ -1941,6 +1937,8 @@ class MetaOperator:
                     "touch_signal_cache_hits": self._analysis_timing["touch_signal_cache_hits"],
                     "replay_process_cache_hits": self._analysis_timing.get("replay_process_cache_hits", 0),
                     "replay_persistent_cache_hits": self._analysis_timing.get("replay_persistent_cache_hits", 0),
+                    "replay_persistent_cache_discarded": self._analysis_timing.get(
+                        "replay_persistent_cache_discarded", 0),
                     "portfolio_selection": round(max(0.0, time.perf_counter() - portfolio_started - control_seconds
                         - self._analysis_timing["advisor_s"] - self._analysis_timing["replay_s"]
                         - self._analysis_timing["touch_signal_s"]), 3),
@@ -2854,14 +2852,13 @@ class MetaOperator:
                round(float(cfg.get("max_loss_pct", 0)), 4), float(cfg.get("_meta_capital_initial", capital)))
         cached = self._process_cache_get(self._cache, key)
         self._analysis_timing.setdefault("replay_cache_hits", 0)
+        self._analysis_timing.setdefault("replay_persistent_cache_hits", 0)
+        self._analysis_timing.setdefault("replay_persistent_cache_discarded", 0)
+        from_process_cache = cached is not None
+        from_persistent_cache = False
         if cached is None:
             cached = self._persistent_cache_get("replay", key)
-            if cached is not None:
-                self._analysis_timing["replay_cache_hits"] += 1
-                self._analysis_timing["replay_persistent_cache_hits"] = self._analysis_timing.get("replay_persistent_cache_hits", 0) + 1
-        else:
-            self._analysis_timing["replay_cache_hits"] += 1
-            self._analysis_timing["replay_process_cache_hits"] = self._analysis_timing.get("replay_process_cache_hits", 0) + 1
+            from_persistent_cache = cached is not None
         if cached is not None and (cached.get("method_version") != REPLAY_METHOD_VERSION or
                 any("curve" not in row for row in cached.get("window_results", []))):
             cached = None
@@ -2871,6 +2868,15 @@ class MetaOperator:
             if any(int(curve.get("curve_format_version", 1)) != CURVE_FORMAT_VERSION
                    for curve in curve_rows):
                 cached = None
+        if cached is not None:
+            self._analysis_timing["replay_cache_hits"] += 1
+            if from_persistent_cache:
+                self._analysis_timing["replay_persistent_cache_hits"] += 1
+            elif from_process_cache:
+                self._analysis_timing["replay_process_cache_hits"] = self._analysis_timing.get(
+                    "replay_process_cache_hits", 0) + 1
+        elif from_persistent_cache:
+            self._analysis_timing["replay_persistent_cache_discarded"] += 1
         replay_windows = None
         if cached is None:
             replay_started = time.perf_counter()

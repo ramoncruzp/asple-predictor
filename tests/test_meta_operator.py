@@ -487,8 +487,7 @@ def test_daily_cache_persists_results_for_reuse(tmp_path):
         **value, "method_version": operator.ADVISOR_CACHE_METHOD_VERSION}
 
 
-def test_durable_replay_cache_keeps_metrics_and_omits_curves(tmp_path):
-    import json
+def test_durable_replay_cache_does_not_write_replay_without_curves(tmp_path):
     from sqlalchemy import select
     from database.db_manager import DBManager
     from grid.meta_learning import REPLAY_METHOD_VERSION
@@ -503,10 +502,9 @@ def test_durable_replay_cache_keeps_metrics_and_omits_curves(tmp_path):
     operator._persistent_cache_set("replay", payload, value)
     key, _day = operator._cache_key("replay", payload)
     with db.engine.connect() as conn:
-        stored = json.loads(conn.execute(select(db.meta_analysis_cache.c.value_json).where(
-            db.meta_analysis_cache.c.cache_key == key)).scalar_one())
-    assert stored["window_results"] == [{"window_start": "w", "pnl_usdt": 1.2}]
-    assert stored["curves_omitted"] is True
+        stored = conn.execute(select(db.meta_analysis_cache.c.value_json).where(
+            db.meta_analysis_cache.c.cache_key == key)).scalar_one_or_none()
+    assert stored is None
     assert value["window_results"][0]["curve"]["curve_format_version"] == 3
 
 
@@ -2163,6 +2161,9 @@ def test_replay_cache_reused_for_subquantum_price_move_and_missed_past_the_step(
 
     operator = MetaOperator(object(), object(), Scanner(), None, None, clock=lambda: 1_800_000_000)
     operator._analysis_timing = {"advisor_s": 0, "replay_s": 0, "touch_signal_s": 0}
+    operator._persistent_cache_get = lambda kind, _payload: ({"method_version": "rolling_7d_v3_equity",
+        "summary": {"probability": .99}, "window_results": [{"pnl_usdt": 99}]}
+        if kind == "replay" else None)
     build_calls = []
     real_build_windows = module.build_windows
 
@@ -2175,10 +2176,14 @@ def test_replay_cache_reused_for_subquantum_price_move_and_missed_past_the_step(
     row_a = {"symbol": "XRPUSDT", "book": {"bid_price": 100.0, "ask_price": 100.02}}
     operator._evaluate(row_a, "simple", 100, 10, 90, 110, 4, cfg)
     assert len(build_calls) == 1
+    assert operator._analysis_timing["replay_persistent_cache_discarded"] == 1
+    assert operator._analysis_timing["replay_persistent_cache_hits"] == 0
+    assert operator._analysis_timing["replay_cache_hits"] == 0
 
     row_b = {"symbol": "XRPUSDT", "book": {"bid_price": 100.08, "ask_price": 100.1}}  # ~+0.08%
     operator._evaluate(row_b, "simple", 100, 10, 90, 110, 4, cfg)
     assert len(build_calls) == 1, "un movimiento bajo el paso de 0.25% debe reutilizar el replay cacheado"
+    assert operator._analysis_timing["replay_process_cache_hits"] == 1
 
     row_c = {"symbol": "XRPUSDT", "book": {"bid_price": 101.0, "ask_price": 101.02}}  # +1%
     operator._evaluate(row_c, "simple", 100, 10, 90, 110, 4, cfg)

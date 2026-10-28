@@ -557,3 +557,9 @@ La etiqueta de salida usa m?ximos/m?nimos de las velas y exige cruce estricto (`
 Medici?n sint?tica: 3 d?as ? 15 alternativas por d?a. Los valores representan 11 curvas comprimidas de 8 KB por campo, recomendaciones peque?as, velas con 2.000 marcas y res?menes de toque. Antes de podar: an?lisis 45 filas/586,76 KB; Advisor 45/49,04 KB; velas 45/7.082,31 KB; fallos 15/3,63 KB; toque 45/36,17 KB. Despu?s de pasar al tercer d?a: an?lisis 15/195,59 KB; Advisor 15/16,35 KB; velas 15/2.360,77 KB; fallos 15/3,63 KB; toque 15/12,06 KB. Son estimaciones del fixture, no tama?os medidos en S1.
 
 Pruebas: `tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py` ? **88 passed, 4 warnings**. Se cubrieron poda diaria, LRU, no podar durante un plan, estad?sticas guardadas y probabilidad id?ntica tras retirar cach? obsoleta.
+
+### Fase 41-C25e ? cach? durable de replay descartada
+
+`grid/meta_operator.py:1052-1054` deja de escribir entradas durables de `replay` sin curvas. En lectura, solo suma acierto cuando el candidato conserva todas las curvas y su formato es vigente; las filas m?tricas antiguas se descartan, el contador `replay_persistent_cache_discarded` aumenta y el replay se vuelve a calcular (`grid/meta_operator.py:2854-2879`). El contador aparece en tiempos del plan (`:1940-1941`). Los aciertos de cach? de Advisor y toque siguen su ruta existente.
+
+Prueba: `tests/test_meta_operator.py` ? **87 passed, 4 warnings**. Comprueba que no se escriban filas replay nuevas, que una fila vieja sin curvas se descarte y no cuente como hit, y que la cach? de proceso con curvas v?lidas s? cuente como hit.
