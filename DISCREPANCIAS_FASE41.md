@@ -262,3 +262,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a8
 
 - La comparación calcula volatilidad realizada como raíz de suma de cuadrados de retornos logarítmicos 5m en 24 h, igual a la definición de entrenamiento del modelo; no estima con velas horarias ni consume el campo `realized_logvol` guardado. No se descargaron velas ni se consultó ninguna BD real en este trabajo.
+
+## Fase 41-C26a9
+
+- El intervalo se limita a `1h`, que es el contrato de los artefactos y las predicciones de model_b/c usados por la app. La evaluación requiere outcomes ya verificados; no completa outcomes faltantes con cotizaciones ni mezcla `model_a_down`.

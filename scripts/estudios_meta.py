@@ -103,6 +103,59 @@ def calibrate_direction(db_path: Path, days: float = 30):
     return result
 
 
+def calibrate_model(db_path: Path, model: str, symbol: str, days: float = 30):
+    """Evalúa model_b/c contra el target binario registrado por el verificador."""
+    model = str(model).lower()
+    if model not in {"model_b", "model_c"}:
+        raise ValueError("model debe ser model_b o model_c")
+    symbol = str(symbol).upper().replace("/", "")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, days))).replace(tzinfo=None).isoformat(sep=" ")
+    with _connect_read_only(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"predictions", "outcomes"} <= tables:
+            raise RuntimeError("La base requiere predictions y outcomes")
+        rows = conn.execute("""SELECT p.probability_up, o.price_change_pct, p.predicted_at
+            FROM predictions p JOIN outcomes o ON o.prediction_id=p.prediction_id
+            WHERE p.model_name=? AND p.symbol=? AND p.interval='1h'
+              AND datetime(p.predicted_at)>=datetime(?) AND p.probability_up IS NOT NULL
+            ORDER BY p.predicted_at""", (model, symbol, cutoff)).fetchall()
+    values = [(float(row[0]), int(float(row[1]) > .5)) for row in rows if row[1] is not None]
+    if not values:
+        return {"model": model, "symbol": symbol, "n": 0, "metrics": None,
+            "base": None, "deciles": [], "target": "precio de cierre a 4 velas (4 h) sube más de 0,5 %",
+            "reason": "sin predicciones verificadas en el periodo"}
+    ps = np.clip(np.asarray([item[0] for item in values], dtype=float), 1e-12, 1-1e-12)
+    ys = np.asarray([item[1] for item in values], dtype=int)
+    base_p = float(ys.mean())
+    base_class = int(base_p >= .5)
+    model_pred = ps >= .5
+    base_pred = np.full(len(ys), bool(base_class))
+    def metrics(probabilities, predicted, labels=ys):
+        return {"brier": float(np.mean((probabilities-labels)**2)),
+            "log_loss": float(-np.mean(labels*np.log(probabilities)+(1-labels)*np.log(1-probabilities))),
+            "auc": _auc(labels.tolist(), probabilities.tolist()),
+            "accuracy": float(np.mean(predicted == labels))}
+    deciles = []
+    for index in range(10):
+        mask = (ps >= index/10) & (ps < (index+1)/10 if index < 9 else ps <= 1)
+        if np.any(mask):
+            subset_y, subset_p = ys[mask], ps[mask]
+            subset_base = np.full(int(mask.sum()), np.clip(base_p, 1e-12, 1-1e-12))
+            subset_model_pred = subset_p >= .5
+            subset_base_pred = np.full(int(mask.sum()), bool(base_class))
+            deciles.append({"decile": index+1, "n": int(mask.sum()),
+                "predicted_mean": float(subset_p.mean()), "observed_up_rate": float(subset_y.mean()),
+                "base_probability": base_p,
+                "model_metrics": metrics(subset_p, subset_model_pred, subset_y),
+                "base_metrics": metrics(subset_base, subset_base_pred, subset_y)})
+    return {"model": model, "symbol": symbol, "interval": "1h", "n": len(values),
+        "target": "price_change_pct > 0.5 (cierre cuatro velas después; 4 h)",
+        "metrics": metrics(ps, model_pred), "base": {"probability_up": base_p,
+            "class": base_class, "metrics": metrics(np.full(len(ys), np.clip(base_p, 1e-12, 1-1e-12)), base_pred)},
+        "deciles": deciles, "first_at": str(rows[0][2]), "last_at": str(rows[-1][2]),
+        "read_only": True}
+
+
 def volatility_bias_rows(candles, forecasts):
     """Compara sigma pronosticada con RV de las 288 velas de 5m siguientes."""
     stamps = np.asarray(candles.timestamp, dtype=np.int64)
@@ -374,6 +427,12 @@ def main(argv=None):
     direction.add_argument("--db", required=True, type=Path)
     direction.add_argument("--days", type=float, default=30)
     direction.add_argument("--out", type=Path, default=Path("./estudios_meta"))
+    model_cal = sub.add_parser("calibrar-modelo")
+    model_cal.add_argument("--db", required=True, type=Path)
+    model_cal.add_argument("--model", required=True, choices=("model_b", "model_c"))
+    model_cal.add_argument("--symbol", required=True)
+    model_cal.add_argument("--days", type=float, default=30)
+    model_cal.add_argument("--out", type=Path, default=Path("./estudios_meta"))
     vol_bias = sub.add_parser("sesgo-volatilidad")
     vol_bias.add_argument("--db", required=True, type=Path)
     vol_bias.add_argument("--symbols", required=True)
@@ -410,6 +469,12 @@ def main(argv=None):
                 print(f"{row['symbol']}: n={row['n']} Brier={row['brier']:.4f} log-loss={row['log_loss']:.4f} "
                     f"AUC={row['auc']} acierto@0,60={row['accuracy_threshold_0_60']:.3f} "
                     f"umbral mejor={row['best_threshold']:.3f}", flush=True)
+        elif args.command == "calibrar-modelo":
+            result = calibrate_model(args.db, args.model, args.symbol, args.days)
+            _write([result], args.out, "calibrar_modelo", {"read_only_db": True,
+                "target": result["target"], "model": args.model, "symbol": args.symbol,
+                "days": args.days})
+            print(json.dumps(result, ensure_ascii=False), flush=True)
         elif args.command == "sesgo-volatilidad":
             rows, summaries = volatility_bias_study(args.db, args.symbols.split(","),
                 args.days, args.source, args.csv_dir)

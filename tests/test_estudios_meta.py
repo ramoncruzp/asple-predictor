@@ -66,6 +66,29 @@ def test_volatility_bias_uses_exact_next_288_five_minute_returns():
     assert rows[0]["bars_used"] == 288
 
 
+def test_calibrar_modelo_uses_four_hour_half_percent_target_and_base(tmp_path):
+    db = tmp_path / "model-calibration.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.executescript("""
+            CREATE TABLE predictions(prediction_id TEXT, symbol TEXT, model_name TEXT, interval TEXT,
+                probability_up REAL, predicted_at TEXT);
+            CREATE TABLE outcomes(prediction_id TEXT, price_change_pct REAL);
+        """)
+        for index, (probability, change) in enumerate(((.9,.6),(.8,.8),(.2,.1),(.1,-.2))):
+            conn.execute("INSERT INTO predictions VALUES(?,?,?,?,?,?)",
+                (f"p{index}", "XRPUSDT", "model_b", "1h", probability, "2026-10-27 00:00:00"))
+            conn.execute("INSERT INTO outcomes VALUES(?,?)", (f"p{index}", change))
+    before = db.read_bytes()
+    result = studies.calibrate_model(db, "model_b", "XRPUSDT", days=3650)
+    assert result["n"] == 4 and "4 h" in result["target"]
+    assert result["metrics"]["brier"] == pytest.approx(.025)
+    assert result["metrics"]["auc"] == 1.0 and result["metrics"]["accuracy"] == 1.0
+    assert result["base"]["metrics"]["brier"] == pytest.approx(.25)
+    assert result["base"]["metrics"]["accuracy"] == .5
+    assert all("model_metrics" in row and "base_metrics" in row for row in result["deciles"])
+    assert db.read_bytes() == before
+
+
 def test_active_study_no_range_exit_matches_passive_exactly():
     import numpy as np
     from grid.sim.data import CandleData
