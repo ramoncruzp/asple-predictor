@@ -18,20 +18,39 @@ def curve(capital, cash, equity=None):
     return pack_curve(np.arange(len(cash)) * 900, cash, cash if equity is None else equity, capital)
 
 
-def test_zlib_curve_is_exact_same_size_below_100kb_and_reads_legacy_format():
+def _pack_curve_v2(timestamps, cash, equity, capital):
+    """Codificación histórica exacta para comparar el lector v2."""
+    import zlib
+    def encode(values, dtype):
+        raw = np.asarray(values, dtype=dtype).tobytes()
+        if dtype == "<f4":
+            raw = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4).T.tobytes()
+        return base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+    return {"start_ts": int(timestamps[0]), "step_s": 900, "count": len(timestamps),
+        "offsets_i32": None, "curve_format_version": 2,
+        "cash_zlib_f32": encode(cash, "<f4"), "equity_zlib_f32": encode(equity, "<f4"),
+        "capital_usdt": float(capital)}
+
+
+def test_delta_xor_v3_is_bit_exact_against_v2_and_reads_v1():
     from grid.sim.meta_portfolio import pack_curve, unpack_curve, CURVE_FORMAT_VERSION
 
     count = 180 * 24 * 4
     stamps = np.arange(count, dtype=np.int64) * 900
-    cash = (100 + np.sin(np.arange(count) / 19) * 2).astype("<f4")
-    equity = (cash + np.cos(np.arange(count) / 31) * .5).astype("<f4")
-    packed = pack_curve(stamps, cash, equity, 100)
-    restored = unpack_curve(packed)
-    assert packed["curve_format_version"] == CURVE_FORMAT_VERSION == 2
-    assert np.array_equal(restored[0], stamps)
-    assert np.array_equal(restored[1].view("u4"), cash.view("u4"))
-    assert np.array_equal(restored[2].view("u4"), equity.view("u4"))
-    assert len(json.dumps(packed, separators=(",", ":"))) < 100_000
+    x = np.arange(count, dtype=np.float64)
+    cash = (70 + np.floor(x / 73) * .013).astype("<f4")
+    equity = (cash + np.sin(x / 28) * .8 + np.cos(x / 103) * .3).astype("<f4")
+    v3 = pack_curve(stamps, cash, equity, 70)
+    v2 = _pack_curve_v2(stamps, cash, equity, 70)
+    restored = unpack_curve(v3)
+    restored_v2 = unpack_curve(v2)
+    assert v3["curve_format_version"] == CURVE_FORMAT_VERSION == 3
+    for left, right in zip(restored, restored_v2):
+        assert np.array_equal(left.view("u4") if left.dtype.kind == "f" else left,
+                              right.view("u4") if right.dtype.kind == "f" else right)
+    metrics_v3 = evaluate_portfolio([v3], capital_initial=100, target_usdt=3, max_loss_pct=18)
+    metrics_v2 = evaluate_portfolio([v2], capital_initial=100, target_usdt=3, max_loss_pct=18)
+    assert metrics_v3 == metrics_v2
 
     legacy = {"start_ts": 0, "step_s": 900, "count": 2, "offsets_i32": None,
         "cash_f32": base64.b64encode(np.array([100, 101], dtype="<f4").tobytes()).decode(),
@@ -41,10 +60,54 @@ def test_zlib_curve_is_exact_same_size_below_100kb_and_reads_legacy_format():
 
     legacy_equivalent = {"start_ts": 0, "step_s": 900, "count": count, "offsets_i32": None,
         "cash_f32": base64.b64encode(cash.tobytes()).decode(),
-        "equity_f32": base64.b64encode(equity.tobytes()).decode(), "capital_usdt": 100}
-    metrics_new = evaluate_portfolio([packed], capital_initial=100, target_usdt=1)
+        "equity_f32": base64.b64encode(equity.tobytes()).decode(), "capital_usdt": 70}
+    metrics_new = evaluate_portfolio([v3], capital_initial=100, target_usdt=1)
     metrics_legacy = evaluate_portfolio([legacy_equivalent], capital_initial=100, target_usdt=1)
     assert metrics_new == metrics_legacy
+
+
+def test_v3_allocation_shadow_matches_v2_with_realistic_180_day_cache_entry():
+    from grid.meta_allocation import evaluate_extended_allocation
+
+    count = 180 * 24 * 4
+    timestamps = np.arange(count, dtype=np.int64) * 900
+    x = np.arange(count, dtype=np.float64)
+    cash = (70 + np.floor(x / 73) * .013).astype("<f4")
+    equity = (cash + np.sin(x / 28) * .8 + np.cos(x / 103) * .3).astype("<f4")
+    piece_v2 = _pack_curve_v2(timestamps, cash, equity, 70)
+    piece_v3 = pack_curve(timestamps, cash, equity, 70)
+    def plan(packed):
+        return {"alternatives": [{"alternative_id": "a", "pieces": [{"symbol": "XRPUSDT",
+            "piece_type": "grid", "strategy": "simple", "capital_usdt": 70}],
+            "capital_variants": [{"pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
+                "strategy": "simple", "capital_usdt": 70}],
+                "window_results": [{"window_start": "w", "curve": packed}],
+                "testnet_openability": {"allowed": True}}],
+            "testnet_openability": {"allowed": True}}]}
+    result_v2 = evaluate_extended_allocation(plan(piece_v2), {}, free_cash=100,
+        capital_initial=100, target_usdt=3, window_days=20, limits={"max_grids": 1, "max_bots": 0})
+    result_v3 = evaluate_extended_allocation(plan(piece_v3), {}, free_cash=100,
+        capital_initial=100, target_usdt=3, window_days=20, limits={"max_grids": 1, "max_bots": 0})
+    assert result_v3 == result_v2
+
+    rows = []
+    curve_bytes = 0
+    for idx in range(11):
+        packed = pack_curve(timestamps + idx * 7 * 24 * 4 * 900, cash, equity, 70)
+        curve_bytes += len(json.dumps(packed, separators=(",", ":")))
+        rows.append({"window_start": f"w{idx}", "curve": packed, "pnl_usdt": 0.2,
+            "days": None, "drawdown_pct": 2.1, "max_advance_usdt": 3.2})
+    full = {"method_version": "rolling_7d_v3_equity", "summary": {"probability": .3, "windows": 11},
+        "window_results": rows}
+    full_bytes = len(json.dumps(full, separators=(",", ":")))
+    metric_only = {**full, "window_results": [{k: v for k, v in row.items() if k != "curve"}
+        for row in rows], "curves_omitted": True}
+    durable_bytes = len(json.dumps(metric_only, separators=(",", ":")))
+    assert durable_bytes < 100_000
+    assert full_bytes > 100_000
+    assert curve_bytes > full_bytes * .95
+    estimated_stable_table_mb = durable_bytes * 883 / (1024 * 1024)
+    assert estimated_stable_table_mb < 1
 
 
 def test_grid_a_earns_2_5_and_b_0_5_without_individual_targets():

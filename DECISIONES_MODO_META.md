@@ -360,3 +360,6 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 
 | 41-G1g2 | Diagn?stico de bloqueos transitorios por valoraci?n desconocida | Se conserva la regla de bloqueo; ledger incluye causa por moneda y duraci?n de recuperaci?n. El verificador consulta solo lectura las ?ltimas 24 h |
+
+
+| 41-G1g3 | Formato de curvas v3 reversible y reducci?n de cach? durable | Lectura v1/v2 preservada; cach? durable guarda m?tricas sin curvas para quedar bajo 100 KB. Tras reinicio puede recalcular replay. No se midi? la BD real |

@@ -400,6 +400,29 @@ def test_daily_cache_persists_results_for_reuse(tmp_path):
         **value, "method_version": operator.ADVISOR_CACHE_METHOD_VERSION}
 
 
+def test_durable_replay_cache_keeps_metrics_and_omits_curves(tmp_path):
+    import json
+    from sqlalchemy import select
+    from database.db_manager import DBManager
+    from grid.meta_learning import REPLAY_METHOD_VERSION
+    from grid.meta_operator import MetaOperator
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-replay-cache.sqlite'}")
+    operator = MetaOperator(object(), db, None, None, None, clock=lambda: 1_800_000_000)
+    payload = ("XRPUSDT", "simple", 70, 20)
+    value = {"method_version": REPLAY_METHOD_VERSION, "summary": {"probability": .4},
+        "window_results": [{"window_start": "w", "curve": {"curve_format_version": 3,
+            "cash_zlib_f32": "x"}, "pnl_usdt": 1.2}]}
+    operator._persistent_cache_set("replay", payload, value)
+    key, _day = operator._cache_key("replay", payload)
+    with db.engine.connect() as conn:
+        stored = json.loads(conn.execute(select(db.meta_analysis_cache.c.value_json).where(
+            db.meta_analysis_cache.c.cache_key == key)).scalar_one())
+    assert stored["window_results"] == [{"window_start": "w", "pnl_usdt": 1.2}]
+    assert stored["curves_omitted"] is True
+    assert value["window_results"][0]["curve"]["curve_format_version"] == 3
+
+
 def test_medidor_cache_is_read_only_and_reports_separate_cache_sources(tmp_path):
     import json
     from datetime import datetime, timezone

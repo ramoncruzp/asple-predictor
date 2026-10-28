@@ -166,3 +166,9 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-G1g2
 
 - La cach? solo registra `depth_cache_used` cuando la lectura est? dentro del TTL; una lectura nueva o una falla se marca como no reutilizada. Los eventos hist?ricos previos no contienen la causa por s?mbolo y no se reconstruyen.
+
+
+## Fase 41-G1g3
+
+- El delta XOR v3 sin p?rdida aument? el tama?o de la curva sint?tica completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en cach? durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de m?tricas. Esta es una decisi?n conservadora y puede aumentar tiempo tras reinicio.
+- Se verific? por c?digo que las muestras no guardan curvas en `parameters_json` ni en `provenance_json`; no fue posible explicar con medidas directas los 61 MB de la tabla real. La BD de S1 no se abri?.

@@ -4,7 +4,7 @@ import zlib
 import numpy as np
 
 
-CURVE_FORMAT_VERSION = 2
+CURVE_FORMAT_VERSION = 3
 
 
 def pack_curve(timestamps, cash, equity, capital):
@@ -17,7 +17,11 @@ def pack_curve(timestamps, cash, equity, capital):
         array = np.asarray(values, dtype=dtype)
         raw = array.tobytes()
         if array.dtype.kind == "f" and array.dtype.itemsize == 4:
-            raw = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4).T.tobytes()
+            bits = np.frombuffer(raw, dtype="<u4")
+            delta = np.empty_like(bits)
+            delta[0] = bits[0]
+            delta[1:] = bits[1:] ^ bits[:-1]
+            raw = delta.tobytes()
         return base64.b64encode(zlib.compress(raw, level=9)).decode("ascii")
     return {"start_ts": int(times[0]), "step_s": step, "count": len(times),
         "offsets_i32": None if step else encode(times - times[0], "<i4"),
@@ -27,12 +31,17 @@ def pack_curve(timestamps, cash, equity, capital):
 
 
 def unpack_curve(curve):
+    version = int(curve.get("curve_format_version", 1))
     def decode(key, dtype, *, compressed=False):
         raw = base64.b64decode(curve[key])
         if compressed:
             raw = zlib.decompress(raw)
             if dtype == "<f4":
-                raw = np.frombuffer(raw, dtype=np.uint8).reshape(4, -1).T.tobytes()
+                if version >= 3:
+                    delta = np.frombuffer(raw, dtype="<u4")
+                    raw = np.bitwise_xor.accumulate(delta).astype("<u4", copy=False).tobytes()
+                else:
+                    raw = np.frombuffer(raw, dtype=np.uint8).reshape(4, -1).T.tobytes()
         return np.frombuffer(raw, dtype=dtype)
     offsets = (np.arange(curve["count"], dtype=np.int64) * curve["step_s"]
         if curve.get("step_s") else decode("offsets_i32", "<i4",

@@ -968,6 +968,13 @@ class MetaOperator:
             table = self.db.meta_analysis_cache
             stored = dict(value) if isinstance(value, dict) else value
             if isinstance(stored, dict):
+                if kind == "replay":
+                    # Las curvas permanecen completas en memoria durante el plan
+                    # para combinar alternativas; la caché durable conserva métricas.
+                    stored["window_results"] = [
+                        {key: field for key, field in row.items() if key != "curve"}
+                        for row in stored.get("window_results", [])]
+                    stored["curves_omitted"] = True
                 expected = {"advisor": self.ADVISOR_CACHE_METHOD_VERSION,
                     "touch_signal": self.TOUCH_CACHE_METHOD_VERSION}.get(kind)
                 if expected:
