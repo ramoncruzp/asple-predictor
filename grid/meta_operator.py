@@ -1184,6 +1184,10 @@ class MetaOperator:
         advisor_rows = []
         advisor_capital = float(cfg.get("_advisor_reference_capital", capital))
         allocation_deadline = cfg.get("_allocation_shadow_deadline")
+        allocation_reject = cfg.get("_allocation_shadow_reject")
+        def reject_allocation(stage, reason):
+            if callable(allocation_reject):
+                allocation_reject(symbol, "unknown", capital, stage, reason)
         def check_allocation_deadline():
             if allocation_deadline is not None and time.perf_counter() >= allocation_deadline:
                 raise TimeoutError("presupuesto agotado")
@@ -1232,6 +1236,8 @@ class MetaOperator:
             advisory = advisor_row.get("recommendation") or {}
             low, high = advisory.get("recommended_floor"), advisory.get("recommended_ceiling")
             if low is None or high is None or not float(low) < price < float(high):
+                if allocation_deadline is not None:
+                    reject_allocation("geometría inválida", "Advisor sin rango válido dentro del precio")
                 continue
             levels = min(int(advisory.get("suggested_grids") or 4), int(float(capital) // 5.5))
             planned = levels if levels >= 4 else 1
@@ -1250,8 +1256,12 @@ class MetaOperator:
             for strategy in strategies:
                 for variant_low, variant_high, buy_distance in ranges:
                     check_allocation_deadline()
-                    alternative = self._evaluate(row, strategy, capital, target_usdt, variant_low, variant_high,
-                        planned, cfg, margin_pct=advisor_row["margin_target_pct"])
+                    try:
+                        alternative = self._evaluate(row, strategy, capital, target_usdt, variant_low, variant_high,
+                            planned, cfg, margin_pct=advisor_row["margin_target_pct"])
+                    except Exception as exc:
+                        reject_allocation("replay", f"{type(exc).__name__}: {exc}")
+                        continue
                     check_allocation_deadline()
                     alternative["mid_at_plan"] = price
                     alternative["advisor"] = advisory
@@ -1293,11 +1303,13 @@ class MetaOperator:
     def _allocation_curve_variants(self, candidates, prepared, goal, cfg, free_cash, current_pieces):
         """Regenera geometrías por monto y conserva las causas de descarte de la sombra."""
         started = time.perf_counter()
-        deadline = started + 30.0
+        deadline = float(cfg.get("_allocation_shadow_deadline", started + 30.0))
         capital_initial = float(goal.get("capital_initial") or 0)
         step = capital_initial * .05
         minimum = max(5.5, step)
-        diagnostics = {"conteo_por_motivo": {}, "ejemplos": [], "no_evaluados": 0}
+        diagnostics = {"conteo_por_motivo": {}, "ejemplos": [], "no_evaluados": 0,
+            "timings_s": {"carga_curvas": 0.0, "orden": 0.0, "variantes": 0.0,
+                "testnet": 0.0, "combinacion": 0.0}}
         def reject(symbol, kind, amount, stage, reason):
             label = str(reason or stage)
             diagnostics["conteo_por_motivo"][label] = diagnostics["conteo_por_motivo"].get(label, 0) + 1
@@ -1306,6 +1318,8 @@ class MetaOperator:
                     "amount_usdt": round(float(amount or 0), 4), "stage": stage, "reason": label})
         if step <= 0 or minimum <= 0:
             reject(None, None, 0, "mínimo de celda", "capital inicial insuficiente")
+            diagnostics["status"] = "completed"
+            diagnostics["timings_s"]["total"] = round(time.perf_counter() - started, 6)
             return [], diagnostics
         current_by_symbol = {}
         current_grids = current_bots = 0
@@ -1320,9 +1334,19 @@ class MetaOperator:
         prepared_by_symbol = {row.get("symbol"): row for row in prepared}
         coin_cap_pct = float(cfg.get("capital_per_coin_pct", 100))
         unique = {}
-        for alternative in sorted(candidates,
-                key=lambda row: float(row.get("replay_probability") or 0), reverse=True):
+        curve_read_started = time.perf_counter()
+        order_started = time.perf_counter()
+        ordered_candidates = sorted(candidates,
+                key=lambda row: float(row.get("replay_probability") or 0), reverse=True)
+        diagnostics["timings_s"]["orden"] += time.perf_counter() - order_started
+        diagnostics["timings_s"]["carga_curvas"] = time.perf_counter() - curve_read_started - diagnostics["timings_s"]["orden"]
+        if not ordered_candidates:
+            reject(None, None, 0, "entrada", "sin alternativas de entrada (0)")
+        for alternative in ordered_candidates:
             piece = (alternative.get("pieces") or [{}])[0]
+            if not alternative.get("pieces"):
+                reject(None, None, 0, "sin evidencia", "alternativa sin pieza para generar geometría")
+                continue
             geometry_key = (piece.get("symbol"), piece.get("piece_type"))
             unique.setdefault(geometry_key, alternative)
         geometry_counts = {}
@@ -1363,10 +1387,12 @@ class MetaOperator:
                     reject(symbol, kind, cap, "presupuesto agotado", f"presupuesto agotado; {remaining_steps} montos sin evaluar")
                     break
                 variant_cfg = {**cfg, "_advisor_reference_capital": cap,
-                    "_allocation_shadow_deadline": deadline}
+                    "_allocation_shadow_deadline": deadline, "_allocation_shadow_reject": reject}
                 try:
+                    generation_started = time.perf_counter()
                     regenerated, advisor_rows = self._plan_timed("allocation_candidate_alternatives",
                         self._candidate_alternatives, row, cap, float(goal.get("target_usdt") or 0), variant_cfg)
+                    diagnostics["timings_s"]["variantes"] += time.perf_counter() - generation_started
                 except TimeoutError as exc:
                     reject(symbol, kind, cap, "presupuesto agotado", str(exc))
                     diagnostics["no_evaluados"] += 1
@@ -1386,9 +1412,17 @@ class MetaOperator:
                     (item.get("estimate") or {}).get("probability_replay") or 0), reverse=True)
                 for generated in matching[:3]:
                     piece = (generated.get("pieces") or [{}])[0]
+                    if not generated.get("estimate", {}).get("evidence_sufficient"):
+                        reject(symbol, kind, cap, "sin evidencia", "replay sin evidencia suficiente")
+                        continue
+                    if not generated.get("window_results"):
+                        reject(symbol, kind, cap, "replay", "replay sin ventanas para combinar")
+                        continue
                     try:
+                        testnet_started = time.perf_counter()
                         openability = self._plan_timed("allocation_testnet_openability",
                             self._testnet_openability, piece, goal)
+                        diagnostics["timings_s"]["testnet"] += time.perf_counter() - testnet_started
                     except Exception as exc:
                         reject(symbol, kind, cap, "Testnet", f"{type(exc).__name__}: {exc}")
                         continue
@@ -1399,6 +1433,10 @@ class MetaOperator:
                 cap += step
             if variants:
                 selected.append({**alternative, "capital_variants": variants})
+        if candidates and not diagnostics["conteo_por_motivo"] and not selected:
+            reject(None, None, 0, "descartada", "alternativas sin candidato evaluable")
+        diagnostics["status"] = ("budget_exceeded" if time.perf_counter() >= deadline else "completed")
+        diagnostics["timings_s"]["total"] = round(time.perf_counter() - started, 6)
         return selected, diagnostics
 
     def _build_plan(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
@@ -1848,13 +1886,37 @@ class MetaOperator:
         try:
             from grid.meta_allocation import evaluate_extended_allocation
             allocation_cash = unused_capital if allocation_free_cash is None else allocation_free_cash
+            shadow_deadline = time.perf_counter() + 30.0
+            allocation_cfg = {**cfg, "_allocation_shadow_deadline": shadow_deadline}
             allocation_variants, allocation_discards = self._allocation_curve_variants(allocation_candidates, prepared, goal,
-                cfg, allocation_cash, current_pieces)
+                allocation_cfg, allocation_cash, current_pieces)
+            combine_timings = {}
+            def record_allocation_discard(symbol, kind, amount, stage, reason):
+                counts = allocation_discards.setdefault("conteo_por_motivo", {})
+                label = str(reason or stage)
+                counts[label] = counts.get(label, 0) + 1
+                examples = allocation_discards.setdefault("ejemplos", [])
+                if len(examples) < 10:
+                    examples.append({"symbol": symbol, "piece_type": kind,
+                        "amount_usdt": round(float(amount or 0), 4), "stage": stage, "reason": label})
+                if stage == "presupuesto agotado":
+                    allocation_discards["no_evaluados"] = int(allocation_discards.get("no_evaluados", 0)) + 1
             plan["allocation_shadow"] = evaluate_extended_allocation({"alternatives": allocation_variants}, current_pieces,
                 free_cash=allocation_cash,
                 capital_initial=capital, target_usdt=target_usdt,
                 window_days=int(cfg.get("max_days", 20)), limits=cfg,
-                tie_tolerance_pp=float(stored.get("allocation_tie_tolerance_pp", 5)))
+                tie_tolerance_pp=float(stored.get("allocation_tie_tolerance_pp", 5)),
+                deadline=shadow_deadline, timings=combine_timings,
+                discard_callback=record_allocation_discard)
+            allocation_discards.setdefault("timings_s", {})["combinacion"] = round(
+                combine_timings.get("combine_aligned_replays_s", 0), 6)
+            allocation_discards["timings_s"]["orden"] = round(
+                allocation_discards["timings_s"].get("orden", 0) + combine_timings.get("orden_s", 0), 6)
+            allocation_discards["timings_s"]["total"] = round(
+                time.perf_counter() - allocation_started, 6)
+            if plan["allocation_shadow"].get("status") == "budget_exceeded":
+                allocation_discards["status"] = "budget_exceeded"
+                plan["allocation_shadow"]["status"] = "budget_exceeded"
             plan["allocation_shadow"]["descartes"] = allocation_discards
         except Exception as exc:
             plan["allocation_shadow"] = {"decision": "no_agregar", "selected": None,

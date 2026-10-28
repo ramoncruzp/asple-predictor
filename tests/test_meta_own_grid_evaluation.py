@@ -218,14 +218,14 @@ def test_held_proceeds_are_estimated_only_for_replacement_not_keeping_inventory(
     assert not operator._testnet_openability(piece, goal, replacing_grid_id=12, include_held_proceeds=False)["allowed"]
 
 
-def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch):
+def test_no_own_symbol_plan_probabilities_and_decision_match_a25818b(monkeypatch):
     import grid.meta_operator as module
 
-    source = subprocess.check_output(["git", "show", "dd10892:grid/meta_operator.py"]).decode("utf-8")
+    source = subprocess.check_output(["git", "show", "a25818b:grid/meta_operator.py"]).decode("utf-8")
     cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == "MetaOperator")
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_build_plan")
     namespace = dict(vars(module))
-    exec(compile(ast.Module(body=[method], type_ignores=[]), "dd10892:_build_plan", "exec"), namespace)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "a25818b:_build_plan", "exec"), namespace)
     monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="plan-fijo"))
     actual, _, goal, _, _ = plan_setup(owner="manual")
     reference, _, _, _, _ = plan_setup(owner="manual")
@@ -236,12 +236,16 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     old_plan.pop("timings_s")
     from grid.meta_learning import REPLAY_METHOD_VERSION
     assert current_plan.pop("base_method_version") == REPLAY_METHOD_VERSION
-    allowed_new_fields = {"current_pieces", "allocation_shadow",
-        "use_extended_allocation", "allocation_tie_tolerance_pp"}
-    assert set(current_plan) - set(old_plan) == allowed_new_fields
-    assert set(current_plan) - allowed_new_fields == set(old_plan)
-    for key in allowed_new_fields:
-        assert key in current_plan
+    assert old_plan.pop("base_method_version") == REPLAY_METHOD_VERSION
+    assert set(current_plan) == set(old_plan)
+    assert len(current_plan["alternatives"]) == len(old_plan["alternatives"])
+    for current, previous in zip(current_plan["alternatives"], old_plan["alternatives"]):
+        assert current["alternative_id"] == previous["alternative_id"]
+        assert current["replay_probability"] == previous["replay_probability"]
+        assert current["estimate"]["probability"] == previous["estimate"]["probability"]
+        assert current["pieces"] == previous["pieces"]
+    assert "current_pieces" in current_plan and "allocation_shadow" in current_plan
+    assert "centered_signal_shadow" in current_plan
     assert current_plan["current_pieces"] == {}
     assert current_plan["allocation_shadow"]["decision"] == "agregar"
     assert current_plan["allocation_shadow"]["selected"]["capital_usdt"] <= 30
@@ -249,9 +253,14 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_dd10892(monkeypatch
     assert current_plan["capital_usage"]["unused_usdt"] == old_plan["capital_usage"]["unused_usdt"]
     assert current_plan["use_extended_allocation"] is False
     assert current_plan["allocation_tie_tolerance_pp"] == 5
+    assert current_plan["centered_signal_shadow"]["alternatives_count"] == len(current_plan["alternatives"])
     assert all("allocation_shadow" not in item for item in current_plan["alternatives"])
-    comparable = {key: value for key, value in current_plan.items() if key in old_plan}
-    assert comparable == old_plan
+    comparable = {key: value for key, value in current_plan.items() if key in old_plan and key != "allocation_shadow"}
+    old_comparable = {key: value for key, value in old_plan.items() if key != "allocation_shadow"}
+    assert comparable == old_comparable
+    for field in ("decision", "selected", "best_evaluated", "evaluated_top",
+                  "probability_before", "reason"):
+        assert current_plan["allocation_shadow"].get(field) == old_plan["allocation_shadow"].get(field)
     for operator in (actual, reference):
         operator._add_piece_from_free_cash = lambda *_args, **_kwargs: None
     assert actual._review_allocations(goal, {}, plan=current_plan) == reference._review_allocations(goal, {}, plan=old_plan)
@@ -285,8 +294,9 @@ def test_shadow_allocation_regenerates_geometry_for_each_available_amount(monkey
             "capital_usdt": capital, "n_levels": 4, "floor": 100-capital/100,
             "ceiling": 100+capital/100, "margin_pct": .3}
         return [{"symbol": row["symbol"], "pieces": [piece],
-            "estimate": {"probability_replay": .2}, "replay_probability": .2,
-            "window_results": [{"window_start": "w1"}], "alternative_id": "new-geometry"}], []
+            "estimate": {"probability_replay": .2, "evidence_sufficient": True}, "replay_probability": .2,
+            "window_results": [{"window_start": "w1", "curve": {"curve_format_version": 3}}],
+            "alternative_id": "new-geometry"}], []
     monkeypatch.setattr(operator, "_candidate_alternatives", generate)
     monkeypatch.setattr(operator, "_testnet_openability", lambda *_args, **_kwargs: {"allowed": True})
     original = {"symbol": "XRPUSDT", "pieces": [{"symbol": "XRPUSDT", "piece_type": "grid",
@@ -315,10 +325,21 @@ def test_shadow_allocation_records_minimum_cell_discard(monkeypatch):
         "amount_usdt": 4.0, "stage": "mínimo de celda", "reason": "efectivo libre inferior al mínimo de celda"}
 
 
+def test_shadow_allocation_empty_input_has_counted_reason_and_stage_timings():
+    operator, _, goal, _, _ = plan_setup(owner="manual")
+    variants, discards = operator._allocation_curve_variants([], [], goal,
+        goal["config_snapshot"], 30, {})
+    assert variants == []
+    assert discards["conteo_por_motivo"] == {"sin alternativas de entrada (0)": 1}
+    assert discards["ejemplos"][0]["stage"] == "entrada"
+    assert discards["status"] == "completed"
+    assert "total" in discards["timings_s"]
+
+
 def test_shadow_allocation_stops_candidate_generation_at_30_second_budget(monkeypatch):
     import grid.meta_operator as module
     operator, _, goal, _, _ = plan_setup(owner="manual")
-    clock_values = iter((0.0, 1.0, 2.0, 31.0))
+    clock_values = iter((0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 31.0, 32.0, 33.0))
     monkeypatch.setattr(module.time, "perf_counter", lambda: next(clock_values))
     called = []
     def generate(_row, _capital, _target, cfg):
@@ -333,18 +354,20 @@ def test_shadow_allocation_stops_candidate_generation_at_30_second_budget(monkey
         [{"symbol": "XRPUSDT"}], goal, goal["config_snapshot"], 30, {})
     assert not called
     assert discards["no_evaluados"] >= 1
-    assert "presupuesto agotado" in discards["conteo_por_motivo"]
+    assert any(reason.startswith("presupuesto agotado")
+        for reason in discards["conteo_por_motivo"])
+    assert discards["status"] == "budget_exceeded"
 
 
 def test_real_review_decision_matches_head_when_shadow_allocator_changes(monkeypatch):
     import grid.meta_operator as module
-    source = subprocess.check_output(["git", "show", "HEAD:grid/meta_operator.py"]).decode("utf-8")
+    source = subprocess.check_output(["git", "show", "a25818b:grid/meta_operator.py"]).decode("utf-8")
     cls = next(node for node in ast.parse(source).body
         if isinstance(node, ast.ClassDef) and node.name == "MetaOperator")
     method = next(node for node in cls.body
         if isinstance(node, ast.FunctionDef) and node.name == "_review_allocations")
     namespace = dict(vars(module))
-    exec(compile(ast.Module(body=[method], type_ignores=[]), "HEAD:_review_allocations", "exec"), namespace)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "a25818b:_review_allocations", "exec"), namespace)
     monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="plan-fijo"))
     actual, _, goal, _, _ = plan_setup(owner="manual")
     reference, _, _, _, _ = plan_setup(owner="manual")

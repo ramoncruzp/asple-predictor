@@ -1,5 +1,6 @@
 """Selección pura de una pieza adicional para la asignación Meta en sombra."""
 from __future__ import annotations
+import time
 
 
 
@@ -21,7 +22,8 @@ def rank_with_tie_tolerance(rows, tolerance_pp=5.0):
 
 
 def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_initial,
-        target_usdt, window_days, limits, tie_tolerance_pp=5.0):
+        target_usdt, window_days, limits, tie_tolerance_pp=5.0, deadline=None,
+        timings=None, discard_callback=None):
     """Evalúa «piezas actuales + una pieza» usando curvas alineadas v3."""
     from grid.meta_operator import combine_aligned_replays
 
@@ -30,9 +32,12 @@ def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_ini
         if item.get("estimate") and item.get("window_results")]
     current_alts = [{"pieces": [dict(item["piece"])], "window_results": item["window_results"]}
         for item in current]
+    timings = timings if timings is not None else {}
     if current_alts:
+        started = time.perf_counter()
         baseline, _ = combine_aligned_replays(current_alts, target_usdt, window_days,
             capital_initial=capital_initial, max_loss_pct=limits.get("max_loss_pct"))
+        timings["combine_aligned_replays_s"] = timings.get("combine_aligned_replays_s", 0) + time.perf_counter() - started
     else:
         baseline = {"probability": 0.0, "median_progress_pct": 0.0, "days_median": None,
             "worst_drawdown_pct": 0.0}
@@ -50,10 +55,19 @@ def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_ini
     reasons = []
     geometry_counts = {}
     seen_geometries = set()
+    order_started = time.perf_counter()
     source_alternatives = sorted(plan.get("alternatives") or [],
         key=lambda item: float(item.get("replay_probability") or
             (item.get("estimate") or {}).get("probability_replay") or 0), reverse=True)
+    timings["orden_s"] = timings.get("orden_s", 0) + time.perf_counter() - order_started
+    timed_out = False
     for alternative in source_alternatives:
+        if deadline is not None and time.perf_counter() >= deadline:
+            timed_out = True
+            if discard_callback:
+                discard_callback(None, None, 0, "presupuesto agotado",
+                    "presupuesto agotado; alternativas restantes sin evaluar")
+            break
         pieces = alternative.get("pieces") or []
         if len(pieces) != 1:
             continue
@@ -94,16 +108,24 @@ def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_ini
             continue
         evaluation_rows = []
         for variant in variants:
+            if deadline is not None and time.perf_counter() >= deadline:
+                timed_out = True
+                break
             variant_piece = (variant.get("pieces") or [{}])[0]
             cap = float(variant_piece.get("capital_usdt") or 0)
             if cap_limit + 1e-8 >= cap >= minimum and (variant.get("testnet_openability") or {}).get("allowed"):
                 evaluation_rows.append((variant, cap, variant_piece))
         for scaled, cap, variant_piece in evaluation_rows:
+            if deadline is not None and time.perf_counter() >= deadline:
+                timed_out = True
+                break
             if scaled is not None:
                 try:
+                    started = time.perf_counter()
                     estimate, _ = combine_aligned_replays(current_alts + [scaled], target_usdt,
                         window_days, capital_initial=capital_initial,
                         max_loss_pct=limits.get("max_loss_pct"))
+                    timings["combine_aligned_replays_s"] = timings.get("combine_aligned_replays_s", 0) + time.perf_counter() - started
                     old_p = float(baseline.get("probability") or 0)
                     new_p = float(estimate.get("probability") or 0)
                     old_progress = float(baseline.get("median_progress_pct") or 0)
@@ -124,8 +146,11 @@ def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_ini
                         "worst_drawdown_pct": estimate.get("worst_drawdown_pct"),
                         "accepted": accepted, "reason": "supera el umbral de asignación" if accepted
                             else "no alcanza la mejora mínima"})
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError) as exc:
                     reasons.append("curvas v3 no alineadas")
+                    if discard_callback:
+                        discard_callback(symbol, kind, cap, "replay",
+                            f"curvas v3 no alineadas: {type(exc).__name__}: {exc}")
         # Las variantes de geometría se limitarán después del orden global.
     ranked = rank_with_tie_tolerance(candidates, tie_tolerance_pp)
     accepted = next((row for row in ranked if row["accepted"]), None)
@@ -133,5 +158,7 @@ def evaluate_extended_allocation(plan, current_pieces, *, free_cash, capital_ini
     return {"decision": "agregar" if accepted else "no_agregar", "selected": accepted,
         "probability_before": float(baseline.get("probability") or 0),
         "best_evaluated": best, "evaluated_top": ranked[:5],
+        "status": "budget_exceeded" if timed_out else "completed",
+        "timings_s": timings,
         "reason": (accepted["reason"] if accepted else
             (best["reason"] if best else (reasons[0] if reasons else "sin alternativas elegibles")))}

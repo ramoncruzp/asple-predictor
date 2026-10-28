@@ -363,3 +363,6 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 
 | 41-G1g3 | Formato de curvas v3 reversible y reducci?n de cach? durable | Lectura v1/v2 preservada; cach? durable guarda m?tricas sin curvas para quedar bajo 100 KB. Tras reinicio puede recalcular replay. No se midi? la BD real |
+
+
+| 41-G1g4 | Motivos de descarte, cron?metros y deadline de asignaci?n en sombra | Se contabiliza la entrada vac?a y los descartes; el resultado decisorio conserva los mismos campos contra a25818b. La ejecuci?n s?ncrona puede esperar hasta el deadline y queda pendiente desacoplarla |

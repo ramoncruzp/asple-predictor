@@ -172,3 +172,9 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 - El delta XOR v3 sin p?rdida aument? el tama?o de la curva sint?tica completa de 493,8 a 621,4 KiB por entrada de 11 ventanas; por ello no se retienen curvas en cach? durable. Se conservan completas durante el plan y se recalculan si solo existe la copia durable de m?tricas. Esta es una decisi?n conservadora y puede aumentar tiempo tras reinicio.
 - Se verific? por c?digo que las muestras no guardan curvas en `parameters_json` ni en `provenance_json`; no fue posible explicar con medidas directas los 61 MB de la tabla real. La BD de S1 no se abri?.
+
+
+## Fase 41-G1g4
+
+- Se impone un deadline compartido de 30 s y se devuelve el estado `budget_exceeded`, pero la ejecuci?n contin?a en el hilo que arma el plan. No se puede afirmar que la revisi?n real no espere a la sombra. La alternativa as?ncrona cambia cu?ndo est? disponible el resultado del asignador y requiere otra fase/contrato; se conserva el resultado s?ncrono para no cambiar decisiones.
+- Los fixtures de compatibilidad sin curvas pero con m?tricas legacy siguen acept?ndose por `combine_aligned_replays`; una ausencia de filas o una excepci?n queda contabilizada. En producci?n, curvas v3 ausentes en cach? durable causan regeneraci?n antes de llegar a esa combinaci?n.
