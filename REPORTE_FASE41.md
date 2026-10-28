@@ -623,3 +623,8 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 
 - `scripts/reetiquetar_meta.py:13`, `scripts/estudios_meta.py:18`, `scripts/medir_orden_intravela.py:16`, `scripts/verificar_s1_meta.py:15`, `scripts/mantenimiento_bd_meta.py:13` y `scripts/meta_active_study.py:12`: agregan la raíz del repo a `sys.path` con el mismo patrón antes de importar módulos propios. `meta_active_study.py:147` acepta `--help` como herramienta autónoma sin iniciar un estudio.
 - Prueba `tests/test_script_entrypoints.py`: cada uno de los seis scripts se ejecuta con `--help`, desde la raíz y desde una carpeta temporal externa, sin `PYTHONPATH`; **1 passed**.
+
+## Fase 41-C26a2 — Conteo de fills simulados intravela
+
+- `scripts/medir_orden_intravela.py:173-186,291-292,323-324,361-368`: los grids cuentan eventos `BUY_FILLED` y `SELL_FILLED`; los bots cuentan transiciones de inventario en la traza. JSON, CSV y tabla de consola incluyen compras y ventas de 5m/1m. No se cambiaron simuladores.
+- Prueba `tests/test_measure_intracandle_order.py:68-71`: dos pares de eventos simulados producen 2 compras y 2 ventas. Resultado: **9 passed**.

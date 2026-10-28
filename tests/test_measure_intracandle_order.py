@@ -65,6 +65,12 @@ def test_exact_buy_touch_is_counted_but_does_not_fill():
     assert not any(event.get("type") == "BUY_FILLED" for event in result["events"])
 
 
+def test_simulated_fill_totals_count_each_buy_and_sell_from_simulator_events():
+    events = [{"type": name} for name in (
+        "BUY_FILLED", "SELL_FILLED", "BUY_FILLED", "SELL_FILLED")]
+    assert measurement._simulated_fill_counts({"events": events}, [], "simple") == (2, 2)
+
+
 def test_script_import_has_no_database_or_dotenv_dependency():
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
     imported = set()

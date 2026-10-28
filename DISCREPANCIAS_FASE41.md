@@ -233,3 +233,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a1
 
 - `meta_active_study.py` era un módulo auxiliar sin CLI. Se añadió solo un parser de ayuda; invocarlo sin argumentos no ejecuta nada ni accede a datos.
+
+## Fase 41-C26a2
+
+- Para bots, el replay solo expone la curva de efectivo/inventario en el callback; el conteo usa los cambios de inventario 0?positivo y positivo?0 de esa traza. Para grids se usan eventos de fill emitidos por el runner.

@@ -149,7 +149,7 @@ def _shared_geometry(candles5: CandleData, kind: str, filters=FILTERS, *, start_
 
 
 def _run_grid(candles: CandleData, geometry: dict, strategy: str, target: bool = False,
-              filters=FILTERS) -> dict:
+              filters=FILTERS, trace_callback=None) -> dict:
     n = int(geometry["n"])
     capital = 100.0 if target else CAPITAL
     params = {"target_usdt": TARGET_USDT, "target_basis": "cash"} if target else {}
@@ -157,16 +157,35 @@ def _run_grid(candles: CandleData, geometry: dict, strategy: str, target: bool =
         low=geometry["low"], high=geometry["high"], params=params, fee_pct=FEE_PCT, filters=filters,
         close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
         meta_max_loss_pct=None, meta_portfolio_piece=True,
-        sigma_values=np.full(len(candles.timestamp), np.nan), resync_candles=3)
+        sigma_values=np.full(len(candles.timestamp), np.nan), resync_candles=3,
+        trace_callback=trace_callback)
 
 
 def _run_bot(candles: CandleData, geometry: dict, offset_pct: float, target: bool = False,
-             filters=FILTERS) -> dict:
+             filters=FILTERS, trace_callback=None) -> dict:
     buy = geometry["reference"] * (1 + offset_pct / 100)
     sell = buy * (1 + .95 / 100)
     return run_meta_bot(candles, capital=100.0 if target else CAPITAL, buy_price=buy, sell_price=sell,
         target_usdt=TARGET_USDT if target else None, fee_pct=FEE_PCT,
-        min_margin_pct=.30, filters=filters)
+        min_margin_pct=.30, filters=filters, trace_callback=trace_callback)
+
+
+def _simulated_fill_counts(result: dict, trace: list[dict], kind: str) -> tuple[int, int]:
+    """Cuenta fills reales de la traza del simulador, sin inferirlos de los ciclos agregados."""
+    if kind != "bot":
+        events = result.get("events") or []
+        return (sum(event.get("type") == "BUY_FILLED" for event in events),
+                sum(event.get("type") == "SELL_FILLED" for event in events))
+    buys = sells = 0
+    previous_inventory = 0.0
+    for sample in trace:
+        inventory = float(sample.get("inventory") or 0.0)
+        if previous_inventory <= 0 < inventory:
+            buys += 1
+        elif previous_inventory > 0 >= inventory:
+            sells += 1
+        previous_inventory = inventory
+    return buys, sells
 
 
 def ambiguous_and_exact(candles: CandleData, geometry: dict, kind: str,
@@ -253,16 +272,24 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
             try:
                 shape5 = _shared_geometry(candles5, kind, filters, start_index=0, offset_pct=offset)
                 shape1 = dict(shape5)
-                def run(candles, shape, target=False):
+                def run(candles, shape, target=False, trace_callback=None):
                     return (_run_bot(candles, shape, offset, target, filters) if kind == "bot"
-                        else _run_grid(candles, shape, kind, target, filters))
-                result5, result1 = run(candles5, shape5), run(candles1, shape1)
+                        else _run_grid(candles, shape, kind, target, filters, trace_callback))
+                trace5, trace1 = [], []
+                if kind == "bot":
+                    result5 = _run_bot(candles5, shape5, offset, filters=filters, trace_callback=trace5.append)
+                    result1 = _run_bot(candles1, shape1, offset, filters=filters, trace_callback=trace1.append)
+                else:
+                    result5 = _run_grid(candles5, shape5, kind, filters=filters, trace_callback=trace5.append)
+                    result1 = _run_grid(candles1, shape1, kind, filters=filters, trace_callback=trace1.append)
                 if shape5 != shape1:
                     raise ValueError("la geometría intravela 5m/1m no coincide")
                 metrics5 = result5.get("metrics", {})
                 metrics1 = result1.get("metrics", {})
                 cycles5 = int(metrics5.get("cycles", int(result5.get("sold", False))))
                 cycles1 = int(metrics1.get("cycles", int(result1.get("sold", False))))
+                buys5, sells5 = _simulated_fill_counts(result5, trace5, kind)
+                buys1, sells1 = _simulated_fill_counts(result1, trace1, kind)
                 pnl5 = float(metrics5.get("pnl_total_net_usdt", result5.get("pnl_usdt", 0)))
                 pnl1 = float(metrics1.get("pnl_total_net_usdt", result1.get("pnl_usdt", 0)))
                 ambiguous, exact = ambiguous_and_exact(candles5, shape5, kind, offset)
@@ -293,6 +320,8 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
                     except Exception as exc:
                         window_errors.append({"start": begin, "error": f"{type(exc).__name__}: {exc}"})
                 row.update({"cycles_5m": cycles5, "cycles_1m": cycles1,
+                    "buy_fills_5m": buys5, "sell_fills_5m": sells5,
+                    "buy_fills_1m": buys1, "sell_fills_1m": sells1,
                     "cycles_lost_pct": (max(0, cycles1 - cycles5) / cycles1 * 100 if cycles1 else 0),
                     "pnl_5m_usdt": pnl5, "pnl_1m_usdt": pnl1,
                     "ambiguous_5m_candles": ambiguous, "exact_touches_5m": exact,
@@ -329,13 +358,13 @@ def measure(symbols: list[str], days: int, source: str, csv_dir: Path, out: Path
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         if rows:
             writer.writeheader(); writer.writerows(rows)
-    print("\nSímbolo/geometría | ciclos 5m/1m | perdidos % | PnL 5m/1m | ambiguas | exactos | P(+3) 5m/1m")
+    print("\nSímbolo/geometría | ciclos 5m/1m | fills 5m compra/venta | fills 1m compra/venta | perdidos % | P(+3) 5m/1m")
     for row in rows:
         if not row.get("measured"):
             continue
         print(f"{row['symbol']} {row['geometry']} | {row['cycles_5m']}/{row['cycles_1m']} | "
-              f"{row['cycles_lost_pct']:.1f} | {row['pnl_5m_usdt']:.3f}/{row['pnl_1m_usdt']:.3f} | "
-              f"{row['ambiguous_5m_candles']} | {row['exact_touches_5m']} | "
+              f"{row['buy_fills_5m']}/{row['sell_fills_5m']} | {row['buy_fills_1m']}/{row['sell_fills_1m']} | "
+              f"{row['cycles_lost_pct']:.1f} | "
               f"{row['target_probability_5m_pct']}/{row['target_probability_1m_pct']}")
     print(f"Resultados: {out.resolve()}")
     return rows
