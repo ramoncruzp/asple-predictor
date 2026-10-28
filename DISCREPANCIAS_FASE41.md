@@ -258,3 +258,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a7
 
 - Solo se extraen los campos de detalles de modelo que son pesados y repetidos; los valores de señal usados por la decisión quedan en cada fila. La compactación de filas previas requiere una ejecución explícita con respaldo confirmado. La medición de ahorro usa dos muestras sintéticas idénticas en los detalles; el ahorro real depende de cuántos bloques se repitan.
+
+## Fase 41-C26a8
+
+- La comparación calcula volatilidad realizada como raíz de suma de cuadrados de retornos logarítmicos 5m en 24 h, igual a la definición de entrenamiento del modelo; no estima con velas horarias ni consume el campo `realized_logvol` guardado. No se descargaron velas ni se consultó ninguna BD real en este trabajo.

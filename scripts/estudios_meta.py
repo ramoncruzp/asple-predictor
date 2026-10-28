@@ -103,6 +103,77 @@ def calibrate_direction(db_path: Path, days: float = 30):
     return result
 
 
+def volatility_bias_rows(candles, forecasts):
+    """Compara sigma pronosticada con RV de las 288 velas de 5m siguientes."""
+    stamps = np.asarray(candles.timestamp, dtype=np.int64)
+    closes = np.asarray(candles.close, dtype=np.float64)
+    rows = []
+    for forecast in forecasts:
+        at = forecast["forecast_at"]
+        if isinstance(at, str):
+            at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        if at.tzinfo is None: at = at.replace(tzinfo=timezone.utc)
+        cut = int(at.timestamp())
+        index = int(np.searchsorted(stamps, cut, side="right") - 1)
+        end = index + 288
+        if index < 0 or end >= len(closes) or closes[index] <= 0 or np.any(closes[index:end+1] <= 0):
+            continue
+        returns = np.diff(np.log(closes[index:end+1]))
+        realized = float(np.sqrt(np.sum(returns * returns)))
+        predicted = float(np.exp(float(forecast["pred_logvol_cal"])))
+        if not (math.isfinite(predicted) and math.isfinite(realized)):
+            continue
+        rows.append({"symbol": str(forecast["symbol"]), "model": str(forecast["model_name"]),
+            "horizon_h": int(forecast["horizon_h"]), "forecast_at": at.isoformat(),
+            "predicted_sigma_fraction": predicted, "realized_sigma_fraction": realized,
+            "ratio_realized_to_predicted": realized / predicted if predicted > 0 else None,
+            "log_error_predicted_minus_realized": (math.log(predicted) - math.log(realized)
+                if predicted > 0 and realized > 0 else None), "bars_used": 288})
+    return rows
+
+
+def volatility_bias_study(db_path: Path, symbols, days, source, csv_dir):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+    with _connect_read_only(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "vol_forecasts" not in tables:
+            raise RuntimeError("La base requiere vol_forecasts")
+        names = [str(symbol).upper().replace("/", "") for symbol in symbols]
+        if not names: raise ValueError("indica al menos una moneda")
+        placeholders = ",".join("?" for _ in names)
+        forecasts = [dict(row) for row in conn.execute(f"""SELECT symbol,model_name,horizon_h,forecast_at,pred_logvol_cal
+            FROM vol_forecasts WHERE symbol IN ({placeholders}) AND horizon_h=24
+            AND forecast_at>=datetime(?) AND datetime(forecast_at,'+24 hours')<=datetime('now')
+            ORDER BY symbol,model_name,forecast_at""", (*names, cutoff.replace(tzinfo=None).isoformat(sep=" ")))]
+    from data.binance_client import BinanceClient
+    from scripts.medir_orden_intravela import _from_frame
+    client = BinanceClient(None, None) if source == "binance" else None
+    rows = []
+    summaries = []
+    for symbol in names:
+        group = [row for row in forecasts if row["symbol"] == symbol]
+        if source == "csv":
+            candles = _read_candles_csv(csv_dir / f"{symbol}_5m.csv")
+        else:
+            frame = client.get_historical_klines(symbol, "5m", int(days) + 2, start_time=cutoff)
+            candles = _from_frame(frame, 300)
+        measured = volatility_bias_rows(candles, group)
+        rows.extend(measured)
+        for model in sorted({row["model"] for row in measured}):
+            sample = [row for row in measured if row["model"] == model]
+            ratios = [row["ratio_realized_to_predicted"] for row in sample if row["ratio_realized_to_predicted"] is not None]
+            errors = [row["log_error_predicted_minus_realized"] for row in sample
+                if row["log_error_predicted_minus_realized"] is not None]
+            summaries.append({"symbol": symbol, "model": model, "n": len(sample),
+                "predicted_sigma_median": float(np.median([row["predicted_sigma_fraction"] for row in sample])),
+                "realized_sigma_median": float(np.median([row["realized_sigma_fraction"] for row in sample])),
+                "realized_to_predicted_ratio_median": float(np.median(ratios)) if ratios else None,
+                "mean_log_bias": float(np.mean(errors)) if errors else None,
+                "unit": "fracción de log-volatilidad de 24 h; exp(pred_logvol_cal) frente a sqrt(sum(r_5m^2))"})
+        print(f"{symbol}: {len(measured)} pronósticos comparables", flush=True)
+    return rows, summaries
+
+
 def persistence_study(values, symbols, days, profile):
     return [{"symbol": symbol.strip().upper().replace("/", ""), "days": int(days),
         "profile": profile, "persistence_reviews": int(value), "status": "not_modeled",
@@ -303,6 +374,13 @@ def main(argv=None):
     direction.add_argument("--db", required=True, type=Path)
     direction.add_argument("--days", type=float, default=30)
     direction.add_argument("--out", type=Path, default=Path("./estudios_meta"))
+    vol_bias = sub.add_parser("sesgo-volatilidad")
+    vol_bias.add_argument("--db", required=True, type=Path)
+    vol_bias.add_argument("--symbols", required=True)
+    vol_bias.add_argument("--days", type=int, default=30)
+    vol_bias.add_argument("--source", choices=("binance", "csv"), default="binance")
+    vol_bias.add_argument("--csv-dir", type=Path, default=Path("."))
+    vol_bias.add_argument("--out", type=Path, default=Path("./estudios_meta"))
     active = sub.add_parser("replay-activo")
     active.add_argument("--symbols", required=True)
     active.add_argument("--days", type=int, default=180)
@@ -332,6 +410,14 @@ def main(argv=None):
                 print(f"{row['symbol']}: n={row['n']} Brier={row['brier']:.4f} log-loss={row['log_loss']:.4f} "
                     f"AUC={row['auc']} acierto@0,60={row['accuracy_threshold_0_60']:.3f} "
                     f"umbral mejor={row['best_threshold']:.3f}", flush=True)
+        elif args.command == "sesgo-volatilidad":
+            rows, summaries = volatility_bias_study(args.db, args.symbols.split(","),
+                args.days, args.source, args.csv_dir)
+            _write(rows, args.out, "sesgo_volatilidad", {"read_only_db": True,
+                "public_market_data": args.source == "binance", "summaries": summaries,
+                "units": "exp(log-vol pronosticado) y volatilidad realizada sqrt(sum(retornos log 5m al cuadrado)) en fracción 24 h"})
+            for summary in summaries:
+                print(f"{summary['symbol']} {summary['model']}: n={summary['n']}; cociente realizado/pronosticado mediano={summary['realized_to_predicted_ratio_median']}", flush=True)
         elif args.command in {"replay-activo", "persistencia-reajuste", "persistencia"}:
             if args.command == "replay-activo":
                 rows = passive_baseline([s.strip().upper().replace("/", "") for s in args.symbols.split(",")],

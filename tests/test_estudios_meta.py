@@ -48,6 +48,24 @@ def test_direction_calibration_uses_read_only_join_and_reports_expected_metrics(
             raise AssertionError("la conexión permitió escritura")
 
 
+def test_volatility_bias_uses_exact_next_288_five_minute_returns():
+    import numpy as np
+    from grid.sim.data import CandleData
+    timestamps = np.arange(0, 301 * 300, 300, dtype=np.int64)
+    closes = np.exp(np.arange(len(timestamps)) * .001)
+    candles = CandleData(timestamp=timestamps, open=closes.copy(), high=closes.copy(),
+        low=closes.copy(), close=closes.copy(), gaps=0)
+    expected = float(np.sqrt(288 * .001 ** 2))
+    forecast = {"symbol": "XRPUSDT", "model_name": "vol_a", "horizon_h": 24,
+        "forecast_at": "1970-01-01T00:00:00+00:00", "pred_logvol_cal": float(np.log(expected))}
+    rows = studies.volatility_bias_rows(candles, [forecast])
+    assert len(rows) == 1
+    assert rows[0]["predicted_sigma_fraction"] == pytest.approx(expected)
+    assert rows[0]["realized_sigma_fraction"] == pytest.approx(expected)
+    assert rows[0]["ratio_realized_to_predicted"] == pytest.approx(1.0)
+    assert rows[0]["bars_used"] == 288
+
+
 def test_active_study_no_range_exit_matches_passive_exactly():
     import numpy as np
     from grid.sim.data import CandleData
