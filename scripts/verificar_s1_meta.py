@@ -109,7 +109,7 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
         print(f"  eventos: {len(shadow_rows)}")
         if shadow_seconds:
             print(f"  tiempo total mediano/máximo: {median(shadow_seconds):.3f}/{max(shadow_seconds):.3f} s")
-        for reason, count in shadow_discards.most_common(10):
+        for reason, count in shadow_discards.most_common(3):
             print(f"  descarte {reason}: {count}")
         if not shadow_discards: print("  sin descartes registrados")
         latest_plans = {}

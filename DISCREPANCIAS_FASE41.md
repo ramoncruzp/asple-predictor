@@ -250,3 +250,7 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 ## Fase 41-C26a5
 
 - B10 muestra los deciles de `replay_only` de una versión, no la calibración agregada por horizonte calculada antes desde todas las muestras. El resumen existente por etiquetas permanece en el gráfico general de replay; B10 identifica la versión, el perfil y el origen para evitar mezclar cohortes de validación.
+
+## Fase 41-C26a6
+
+- El verificador muestra tres causas, aunque haya más, para mantener la salida de diagnóstico breve; el conteo agregado conserva todas en la base y el código solo lee la BD.

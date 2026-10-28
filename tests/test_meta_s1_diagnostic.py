@@ -41,7 +41,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
             (now,json.dumps({'reason':'valuation_unknown','symbols':{'XRPUSDT':{
                 'status':'DESCONOCIDO','reason':'libro sin compradores'}}})))
         conn.execute("INSERT INTO meta_ledger VALUES(4,1,?,'META_OPERATOR_ALLOCATION_SHADOW',NULL,12,?)",
-            (now,json.dumps({'descartes':{'conteo_por_motivo':{'sin curva v3':2},
+            (now,json.dumps({'descartes':{'conteo_por_motivo':{'sin curva v3':2, 'sin readiness':5, 'limite por moneda':4, 'geometria invalida':1},
                 'timings_s':{'total':2.5}}})))
         summary={'samples_failed':1,'labels_invalid_geometry':1,
             'failed_samples':[{'sample_id':7,'symbol':'XRPUSDT','error':'ValueError: fallo sintético'}]}
@@ -64,6 +64,8 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert 'Bloqueos transitorios (24 h):' in output
     assert 'XRPUSDT: libro sin compradores: 1' in output
     assert 'Asignación en sombra (24 h):' in output and 'descarte sin curva v3: 2' in output
+    assert 'descarte sin readiness: 5' in output and 'descarte limite por moneda: 4' in output
+    assert 'descarte geometria invalida: 1' not in output
     assert 'formato 2: 1 filas' in output and 'formato 3: 1 filas' in output
     assert 'Cachés de proceso Meta' in output and 'analysis: filas=15; KB estimados=120.5' in output
     assert 'samples_failed' not in output and 'muestras fallidas: 1' in output

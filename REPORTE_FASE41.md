@@ -646,3 +646,8 @@ Commits de C25: `eaa9906` (a), `3a550ce` (b), `09cb68b` (c), `6efdc97` (d), `7e7
 - `api/routes/intelligence.py:145-149,370-395,558-561` busca desde la versión más nueva la primera con deciles `replay_only` y usa solo ese conjunto de validación. Incluye id, perfil, `source_kind` y fecha; si no hay deciles, devuelve una lista vacía y `sin deciles guardados`.
 - `frontend/intelligence.js:62-66,107` muestra el origen/versionado en B10 y no combina etiquetas de otras corridas ni orígenes.
 - Pruebas: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a5-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_intelligence_api.py tests/ui/test_intelligence_ui.py -q --basetemp $bt` — **3 passed, 2 warnings**. `node --check frontend/intelligence.js` correcto.
+
+## Fase 41-C26a6 — Verificador resumido de descartes de asignación
+
+- `scripts/verificar_s1_meta.py:116-117` imprime solo los tres motivos de descarte más frecuentes de `META_OPERATOR_ALLOCATION_SHADOW`, con sus conteos.
+- `tests/test_meta_s1_diagnostic.py:43-44,69-70` agrega cuatro causas sintéticas y verifica que se muestren las tres más frecuentes. Prueba: `$env:ASPLE_OFFLINE='1'; $bt=Join-Path $env:TEMP ('fase41-c26a6-'+[guid]::NewGuid().ToString('N')); .\venv\Scripts\python.exe -m pytest tests/test_meta_s1_diagnostic.py -q --basetemp $bt` — **1 passed**.
