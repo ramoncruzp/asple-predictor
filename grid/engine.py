@@ -269,20 +269,32 @@ class GridEngine:
         stop_loss_pct: Decimal | str | float | None = None,
         calibration_id: int | None = None,
         *, meta_id: int | None = None, meta_piece_type: str | None = None,
+        origin_grid_id: int | None = None, origin_level_allocations: list[dict] | None = None,
     ) -> dict:
         symbol = str(symbol).replace("/", "").upper()
         if not self._active_coin(symbol):
             raise GridConfigError(f"{symbol} must be an active registered coin")
         strategy = str(strategy).lower()
         individual_meta_bot = meta_piece_type == "individual_bot_grid" and meta_id is not None
-        if meta_piece_type is not None and not individual_meta_bot:
-            raise GridConfigError("Meta piece type requires a valid meta_id")
+        individual_origin_bot = meta_piece_type == "individual_bot_grid" and origin_grid_id is not None
+        individual_bot = individual_meta_bot or individual_origin_bot
+        if meta_piece_type is not None and not individual_bot:
+            raise GridConfigError("individual_bot_grid requires a Meta or source grid")
         if individual_meta_bot:
             with self.db.engine.connect() as conn:
                 goal = conn.execute(select(self.db.meta_goals).where(
                     self.db.meta_goals.c.id == int(meta_id))).mappings().first()
             if goal is None or goal["status"] != "ACTIVE" or goal["environment"] != "testnet":
                 raise GridConfigError("individual_bot_grid requiere una meta activa en Testnet")
+            if int(n_levels) != 1 or strategy != "simple":
+                raise GridConfigError("individual_bot_grid requiere strategy=simple y un nivel")
+        elif individual_origin_bot:
+            source = self.db.get_grid(int(origin_grid_id))
+            if (source is None or source.get("status") != "ACTIVE"
+                    or str(source.get("strategy", "")).lower() not in {"smart", "simple"}
+                    or self.db.is_meta_grid(int(origin_grid_id))
+                    or str(source.get("symbol")) != symbol):
+                raise GridConfigError("el bot agregado requiere un grid origen activo, propio y de la misma moneda")
             if int(n_levels) != 1 or strategy != "simple":
                 raise GridConfigError("individual_bot_grid requiere strategy=simple y un nivel")
         if strategy not in {"simple", "smart"}:
@@ -346,19 +358,22 @@ class GridEngine:
         if filters.max_num_orders is not None and len(open_orders) >= filters.max_num_orders:
             raise GridConfigError("exchange MAX_NUM_ORDERS is already reached")
         lines = compute_lines(range_low, range_high, n_levels, filters)
-        if individual_meta_bot:
+        if individual_bot:
             low, high = lines[0], lines[1]
             mid = book_mid(snapshot)
-            if mid is None or not low < mid < high:
+            if mid is None or not low < mid or (individual_meta_bot and not mid < high):
                 raise GridConfigError("el precio debe quedar dentro del rango del bot individual")
             if (high - low) / low < _d(_get(self.settings, "grid_min_step_pct", .003)):
                 raise GridConfigError("margen del bot por debajo de GRID_MIN_STEP_PCT")
-            profile_cfg = goal.get("config_snapshot") or {}
-            if isinstance(profile_cfg, str):
-                profile_cfg = json.loads(profile_cfg)
             net_margin_pct = (high / low - Decimal(1)) * Decimal(100) - Decimal("0.20")
-            if net_margin_pct < _d(profile_cfg.get("min_margin_pct", .3)):
-                raise GridConfigError("margen neto del bot inferior al mínimo del perfil Meta")
+            minimum_margin = .3
+            if individual_meta_bot:
+                profile_cfg = goal.get("config_snapshot") or {}
+                if isinstance(profile_cfg, str):
+                    profile_cfg = json.loads(profile_cfg)
+                minimum_margin = profile_cfg.get("min_margin_pct", .3)
+            if net_margin_pct < _d(minimum_margin):
+                raise GridConfigError("margen neto del bot inferior al mínimo permitido")
             qty = filters.round_qty_down(distributable_capital / low)
             if qty < filters.min_qty or qty * low < filters.min_notional:
                 raise GridConfigError("compra individual bajo cantidad o notional mínimo")
@@ -372,7 +387,12 @@ class GridEngine:
             else:
                 initial_state = "BUY_OPEN"
             plans = [CellPlan(0, low, high, distributable_capital, qty, initial_state)]
-            effective_params = {"meta_piece_type": "individual_bot_grid", "meta_id": int(meta_id)}
+            effective_params = {"meta_piece_type": "individual_bot_grid"}
+            if individual_meta_bot:
+                effective_params["meta_id"] = int(meta_id)
+            else:
+                effective_params["origin_grid_id"] = int(origin_grid_id)
+                effective_params["origin_level_allocations"] = list(origin_level_allocations or [])
         else:
             plans = plan_cells(lines, distributable_capital, snapshot, filters, self.settings)
         existing_levels = []
@@ -1395,10 +1415,28 @@ class GridEngine:
     def sync_grid(self, grid_id: int) -> dict[str, Any]:
         grid = self.db.get_grid(int(grid_id))
         meta_bot = bool(grid and self.db.is_meta_individual_bot_grid(int(grid_id)))
-        return self._sync_grid(
-            grid_id, rearm=not meta_bot, allowed_statuses={"ACTIVE"},
+        intel_paused = bool(grid and (grid.get("params") or {}).get("intel_pause_buys"))
+        result = self._sync_grid(
+            grid_id, rearm=not meta_bot and not intel_paused, allowed_statuses={"ACTIVE"},
             post_sell_state="DONE" if meta_bot else "IDLE",
         )
+        if meta_bot and grid:
+            params = grid.get("params") or {}
+            allocations = params.get("origin_level_allocations") or []
+            levels = self.db.get_grid_levels(int(grid_id))
+            if (params.get("origin_levels_released") is not True and allocations and levels
+                    and all(row.get("state") == "DONE" and _d(row.get("held_qty") or 0) <= 0 for row in levels)):
+                origin_id = int(params.get("origin_grid_id") or 0)
+                origin = self.db.get_grid(origin_id)
+                if origin and origin.get("status") == "ACTIVE":
+                    for allocation in allocations:
+                        self.db.update_level(origin_id, int(allocation["level_idx"]),
+                            state=allocation.get("state", "IDLE"),
+                            capital=float(allocation["capital"]),
+                            capital_base=float(allocation.get("capital_base") or allocation["capital"]))
+                    self.db.merge_grid_params(int(grid_id), {"origin_levels_released": True},
+                        allowed=frozenset({"origin_levels_released"}))
+        return result
 
     def sync_closing(self, grid_id: int) -> dict[str, Any]:
         return self._sync_grid(grid_id, rearm=False, allowed_statuses={"CLOSING"})

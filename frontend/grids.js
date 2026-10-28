@@ -88,6 +88,16 @@
     return data;
   }
 
+  async function apiPut(path, body) {
+    const response = await fetch((window.API_BASE || window.location.origin) + path, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', ...(window.gridApiToken ? { 'X-API-Token': window.gridApiToken } : {}) },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { const error = new Error(data.detail || `HTTP ${response.status}`); error.status = response.status; throw error; }
+    return data;
+  }
+
   function actionFields(action, card) {
     if (action === 'idle-shrink-on') return { adjust_idle_shrink: true };
     if (action === 'idle-shrink-off') return { adjust_idle_shrink: false };
@@ -421,6 +431,17 @@
     const cells = detail.cells;
     const metaLink = (metaLinks || []).find(row => Number(row.grid_id) === Number(summary.id));
     const metaOwned = Boolean(metaLink);
+    const intelEnabled = detail.config?.intel_apply_enabled === true;
+    const intelActor = detail.config?.intel_apply_actor || '';
+    const intelChangedAt = detail.config?.intel_apply_changed_at || '';
+    const gridIntel = detail.grid_intelligence;
+    const intelEvidence = Object.entries(gridIntel?.mature_labels?.readiness_by_action || {}).map(([action, item]) =>
+      '<div><b>' + esc(action) + ': ' + esc(item.state) + '</b> · ' + esc(item.n) + '/' + esc(item.n_required) + ' etiquetas' +
+      '<progress max="' + esc(item.n_required || 30) + '" value="' + Math.min(Number(item.n_required || 30), Number(item.n || 0)) + '"></progress>' +
+      '<small>' + esc(item.summary || '') + (item.estimated_ready_at ? ' · estimado: ' + esc(item.estimated_ready_at) : '') + '</small>' +
+      '<ul>' + (item.criteria || []).map(c => '<li>' + (c.ok ? 'Cumple: ' : 'Pendiente: ') + esc(c.text) + '</li>').join('') + '</ul></div>').join('') || 'Aún sin 30 etiquetas maduras para recomendar activación.';
+    const intelSwitchCard = !metaOwned && ['ACTIVE', 'PAUSED'].includes(summary.status) && ['smart','simple'].includes(String(summary.strategy).toLowerCase())
+      ? `<section class="card grid-intelligence-switch"><h3>Inteligencia de este grid</h3><p>Interruptor: <b>${intelEnabled ? 'ENCENDIDO' : 'APAGADO'}</b>. El sistema solo aplica una recomendación tras dos horas iguales, seis horas de espera y un máximo de dos cambios diarios.</p><p>${intelActor ? `Último cambio por ${esc(intelActor)} · ${esc(intelChangedAt)}` : 'Sin cambios anteriores.'}</p><p>${intelEvidence}</p><button type="button" class="button secondary" data-intel-switch="${intelEnabled ? 'off' : 'on'}" data-grid-intel-id="${summary.id}" ${intelEnabled ? '' : (summary.status !== 'ACTIVE' || ((Object.values(gridIntel?.mature_labels?.readiness_by_action || {}).some(x => x.state === 'Listo para encender')) ? '' : 'disabled'))}>${intelEnabled ? 'Apagar aplicación automática' : 'Encender para este grid'}</button><a href="#intelligence">Ver evidencia en Inteligencia</a></section>` : '';
     const metaManagedNote = metaOwned
       ? `<div class="card metas-grid-managed-warning"><b>Esta pieza la gestiona la Meta #${esc(metaLink.meta_id)}.</b> Los cambios manuales pueden chocar con el operador. La Meta decide los reajustes de rango, niveles y margen; los eventos de dirección son informativos. Revisa sus decisiones en <a href="#metas">Metas</a>; para cancelar, usa la opción de la Meta.</div>` : '';
     const recovery = summary.recovery_mode === true
@@ -529,6 +550,7 @@
       </div>
       ${['ACTIVE','PAUSED'].includes(summary.status) ? `<p class="card muted grid-global-switches">${esc(switchLine)}</p>` : ''}
       ${metaManagedNote}
+      ${intelSwitchCard}
       ${experimentCard}
       ${loanBlock}
       ${recovery}
@@ -656,6 +678,25 @@
   document.addEventListener('click', (event) => {
     const badge = event.target.closest('[data-meta-badge]');
     if (badge) { event.preventDefault(); event.stopPropagation(); location.hash = '#metas'; return; }
+    const intelButton = event.target.closest('[data-intel-switch]');
+    if (intelButton) {
+      event.preventDefault(); event.stopPropagation();
+      const gridId = intelButton.dataset.gridIntelId;
+      if (!gridId) return;
+      const enable = intelButton.dataset.intelSwitch === 'on';
+      const parent = document.getElementById('grids-content');
+      showActionDialog(parent, 'Confirmar interruptor de Inteligencia',
+        `<p>${enable ? 'Al encenderlo, el operador podrá aplicar cambios al grid cuando se cumplan todas las puertas.' : 'Se apagará la aplicación automática de recomendaciones.'}</p><label>Quién confirma<input name="intel-actor" required maxlength="80"></label><label><input type="checkbox" name="intel-confirm"> Confirmo el cambio para este grid</label>`,
+        async () => {
+          const modal = document.getElementById('grid-action-dialog');
+          const actor = modal.querySelector('[name="intel-actor"]').value.trim();
+          if (!actor || !modal.querySelector('[name="intel-confirm"]').checked) throw new Error('Indica quién confirma y marca la confirmación.');
+          await apiPut(`/api/grids/${gridId}/intelligence-switch`, { enabled: enable, actor, confirm: true });
+          modal.hidden = true;
+          await window.loadGridsScreen?.(`grids/${gridId}`, true);
+        });
+      return;
+    }
     const button = event.target.closest('[data-grid-action]');
     if (!button) return;
     const controls = button.closest('[data-grid-controls]');

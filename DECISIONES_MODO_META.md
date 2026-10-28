@@ -388,7 +388,7 @@ Todos los medidores son informativos; Ramón decide y el sistema nunca enciende 
 | Ruptura v2, por perfil | ≥ 30 etiquetas 72 h; log-loss y Brier mejores; tasas de salida del rango ordenadas por tercil; IC de Δ log-loss completamente bajo cero. |
 | Bots de toque, por perfil | ≥ 30 propuestas etiquetadas a 72 h; venta observada a ±10 puntos de la esperada; ganancia neta estimada positiva con IC por encima de cero. |
 | Asignación ampliada, por perfil | ≥ 30 decisiones «agregar» con etiquetas maduras a 72 h y al plazo; avance mayor que sin la pieza con IC que no cruce cero. Hasta enlazar esas etiquetas, permanece recolectando. |
-| Recomendaciones por grid (Fase 42) | Punto de extensión documentado; todavía no existe bandera ni almacenamiento de recomendaciones por grid. |
+| Recomendaciones para grids no Meta (Fase 42) | Interruptor independiente por grid, apagado por defecto. Requiere 30 etiquetas maduras de la acción, media de aplicar frente a mantener positiva, intervalo que no cruce cero y confirmación de Ramón por grid. |
 
 C27a define los estados compartidos y C27b conecta datos y presentación. «No conviene» solo se emite con evidencia suficiente y resultado adverso significativo. La evaluación no reemplaza la confirmación manual.
 
@@ -400,3 +400,13 @@ Cuando una evaluación entra en “Listo para encender” o “No conviene”, s
 ### C27d — elegibilidad de datos y entrega de alertas
 
 Los medidores de evidencia cuentan solo muestras del método vigente y admitidas para entrenamiento. Las alertas de preparación conservan eventos encolados durante envíos concurrentes. Ninguno de estos cambios activa interruptores ni altera decisiones del operador.
+
+## Inteligencia para grids no Meta — Fase 42
+
+Smart y Simple activos ajenos a Meta reciben evaluación horaria en sombra. La métrica es ganancia neta a siete días (PnL realizado mós inventario a bid neto de comisión), con drawdown como límite. Se permiten mover el rango sin vender inventario, cambiar niveles, agregar un bot de un nivel con efectivo libre o pausar compras.
+La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de la acción, ganancia media de aplicar frente a mantener positiva e intervalo de confianza enteramente sobre cero, y confirmación explícita de Ramón. Tras encender: dos recomendaciones horarias iguales, seis horas de enfriamiento, máximo dos cambios diarios, grid ACTIVE y valoración conocida. El sistema no enciende interruptores por sí solo.
+
+## Inteligencia para grids no Meta — Fase 42
+
+Smart y Simple activos ajenos a Meta reciben evaluación horaria en sombra. La métrica es ganancia neta a siete días (PnL realizado más inventario a bid neto de comisión), con drawdown como límite. Las acciones permitidas son mover rango sin vender inventario, cambiar niveles, agregar bot con efectivo libre o pausar compras.
+La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de la acción, ganancia media de aplicar frente a mantener positiva e intervalo enteramente sobre cero, y aprobación de Ramón. Tras encender: dos recomendaciones horarias iguales, seis horas de enfriamiento, máximo dos cambios por 24 h, grid ACTIVE y valoración conocida. El sistema nunca enciende interruptores por sí solo.

@@ -31,6 +31,12 @@ from grid.market_book import book_mid
 
 router = APIRouter()
 
+
+class GridIntelligenceSwitchRequest(BaseModel):
+    enabled: bool
+    actor: str = Field(min_length=1, max_length=80)
+    confirm: bool
+
 _GRID_STATUSES = {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING",
                   "CLOSED", "CANCELLED", "FAILED", "ERROR"}
 _LOAN_STATUSES = ("OPEN", "REPAID", "TRANSFERRED", "CANCELLED", "PENDING")
@@ -1078,3 +1084,38 @@ def grid_loans(request: Request, grid_id: int):
                                           if repaid_hours else None),
             "open_loans": [_loan_open_view(row, now) for row in loans
                            if str(row.get("status", "")).upper() == "OPEN"]}
+
+
+@router.put("/{grid_id}/intelligence-switch")
+def set_grid_intelligence_switch(request: Request, grid_id: int, body: GridIntelligenceSwitchRequest):
+    """Per-grid opt-in; enabling requires mature positive evidence for the latest action."""
+    _authorize(request)
+    if not body.confirm or not body.actor.strip():
+        raise HTTPException(422, "Confirma el cambio e indica quién lo autoriza.")
+    db = request.app.state.db
+    grid = db.get_grid(int(grid_id))
+    if grid is None:
+        raise HTTPException(404, f"Grid {grid_id} no existe.")
+    params = grid.get("params") if isinstance(grid.get("params"), dict) else {}
+    if db.is_meta_grid(int(grid_id)) or params.get("meta_piece_type") or params.get("meta_id"):
+        raise HTTPException(409, "Los grids de Meta no usan este interruptor.")
+    if body.enabled:
+        if str(grid.get("status", "")).upper() != "ACTIVE":
+            raise HTTPException(409, "Solo se puede activar en un grid ACTIVE.")
+        from api.routes.intelligence import _grid_intelligence_summary
+        evidence = next((item for item in _grid_intelligence_summary(db, target_grid_id=int(grid_id))["grids"]
+            if int(item["grid_id"]) == int(grid_id)), None)
+        if evidence is None or not evidence.get("recommendations_24h"):
+            raise HTTPException(409, "No hay una recomendación reciente para evaluar.")
+        readiness = (evidence.get("mature_labels") or {}).get("readiness_by_action") or {}
+        if not any(item.get("state") == "Listo para encender" for item in readiness.values()):
+            raise HTTPException(409, "La acción no tiene 30 etiquetas maduras con mejora e intervalo positivo.")
+    now = datetime.now(timezone.utc)
+    db.merge_grid_params(int(grid_id), {"intel_apply_enabled": bool(body.enabled),
+        "intel_apply_actor": body.actor.strip(), "intel_apply_changed_at": now.isoformat()},
+        allowed=frozenset({"intel_apply_enabled", "intel_apply_actor", "intel_apply_changed_at"}))
+    db.add_grid_event(run_id=None, source="CLI", grid_id=int(grid_id),
+        event_type="GRID_INTEL_SWITCH_CHANGED", reason="aprobación manual por grid",
+        details={"enabled": bool(body.enabled), "actor": body.actor.strip(), "changed_at": now.isoformat()})
+    return {"grid_id": int(grid_id), "intel_apply_enabled": bool(body.enabled),
+        "actor": body.actor.strip(), "changed_at": now.isoformat()}

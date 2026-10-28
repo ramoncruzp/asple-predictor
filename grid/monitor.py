@@ -106,7 +106,7 @@ class GridMonitor:
                     "threshold": DIRECTION_FILTER_THRESHOLD}})
         return p_down, fresh
 
-    def _cancel_direction_buys(self, grid, levels, mid):
+    def _cancel_direction_buys(self, grid, levels, mid, *, reason="bearish_forecast"):
         for level in levels:
             if level.get("state") != "BUY_OPEN" or level.get("order_id") is None:
                 continue
@@ -114,13 +114,14 @@ class GridMonitor:
                 result = self.exchange.cancel_order(grid["symbol"], int(level["order_id"]))
                 if float(result.get("executed_qty") or 0) > 0:
                     self.engine._settle_canceled_buy_partial(grid, level, result,
-                        "direction_filter", place_sell=True)
+                        reason, place_sell=True)
                 elif str(result.get("status", "")).upper() == "CANCELED":
                     self.db.update_level(int(grid["id"]), int(level["level_idx"]),
                         state="IDLE", order_id=None, client_order_id=None, buy_client_order_id=None)
-                    self._emit({"event_type": "DIRECTION_BUY_CANCELED", "grid_id": int(grid["id"]),
+                    event_type = "GRID_INTEL_BUY_CANCELED" if reason == "grid_intelligence" else "DIRECTION_BUY_CANCELED"
+                    self._emit({"event_type": event_type, "grid_id": int(grid["id"]),
                         "level_idx": int(level["level_idx"]), "order_id": int(level["order_id"]),
-                        "reason": "bearish_forecast", "price": mid,
+                        "reason": reason, "price": mid,
                         "details": {"sells_preserved": True}})
             except Exception as exc:
                 self._emit({"event_type": "DIRECTION_FILTER_FAILED", "grid_id": int(grid["id"]),
@@ -595,6 +596,30 @@ class GridMonitor:
                     # canceled limit sell as an external cancellation.
                     if status_before == "ACTIVE":
                         self.engine.sync_grid(grid_id)
+                        params_now = current.get("params") or {}
+                        if params_now.get("intel_pause_buys") is True and mid is not None:
+                            try:
+                                from grid.grid_intelligence import (GRID_INTEL_BREAK_PAUSE_THRESHOLD,
+                                    GRID_INTEL_HIGH_VOLATILITY_THRESHOLD)
+                                from grid.meta_learning import meta_break_prob_v2
+                                sigma_now = float(view.sigma_24h) if view is not None else 0.0
+                                probability = float(meta_break_prob_v2(mid, float(current["range_low"]),
+                                    float(current["range_high"]), sigma_now))
+                                still_blocked = (probability >= GRID_INTEL_BREAK_PAUSE_THRESHOLD
+                                    or sigma_now >= GRID_INTEL_HIGH_VOLATILITY_THRESHOLD)
+                                if still_blocked:
+                                    self._cancel_direction_buys(current, self.db.get_grid_levels(grid_id),
+                                        mid, reason="grid_intelligence")
+                                else:
+                                    self.db.merge_grid_params(grid_id, {},
+                                        remove={"intel_pause_buys", "intel_pause_reason"},
+                                        allowed=frozenset({"intel_pause_buys", "intel_pause_reason"}))
+                                    self._emit({"event_type": "GRID_INTEL_BUYS_RESUMED", "grid_id": grid_id,
+                                        "reason": "señal de pausa despejada", "price": mid,
+                                        "details": {"break_prob_v2": probability, "sigma_24h": sigma_now}})
+                                    self.engine.sync_grid(grid_id)
+                            except Exception:
+                                self.logger.exception("grid=%s fallo al revisar pausa de compras de Inteligencia", grid_id)
                         if (direction_enabled and direction_fresh
                                 and direction_gate(direction_p_down, DIRECTION_FILTER_THRESHOLD)):
                             self._cancel_direction_buys(current,

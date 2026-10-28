@@ -45,6 +45,7 @@ from alerts.dispatcher import AlertDispatcher
 from grid.meta import MetaCore
 from grid.meta_operator import MetaOperator
 from grid.intelligence_readiness import IntelligenceReadinessJob
+from grid.grid_intelligence import GridIntelligenceJob
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -147,6 +148,76 @@ async def lifespan(app: FastAPI):
 
     meta_operator = MetaOperator(meta_core, db, grid_scan_service, grid_engine, settings,
                                  advisor=meta_advisor)
+    def apply_grid_intelligence(current_grid, action, candidate):
+        if grid_engine is None:
+            return {"ok": False, "reason": "motor Testnet no disponible"}
+        geometry = candidate.get("geometry") or {}
+        grid_id = int(current_grid["id"])
+        if str(action).startswith(("mover_rango", "cambiar_n_")):
+            return grid_engine.adjust_grid(grid_id, geometry["low"], geometry["high"],
+                int(geometry.get("n") or current_grid["n_levels"]),
+                reason="grid_intelligence_shadow", details={"source": "GRID_INTEL",
+                    "method_version": "grid_shadow_42a_v1", "action": action})
+        if str(action).startswith("agregar_bot_"):
+            capital = float(geometry.get("affected_capital") or 0)
+            if capital < 5.5:
+                return {"ok": False, "reason": "efectivo libre inferior al mínimo del bot"}
+            from contextlib import nullcontext
+            guard = grid_monitor.ops_lock if grid_monitor is not None else nullcontext()
+            with guard:
+                source_cells = db.get_grid_levels(grid_id)
+                reserved = [row for row in source_cells if int(row["level_idx"]) in
+                    set(geometry.get("source_level_idxs") or []) and row.get("order_id") is None
+                    and float(row.get("held_qty") or 0) <= 0 and str(row.get("state", "")).upper() in {"IDLE", "DONE"}]
+                available = sum(float(row.get("capital") or 0) for row in reserved)
+                if available + 1e-8 < capital:
+                    return {"ok": False, "reason": "el efectivo libre cambió desde el análisis"}
+                allocations = [{"level_idx": int(row["level_idx"]), "state": row["state"],
+                    "capital": float(row.get("capital") or 0),
+                    "capital_base": float(row.get("capital_base") or row.get("capital") or 0)}
+                    for row in reserved]
+                try:
+                    for allocation in allocations:
+                        db.update_level(grid_id, allocation["level_idx"], state="INTEL_ALLOCATED",
+                            capital=0, capital_base=0)
+                    opened = grid_engine.create_grid(str(current_grid["symbol"]), geometry["low"],
+                        geometry["high"], 1, capital=capital, strategy="simple",
+                        meta_piece_type="individual_bot_grid", origin_grid_id=grid_id,
+                        origin_level_allocations=allocations)
+                except Exception:
+                    for allocation in allocations:
+                        db.update_level(grid_id, allocation["level_idx"], state=allocation["state"],
+                            capital=allocation["capital"], capital_base=allocation["capital_base"])
+                    raise
+                return {"ok": True, "bot_grid_id": opened.get("id")}
+        if action == "pausar_compras":
+            canceled = grid_engine.cancel_grid_orders(grid_id, finalize=False, buy_only=True)
+            if canceled.get("cancel_errors") or canceled.get("pending_order_ids"):
+                return {"ok": False, "reason": "no se confirmaron todas las cancelaciones de compra"}
+            db.merge_grid_params(grid_id, {"intel_pause_buys": True,
+                "intel_pause_reason": "break_prob_v2_or_high_volatility"},
+                allowed=frozenset({"intel_pause_buys", "intel_pause_reason"}))
+            return {"ok": True}
+        return {"ok": False, "reason": "acción no reconocida"}
+
+    def grid_intelligence_valuation_known(current_grid):
+        try:
+            if grid_engine is None:
+                return False
+            from grid.market_book import book_is_two_sided
+            _filters, snapshot, _mid = grid_engine._market_context(str(current_grid["symbol"]))
+            return bool(book_is_two_sided(snapshot))
+        except Exception:
+            logging.getLogger(__name__).exception("No se pudo validar el libro Testnet antes de aplicar Inteligencia")
+            return False
+
+    grid_intel_shadow_job = GridIntelligenceJob(
+        db, public_market_client, meta_operator._symbol_filters, advisor=meta_advisor,
+        settings=grid_engine.settings if grid_engine is not None else settings,
+        vol_provider=grid_vol_provider,
+        apply_callback=apply_grid_intelligence,
+        valuation_checker=grid_intelligence_valuation_known,
+        ops_lock=grid_monitor.ops_lock if grid_monitor is not None else None)
     app.state.grid_scan_service = grid_scan_service
     app.state.public_market_client = public_market_client
     app.state.grid_engine, app.state.testnet_client = grid_engine, testnet_client
@@ -155,6 +226,7 @@ async def lifespan(app: FastAPI):
     app.state.alert_dispatcher = alert_dispatcher
     app.state.meta_core = meta_core
     app.state.meta_operator = meta_operator
+    app.state.grid_intel_shadow_job = grid_intel_shadow_job
     app.state.models, app.state.ensemble = {"model_a": model_a, **shadow_models}, ensemble
     app.state.model_load_report = {
         "model_a": {"available": True, "artifact": str(artifact),
@@ -178,6 +250,7 @@ async def lifespan(app: FastAPI):
     grid_intelligence_job = IntelligenceReadinessJob(evaluate_grid_readiness, alert_dispatcher)
     app.state.grid_intelligence_job = grid_intelligence_job
     grid_intelligence_job.start()
+    grid_intel_shadow_job.start()
     prediction_loop.start()
     verification_loop.start()
     if vol_loop is not None:
@@ -209,6 +282,7 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_intelligence_job.stop()
+        grid_intel_shadow_job.stop()
         meta_core.stop()
         meta_operator.stop()
         grid_auto_open.stop()
