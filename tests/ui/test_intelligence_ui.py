@@ -10,6 +10,7 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     js = (ROOT / 'frontend' / 'intelligence.js').read_text(encoding='utf-8')
     assert 'data-route="intelligence">Inteligencia' in html
     assert 'id="screen-intelligence"' in html and 'intelligence.js' in html
+    assert 'id="intelligence-readiness"' in html
     assert "'intelligence'].forEach(screen" in app and "window.loadIntelligencePage" in app
     assert "api.get(`/api/intelligence?page=${decisionPage}&page_size=50" in js
     assert "addEventListener('click', load)" in js
@@ -21,6 +22,7 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'replay_windows_new' in js and 'data-page-next' in js
     assert 'signalLabel(name)' in js
     assert 'intelligence-summary' in js
+    assert 'readiness_switches' in js and '¿Qué puedo encender?' in js
     assert '<details class="intelligence-detail">' in js
     assert 'replayBars(r.chart)' in js
     assert 'B10 \u00b7 Aciertos' in js

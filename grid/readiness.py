@@ -92,3 +92,29 @@ def paired_bootstrap_mean_ci(values: Iterable[float], *, seed: int = BOOTSTRAP_S
     low = max(0, int((1 - CONFIDENCE_LEVEL) / 2 * len(means)))
     high = min(len(means) - 1, int((1 + CONFIDENCE_LEVEL) / 2 * len(means)))
     return [means[low], means[high]]
+
+
+def probability_comparison(actual: Iterable[tuple[float, int]],
+                           candidate: Iterable[tuple[float, int]]) -> dict:
+    """Compara probabilidades emparejadas; diferencia negativa favorece candidate."""
+    import math
+
+    left = list(actual)
+    right = list(candidate)
+    paired = [(a, b) for a, b in zip(left, right) if a[1] == b[1]]
+    def losses(pair):
+        p = max(1e-12, min(1 - 1e-12, float(pair[0])))
+        y = int(bool(pair[1]))
+        return -(y * math.log(p) + (1 - y) * math.log(1 - p)), (p - y) ** 2
+    if not paired:
+        return {"n": 0, "actual_log_loss": None, "candidate_log_loss": None,
+                "actual_brier": None, "candidate_brier": None, "log_loss_delta_ci95": None}
+    actual_losses = [losses(a) for a, _ in paired]
+    candidate_losses = [losses(b) for _, b in paired]
+    ci = paired_bootstrap_mean_ci([b[0] - a[0] for a, b in zip(actual_losses, candidate_losses)])
+    return {"n": len(paired),
+        "actual_log_loss": sum(x[0] for x in actual_losses) / len(paired),
+        "candidate_log_loss": sum(x[0] for x in candidate_losses) / len(paired),
+        "actual_brier": sum(x[1] for x in actual_losses) / len(paired),
+        "candidate_brier": sum(x[1] for x in candidate_losses) / len(paired),
+        "log_loss_delta_ci95": ci}

@@ -572,6 +572,15 @@
     return `<aside class="meta-learning-readiness ${esc(status)}"><b>${esc(readiness.label || 'Recolectando datos')}</b> &middot; ${esc(readiness.best_effective_samples || 0)} de 30; faltan ${esc(readiness.remaining || 0)}.<progress max="30" value="${Math.min(30, Number(readiness.best_effective_samples || 0))}"></progress>${reasons.length ? ` <span>${esc(reasons.join('; '))}</span>` : ''}${enabled && status !== 'verde' ? '<p>Aviso: interruptor encendido sin evidencia vigente.</p>' : ''}</aside>`;
   }
 
+  function switchReadinessMarkup(readiness) {
+    if (!readiness) return '<p class="muted">Medidor no disponible.</p>';
+    const state = readiness.state || 'Recolectando datos';
+    const color = state === 'Listo para encender' ? 'verde' : state === 'No conviene' ? 'rojo' : state === 'Evaluando' ? 'amarillo' : 'gris';
+    const criteria = (readiness.criteria || []).map(item => `<li>${item.ok ? '✓' : '×'} ${esc(item.text)}${item.value == null ? '' : ` · ${esc(typeof item.value === 'object' ? JSON.stringify(item.value) : item.value)}`}</li>`).join('');
+    const estimate = readiness.estimated_ready_at ? `estimado: ${esc(readiness.estimated_ready_at)}` : 'estimado: sin ritmo suficiente';
+    return `<aside class="meta-learning-readiness ${color}"><b>${esc(state)}</b> · ${esc(readiness.n || 0)} de ${esc(readiness.n_required || 30)}<progress max="${esc(readiness.n_required || 30)}" value="${Math.min(Number(readiness.n_required || 30), Number(readiness.n || 0))}"></progress><small>${estimate}</small>${criteria ? `<ul>${criteria}</ul>` : ''}<p>${esc(readiness.summary || '')}</p></aside>`;
+  }
+
   function learningMarkup(data, profile) {
     const rows = Object.entries(data.signals || {}).map(([name, item]) => `<tr><td>${esc(LEARNING_SIGNAL_LABELS[name] || name)}</td>
       <td>${fmtMoney(item.current_weight, 2)}</td><td>${fmtMoney(item.learned_weight, 3)}</td>
@@ -619,9 +628,13 @@
     if (!host) return;
     const profiles = ['RAPIDO', 'PRUDENTE'];
     try {
-      const data = await Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`)));
+      const [data, intelligence, config] = await Promise.all([
+        Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`))),
+        apiGet('/api/intelligence'), apiGet('/api/metas/config')]);
+      const profileConfigs = config.profiles || {};
       const rows = data.map((item, index) => {
         const profile = profiles[index], label = profile === 'RAPIDO' ? 'Meta R\u00e1pido' : 'Meta Prudente';
+        const readinessItems = intelligence.readiness_switches?.[profile] || {};
         const enabled = Boolean(item.enabled);
         const evidence = Object.values(item.signals || {}).some(signal => Number(signal.effective_samples || 0) >= 30 && signal.source !== 'sin evidencia');
         const change = item.last_switch ? `${esc(item.last_switch.actor)} &middot; ${esc(item.last_switch.changed_at)} &middot; versi\u00f3n ${esc(item.last_switch.weight_version_id || 'sin versi\u00f3n')}` : 'Nunca encendido';
@@ -630,37 +643,49 @@
         const learningRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="learning"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
           <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al (Toque compra\u2192venta: 0) y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
-          ${learningReadinessMarkup(item.readiness, enabled)}
+          ${switchReadinessMarkup(readinessItems.learned_weights)}
           ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (las se\u00f1ales conservan sus pesos base: 0,25; Toque compra\u2192venta: 0)</p>' : ''}
-          <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
+          <div data-switch-confirm hidden>${!enabled && readinessItems.learned_weights?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(readinessItems.learned_weights?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
           <button class="button secondary" type="button" data-switch-open>${enabled ? 'Apagar' : 'Encender'}</button></article>`;
         const allocationRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="allocation"><div class="global-flag-copy"><h3>${label}: asignaci\u00f3n de capital ampliada</h3>
           <p>Encendido: el operador elige piezas para el efectivo libre con replay de cartera. Apagado: se conserva el m\u00e9todo actual para usar efectivo; esta selecci\u00f3n queda solo en sombra.</p>
           <small class="muted">Estado: <b>${allocationEnabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${allocationChange}</small>
-          <div data-switch-confirm hidden><label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
+          ${switchReadinessMarkup(readinessItems.extended_allocation)}
+          <div data-switch-confirm hidden>${!allocationEnabled && readinessItems.extended_allocation?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(readinessItems.extended_allocation?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
           <button class="button secondary" type="button" data-switch-open>${allocationEnabled ? 'Apagar' : 'Encender'}</button></article>`;
-        return learningRow + allocationRow;
+        const extraRows = [
+          ['centered_signals', 'Señales centradas', 'use_centered_signals', 'El centrado Scanner + Advisor se mantiene en sombra mientras esté apagado.'],
+          ['break_prob_v2', 'Ruptura v2', 'use_break_prob_v2', 'La ruptura v2 sustituye la entrada de ruptura solo al encenderse.'],
+          ['touch_bots', 'Bots de toque', 'use_touch_bots', 'Las propuestas de bot de toque no crean órdenes mientras estén apagadas.'],
+        ].map(([kind, title, key, description]) => {
+          const isEnabled = Boolean((profileConfigs[profile] || {})[key]);
+          const evidenceItem = readinessItems[kind];
+          return `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="${kind}" data-setting-key="${key}"><div class="global-flag-copy"><h3>${label}: ${title}</h3><p>${description}</p><small class="muted">Estado: <b>${isEnabled ? 'ENCENDIDO' : 'APAGADO'}</b></small>${switchReadinessMarkup(evidenceItem)}<div data-switch-confirm hidden>${!isEnabled && evidenceItem?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(evidenceItem?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${isEnabled ? 'Apagar' : 'Encender'}</button></article>`;
+        }).join('');
+        return learningRow + allocationRow + extraRows;
       }).join('');
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
       host.querySelectorAll('[data-switch-open]').forEach(button => button.addEventListener('click', () => {
         const row = button.closest('[data-meta-learning-switch]'), confirm = row.querySelector('[data-switch-confirm]');
-        confirm.hidden = false; button.disabled = true; confirm.querySelector('[data-switch-actor]').focus();
+        confirm.hidden = false; button.disabled = true; confirm.querySelector('[data-switch-actor]')?.focus();
       }));
       host.querySelectorAll('[data-switch-cancel]').forEach(button => button.addEventListener('click', () => {
         const row = button.closest('[data-meta-learning-switch]'); row.querySelector('[data-switch-confirm]').hidden = true; row.querySelector('[data-switch-open]').disabled = false;
       }));
       host.querySelectorAll('[data-switch-save]').forEach(button => button.addEventListener('click', async () => {
         const row = button.closest('[data-meta-learning-switch]'), profile = row.dataset.metaLearningSwitch;
-        const actor = row.querySelector('[data-switch-actor]').value.trim(), status = row.querySelector('[role="status"]');
-        if (!actor) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe qui\u00e9n confirma el cambio.'; return; }
+        const actor = row.querySelector('[data-switch-actor]')?.value.trim() || '', status = row.querySelector('[role="status"]');
+        const kind = row.dataset.switchKind;
+        if (!actor && (kind === 'learning' || kind === 'allocation')) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe quién confirma el cambio.'; return; }
         button.disabled = true;
         try {
           const currentlyEnabled = row.querySelector('small b').textContent === 'ENCENDIDO';
-          const kind = row.dataset.switchKind;
-          await apiPut(kind === 'allocation' ? '/api/metas/allocation/switch' : '/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
+          if (kind === 'allocation') await apiPut('/api/metas/allocation/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
+          else if (kind === 'learning') await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
+          else await apiPut('/api/metas/config/profile', {profile, values:{[row.dataset.settingKey]: !currentlyEnabled}});
           await loadLearningSwitches(host);
         } catch (error) { status.textContent = error.message; button.disabled = false; }
       }));

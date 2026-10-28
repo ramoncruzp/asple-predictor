@@ -93,6 +93,9 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         allocation_shadow_rows = conn.execute(select(db.meta_ledger.c.meta_id, db.meta_ledger.c.ts,
             db.meta_ledger.c.details).where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")
             .order_by(db.meta_ledger.c.id.desc()).limit(10)).mappings().all()
+        allocation_readiness_rows = conn.execute(select(db.meta_goals.c.profile, db.meta_ledger.c.details)
+            .select_from(db.meta_ledger.join(db.meta_goals, db.meta_goals.c.id == db.meta_ledger.c.meta_id))
+            .where(db.meta_ledger.c.event_type == "META_OPERATOR_ALLOCATION_SHADOW")).all()
         bot_shadow_rows = conn.execute(select(db.meta_ledger.c.id, db.meta_ledger.c.meta_id,
             db.meta_ledger.c.ts, db.meta_ledger.c.event_type, db.meta_ledger.c.details).where(
                 db.meta_ledger.c.event_type.in_(("META_BOT_TOUCH_SHADOW", "META_BOT_TOUCH_SHADOW_LABEL")))
@@ -125,7 +128,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             db.meta_learning_samples.c.base_probability,
             db.meta_learning_samples.c.base_probability_smoothed,
             db.meta_learning_samples.c.signals_json,
-            db.meta_learning_samples.c.training_exclusion_reason).order_by(
+            db.meta_learning_samples.c.training_exclusion_reason,
+            db.meta_learning_samples.c.sample_at).order_by(
                 db.meta_learning_samples.c.id.desc()).limit(10000)).all()
         latest_run = conn.execute(select(db.meta_learning_runs).order_by(
             db.meta_learning_runs.c.id.desc()).limit(1)).mappings().first()
@@ -384,6 +388,7 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         break
     centered_rows = {horizon: {kind: [] for kind in ("actual", "centrada")}
         for horizon in ("72h", "20d", "45d")}
+    centered_by_profile = {profile: [] for profile in ("RAPIDO", "PRUDENTE")}
     for sample in sample_rows:
         raw = _json(sample[7])
         if not isinstance(raw, dict):
@@ -399,6 +404,14 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
                 if probability is not None:
                     centered_rows[horizon][kind].append((
                         max(1e-12, min(1 - 1e-12, float(probability))), truth))
+            if horizon == "72h":
+                actual = raw.get("probability_adjusted_actual")
+                centered = raw.get("probability_adjusted_centered")
+                if actual is not None and centered is not None:
+                    profile = str(sample[1]).upper()
+                    if profile in centered_by_profile:
+                        centered_by_profile[profile].append((float(actual), float(centered), truth,
+                            sample[9]))
     centered_comparison = {}
     for horizon, kinds in centered_rows.items():
         centered_comparison[horizon] = {}
@@ -423,7 +436,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
             continue
         exits = [piece.get("exited") for piece in (label.get("piece_range_exits") or [])
                  if piece.get("exited") is not None]
-        break_v2_samples.append({"actual": float(actual_p), "v2": float(v2_p),
+        break_v2_samples.append({"profile": str(sample[1]).upper(),
+            "sample_at": sample[9], "actual": float(actual_p), "v2": float(v2_p),
             "truth": int(bool(label["reached"])), "break": float(v2["value"]),
             "piece_exits": exits,
             "sample_start": label.get("sample_start"), "sample_end": label.get("sample_end")})
@@ -519,6 +533,133 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "stoploss_enabled", "smart_close_wait_enabled", "smart_respacing_enabled",
         "smart_direction_filter_enabled") if settings is not None and hasattr(settings, name)}
 
+    # Evidencia por interruptor/perfil. Se calcula en lectura y queda separada
+    # de los valores efectivos: esta respuesta nunca escribe ni activa flags.
+    from grid.readiness import (MIN_MATURE_CASES, STATE_READY, evaluate_readiness,
+        paired_bootstrap_mean_ci, probability_comparison)
+    readiness_switches = {}
+    allocation_decision_counts = Counter()
+    for profile_name, raw_detail in allocation_readiness_rows:
+        detail = _json(raw_detail)
+        allocation_decision_counts[(str(profile_name or "").upper(),
+            str(detail.get("decision") or "no_agregar"))] += 1
+    for profile in ("RAPIDO", "PRUDENTE"):
+        learning_mature_times = [row[9] for row in sample_rows
+            if str(row[1]).upper() == profile and row[9] is not None
+            and labels_by_sample.get((int(row[0]), "72h"), {}).get("status") == "labeled"]
+        learning_item = profile_learning.get(profile) or {}
+        learning_n = int((learning_item.get("readiness") or {}).get("best_effective_samples") or 0)
+        learn_criteria = [
+            {"text": "Al menos 30 muestras efectivas en una señal", "ok": learning_n >= MIN_MATURE_CASES, "value": learning_n},
+            {"text": "Holm < 0,05 y peso distinto del valor base", "ok": bool((learning_item.get("readiness") or {}).get("conditions", {}).get("significancia_y_cambio")), "value": None},
+            {"text": "Validación temporal ≥ 5", "ok": bool((learning_item.get("readiness") or {}).get("conditions", {}).get("validacion")), "value": None},
+            {"text": "Log-loss y Brier mejores que solo p_replay", "ok": bool((learning_item.get("readiness") or {}).get("conditions", {}).get("mejora")), "value": None},
+        ]
+        learned_ready = evaluate_readiness(n=learning_n, criteria=learn_criteria,
+            sample_times=learning_mature_times)
+        # Reutiliza la decisión estadística ya implementada por el aprendizaje.
+        if (learning_item.get("readiness") or {}).get("status") == "verde":
+            learned_ready["state"] = STATE_READY
+            learned_ready["summary"] = "La evidencia indica que mejora; puedes encenderlo si estás de acuerdo"
+        learned_ready["enabled"] = bool(learning_item.get("enabled", False))
+
+        centered = []
+        for actual, candidate, truth, _stamp in centered_by_profile[profile]:
+            centered.append(((actual, truth), (candidate, truth)))
+        centered_eval = probability_comparison((x[0] for x in centered), (x[1] for x in centered))
+        centered_ci = centered_eval["log_loss_delta_ci95"]
+        centered_criteria = [
+            {"text": "Log-loss de señales centradas menor que el actual", "ok": centered_eval["n"] > 0 and centered_eval["candidate_log_loss"] < centered_eval["actual_log_loss"], "value": centered_eval["candidate_log_loss"]},
+            {"text": "Brier de señales centradas menor que el actual", "ok": centered_eval["n"] > 0 and centered_eval["candidate_brier"] < centered_eval["actual_brier"], "value": centered_eval["candidate_brier"]},
+            {"text": "IC bootstrap 95 % de Δ log-loss no cruza cero", "ok": bool(centered_ci and centered_ci[1] < 0), "value": centered_ci},
+        ]
+        centered_times = [stamp for *_row, stamp in centered_by_profile[profile] if stamp is not None]
+        centered_ready = evaluate_readiness(n=centered_eval["n"], criteria=centered_criteria,
+            adverse_significant=bool(centered_ci and centered_ci[0] > 0), sample_times=centered_times)
+        centered_ready["metrics"] = centered_eval
+        centered_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_centered_signals", False))
+
+        break_rows = [item for item in break_v2_samples if item["profile"] == profile]
+        break_eval = probability_comparison(((x["actual"], x["truth"]) for x in break_rows),
+            ((x["v2"], x["truth"]) for x in break_rows))
+        exits_by_probability = sorted((item["break"], bool(exited)) for item in break_rows
+            for exited in item.get("piece_exits", []) if exited is not None)
+        tercile_rates = []
+        if exits_by_probability:
+            cut_one, cut_two = len(exits_by_probability) // 3, 2 * len(exits_by_probability) // 3
+            groups = (exits_by_probability[:cut_one], exits_by_probability[cut_one:cut_two],
+                      exits_by_probability[cut_two:])
+            tercile_rates = [statistics.fmean(float(value) for _, value in group) if group else None
+                for group in groups]
+        rates = tercile_rates
+        break_ci = break_eval["log_loss_delta_ci95"]
+        break_criteria = [
+            {"text": "Log-loss de ruptura v2 menor que el actual", "ok": break_eval["n"] > 0 and break_eval["candidate_log_loss"] < break_eval["actual_log_loss"], "value": break_eval["candidate_log_loss"]},
+            {"text": "Brier de ruptura v2 menor que el actual", "ok": break_eval["n"] > 0 and break_eval["candidate_brier"] < break_eval["actual_brier"], "value": break_eval["candidate_brier"]},
+            {"text": "Salidas del rango ordenadas por tercil", "ok": len(rates) == 3 and all(value is not None for value in rates) and rates[0] < rates[1] < rates[2], "value": rates},
+            {"text": "IC bootstrap 95 % de Δ log-loss no cruza cero", "ok": bool(break_ci and break_ci[1] < 0), "value": break_ci},
+        ]
+        break_times = [item["sample_at"] for item in break_rows if item.get("sample_at") is not None]
+        break_ready = evaluate_readiness(n=break_eval["n"], criteria=break_criteria,
+            adverse_significant=bool(break_ci and break_ci[0] > 0), sample_times=break_times)
+        break_ready["metrics"] = break_eval
+        break_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_break_prob_v2", False))
+
+        # Bots: la evidencia usa etiquetas 72 h de propuestas persistidas para
+        # el perfil; la rentabilidad por propuesta se aproxima al margen neto
+        # guardado por la propuesta multiplicado por la venta observada.
+        bot_pairs = []
+        for proposal in bot_proposals:
+            if str(proposal.get("profile") or "RAPIDO").upper() != profile:
+                continue
+            label = proposal.get("labels", {}).get("72") or {}
+            if label.get("sell_after_buy") is not None:
+                expected = proposal.get("expected_sell_rate_72h")
+                if expected is not None:
+                    bot_pairs.append((float(expected), float(bool(label["sell_after_buy"])),
+                        float(proposal.get("sale_net_target_pct") or .95), proposal.get("at")))
+        bot_n = len(bot_pairs)
+        observed_rate = statistics.fmean(x[1] for x in bot_pairs) if bot_pairs else None
+        expected_rate = statistics.fmean(x[0] for x in bot_pairs) if bot_pairs else None
+        net_ci = paired_bootstrap_mean_ci([x[1] * x[2] for x in bot_pairs]) if bot_pairs else None
+        bot_criteria = [
+            {"text": "Venta real dentro de ±10 puntos de la tasa esperada", "ok": bot_n > 0 and abs(observed_rate-expected_rate) <= .10, "value": None if observed_rate is None else observed_rate-expected_rate},
+            {"text": "Ganancia neta esperada positiva y su IC no cruza cero", "ok": bool(net_ci and net_ci[0] > 0), "value": net_ci},
+        ]
+        bot_times = []
+        for _expected, _observed, _margin, stamp in bot_pairs:
+            if stamp:
+                try: bot_times.append(datetime.fromisoformat(str(stamp)))
+                except ValueError: pass
+        bot_ready = evaluate_readiness(n=bot_n, criteria=bot_criteria, sample_times=bot_times)
+        bot_ready["metrics"] = {"expected_sell_rate": expected_rate, "observed_sell_rate": observed_rate,
+            "net_return_ci95_pct": net_ci}
+        bot_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_touch_bots", False))
+
+        allocation_n = int(allocation_decision_counts.get((profile, "agregar"), 0))
+        allocation_ready = evaluate_readiness(n=0, criteria=[
+            {"text": "30 propuestas de agregar con etiquetas maduras 72 h y al plazo", "ok": False, "value": allocation_n},
+            {"text": "La cartera mejora frente a no agregar, con IC que no cruza cero", "ok": False, "value": None}],
+            summary=("Todavía no hubo propuestas de agregar" if allocation_n == 0 else
+                     "Las propuestas no tienen etiquetas maduras enlazadas para comparar cartera"))
+        allocation_ready["enabled"] = bool((profile_configs.get(profile) or {}).get("use_extended_allocation", False))
+        recommendations_ready = evaluate_readiness(n=0, criteria=[
+            {"text": "Extensión Fase 42: no existe almacenamiento de recomendaciones por grid", "ok": False, "value": "punto de extensión"}],
+            summary="Punto de extensión: aplicar recomendaciones por grid aún no existe")
+        recommendations_ready["enabled"] = False
+        readiness_switches[profile] = {
+            "learned_weights": learned_ready,
+            "centered_signals": centered_ready,
+            "break_prob_v2": break_ready,
+            "touch_bots": bot_ready,
+            "extended_allocation": allocation_ready,
+            "grid_recommendations": recommendations_ready,
+        }
+
+    dispatcher = getattr(request.app.state, "alert_dispatcher", None)
+    note_readiness = getattr(dispatcher, "note_intelligence_readiness", None)
+    if callable(note_readiness):
+        note_readiness(readiness_switches)
     return {"updated_at": datetime.now(timezone.utc).isoformat(),
         "data": {"summary_text": eval_msg + coverage_msg + forecast_msg + learning_msg,
             "candles": {"available": False,
@@ -568,7 +709,8 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
         "runs": [{"id": int(row["id"]), "started_at": str(row["started_at"]),
             "finished_at": str(row["finished_at"]), "status": row["status"],
             "summary": _json(row["summary_json"])} for row in runs],
-        "switches": switches, "shadow_switches": shadow_switches, "global_flags": global_flags,
+        "switches": switches, "shadow_switches": shadow_switches,
+        "readiness_switches": readiness_switches, "global_flags": global_flags,
         "models_link": "#models", "battle_link": "#battle"}
 
 

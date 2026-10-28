@@ -718,8 +718,13 @@ venv2/bin/python scripts/mantenimiento_bd_meta.py --db ./asple_predictor.db --co
 
 No se ejecutó ninguno de estos comandos en S1. Los resultados de mercado y el ahorro real de la BD quedan pendientes de esa medición manual.
 
-## Fase 41-C27a ? contrato com?n de evidencia
+## Fase 41-C27a \u2014 contrato com\u00fan de evidencia
 
-- `grid/readiness.py:1-86` incorpora el contrato com?n del medidor, los cuatro estados, progreso `n/requerido`, fecha estimada con ritmo de los ?ltimos tres d?as e intervalo bootstrap determinista de 2.000 remuestreos. Es una funci?n descriptiva; no modifica interruptores ni decisiones.
-- `tests/test_intelligence_readiness.py:1-33`: **3 passed** (estados, contrato, estimaci?n e intervalo determinista). Ejecuci?n offline con carpeta temporal nueva.
-- Esta parte establece el n?cleo puro. El c?lculo de evidencia por interruptor, su publicaci?n en API/UI, alertas y verificador se integrar?n en las partes siguientes.
+- `grid/readiness.py:1-126` define el contrato com\u00fan, los cuatro estados, progreso `n/requerido`, ETA seg\u00fan el ritmo de casos maduros de los \u00faltimos tres d\u00edas e intervalo bootstrap determinista de 2.000 remuestreos. No activa interruptores ni participa en la decisi\u00f3n del operador.
+- `tests/test_intelligence_readiness.py:1-33`: 3 passed; estados, contrato, ETA e intervalo determinista.
+
+## Fase 41-C27b \u2014 evidencia por interruptor y presentaci\u00f3n
+
+- `api/routes/intelligence.py:540-655,711` publica seis medidores por perfil: pesos aprendidos, se\u00f1ales centradas, ruptura v2, bots de toque, asignaci\u00f3n ampliada y extensi\u00f3n de recomendaciones por grid. Se\u00f1ales centradas y ruptura comparan pares de etiquetas 72 h; sus intervalos de log-loss usan bootstrap fijo de 2.000 remuestreos. La ruptura verifica terciles por perfil.
+- `frontend/metas.js:575-690`, `frontend/lab.js:1-36`, `frontend/index.html:30`, `frontend/intelligence.js:42-54`, `frontend/metas.css:84` y `frontend/intelligence.css:6`: Laboratorio presenta los medidores junto a cada bandera y a\u00f1ade se\u00f1ales centradas y bots de toque; Inteligencia muestra la tarjeta global ordenada por estado. Encender fuera de \u00abListo para encender\u00bb requiere confirmar el aviso; no se cambia ning\u00fan valor autom\u00e1ticamente.
+- Pruebas dirigidas: `tests/test_intelligence_api.py`, `tests/test_intelligence_readiness.py`, `tests/ui/test_laboratorio.py`, `tests/ui/test_intelligence_ui.py`, `tests/test_meta_learning_api.py`, `tests/test_alert_dispatcher.py`, `tests/test_meta_s1_diagnostic.py`: **51 passed, 13 warnings, 0 failed, 17,00 s**. `node --check` pas? para `frontend/metas.js`, `frontend/intelligence.js` y `frontend/lab.js`; `ASPLE_OFFLINE=1`, sin red ni BD real.

@@ -80,3 +80,5 @@
 
 .metas-learning-profile{border-top:1px solid var(--border);padding-top:8px;margin-top:14px}.metas-learning-profile h3{margin-bottom:4px}.metas-learning [data-learning-updated]{margin-top:0}.meta-learning-switches [data-switch-confirm]{margin-top:10px}.meta-learning-switches [data-switch-confirm] label{display:inline-flex;align-items:center;gap:8px}.meta-learning-switches [data-switch-actor]{max-width:16rem}
 .meta-learning-readiness{margin:.5rem 0;padding:.55rem;border-left:3px solid #768390;background:rgba(120,130,140,.08)}.meta-learning-readiness.amarillo{border-color:#d29922;background:rgba(210,153,34,.1)}.meta-learning-readiness.verde{border-color:#3fb950;background:rgba(63,185,80,.1)}.meta-learning-readiness p{margin:.35rem 0 0}
+
+.meta-learning-readiness.rojo{border-color:#f85149;background:rgba(248,81,73,.1)}.meta-learning-readiness progress{display:block;width:100%;height:7px}.meta-learning-readiness ul{margin:.4rem 0;padding-left:1.2rem}

@@ -19,6 +19,12 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
          "current": False, "default": False, "origin": "default", "requires_restart": False},
     ]
     profiles = {"RAPIDO": {"use_break_prob_v2": False}, "PRUDENTE": {"use_break_prob_v2": False}}
+    readiness = {profile: {key: {"state": "Recolectando datos", "n": 0, "n_required": 30,
+        "progress_pct": 0, "criteria": [{"text": "30 casos maduros", "ok": False, "value": 0}],
+        "estimated_ready_at": None, "summary": "Sin muestras maduras todavía", "enabled": False}
+        for key in ("learned_weights", "centered_signals", "break_prob_v2", "touch_bots",
+                    "extended_allocation", "grid_recommendations")}
+        for profile in ("RAPIDO", "PRUDENTE")}
     now = datetime.now(timezone.utc).isoformat()
 
     def api(route):
@@ -47,6 +53,8 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
             profiles[body["profile"]].update(body["values"])
             calls.append({"meta_profile": body["profile"], **body["values"]})
             route.fulfill(json={"profile": body["profile"], "settings": profiles[body["profile"]]})
+        elif path == "/api/intelligence" and req.method == "GET":
+            route.fulfill(json={"readiness_switches": readiness})
         elif path == "/api/grids":
             route.fulfill(json={"grids": [{"id": 17}]})
         elif path == "/api/grids/17/events":
@@ -77,11 +85,14 @@ def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, l
     expect(ui_page.locator("#lab-method")).to_be_visible()
     expect(ui_page.locator('#lab-global-settings-content [data-flag-key="stoploss_enabled"]')).to_be_visible()
     expect(ui_page.locator("#lab-stoploss-stats-content")).to_contain_text("CELL_STOPLOSS")
-    expect(ui_page.locator("#lab-global-settings-content")).to_contain_text("Ruptura v2 de Meta")
-    rapid_v2 = ui_page.locator('[data-break-v2="RAPIDO"]')
-    expect(rapid_v2).to_have_text("Encender")
-    rapid_v2.click()
-    expect(ui_page.locator('[data-break-v2="RAPIDO"]')).to_have_text("Apagar")
+    expect(ui_page.locator("#lab-global-settings-content")).to_contain_text("Meta Rápido: Ruptura v2")
+    rapid_v2 = ui_page.locator('[data-meta-learning-switch="RAPIDO"][data-switch-kind="break_prob_v2"]')
+    expect(rapid_v2).to_contain_text("Recolectando datos")
+    expect(rapid_v2.locator('progress')).to_have_attribute('max', '30')
+    rapid_v2.get_by_role("button", name="Encender").click()
+    expect(rapid_v2.locator('[data-switch-confirm]')).to_contain_text("¿Encender de todos modos?")
+    rapid_v2.get_by_role("button", name="Confirmar").click()
+    expect(rapid_v2.locator('small b')).to_have_text('ENCENDIDO')
     assert {"meta_profile": "RAPIDO", "use_break_prob_v2": True} in calls
     ui_page.screenshot(path=str(shots / "desktop-after-laboratorio.png"), full_page=False)
     ui_page.set_viewport_size({"width": 390, "height": 844})

@@ -33,3 +33,15 @@ def test_bootstrap_interval_is_paired_and_deterministic():
     assert first == paired_bootstrap_mean_ci([1, 2, 3, 4])
     assert first[0] <= 2.5 <= first[1]
     assert paired_bootstrap_mean_ci([1]) is None
+
+
+def test_probability_comparison_detects_improvement_with_paired_bootstrap():
+    from grid.readiness import probability_comparison
+
+    actual = [(.5, index % 2) for index in range(30)]
+    candidate = [(.9 if truth else .1, truth) for _, truth in actual]
+    result = probability_comparison(actual, candidate)
+    assert result["n"] == 30
+    assert result["candidate_log_loss"] < result["actual_log_loss"]
+    assert result["candidate_brier"] < result["actual_brier"]
+    assert result["log_loss_delta_ci95"][1] < 0

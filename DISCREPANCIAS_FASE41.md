@@ -273,5 +273,11 @@ La causa descrita por Ramón concuerda con el contrato local: `executable_value`
 
 ## Fase 41-C27a
 
-- El prompt pide fecha estimada seg?n ritmo de los ?ltimos tres d?as, pero no define qu? hacer con ritmo cero o sin timestamps. Se eligi? `estimated_ready_at: null`; no se extrapola evidencia inexistente.
-- El estado `No conviene` se reserva para evidencia suficiente y un resultado adverso estad?sticamente distinguible de cero. El contrato com?n deja ese dictamen como entrada expl?cita para cada criterio espec?fico.
+- Si no hay ritmo positivo de casos maduros en los \u00faltimos tres d\u00edas, `estimated_ready_at` es null; no se extrapola una fecha sin soporte.
+- \u00abNo conviene\u00bb exige muestra suficiente y diferencia adversa cuyo intervalo no cruce cero. En los c\u00e1lculos comparativos se usa bootstrap pareado con semilla fija.
+
+## Fase 41-C27b
+
+- `META_OPERATOR_ALLOCATION_SHADOW` no enlaza una decisi\u00f3n \u00abagregar\u00bb con sus etiquetas de cartera a 72 h y al plazo. El medidor de asignaci\u00f3n ampliada conserva `n=0` y explica que las etiquetas a\u00fan no est\u00e1n enlazadas; no infiere resultados de otras alternativas.
+- No existe hoy una bandera ni un almac\u00e9n de recomendaciones por grid de Fase 42. Se presenta el punto de extensi\u00f3n como \u00abRecolectando datos\u00bb, sin crear una bandera ficticia.
+- El estado de progreso/alerta se actualiza al consultar Inteligencia o Laboratorio; el env\u00edo queda en la cola duradera del `AlertDispatcher` y se entrega en su ciclo normal.

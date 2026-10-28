@@ -377,6 +377,17 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 | 41-G1g6 | Cierre, comandos de consulta S1 y auditoría UTF-8 | Se documentan los cinco resultados y los límites: etiqueta histórica pendiente de dry-run; sombra síncrona hasta 30 s |
 | 41-C25i | Lanzamiento manual del aprendizaje Meta | Endpoint autenticado agenda una corrida de fondo; el estado y resumen de la última corrida son de solo lectura. Confirmación en Inteligencia. Sin cambio a decisiones del operador. |
 
-## Fase 41-C27 ? medidores informativos de evidencia
+## Fase 41-C27 \u2014 medidores informativos de evidencia
 
-Todos los interruptores de inteligencia conservan decisi?n manual. El medidor com?n informa `Recolectando datos`, `Evaluando`, `Listo para encender` o `No conviene`; nunca enciende un interruptor. C27a establece el contrato puro. Los criterios por se?al y perfil se detallan junto con su integraci?n.
+Todos los medidores son informativos; Ram\u00f3n decide y el sistema nunca enciende un interruptor por s\u00ed solo. M\u00ednimo com\u00fan: 30 casos maduros. Los intervalos comparativos usan bootstrap pareado, 2.000 remuestreos y semilla fija.
+
+| Interruptor | Evidencia para \u00abListo para encender\u00bb |
+|---|---|
+| Pesos aprendidos, por perfil | Reutiliza los criterios del aprendizaje: 30 efectivos, Holm < 0,05 con peso distinto del base, validaci\u00f3n \u2265 5 y log-loss/Brier mejores que solo p_replay. |
+| Se\u00f1ales centradas, por perfil | \u2265 30 etiquetas 72 h con ambas probabilidades; log-loss y Brier mejores; IC 95 % de \u0394 log-loss completamente bajo cero. |
+| Ruptura v2, por perfil | \u2265 30 etiquetas 72 h; log-loss y Brier mejores; tasas de salida del rango ordenadas por tercil; IC de \u0394 log-loss completamente bajo cero. |
+| Bots de toque, por perfil | \u2265 30 propuestas etiquetadas a 72 h; venta observada a \u00b110 puntos de la esperada; ganancia neta estimada positiva con IC por encima de cero. |
+| Asignaci\u00f3n ampliada, por perfil | \u2265 30 decisiones \u00abagregar\u00bb con etiquetas maduras a 72 h y al plazo; avance mayor que sin la pieza con IC que no cruce cero. Hasta enlazar esas etiquetas, permanece recolectando. |
+| Recomendaciones por grid (Fase 42) | Punto de extensi\u00f3n documentado; todav\u00eda no existe bandera ni almacenamiento de recomendaciones por grid. |
+
+C27a define los estados compartidos y C27b conecta datos y presentaci\u00f3n. \u00abNo conviene\u00bb solo se emite con evidencia suficiente y resultado adverso significativo. La evaluaci\u00f3n no reemplaza la confirmaci\u00f3n manual.

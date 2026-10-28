@@ -39,6 +39,19 @@
   }
   function render(data) {
     const d = data.data || {}, s = data.samples || {}, r = data.replay || {}, profiles = data.regressions?.profiles || {}, hits = data.hits || {};
+    const readinessHost = $('#intelligence-readiness');
+    if (readinessHost) {
+      const names = {learned_weights:'Pesos aprendidos', centered_signals:'Señales centradas', break_prob_v2:'Ruptura v2', touch_bots:'Bots de toque', extended_allocation:'Asignación ampliada', grid_recommendations:'Recomendaciones por grid'};
+      const order = {'Listo para encender':0,'No conviene':1,'Evaluando':2,'Recolectando datos':3};
+      const rows = Object.entries(data.readiness_switches || {}).flatMap(([profile, items]) => Object.entries(items || {}).map(([key, item]) => ({profile,key,item})))
+        .sort((a,b) => (order[a.item.state] ?? 4) - (order[b.item.state] ?? 4));
+      readinessHost.innerHTML = `<section class="card"><h2>¿Qué puedo encender?</h2><p>El medidor informa. Ramón decide; el sistema nunca activa interruptores automáticamente.</p>${rows.map(({profile,key,item}) => {
+        const state = item.state || 'Recolectando datos', color = state === 'Listo para encender' ? 'verde' : state === 'No conviene' ? 'rojo' : state === 'Evaluando' ? 'amarillo' : 'gris';
+        const estimate = item.estimated_ready_at ? `estimado: ${esc(item.estimated_ready_at)}` : 'estimado: sin ritmo suficiente';
+        const destination = key === 'grid_recommendations' ? '#grids' : '#lab';
+        return `<article class="intelligence-readiness ${color}"><h3>${esc(names[key] || key)} · Meta ${profile === 'RAPIDO' ? 'Rápido' : 'Prudente'}</h3><b>${esc(state)}</b> · ${num(item.n)} / ${num(item.n_required)} <progress max="${num(item.n_required || 30)}" value="${Math.min(Number(item.n_required || 30),Number(item.n || 0))}"></progress><p>${esc(estimate)} · interruptor ${item.enabled ? 'ENCENDIDO' : 'APAGADO'}</p><p>${esc(item.summary || '')}</p><ul>${(item.criteria || []).map(c => `<li>${c.ok ? '✓' : '×'} ${esc(c.text)}${c.value == null ? '' : ` · ${esc(typeof c.value === 'object' ? JSON.stringify(c.value) : c.value)}`}</li>`).join('')}</ul><a href="${destination}">Ir al interruptor</a></article>`;
+      }).join('')}</section>`;
+    }
     const forecastRows = (d.volatility_forecasts || []).map(x => [x.symbol,x.model_name,`${x.horizon_h} h`,x.count,x.first_at,x.last_at]);
     const predictionRows = (d.direction_predictions || []).map(x => [x.symbol,x.model_name,x.interval,x.count,x.first_at,x.last_at]);
     const sampleRows = (s.by_profile_source_symbol || []).map(x => [x.profile,x.source_kind,x.symbol,x.count,x.first_at,x.last_at]);

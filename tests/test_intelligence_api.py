@@ -128,6 +128,15 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['data']['direction_predictions'][0]['count'] == 1
     assert payload['switches']['RAPIDO']['readiness']['status'] == 'gris'
     assert payload['switches']['RAPIDO']['enabled'] is False
+    assert set(payload['readiness_switches']['RAPIDO']) == {
+        'learned_weights', 'centered_signals', 'break_prob_v2', 'touch_bots',
+        'extended_allocation', 'grid_recommendations'}
+    for profile in ('RAPIDO', 'PRUDENTE'):
+        for readiness in payload['readiness_switches'][profile].values():
+            assert readiness['state'] == 'Recolectando datos'
+            assert readiness['n_required'] == 30
+            assert 0 <= readiness['progress_pct'] <= 100
+            assert isinstance(readiness['criteria'], list)
     assert payload['shadow_switches']['RAPIDO']['use_break_prob_v2'] is False
     assert payload['signals']['touch_buy_to_sell']['sample_coverage'] == 0
     assert payload['signals']['touch_buy_to_sell']['coverage_pct'] == 0
