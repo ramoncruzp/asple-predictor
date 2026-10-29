@@ -23,6 +23,30 @@
     if (Math.abs(num) < 0.005) return 'pnl-neutral';
     return num > 0 ? 'pnl-positive' : 'pnl-negative';
   }
+  function dailyDateLabel(value) {
+    const source = `${String(value || '').slice(0, 10)}T12:00:00Z`;
+    const formatted = window.ASPLEFormat?.formatDate(source);
+    return formatted && formatted !== '—' ? formatted.slice(0, 5) : String(value || '').slice(5, 10).split('-').reverse().join('/');
+  }
+  function dailyAmount(value) {
+    const number = Number(value) || 0;
+    const formatted = new Intl.NumberFormat('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(number));
+    return `${number > 0 ? '+' : number < 0 ? '−' : ''}${formatted}`;
+  }
+  function dailyCalendarRows(rows) {
+    const byDate = new Map((rows || []).map(row => [String(row.date).slice(0, 10), row]));
+    const dates = [...byDate.keys()].sort();
+    if (!dates.length) return [];
+    const result = [];
+    const day = new Date(`${dates[0]}T12:00:00Z`);
+    const last = new Date(`${dates[dates.length - 1]}T12:00:00Z`);
+    while (day <= last) {
+      const key = day.toISOString().slice(0, 10);
+      result.push(byDate.get(key) || { date: key, net_pnl_usdt: 0 });
+      day.setUTCDate(day.getUTCDate() + 1);
+    }
+    return result;
+  }
   function esc(value) {
     return String(value ?? '—').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
   }
@@ -460,16 +484,24 @@
       ? `<div class="progress-block"><span>Plazo</span><b>${summary.progress.max_days.days_remaining === null ? '—'
           : summary.progress.max_days.days_remaining.toFixed(1) + ' d restantes'}</b></div>`
       : '';
-    const dailyRows = daily.daily || [];
+    const dailyRows = dailyCalendarRows(daily.daily || []);
     const maxDaily = Math.max(1, ...dailyRows.map((row) => Math.abs(row.net_pnl_usdt || 0)));
     const dailyBars = dailyRows.map((row) => {
       const value = Number(row.net_pnl_usdt || 0);
-      const barHeight = Math.max(4, Math.abs(value) / maxDaily * 30);
-      const barTop = value < 0 ? 30 : 30 - barHeight;
-      return `<div class="daily-bar-wrap" style="display:block;position:relative;height:60px;min-width:10px" title="${esc(row.date)}: ${fmtMoney(value, 2)}">
-        <div class="daily-bar ${pnlClass(value)}" style="position:absolute;left:2px;top:${barTop}px;height:${barHeight}px;border-radius:0 0 2px 2px"></div>
+      const barHeight = value === 0 ? 0 : Math.max(3, Math.abs(value) / maxDaily * 40);
+      const barTop = value < 0 ? 58 : 58 - barHeight;
+      return `<div class="daily-bar-wrap ${pnlClass(value)}" title="${esc(row.date)}: ${fmtMoney(value, 4)}">
+        <span class="daily-amount">${dailyAmount(value)}</span>
+        <div class="daily-bar ${pnlClass(value)}" style="top:${barTop}px;height:${barHeight}px"></div>
+        <span class="daily-date">${esc(dailyDateLabel(row.date))}</span>
       </div>`;
     }).join('');
+    const dailyTotal = dailyRows.reduce((sum, row) => sum + Number(row.net_pnl_usdt || 0), 0);
+    const bestDaily = dailyRows.reduce((best, row) => Number(row.net_pnl_usdt || 0) > Number(best?.net_pnl_usdt ?? -Infinity) ? row : best, null);
+    const profitableDays = dailyRows.filter(row => Number(row.net_pnl_usdt || 0) > 0).length;
+    const dailySummary = dailyRows.length
+      ? `<p class="daily-summary">Total del período: <b class="${pnlClass(dailyTotal)}">${dailyAmount(dailyTotal)} USDT</b> · Mejor día: <b class="${pnlClass(bestDaily.net_pnl_usdt)}">${dailyDateLabel(bestDaily.date)} ${dailyAmount(bestDaily.net_pnl_usdt)}</b> · Días con ganancia: ${profitableDays} de ${dailyRows.length}</p>`
+      : '';
     const opsRows = (operations.operations || []).map((op) => `<tr>
       <td>${esc(window.ASPLEFormat?.formatDateTime(op.ts) ?? op.ts)}</td><td>${esc(op.kind || 'ciclo')}</td><td>${op.level_idx}</td>
       <td class="mono" title="${op.prices_approx ? 'precio aproximado por un ajuste de celda' : 'precio de orden/celda'}">${fmtMoney(op.buy_price_approx, 6)}${op.prices_approx ? ' ~' : ''}</td><td class="mono" title="${op.prices_approx ? 'precio aproximado por un ajuste de celda' : 'precio de orden/celda'}">${fmtMoney(op.sell_price_approx, 6)}${op.prices_approx ? ' ~' : ''}</td>
@@ -607,7 +639,8 @@
       </div>
       <div class="card daily-block">
         <h3>Ganancia diaria</h3>
-        <div class="daily-chart" style="align-items:flex-start;position:relative;background:linear-gradient(to bottom,transparent 29px,var(--muted) 30px,transparent 31px)">${dailyBars || '<span class="muted" style="text-decoration:none">Sin datos a\u00fan</span>'}</div>
+        <div class="daily-chart">${dailyBars || '<span class="muted" style="text-decoration:none">Sin datos a\u00fan</span>'}</div>
+        ${dailySummary}
         ${(daily.unattributed_usdt !== null && Math.abs(daily.unattributed_usdt) > 1e-9) || daily.truncated
           ? `<p class="muted">No atribuido al diario: ${fmtMoney(daily.unattributed_usdt, 2)} USDT${daily.unattributed_note ? ` (${esc(daily.unattributed_note)})` : ''}${daily.truncated ? ' · consulta truncada a los últimos 5000 eventos' : ''}</p>` : ''}
       </div>
@@ -626,6 +659,8 @@
     container.querySelector('.experiment-copy')?.addEventListener('click', () => {
       copyExperimentSummary(summary, detail);
     });
+    const dailyChart = container.querySelector('.daily-chart');
+    if (dailyChart) dailyChart.scrollLeft = dailyChart.scrollWidth;
   }
 
   async function loadList(container) {
