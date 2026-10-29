@@ -9,7 +9,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from database.db_manager import DBManager
-from grid.grid_intelligence import GridIntelligenceJob, recommend_grid_action, retained_inventory_metrics
+from grid.grid_intelligence import (GRID_INTEL_METHOD_VERSION, GridIntelligenceJob,
+    paired_gain_metrics, recommend_grid_action, retained_inventory_metrics)
 from api.routes.intelligence import _grid_intelligence_readiness_alerts
 from api.routes import grids as grids_api
 from grid.sim.runner import FILTERS
@@ -46,13 +47,14 @@ def test_hourly_shadow_job_has_its_own_schedule_and_lock(tmp_path):
 
 def test_shadow_recommendation_requires_gain_and_drawdown_gates():
     rows = [
-        {"action": "mantener", "expected_gain_7d": 0.4, "drawdown": 4.0},
-        {"action": "mover", "expected_gain_7d": 0.69, "drawdown": 4.5},
-        {"action": "n_plus_one", "expected_gain_7d": 0.8, "drawdown": 5.1},
+        {"action": "mantener", "expected_gain_7d": 0.4, "paired_diff_median": 0, "drawdown": 4.0},
+        {"action": "mover", "expected_gain_7d": 0.69, "paired_diff_median": .29, "drawdown": 4.5},
+        {"action": "n_plus_one", "expected_gain_7d": 0.8, "paired_diff_median": .4, "drawdown": 5.1},
     ]
     selected, _ = recommend_grid_action(rows, 100)
     assert selected["action"] == "mantener"  # 0.29 USDT is below the 0.30 USDT gate.
     rows[1]["expected_gain_7d"] = .71
+    rows[1]["paired_diff_median"] = .31
     selected, _ = recommend_grid_action(rows, 100)
     assert selected["action"] == "mover"
 
@@ -63,6 +65,26 @@ def test_retained_inventory_is_valued_at_bid_net_fee_for_gain_and_drawdown():
         [{"held_qty": 2, "entry_cost": 20, "entry_fee_usdt": 0}], 80)
     assert result["gain"] == pytest.approx(80 + 2 * 8 * .999 - 100)
     assert result["drawdown"] == pytest.approx((100 - (80 + 2 * 8 * .999)) / 100 * 100)
+
+
+def test_historical_window_inventory_uses_current_price_scale():
+    result = retained_inventory_metrics([0, 300], [200, 220],
+        [{"timestamp": 0}, {"timestamp": 300}], [0, 0],
+        [{"held_qty": 1, "entry_cost": 100, "entry_fee_usdt": 0}], 0,
+        reference_price=100, window_start_price=200)
+    # El camino 200→220 se aplica al precio actual: 100→110, no 200→220.
+    assert result["gain"] == pytest.approx(110 * .999 - 100)
+
+
+def test_paired_difference_is_zero_for_same_geometry_and_inventory_cancels():
+    baseline = [1.0, -2.0, 3.0]
+    same_geometry = [1.0, -2.0, 3.0]
+    assert paired_gain_metrics(same_geometry, baseline)["median"] == 0
+    inventory_marks = [10, 25, 40]
+    with_inventory = paired_gain_metrics([a + inv for a, inv in zip(same_geometry, inventory_marks)],
+        [b + inv for b, inv in zip(baseline, inventory_marks)])
+    assert with_inventory["median"] == 0
+    assert with_inventory["p10"] == 0
 
 
 def test_synthetic_shadow_evaluates_candidates_without_mutating_grid():
@@ -220,7 +242,7 @@ def test_recommendations_are_persisted_as_shadow_only(tmp_path):
         row = conn.execute(select(db.grid_intel_recommendations)).mappings().one()
     assert row["would_apply"] is False
     assert row["action"] == "mantener"
-    assert row["method_version"] == "grid_shadow_42a_v1"
+    assert row["method_version"] == GRID_INTEL_METHOD_VERSION
     db.engine.dispose()
 
 
@@ -236,14 +258,14 @@ def test_apply_gate_needs_two_identical_hourly_recommendations(tmp_path):
             rec_id = conn.execute(db.grid_intel_recommendations.insert().values(grid_id=grid_id,
                 symbol="XRPUSDT", strategy="simple", created_at=now - timedelta(minutes=age),
                 action="cambiar_n_5", candidate_json="{}", baseline_json="{}",
-                signals_json="{}", method_version="test", would_apply=False)).inserted_primary_key[0]
+                signals_json="{}", method_version=GRID_INTEL_METHOD_VERSION, would_apply=False)).inserted_primary_key[0]
             conn.execute(db.grid_intel_labels.insert().values(recommendation_id=rec_id,
                 labeled_at=now, status="mature", label_json='{"gain_difference_usdt":1}'))
         for index in range(28):
             rec_id = conn.execute(db.grid_intel_recommendations.insert().values(grid_id=grid_id,
                 symbol="XRPUSDT", strategy="simple", created_at=now - timedelta(days=8, minutes=index),
                 action="cambiar_n_5", candidate_json="{}", baseline_json="{}",
-                signals_json="{}", method_version="test", would_apply=False)).inserted_primary_key[0]
+                signals_json="{}", method_version=GRID_INTEL_METHOD_VERSION, would_apply=False)).inserted_primary_key[0]
             conn.execute(db.grid_intel_labels.insert().values(recommendation_id=rec_id,
                 labeled_at=now, status="mature", label_json='{"gain_difference_usdt":1}'))
     called = []

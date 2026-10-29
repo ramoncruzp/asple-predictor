@@ -107,3 +107,11 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 
 - No se ejecutó suite completa ni se usaron S1, Testnet, red, `.env` o la base real. No se afirma el objetivo menor de 2 s para `/api/grids`, que conserva las lecturas vivas.
 - Comando de observación en S1: `journalctl -u asple-predictor -o short-iso | grep asple.slow`.
+
+
+## C39a ? Inventario reescalado y comparaci?n pareada
+
+- `grid/grid_intelligence.py:22,45-76,80-105,458-479` valora el inventario de cada ventana hist?rica por el camino relativo de sus cierres aplicado al precio de referencia actual. Las etiquetas posteriores conservan precios reales: la llamada de `grid/grid_intelligence.py:725` no pasa referencia ni reescala.
+- Cada candidato guarda `expected_gain_7d`, `expected_gain_7d_baseline`, `paired_diff_median` y `paired_diff_p10`; la selecci?n compara diferencias por ventana y exige que la mediana pareada alcance el 0,3 % del capital. `api/routes/intelligence.py:67-119` limita el medidor a `method_version=grid_shadow_42c39_v2` y expone ambas diferencias; las filas anteriores permanecen almacenadas y no se cuentan.
+- La prueba confirma que una ventana hist?rica 2? del precio actual se escala antes de marcar inventario, que geometr?as iguales dan diferencia 0 y que una variaci?n com?n del inventario se cancela al parear. El mecanismo de aplicaci?n contin?a detr?s del interruptor existente y las recomendaciones persisten con `would_apply=false`.
+- Comando exacto: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c39a-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_grid_intelligence.py tests/test_intelligence_api.py -q --basetemp $bt`. Resultado: **20 passed, 4 warnings, 5,05 s**.

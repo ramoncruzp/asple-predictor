@@ -51,3 +51,9 @@ La base sintética alcanzó las cantidades solicitadas para muestras, etiquetas 
 - El presupuesto se comprueba entre candidatos y ventanas; una simulación individual sin timeout interno no puede interrumpirse. Si esa simulación excede 45 s, las siguientes alternativas de ese grid no arrancan y se persiste la mejor recomendación parcial disponible (o `mantener` sin métricas si no terminó ninguna ventana).
 - El job mantiene 60 s total y 45 s por grid. Al agotarse el total, persiste filas `mantener` parciales para los grids elegibles restantes sin empezar simulaciones, para no dejar ninguno sin registro. Estas filas indican que no se midieron ventanas y no deben interpretarse como recomendación con evidencia.
 - El estudio con 180 días usó velas planas sintéticas y una geometría simple; los tiempos de cada símbolo y las exclusiones de producción deben confirmarse observando `GRID_INTEL_JOB_SUMMARY` en S1.
+
+
+## C39a
+
+- La comparaci?n pareada usa el prefijo com?n ordenado de ventanas cuando el presupuesto deja una evaluaci?n parcial; as? no se emparejan fechas distintas. Las etiquetas ya maduras no se recalculan ni se borran. Se separan por versi?n del m?todo en el medidor porque representan el criterio previo y no son comparables con la m?trica nueva.
+- La valoraci?n de etiquetas 42b mantiene el precio real posterior; el reescalado solo se aplica a las ventanas hist?ricas usadas para recomendar cambios del grid.

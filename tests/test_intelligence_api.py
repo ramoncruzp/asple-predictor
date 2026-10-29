@@ -9,6 +9,7 @@ from api.routes import intelligence
 from database.db_manager import DBManager
 from grid.meta_operator import MetaOperator
 from grid.intelligence_snapshot import IntelligenceSnapshotService
+from grid.grid_intelligence import GRID_INTEL_METHOD_VERSION
 
 
 def test_readiness_reports_gray_yellow_failures_and_green_without_side_effects():
@@ -240,5 +241,34 @@ def test_intelligence_s1_scale_exposes_section_timings(tmp_path, caplog):
     else:
         assert 'INTELLIGENCE_TIMINGS' not in caplog.text
     print('C38a synthetic timings_ms:', json.dumps(timings, sort_keys=True))
+
+
+def test_grid_intelligence_medidor_ignores_old_method_rows_and_exposes_paired_metrics(tmp_path):
+    from api.routes.intelligence import _grid_intelligence_summary
+
+    db = DBManager(f"sqlite:///{tmp_path / 'grid-intelligence-method-version.sqlite'}")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol='XRPUSDT', range_low=.4,
+            range_high=.6, n_levels=4, capital_total=100, reserve=0, status='ACTIVE',
+            created_at=now, environment='testnet', strategy='simple', params='{}')).inserted_primary_key[0]
+        for version, difference in (('grid_shadow_42a_v1', 50), (GRID_INTEL_METHOD_VERSION, .4)):
+            candidate_json = json.dumps({'paired_diff_median': difference,
+                'paired_diff_p10': difference - .1})
+            rec_id = conn.execute(db.grid_intel_recommendations.insert().values(grid_id=grid_id,
+                symbol='XRPUSDT', strategy='simple', created_at=now, action='mantener',
+                candidate_json=candidate_json, baseline_json='{}', expected_gain_7d=1,
+                expected_gain_7d_baseline=.6, drawdown=1, signals_json='{}',
+                method_version=version, would_apply=False)).inserted_primary_key[0]
+            conn.execute(db.grid_intel_labels.insert().values(recommendation_id=rec_id,
+                labeled_at=now, status='mature', label_json=json.dumps({
+                    'gain_difference_usdt': difference, 'evaluated_action': 'mantener'})))
+    summary = _grid_intelligence_summary(db)
+    row = next(item for item in summary['grids'] if item['grid_id'] == grid_id)
+    assert len(row['recommendations_24h']) == 1
+    assert row['recommendations_24h'][0]['paired_diff_median'] == .4
+    assert abs(row['recommendations_24h'][0]['paired_diff_p10'] - .3) < 1e-8
+    assert row['mature_labels']['n'] == 1
+    assert row['mature_labels']['mean_gain_vs_maintain_usdt'] == .4
 
 

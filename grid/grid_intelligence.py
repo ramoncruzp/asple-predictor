@@ -19,7 +19,7 @@ GRID_INTEL_BUDGET_S = 60.0
 GRID_INTEL_PER_GRID_BUDGET_S = 45.0
 GRID_INTEL_MIN_GAIN_PCT = 0.3
 GRID_INTEL_MAX_DRAWDOWN_DELTA_PP = 1.0
-GRID_INTEL_METHOD_VERSION = "grid_shadow_42a_v1"
+GRID_INTEL_METHOD_VERSION = "grid_shadow_42c39_v2"
 GRID_INTEL_RETENTION_DAYS = 30
 GRID_INTEL_WINDOW_DAYS = 7
 GRID_INTEL_WINDOW_STEP_DAYS = 14
@@ -42,39 +42,60 @@ def _json(value):
         return {}
 
 
+def paired_gain_metrics(candidate_gains, baseline_gains):
+    candidate = [float(value) for value in candidate_gains]
+    baseline = [float(value) for value in baseline_gains]
+    paired_count = min(len(candidate), len(baseline))
+    if paired_count <= 0:
+        raise ValueError("las curvas no tienen ventanas comunes para comparar")
+    # Si un presupuesto corta el replay, las listas conservan el mismo orden de ventanas;
+    # se compara solo el prefijo común, sin usar ventanas desalineadas.
+    differences = sorted(left - right for left, right in zip(candidate[:paired_count], baseline[:paired_count]))
+    return {"median": float(median(differences)),
+        "p10": float(differences[max(0, int((len(differences) - 1) * .1))]),
+        "windows": paired_count}
+
+
 def recommend_grid_action(candidates, capital):
     """Choose a shadow proposal only when gain and drawdown gates both pass."""
     rows = list(candidates or [])
     baseline = next((row for row in rows if row.get("action") == "mantener"
         and not row.get("error") and not row.get("discard_reason")
-        and row.get("expected_gain_7d") is not None), None)
+        and row.get("expected_gain_7d") is not None
+        and row.get("paired_diff_median") is not None), None)
     if baseline is None:
         return None, "línea base no simulable"
     threshold = float(capital or 0) * GRID_INTEL_MIN_GAIN_PCT / 100.0
     eligible = [row for row in rows if row is not baseline and not row.get("error")
         and not row.get("discard_reason")
-        and row.get("expected_gain_7d") is not None and row.get("drawdown") is not None
-        and float(row["expected_gain_7d"]) >= float(baseline["expected_gain_7d"]) + threshold
+        and row.get("paired_diff_median") is not None and row.get("drawdown") is not None
+        and float(row["paired_diff_median"]) >= threshold
         and float(row["drawdown"]) <= float(baseline["drawdown"]) + GRID_INTEL_MAX_DRAWDOWN_DELTA_PP]
-    eligible.sort(key=lambda row: (float(row["expected_gain_7d"]), -float(row["drawdown"])), reverse=True)
+    eligible.sort(key=lambda row: (float(row["paired_diff_median"]), -float(row["drawdown"])), reverse=True)
     if not eligible:
         return baseline, "ninguna alternativa supera los umbrales; mantener"
     return eligible[0], "supera ganancia mínima y límite de drawdown"
 
 
 def retained_inventory_metrics(candle_timestamps, closes, trace_rows, free_equity, inventory_lots, starting_cash,
-                               fee_rate=.001):
+                               fee_rate=.001, reference_price=None, window_start_price=None):
     """Ganancia y drawdown con inventario retenido marcado a bid neto de comisión."""
     import numpy as np
     held_qty = sum(float(item.get("held_qty") or 0) for item in inventory_lots)
     held_basis = sum(float(item.get("entry_cost") or 0) + float(item.get("entry_fee_usdt") or 0)
         for item in inventory_lots)
     initial = float(starting_cash) + held_basis
+    scale = 1.0
+    if reference_price is not None:
+        start_price = float(window_start_price if window_start_price is not None else closes[0])
+        if start_price <= 0:
+            raise ValueError("el precio inicial de la ventana debe ser positivo")
+        scale = float(reference_price) / start_price
     path = []
     for item, value in zip(trace_rows, free_equity):
         pos = int(np.searchsorted(candle_timestamps, int(item["timestamp"]), side="right") - 1)
         pos = max(0, min(pos, len(closes) - 1))
-        path.append(float(value) + held_qty * float(closes[pos]) * (1 - fee_rate))
+        path.append(float(value) + held_qty * float(closes[pos]) * scale * (1 - fee_rate))
     if not path:
         raise ValueError("el simulador no produjo curva de patrimonio")
     peak, max_dd = initial, 0.0
@@ -353,6 +374,7 @@ class GridIntelligenceJob:
             "step_days": GRID_INTEL_WINDOW_STEP_DAYS, "windows_available": len(window_samples)}
         candidate_timings = []
         partial = False
+        baseline_window_gains = None
         for action, geometry in geometries:
             if deadline is not None and time.perf_counter() >= deadline:
                 summary.update(status="budget_exceeded", budget_exceeded=True)
@@ -437,7 +459,7 @@ class GridIntelligenceJob:
                         free_equity, [{"held_qty": row.get("held_qty"),
                             "entry_cost": row.get("entry_cost"),
                             "entry_fee_usdt": row.get("entry_fee_usdt")} for row in inventory_cells],
-                        replay_capital)
+                        replay_capital, reference_price=current_price, window_start_price=float(sample.open[0]))
                     gain, worst_dd = combined["gain"], combined["drawdown"]
                     metrics.append({"gain": gain,
                         "drawdown": worst_dd,
@@ -446,8 +468,14 @@ class GridIntelligenceJob:
                     raise ValueError("sin ventanas históricas simulables")
                 gains = sorted(row["gain"] for row in metrics)
                 p10 = gains[max(0, int((len(gains) - 1) * .1))]
+                if action == "mantener":
+                    baseline_window_gains = [row["gain"] for row in metrics]
+                baseline_gains = baseline_window_gains or [row["gain"] for row in metrics]
+                paired = paired_gain_metrics([row["gain"] for row in metrics], baseline_gains)
                 candidates.append({"action": action, "geometry": geometry,
                     "expected_gain_7d": float(median(gains)), "p10_gain_7d": p10,
+                    "expected_gain_7d_baseline": float(median(baseline_gains)),
+                    "paired_diff_median": paired["median"], "paired_diff_p10": paired["p10"],
                     "drawdown": max(row["drawdown"] for row in metrics),
                     "fees_median": float(median(row["fees"] for row in metrics)),
                     "windows": len(metrics), "windows_expected": len(window_samples),
@@ -502,7 +530,9 @@ class GridIntelligenceJob:
                 event_type="GRID_INTEL_RECOMMENDATION", reason=record["reason"],
                 details={"recommendation_id": int(rec_id), "action": record["action"],
                     "expected_gain_7d": candidate.get("expected_gain_7d"),
-                    "baseline_gain_7d": baseline.get("expected_gain_7d"), "would_apply": False})
+                    "baseline_gain_7d": baseline.get("expected_gain_7d"),
+                    "paired_diff_median": candidate.get("paired_diff_median"),
+                    "paired_diff_p10": candidate.get("paired_diff_p10"), "would_apply": False})
 
     def _apply_if_eligible(self, grid, record):
         grid_id = int(grid["id"])

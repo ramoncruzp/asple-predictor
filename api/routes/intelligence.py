@@ -64,22 +64,27 @@ def _metrics_improved(summary):
 
 
 def _grid_intelligence_summary(db, target_grid_id=None):
+    from grid.grid_intelligence import GRID_INTEL_METHOD_VERSION, _json as grid_json
+
     now = datetime.now(timezone.utc)
     recommendation_query = select(db.grid_intel_recommendations).where(
-        db.grid_intel_recommendations.c.created_at >= now - timedelta(hours=24))
+        db.grid_intel_recommendations.c.created_at >= now - timedelta(hours=24),
+        db.grid_intel_recommendations.c.method_version == GRID_INTEL_METHOD_VERSION)
     if target_grid_id is not None:
         recommendation_query = recommendation_query.where(
             db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
     with db.engine.connect() as conn:
         recommendations = conn.execute(recommendation_query.order_by(
             db.grid_intel_recommendations.c.created_at.desc())).mappings().all()
-        label_query = select(db.grid_intel_labels.c.recommendation_id, db.grid_intel_labels.c.label_json).where(
-            db.grid_intel_labels.c.status == "mature")
+        label_query = (select(db.grid_intel_labels.c.recommendation_id, db.grid_intel_labels.c.label_json)
+            .join(db.grid_intel_recommendations,
+                db.grid_intel_recommendations.c.id == db.grid_intel_labels.c.recommendation_id)
+            .where(db.grid_intel_labels.c.status == "mature",
+                db.grid_intel_recommendations.c.method_version == GRID_INTEL_METHOD_VERSION))
         grid_query = select(db.grids)
         if target_grid_id is not None:
-            label_query = label_query.join(db.grid_intel_recommendations,
-                db.grid_intel_recommendations.c.id == db.grid_intel_labels.c.recommendation_id).where(
-                    db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
+            label_query = label_query.where(
+                db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
             grid_query = grid_query.where(db.grids.c.id == int(target_grid_id))
         labels = conn.execute(label_query).all()
         grids = {int(row["id"]): dict(row) for row in conn.execute(grid_query).mappings().all()}
@@ -96,7 +101,10 @@ def _grid_intelligence_summary(db, target_grid_id=None):
         item["recommendations_24h"].append({"at": str(recommendation["created_at"]),
             "action": recommendation["action"], "expected_gain_7d": recommendation["expected_gain_7d"],
             "baseline_gain_7d": recommendation["expected_gain_7d_baseline"],
-            "drawdown": recommendation["drawdown"], "would_apply": bool(recommendation["would_apply"])})
+            "drawdown": recommendation["drawdown"],
+            "paired_diff_median": (grid_json(recommendation["candidate_json"]).get("paired_diff_median")),
+            "paired_diff_p10": (grid_json(recommendation["candidate_json"]).get("paired_diff_p10")),
+            "would_apply": bool(recommendation["would_apply"])})
     # Las etiquetas se agrupan por grid y acción usando la recomendación de origen.
     with db.engine.connect() as conn:
         rec_query = (select(db.grid_intel_recommendations.c.id,
@@ -104,7 +112,8 @@ def _grid_intelligence_summary(db, target_grid_id=None):
             db.grid_intel_recommendations.c.candidate_json,
             db.grid_intel_recommendations.c.baseline_json).join(db.grid_intel_labels,
                 db.grid_intel_labels.c.recommendation_id == db.grid_intel_recommendations.c.id)
-            .where(db.grid_intel_labels.c.status == "mature"))
+            .where(db.grid_intel_labels.c.status == "mature",
+                db.grid_intel_recommendations.c.method_version == GRID_INTEL_METHOD_VERSION))
         if target_grid_id is not None:
             rec_query = rec_query.where(db.grid_intel_recommendations.c.grid_id == int(target_grid_id))
         rec_rows = conn.execute(rec_query).all()
