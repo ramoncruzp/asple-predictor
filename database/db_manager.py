@@ -237,6 +237,9 @@ class DBManager:
             Column("labeled_at", DateTime(timezone=True), nullable=False),
             Column("status", String(24), nullable=False), Column("label_json", Text, nullable=False),
             UniqueConstraint("recommendation_id", name="uq_grid_intel_label_recommendation"))
+        self.intelligence_snapshots = Table("intelligence_snapshots", self.metadata,
+            Column("id", Integer, primary_key=True), Column("computed_at", DateTime(timezone=True), nullable=False),
+            Column("payload_json", Text, nullable=False))
         self.app_flag_overrides = Table(
             "app_flag_overrides", self.metadata,
             Column("key", String, primary_key=True),

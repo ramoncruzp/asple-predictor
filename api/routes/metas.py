@@ -134,6 +134,18 @@ def update_maintenance_settings(request: Request, body: MaintenanceSettings):
 
 @router.get("/learning")
 def learning_status(request: Request, profile: str = "RAPIDO"):
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    snapshot = getattr(service, "snapshot", None) if service is not None else None
+    if snapshot is not None:
+        key = str(profile or "RAPIDO").upper()
+        item = (snapshot.get("regressions", {}).get("profiles") or {}).get(key)
+        if item is not None:
+            return item
+    if service is not None and snapshot is None:
+        if not service.calculating:
+            service.request_refresh()
+        return {"profile": str(profile or "RAPIDO").upper(), "status": "calculando",
+            "enabled": False, "weights": {}, "versions": [], "comparison": {}}
     return _operator(request).learning_status(profile)
 
 
@@ -149,8 +161,12 @@ def run_learning_manual(request: Request):
 
 @router.put("/learning/switch")
 def update_learning_switch(request: Request, body: LearningSwitch):
-    return _call(_operator(request).set_learning_switch, body.profile, body.enabled,
+    result = _call(_operator(request).set_learning_switch, body.profile, body.enabled,
         confirm=body.confirm, actor=body.actor)
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    if service is not None:
+        service.request_refresh()
+    return result
 
 
 @router.put("/allocation/switch")

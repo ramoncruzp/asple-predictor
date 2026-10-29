@@ -46,6 +46,7 @@ from grid.meta import MetaCore
 from grid.meta_operator import MetaOperator
 from grid.intelligence_readiness import IntelligenceReadinessJob
 from grid.grid_intelligence import GridIntelligenceJob
+from grid.intelligence_snapshot import IntelligenceSnapshotService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -241,11 +242,25 @@ async def lifespan(app: FastAPI):
     app.state.backup_loop = backup_loop
     app.state.widen_factor_loop = widen_factor_loop
     app.state.started_at = time.monotonic()
-    def evaluate_grid_readiness():
+    def build_intelligence_snapshot():
         scope = {"type": "http", "method": "GET", "path": "/api/intelligence",
             "query_string": b"", "headers": [], "app": app, "scheme": "http",
             "server": ("localhost", 80), "client": ("127.0.0.1", 0)}
-        summary = intelligence._intelligence_summary(Request(scope), page=1, page_size=1)
+        return intelligence._intelligence_summary(Request(scope), page=1, page_size=50)
+    intelligence_snapshot = IntelligenceSnapshotService(db, build_intelligence_snapshot)
+    app.state.intelligence_snapshot = intelligence_snapshot
+    intelligence_snapshot.request_refresh()
+    for direction_symbol in ("XRPUSDT", "PEPEUSDT", "ADAUSDT"):
+        scope = {"type": "http", "method": "GET", "path": "/api/direction/shadow/summary",
+            "query_string": b"", "headers": [], "app": app, "scheme": "http",
+            "server": ("localhost", 80), "client": ("127.0.0.1", 0)}
+        intelligence_snapshot.request_aux_refresh(
+            f"direction-shadow:{direction_symbol}",
+            lambda symbol=direction_symbol: grid_status._direction_shadow_summary_compute(
+                Request(scope), symbol))
+    def evaluate_grid_readiness():
+        intelligence_snapshot.request_refresh()
+        summary = intelligence_snapshot.snapshot or {}
         return {**(summary.get("readiness_switches") or {}),
             "GRIDS": summary.get("grid_intelligence_readiness") or {}}
     grid_intelligence_job = IntelligenceReadinessJob(evaluate_grid_readiness, alert_dispatcher)
@@ -283,6 +298,7 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_intelligence_job.stop()
+        intelligence_snapshot.shutdown()
         grid_intel_shadow_job.stop()
         meta_core.stop()
         meta_operator.stop()

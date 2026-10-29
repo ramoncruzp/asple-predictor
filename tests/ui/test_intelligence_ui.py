@@ -48,3 +48,11 @@ def test_intelligence_tab_is_manual_refresh_read_only_and_links_model_views():
     assert 'grid-intelligence-switch' in grids and 'data-intel-switch' in grids
     assert 'intel_apply_actor' in grids and 'intel_apply_changed_at' in grids
     assert 'item.criteria' in grids and 'item.estimated_ready_at' in grids
+
+
+def test_intelligence_has_background_recalculation_button():
+    html = (ROOT / 'frontend' / 'index.html').read_text(encoding='utf-8')
+    js = (ROOT / 'frontend' / 'intelligence.js').read_text(encoding='utf-8')
+    assert 'id="intelligence-recalculate"' in html
+    assert "api.post('/api/intelligence/recalculate', {})" in js
+    assert 'computed_at' in js and 'Calculando' in js

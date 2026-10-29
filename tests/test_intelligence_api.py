@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from api.routes import intelligence
 from database.db_manager import DBManager
 from grid.meta_operator import MetaOperator
+from grid.intelligence_snapshot import IntelligenceSnapshotService
 
 
 def test_readiness_reports_gray_yellow_failures_and_green_without_side_effects():
@@ -234,5 +235,10 @@ def test_intelligence_s1_scale_exposes_section_timings(tmp_path, caplog):
     assert {'lecturas_sql', 'muestras_y_senales', 'resultados_modelos',
         'comparaciones_y_calibracion', 'estado_aprendizaje', 'bootstrap_y_medidores',
         'inteligencia_grids', 'total'} <= timings.keys()
-    assert 'INTELLIGENCE_TIMINGS' in caplog.text
+    if timings['total'] >= 1000:
+        assert 'INTELLIGENCE_TIMINGS' in caplog.text
+    else:
+        assert 'INTELLIGENCE_TIMINGS' not in caplog.text
     print('C38a synthetic timings_ms:', json.dumps(timings, sort_keys=True))
+
+

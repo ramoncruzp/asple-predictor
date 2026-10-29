@@ -159,7 +159,51 @@ def _grid_intelligence_readiness_alerts(grid_summary):
 def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
                          meta_id: int | None = Query(None, ge=1)):
     _authorize(request)
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    if service is not None and page == 1 and page_size == 50 and meta_id is None:
+        snapshot = service.snapshot
+        if snapshot is None:
+            if not service.calculating:
+                service.request_refresh()
+            return _calculating_summary()
+        age_s = (datetime.now(timezone.utc) - datetime.fromisoformat(
+            snapshot["computed_at"].replace("Z", "+00:00"))).total_seconds()
+        if age_s >= 3600 and not service.calculating:
+            service.request_refresh()
+        result = dict(snapshot)
+        result["refresh_status"] = "calculando" if service.calculating else "listo"
+        return result
     return _intelligence_summary(request, page=page, page_size=page_size, meta_id=meta_id)
+
+
+def _calculating_summary():
+    """Contrato vacío rápido para el primer arranque, mientras se genera la instantánea."""
+    return {"status": "calculando", "refresh_status": "calculando", "computed_at": None,
+        "updated_at": None, "timings_ms": {},
+        "data": {"summary_text": "Calculando el primer resumen de Inteligencia en segundo plano.",
+            "candles": {"available": False, "reason": "El resumen aparecerá al terminar el precálculo."},
+            "volatility_forecasts": [], "direction_predictions": [],
+            "meta_signal_observations_by_symbol": [], "meta_signal_counts": {},
+            "meta_signal_counts_by_symbol": [], "meta_ledger": [],
+            "unknown_valuation_reviews": {"last_24h": 0, "last_7d": 0, "reasons": []}},
+        "samples": {"by_profile_source_symbol": [], "exclusions": [], "recalculate_pending": 0,
+            "labels": [], "effective_by_signal": {}},
+        "replay": {"chart": [], "window_histogram": {}, "cache_entries": 0, "last_run": None},
+        "signals": {}, "hits": {}, "regressions": {"versions": [], "profiles": {}},
+        "decisions": {"recent": [], "total": 0, "page": 1, "page_size": 50},
+        "allocation_shadow": [], "runs": [], "grid_intelligence": {"grids": []},
+        "grid_intelligence_readiness": {}, "readiness_switches": {}, "switches": {},
+        "shadow_switches": {}, "global_flags": {}}
+
+
+@router.post("/recalculate", status_code=202)
+def recalculate_intelligence(request: Request):
+    _authorize(request)
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    if service is None:
+        raise HTTPException(503, "El precálculo de Inteligencia no está disponible")
+    result = service.request_refresh()
+    return {**result, "computed_at": (service.snapshot or {}).get("computed_at")}
 
 
 def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=None):

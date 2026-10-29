@@ -3,11 +3,12 @@
   const esc = value => escapeHtml(value ?? '\u2014');
   const num = value => value == null || !Number.isFinite(Number(value)) ? '\u2014' : Number(value).toLocaleString('es-ES', {maximumFractionDigits: 3});
   const pct = value => value == null ? '\u2014' : `${(Number(value) * 100).toLocaleString('es-ES', {maximumFractionDigits: 1})}%`;
-  let updatedAt = 0, ageTimer = null, decisionPage = 1, decisionMeta = '';
+  let updatedAt = 0, ageTimer = null, pollTimer = null, snapshotStatus = 'listo', decisionPage = 1, decisionMeta = '';
   function updateAge() {
     const node = $('#intelligence-updated'); if (!node || !updatedAt) return;
     const mins = Math.max(0, Math.floor((Date.now() - updatedAt) / 60000));
-    node.textContent = mins < 1 ? 'Actualizado hace menos de un minuto' : `Actualizado hace ${mins} min`;
+    const age = mins < 1 ? 'Calculado hace menos de un minuto' : `Calculado hace ${mins} min`;
+    node.textContent = snapshotStatus === 'calculando' ? `${age} · calculando actualización…` : age;
     ageTimer = setTimeout(updateAge, 60000);
   }
   const table = (headers, rows, cls = '') => `<div class="table-card ${cls}"><table class="data-table"><thead><tr>${headers.map(x => `<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr class="${row.includes('Pocas muestras') ? 'few-samples' : ''}">${row.map(x => `<td>${esc(x)}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}">A\u00fan sin datos guardados.</td></tr>`}</tbody></table></div>`;
@@ -135,12 +136,29 @@
     content.querySelector('[data-decision-filter]')?.addEventListener('click', () => { decisionMeta = content.querySelector('[data-decision-meta]').value; decisionPage = 1; load(); });
     content.querySelector('[data-page-prev]')?.addEventListener('click', () => { decisionPage = Math.max(1, decisionPage - 1); load(); });
     content.querySelector('[data-page-next]')?.addEventListener('click', () => { decisionPage += 1; load(); });
-    updatedAt = Date.now(); if (ageTimer) clearTimeout(ageTimer); updateAge();
+    updatedAt = Date.parse(data.computed_at || data.updated_at || '') || Date.now();
+    snapshotStatus = data.refresh_status || data.status || 'listo';
+    if (ageTimer) clearTimeout(ageTimer); updateAge();
+    if (pollTimer) clearTimeout(pollTimer);
+    if (snapshotStatus === 'calculando') pollTimer = setTimeout(load, 5000);
   }
   async function load() {
-    $('#intelligence-content').innerHTML = '<p class="muted">Consultando agregados guardados…</p>';
+    const host = $('#intelligence-content');
+    if (!host.querySelector('.card')) host.innerHTML = '<p class="muted">Consultando la instantánea guardada…</p>';
     try { render(await api.get(`/api/intelligence?page=${decisionPage}&page_size=50${decisionMeta ? `&meta_id=${encodeURIComponent(decisionMeta)}` : ''}`)); }
     catch (error) { $('#intelligence-content').innerHTML = `<p class="cuenta-error">No se pudo consultar Inteligencia: ${esc(error.message)}</p>`; }
+  }
+  async function recalculate() {
+    const button = $('#intelligence-recalculate'), node = $('#intelligence-updated');
+    if (button) button.disabled = true;
+    if (node) node.textContent = 'Agendando recálculo…';
+    try {
+      const result = await api.post('/api/intelligence/recalculate', {});
+      if (node) node.textContent = result.status === 'calculando' ? 'Calculando en segundo plano…' : result.status;
+      await load();
+    } catch (error) {
+      if (node) node.textContent = `No se pudo recalcular: ${error.message}`;
+    } finally { if (button) button.disabled = false; }
   }
   async function loadLearningLast() {
     const node = $('#learning-last-run'); if (!node) return;
@@ -167,6 +185,7 @@
   window.loadIntelligencePage = load;
   document.addEventListener('DOMContentLoaded', () => {
     $('#intelligence-refresh')?.addEventListener('click', load);
+    $('#intelligence-recalculate')?.addEventListener('click', recalculate);
     $('#learning-run')?.addEventListener('click', () => { $('#learning-run-confirm').hidden = false; });
     $('#learning-run-confirm-yes')?.addEventListener('click', startLearning);
     $('#learning-run-confirm-no')?.addEventListener('click', () => { $('#learning-run-confirm').hidden = true; });

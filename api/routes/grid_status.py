@@ -34,6 +34,22 @@ def direction_shadow_summary(request: Request, symbol: str = Query("XRPUSDT")):
     symbol = str(symbol or "").strip().upper().replace("/", "")
     if not symbol.endswith("USDT") or len(symbol) < 6:
         raise HTTPException(422, "symbol debe ser un par USDT")
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    if service is not None:
+        key = f"direction-shadow:{symbol}"
+        cached = service.get_aux(key)
+        if cached is not None:
+            return cached
+        service.request_aux_refresh(key, lambda: _direction_shadow_summary_compute(request, symbol))
+        return {"status": "calculando", "symbol": symbol, "model_name": "model_a_down",
+            "threshold": .60, "timely_accuracy": None, "precision": {}, "independent_blocks": 0,
+            "timely_predictions": 0, "shadow_events": 0, "would_block_buy_fills_lost": 0,
+            "would_block_buy_fills_cycled_gain": 0, "oos": None, "bank_verdict": None,
+            "label": "El resumen se calcula en segundo plano."}
+    return _direction_shadow_summary_compute(request, symbol)
+
+
+def _direction_shadow_summary_compute(request: Request, symbol: str):
     base = symbol[:-4].lower()
     db = request.app.state.db
     rows = db.get_predictions_with_outcomes(symbol, "1h", "model_a_down", days=365, limit=10000)
@@ -194,9 +210,15 @@ def grid_detail(request: Request, grid_id: int):
     summary = _build_summary(request, grid, levels, now)
     cells = sv.cells_view(levels, summary["price"], float(request.app.state.settings.scanner_fee_pct),
                           grid_paused=(grid["status"] == "PAUSED"))
-    from api.routes.intelligence import _grid_intelligence_summary
-    grid_intel = next((item for item in _grid_intelligence_summary(db, target_grid_id=int(grid_id))["grids"]
-        if int(item["grid_id"]) == int(grid_id)), None)
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    snapshot = getattr(service, "snapshot", None) if service is not None else None
+    if snapshot is not None:
+        grid_intel = next((item for item in snapshot.get("grid_intelligence", {}).get("grids", [])
+            if int(item["grid_id"]) == int(grid_id)), None)
+    else:
+        from api.routes.intelligence import _grid_intelligence_summary
+        grid_intel = next((item for item in _grid_intelligence_summary(db, target_grid_id=int(grid_id))["grids"]
+            if int(item["grid_id"]) == int(grid_id)), None)
     return {"summary": summary, "cells": cells, "config": grid.get("params") or {},
             "grid_intelligence": grid_intel,
             "range_low": grid.get("range_low"), "range_high": grid.get("range_high"),
