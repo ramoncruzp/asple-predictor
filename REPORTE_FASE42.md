@@ -72,3 +72,38 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 - Comando: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c38a-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_intelligence_api.py -q -s --basetemp $bt`. Resultado: **3 passed, 3 warnings, 18,51 s**.
 - Medición de la petición sintética: **1.089,07 ms**. Cinco tramos más lentos: lecturas SQL 493,99 ms; bootstrap/medidores 364,51 ms; muestras/señales 194,38 ms; estado de aprendizaje 97,34 ms; inteligencia de grids 36,09 ms.
 - La prueba no reprodujo los 70–95 s de S1. Aunque coincide en cantidad de filas, usa JSON mínimo y no incluye la densidad de referencias de señales, predicciones ni etiquetas/recomendaciones de grids de la BD de S1. El costo de bootstrap y la lectura repetida de aprendizaje siguen siendo sospechosos y se resolverán con precálculo/cache en C38b.
+
+
+## C38b - Instantánea, cálculo único y respuestas rápidas
+
+- `database/db_manager.py:224-227` agrega una fila persistente para la última instantánea. `grid/intelligence_snapshot.py:18-153` la carga al iniciar, mantiene una sola referencia en memoria y ejecuta precálculos con single-flight. La caché auxiliar tiene TTL de 300 s y máximo de 50 claves.
+- `api/main.py:245-263, 301` inicia el precálculo en segundo plano, solicita otro tras el job horario de C35 y libera el servicio al apagar. Inteligencia sirve la instantánea; si aún no existe responde `status=calculando`. `POST /api/intelligence/recalculate` agenda o comparte el cálculo y responde 202.
+- `/api/metas/learning` reutiliza el bloque precalculado; `/api/grids/{id}` sirve el resumen de inteligencia desde la instantánea y `/api/direction/shadow/summary` usa caché auxiliar asíncrona. La lista `/api/grids` conserva la consulta de estado y efectivo vivos.
+- `frontend/index.html:165` y `frontend/intelligence.js:1-80` agregan "Recalcular ahora", estado de cálculo y antigüedad visible.
+- Pruebas enfocadas: `tests/test_intelligence_snapshot.py`, `tests/test_intelligence_api.py`, `tests/test_meta_learning_api.py`, `tests/test_grid_status_api.py`, `tests/test_grids_api.py`, `tests/ui/test_intelligence_ui.py`: **80 passed, 13 warnings, 6,82 s**. La prueba adicional del botón de recálculo también queda incluida. Se usó una carpeta nueva en `$env:TEMP` y `ASPLE_OFFLINE=1`.
+- La sintética de 15.000 muestras midió 1.089,07 ms en cálculo directo. Pruebas de snapshot y recálculo lento verifican GET menor de 2 s y una sola tarea simultánea.
+
+## C38c - Límites de memoria
+
+- `grid/intelligence_snapshot.py:15-16, 119-124, 151-153` limita la instantánea a 16 MiB; un resultado mayor conserva la última versión válida. La caché auxiliar admite 50 entradas y vence a los 300 s; las cachés de MetaOperator tienen LRU de 500 entradas (`grid/meta_operator.py:366, 423-441`).
+- `tests/test_intelligence_snapshot_memory.py:10-50` mide diez reemplazos con `tracemalloc`: instantánea sintética final 275.113 bytes; memoria retenida 0,95 MiB y pico 2,22 MiB sobre la línea base. También verifica que una instantánea mayor al límite no sustituye a la válida.
+- Prueba `tests/test_intelligence_snapshot_memory.py`: **2 passed, 0 warnings, 1,04 s**.
+
+## C38d - Paridad y concurrencia
+
+- `tests/test_intelligence_snapshot.py:101-139` hace dos GET simultáneos, verifica que comparten el precálculo y que el POST de recálculo responde 202 con `shared=true`.
+- `tests/test_intelligence_snapshot_concurrency.py:57-76` compara las claves del resumen directo y el servido desde la instantánea; solo se añaden estado/fecha/estado de recarga y `snapshot_total`. La restauración SQLite se prueba en `tests/test_intelligence_snapshot.py:15-57`.
+- Prueba `tests/test_intelligence_snapshot_concurrency.py`, `tests/test_intelligence_snapshot.py`, `tests/ui/test_intelligence_ui.py`: **5 passed, 6 warnings, 1,35 s**. `node --check frontend/intelligence.js` correcto.
+
+## C38e - Recomendación parcial y presupuesto por grid
+
+- `grid/grid_intelligence.py:19-29, 94-102, 125-248` establece 45 s por grid y mantiene 60 s total. Un grid que agota el presupuesto recibe una recomendación parcial `mantener`, guardada con `partial=true`; los grids elegibles restantes también reciben fila parcial si el límite total terminó.
+- `grid/grid_intelligence.py:337-353, 465-497` usa ventanas de siete días separadas por 14 días, prepara los recortes de velas una vez por grid y registra cantidad de ventanas y segundos por candidato. Velas y curvas usan las cachés LRU existentes (512 entradas en esta clase).
+- El resumen incluye id/símbolo incluidos y excluidos, motivos, resultado por grid, ventanas disponibles, candidatos y duración por candidato. `tests/test_grid_intelligence.py:96-191` cubre 180 días y escenarios de 1/3 grids.
+- Medición sintética de 180 días: 13 ventanas por candidato, job de un grid en **2,30 s**. Tiempos: mantener 0,44 s; mover rango -1 paso 0,67 s; mover rango +1 paso 0,81 s; bots 0,18/0,08/0,08 s. Cambiar niveles se descartó antes del replay por el planificador.
+- Prueba `tests/test_grid_intelligence.py`: **14 passed, 2 warnings, 5,14 s**. Con 1 y 3 grids se guardó una recomendación por grid; con presupuesto vencido, registros parciales.
+
+## Cierre C38
+
+- No se ejecutó suite completa ni se usaron S1, Testnet, red, `.env` o la base real. No se afirma el objetivo menor de 2 s para `/api/grids`, que conserva las lecturas vivas.
+- Comando de observación en S1: `journalctl -u asple-predictor -o short-iso | grep asple.slow`.

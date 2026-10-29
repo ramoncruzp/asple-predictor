@@ -16,11 +16,13 @@ from grid.sim.runner import run_simulation
 
 logger = logging.getLogger(__name__)
 GRID_INTEL_BUDGET_S = 60.0
+GRID_INTEL_PER_GRID_BUDGET_S = 45.0
 GRID_INTEL_MIN_GAIN_PCT = 0.3
 GRID_INTEL_MAX_DRAWDOWN_DELTA_PP = 1.0
 GRID_INTEL_METHOD_VERSION = "grid_shadow_42a_v1"
 GRID_INTEL_RETENTION_DAYS = 30
 GRID_INTEL_WINDOW_DAYS = 7
+GRID_INTEL_WINDOW_STEP_DAYS = 14
 GRID_INTEL_LOOKBACK_DAYS = 180
 GRID_INTEL_MIN_BOT_CASH_USDT = 5.5
 GRID_INTEL_BREAK_PAUSE_THRESHOLD = 0.70
@@ -88,7 +90,8 @@ class GridIntelligenceJob:
 
     def __init__(self, db, market_client, filters_resolver, *, advisor=None, settings=None,
                  vol_provider=None, scheduler=None,
-                 clock=None, budget_s=GRID_INTEL_BUDGET_S, apply_callback=None,
+                 clock=None, budget_s=GRID_INTEL_BUDGET_S,
+                 per_grid_budget_s=GRID_INTEL_PER_GRID_BUDGET_S, apply_callback=None,
                  valuation_checker=None, ops_lock=None):
         self.db, self.market_client, self.filters_resolver = db, market_client, filters_resolver
         self.advisor = advisor
@@ -99,6 +102,7 @@ class GridIntelligenceJob:
         self.scheduler = scheduler or BackgroundScheduler(timezone="UTC")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.budget_s = float(budget_s)
+        self.per_grid_budget_s = float(per_grid_budget_s)
         self._grid_intel_guard = threading.Lock()
         self.last_summary = {"status": "not_run"}
         self._replay_cache = OrderedDict()
@@ -122,8 +126,9 @@ class GridIntelligenceJob:
         if not self._grid_intel_guard.acquire(blocking=False):
             return {"status": "skipped", "reason": "ejecución horaria anterior activa"}
         started = time.perf_counter()
-        summary = {"status": "completed", "included": [], "excluded": [],
+        summary = {"status": "completed", "included": [], "included_details": [], "excluded": [],
             "recommendations": 0, "candidates_evaluated": 0, "budget_exceeded": False,
+            "per_grid_budget_s": self.per_grid_budget_s, "grid_results": [],
             "duration_s": 0.0, "timings_s": {"candles": 0.0, "advisor": 0.0,
                 "replay": 0.0, "persistence": 0.0}, "cache_hits": 0}
         try:
@@ -131,21 +136,27 @@ class GridIntelligenceJob:
             grids = self.db.list_grids_by_status({"OPENING", "ACTIVE", "PAUSED", "CLOSING",
                 "HOLDING", "CLOSED", "CANCELLED", "FAILED", "ERROR"})
             for grid in grids:
-                if time.perf_counter() - started >= self.budget_s:
-                    summary.update(status="budget_exceeded", budget_exceeded=True)
-                    break
                 reason = self._excluded_reason(grid)
                 if reason:
-                    summary["excluded"].append({"grid_id": grid["id"], "reason": reason})
+                    summary["excluded"].append({"grid_id": grid["id"], "symbol": grid.get("symbol"), "reason": reason})
                     continue
                 summary["included"].append(int(grid["id"]))
+                grid_started = time.perf_counter()
+                summary["included_details"].append({"grid_id": int(grid["id"]), "symbol": grid.get("symbol")})
                 try:
-                    record = self._evaluate_grid(grid, started, summary)
+                    if time.perf_counter() - started >= self.budget_s:
+                        summary.update(status="budget_exceeded", budget_exceeded=True)
+                        record = self._partial_record("presupuesto total agotado antes de evaluar")
+                    else:
+                        deadline = min(started + self.budget_s, grid_started + self.per_grid_budget_s)
+                        record = self._evaluate_grid(grid, started, summary, deadline=deadline)
                     if record:
                         persist_started = time.perf_counter()
                         self._persist(grid, record)
                         summary["timings_s"]["persistence"] += time.perf_counter() - persist_started
                         summary["recommendations"] += 1
+                        summary["grid_results"].append({"grid_id": int(grid["id"]),
+                            "symbol": grid.get("symbol"), "status": "partial" if record.get("partial") else "completed"})
                         applied = self._apply_if_eligible(grid, record)
                         if applied:
                             summary.setdefault("applied", []).append(applied)
@@ -153,6 +164,14 @@ class GridIntelligenceJob:
                     summary.setdefault("errors", []).append({"grid_id": grid["id"],
                         "error": f"{type(exc).__name__}: {exc}"})
                     logger.exception("Falló evaluación de sombra del grid %s", grid["id"])
+                    try:
+                        fallback = self._partial_record(f"{type(exc).__name__}: {exc}")
+                        self._persist(grid, fallback)
+                        summary["recommendations"] += 1
+                        summary["grid_results"].append({"grid_id": int(grid["id"]),
+                            "symbol": grid.get("symbol"), "status": "partial", "error": fallback["signals"]["partial_reason"]})
+                    except Exception:
+                        logger.exception("No se pudo guardar la recomendación parcial del grid %s", grid["id"])
             self._prune()
             if summary.get("budget_exceeded"):
                 summary["unprocessed_grid_ids"] = [int(row["id"]) for row in grids
@@ -225,7 +244,16 @@ class GridIntelligenceJob:
         # La caché de replay se retiene por LRU: su día es el corte histórico
         # de la ventana, no el día UTC de hoy.
 
-    def _evaluate_grid(self, grid, started, summary):
+    @staticmethod
+    def _partial_record(reason):
+        fallback = {"action": "mantener", "partial": True, "windows": 0,
+            "expected_gain_7d": None, "p10_gain_7d": None, "drawdown": None,
+            "discard_reason": reason}
+        return {"action": "mantener", "candidate": fallback, "baseline": fallback,
+            "candidates": [fallback], "partial": True,
+            "reason": f"recomendación parcial: {reason}", "signals": {"partial_reason": reason}}
+
+    def _evaluate_grid(self, grid, started, summary, *, deadline=None):
         from grid.sim.data import ewma_sigma_24h
         grid_id, symbol = int(grid["id"]), str(grid["symbol"])
         strategy = str(grid["strategy"]).lower()
@@ -306,14 +334,30 @@ class GridIntelligenceJob:
             engine_settings = _PlannerSettings()
         window_seconds = GRID_INTEL_WINDOW_DAYS * 86400
         timestamps = candles.timestamp
+        step_bars = GRID_INTEL_WINDOW_STEP_DAYS * 24 * 12
         start_indices = [i for i, stamp in enumerate(timestamps)
-            if int(stamp) + window_seconds <= int(timestamps[-1]) and i % (7 * 24 * 12) == 0]
+            if int(stamp) + window_seconds <= int(timestamps[-1]) and i % step_bars == 0]
         if not start_indices:
             start_indices = [0] if len(timestamps) > 2 else []
+        import numpy as np
+        preload_started = time.perf_counter()
+        window_samples = []
+        for idx in start_indices:
+            end_idx = int(np.searchsorted(timestamps, int(timestamps[idx]) + window_seconds, side="right"))
+            sample = self._slice(candles, idx, end_idx)
+            if len(sample.timestamp) >= 2:
+                window_samples.append((idx, sample))
+        summary.setdefault("timings_s", {}).setdefault("window_preload", 0.0)
+        summary["timings_s"]["window_preload"] += time.perf_counter() - preload_started
+        summary.setdefault("window_counts", {})[str(grid_id)] = {
+            "step_days": GRID_INTEL_WINDOW_STEP_DAYS, "windows_available": len(window_samples)}
+        candidate_timings = []
+        partial = False
         for action, geometry in geometries:
-            if time.perf_counter() - started >= self.budget_s:
+            if deadline is not None and time.perf_counter() >= deadline:
                 summary.update(status="budget_exceeded", budget_exceeded=True)
-                candidates.append({"action": action, "discard_reason": "presupuesto agotado"})
+                candidates.append({"action": action, "discard_reason": "presupuesto por grid/total agotado"})
+                partial = True
                 break
             if geometry.get("error"):
                 candidates.append({"action": action, "discard_reason": geometry["error"]})
@@ -337,15 +381,17 @@ class GridIntelligenceJob:
             metrics = []
             replay_started = time.perf_counter()
             try:
-                for idx in start_indices:
-                    end_idx = int(__import__("numpy").searchsorted(timestamps, int(timestamps[idx]) + window_seconds, side="right"))
-                    sample = self._slice(candles, idx, end_idx)
-                    if len(sample.timestamp) < 2:
-                        continue
+                for idx, sample in window_samples:
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        partial = True
+                        summary.update(status="budget_exceeded", budget_exceeded=True)
+                        break
                     scale = float(sample.open[0]) / max(1e-12, (float(geometry["low"]) + float(geometry["high"])) / 2)
                     replay_capital = (min(float(geometry.get("affected_capital") or 0), affected_capital)
                         if geometry.get("bot") else max(affected_capital, 5.5))
-                    key = (symbol, strategy, action, round(replay_capital, 6),
+                    # El resultado depende de la entrada simulada, no del rótulo del candidato.
+                    # Así se comparte una curva exacta cuando dos acciones proponen la misma geometría.
+                    key = (symbol, strategy, round(replay_capital, 6),
                         round(geometry["low"] * scale, 10), round(geometry["high"] * scale, 10),
                         int(geometry["n"]), bool(geometry.get("pause_buys")), int(timestamps[idx] // 86400))
                     sim = self._replay_cache.get(key)
@@ -404,19 +450,28 @@ class GridIntelligenceJob:
                     "expected_gain_7d": float(median(gains)), "p10_gain_7d": p10,
                     "drawdown": max(row["drawdown"] for row in metrics),
                     "fees_median": float(median(row["fees"] for row in metrics)),
-                    "windows": len(metrics), "affected_capital": float(geometry.get("affected_capital") or affected_capital)})
+                    "windows": len(metrics), "windows_expected": len(window_samples),
+                    "partial": len(metrics) < len(window_samples),
+                    "timing_s": round(time.perf_counter() - replay_started, 3),
+                    "affected_capital": float(geometry.get("affected_capital") or affected_capital)})
+                partial = partial or len(metrics) < len(window_samples)
                 summary["candidates_evaluated"] += 1
             except Exception as exc:
                 candidates.append({"action": action, "geometry": geometry,
                     "discard_reason": f"{type(exc).__name__}: {exc}"})
             finally:
                 summary["timings_s"]["replay"] += time.perf_counter() - replay_started
+                candidate_timings.append({"action": action,
+                    "duration_s": round(time.perf_counter() - replay_started, 3),
+                    "windows": len(metrics)})
+        summary.setdefault("candidate_timings_s", {})[str(grid_id)] = candidate_timings
         selected, reason = recommend_grid_action(candidates, capital)
         if selected is None:
-            return None
+            return self._partial_record("no se completó una ventana antes del presupuesto")
         baseline = next((item for item in candidates if item.get("action") == "mantener"), {})
         return {"action": selected.get("action", "mantener"), "candidate": selected,
             "baseline": baseline, "candidates": candidates, "reason": reason,
+            "partial": partial or bool(selected.get("partial")),
             "signals": {"inventory_cells_retained": len(inventory_cells), "free_cells": len(free_cells),
                 "free_cash_usdt": free_cash, "sigma_24h": sigma, "sigma_source": sigma_source,
                 "break_prob_v2": break_probability,
@@ -432,6 +487,7 @@ class GridIntelligenceJob:
         values = {"grid_id": int(grid["id"]), "symbol": str(grid["symbol"]),
             "strategy": str(grid["strategy"]).lower(), "created_at": now,
             "action": record["action"], "candidate_json": json.dumps({**candidate,
+                "partial": bool(record.get("partial")),
                 "reason": record["reason"], "all_candidates": record["candidates"]}, ensure_ascii=False),
             "baseline_json": json.dumps(baseline, ensure_ascii=False),
             "expected_gain_7d": candidate.get("expected_gain_7d"),
