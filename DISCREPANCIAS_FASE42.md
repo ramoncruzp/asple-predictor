@@ -63,3 +63,7 @@ La base sintética alcanzó las cantidades solicitadas para muestras, etiquetas 
 ## C39b
 
 - La corrección toma el reloj después de la lectura y mantiene el límite de 60 s. Una discrepancia futura mayor de 1 s sigue dando `DESCONOCIDO`, pero ahora queda diagnosticada como desfase de reloj con `age_s` negativo; no se tolera como libro válido.
+
+## C39c
+
+- Las consultas para S1 quedan como comandos de lectura `mode=ro`; no se ejecutaron. Las secciones previas del reporte contienen texto histórico de otras fases; esta entrega verificó las secciones C39 en UTF-8, sin BOM ni CRLF y sin signos `?` de codificación. No se reescribieron secciones previas ajenas al alcance.

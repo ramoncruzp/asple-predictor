@@ -124,3 +124,42 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 - La revisión del uso de `executable_value` confirma que el cálculo central de `MetaCore` es quien lo invoca para valorar el inventario. La revisión de operador utiliza su propia lectura/validación de profundidad y conserva su reintento, desfase y motivos C17.
 - Pruebas en `tests/test_meta_core.py`: lectura simulada que tarda 5 s queda `KNOWN`; lectura de 61 s queda `DESCONOCIDO`, informa `age_s=61` y mantiene bloqueadas piezas nuevas y reinicia el contador de pérdida. Una edad futura negativa tiene motivo explícito. Comando exacto: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c39b-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py -q --basetemp $bt`. Resultado: **40 passed, 5,09 s**.
 - No se usaron S1, Testnet, red, `.env` ni la base real. No se ejecutó la suite completa.
+
+## C39c: Cierre y verificación en S1
+
+Commits locales, en orden y sin push:
+
+1. `feaf770 Fase 42-C39a: inventario reescalado y diferencias pareadas`
+2. `afa61b0 Fase 42-C39b: corrige edad futura del libro`
+3. `Fase 42-C39c: cierre C39 y consultas de verificación` (este cierre documental)
+
+Consultas de solo lectura para ejecutar en S1 desde `~/asple-predictor`:
+
+```bash
+venv2/bin/python - <<'PY'
+import sqlite3
+con = sqlite3.connect("file:asple_predictor.db?mode=ro", uri=True)
+for row in con.execute("""SELECT reason, COUNT(*), MIN(ts), MAX(ts)
+FROM meta_ledger
+WHERE event_type='META_PIECES_BLOCKED'
+  AND ts >= datetime('now','-24 hours')
+GROUP BY reason ORDER BY COUNT(*) DESC"""):
+    print("bloqueos:", row)
+for row in con.execute("""SELECT created_at, grid_id, symbol, action,
+       json_extract(candidate_json,'$.paired_diff_median'),
+       json_extract(candidate_json,'$.paired_diff_p10'), method_version
+FROM grid_intel_recommendations
+WHERE created_at >= datetime('now','-24 hours')
+ORDER BY created_at DESC LIMIT 30"""):
+    print("recomendacion:", row)
+con.close()
+PY
+```
+
+Los bloqueos quedan agrupados por el motivo guardado en el ledger; las recomendaciones exponen diferencias pareadas y versión de método. La prueba local usa bases SQLite sintéticas; las consultas anteriores no se ejecutaron contra S1. La valoración real del inventario en la revisión conserva el precio de mercado y no usa este reescalado de replay.
+
+| Parte | Archivos principales | Pruebas | Resultado | Cambia una decisión de grids normales |
+|---|---|---|---|---|
+| C39a | `grid/grid_intelligence.py`, `api/routes/intelligence.py` | `tests/test_grid_intelligence.py`, `tests/test_intelligence_api.py` | 20 passed | No; recomendación de sombra cambia a métrica pareada, aplicación sigue bajo interruptor |
+| C39b | `grid/meta.py` | `tests/test_meta_core.py` | 40 passed | No; libros viejos continúan bloqueando piezas |
+| C39c | reportes | revisión de UTF-8/LF | Correcto en secciones C39 | No |
