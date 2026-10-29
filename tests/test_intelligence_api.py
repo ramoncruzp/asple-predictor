@@ -181,3 +181,58 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
     assert payload['replay']['last_run']['candle_inventory']['XRPUSDT']['gaps'] == 1
     after = db.engine.connect().execute(db.meta_learning_switch_events.select()).all()
     assert before == after == []
+
+
+def test_intelligence_s1_scale_exposes_section_timings(tmp_path, caplog):
+    import logging
+    from sqlalchemy import select
+
+    db = DBManager(f"sqlite:///{tmp_path / 'intelligence-scale.sqlite'}")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(capital_initial=100, target_usdt=10,
+            target_input_type='usdt', target_input_value=10, profile='RAPIDO', status='ACTIVE',
+            environment='TESTNET', created_at=now)).inserted_primary_key[0]
+        conn.execute(db.grids.insert().values(symbol='XRPUSDT', range_low=.5, range_high=.6,
+            n_levels=5, capital_total=100, status='ACTIVE', created_at=now,
+            environment='testnet', strategy='simple', params='{}'))
+        sample_start = conn.execute(db.meta_learning_samples.insert().values(
+            sample_key='scale-seed', symbol='XRPUSDT', profile='RAPIDO', sample_at=now,
+            source_kind='historical_reconstructed', base_window_count=3,
+            parameters_json='{}', signals_json='{}', provenance_json='{}', created_at=now
+        )).inserted_primary_key[0]
+        conn.execute(db.meta_learning_samples.delete().where(
+            db.meta_learning_samples.c.id == sample_start))
+        conn.execute(db.meta_learning_samples.insert(), [{
+            'sample_key': f'scale-{index}', 'meta_id': goal_id, 'symbol': 'XRPUSDT',
+            'profile': 'RAPIDO', 'sample_at': now, 'source_kind': 'historical_reconstructed',
+            'base_window_count': 3, 'parameters_json': '{}', 'signals_json': '{}',
+            'provenance_json': '{}', 'created_at': now,
+        } for index in range(15000)])
+        sample_ids = conn.execute(select(db.meta_learning_samples.c.id).order_by(
+            db.meta_learning_samples.c.id).limit(4000)).scalars().all()
+        conn.execute(db.meta_learning_labels.insert(), [{
+            'sample_id': sample_id, 'horizon': '72h',
+            'label_json': json.dumps({'status': 'labeled', 'reached': bool(index % 2)}),
+            'labeled_at': now,
+        } for index, sample_id in enumerate(sample_ids)])
+        conn.execute(db.meta_ledger.insert(), [{
+            'meta_id': goal_id, 'ts': now, 'event_type': 'META_OPERATOR_REVIEW_DECISION',
+            'details': '{}',
+        } for _ in range(5000)])
+
+    settings = SimpleNamespace(grid_api_token='scale-secret', meta_mode_enabled=False)
+    operator = MetaOperator(SimpleNamespace(), db, None, None, settings)
+    app = FastAPI()
+    app.include_router(intelligence.router, prefix='/api/intelligence')
+    app.state.settings, app.state.db, app.state.meta_operator = settings, db, operator
+    client = TestClient(app)
+    with caplog.at_level(logging.WARNING, logger='asple.slow'):
+        response = client.get('/api/intelligence', headers={'X-API-Token': 'scale-secret'})
+    assert response.status_code == 200
+    timings = response.json()['timings_ms']
+    assert {'lecturas_sql', 'muestras_y_senales', 'resultados_modelos',
+        'comparaciones_y_calibracion', 'estado_aprendizaje', 'bootstrap_y_medidores',
+        'inteligencia_grids', 'total'} <= timings.keys()
+    assert 'INTELLIGENCE_TIMINGS' in caplog.text
+    print('C38a synthetic timings_ms:', json.dumps(timings, sort_keys=True))

@@ -24,3 +24,7 @@
 ## Pendiente de evidencia operativa
 
 - En S1, consultar en modo solo lectura duración, grids incluidos/excluidos, motivos y etiquetas maduras. No activar interruptores en esta fase.
+
+## C38a — Limitación de la medición sintética
+
+La base sintética alcanzó las cantidades solicitadas para muestras, etiquetas Meta, ledger y grids, pero su JSON de señales fue mínimo y no tenía etiquetas de recomendaciones de grids. Por ello midió el costo de filas y agregados, pero no reprodujo toda la cardinalidad de bootstrap ni el tamaño de los bloques de señales de S1. La opción conservadora es no cambiar cálculos ni decisiones a partir de esta medición; C38b atenderá las recalculaciones repetidas y C38e medirá por candidato con velas sintéticas.

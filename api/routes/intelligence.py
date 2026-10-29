@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import math
 import statistics
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func, select
@@ -14,6 +16,7 @@ from api.routes.grids import _authorize
 from grid.readiness import evaluate_readiness, paired_bootstrap_mean_ci
 
 router = APIRouter()
+_logger = logging.getLogger("asple.slow")
 
 
 def _json(value, default=None):
@@ -160,6 +163,16 @@ def intelligence_summary(request: Request, page: int = Query(1, ge=1), page_size
 
 
 def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=None):
+    request_started = time.perf_counter()
+    section_started = request_started
+    timings_ms = {}
+
+    def mark_timing(name):
+        nonlocal section_started
+        now = time.perf_counter()
+        timings_ms[name] = round((now - section_started) * 1000, 2)
+        section_started = now
+
     db = getattr(request.app.state, "db", None)
     if db is None:
         raise HTTPException(503, "Base de datos no disponible")
@@ -289,6 +302,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
                 db.meta_ledger.c.ts >= now_utc - timedelta(days=7)).order_by(
                     db.meta_ledger.c.ts.desc()).limit(5000)).all()
 
+    mark_timing("lecturas_sql")
     unknown_reviews = []
     for stamp, unknown_meta_id, raw_details in unknown_review_rows:
         detail = _json(raw_details)
@@ -416,6 +430,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
             "raw_mean": statistics.fmean(float(row[5]) for row in group) if group else None,
             "smoothed_mean": statistics.fmean(smooth) if smooth else None,
             "windows_mean": statistics.fmean(int(row[4] or 0) for row in group) if group else 0})
+    mark_timing("muestras_y_senales")
 
     def wilson(successes, n, z=1.959963984540054):
         if not n: return None
@@ -453,6 +468,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
         volatility_accuracy.append({"model": model, "symbol": symbol, "days": days,
             "n": len(errors), "mae_log": statistics.fmean(errors), "within_20_pct": within/len(errors),
             "few_samples": len(errors) < 30})
+    mark_timing("resultados_modelos")
     touch_bins = {}
     for symbol, sample_at, signal_raw, stats_raw in touch_sample_rows:
         stats = _json(stats_raw); signals = _json(signal_raw).get("signals_used") or []
@@ -487,6 +503,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
             "profile": str(version["profile"]), "source_kind": str(version["source_kind"]),
             "created_at": str(version["created_at"]), "message": None}
         break
+    mark_timing("comparaciones_y_calibracion")
     centered_rows = {horizon: {kind: [] for kind in ("actual", "centrada")}
         for horizon in ("72h", "20d", "45d")}
     centered_by_profile = {profile: [] for profile in ("RAPIDO", "PRUDENTE")}
@@ -617,9 +634,11 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
     readiness = _ready(list(latest_versions.values()))
     profile_learning = {}
     operator = getattr(request.app.state, "meta_operator", None)
+    learning_status_started = time.perf_counter()
     if operator is not None:
         for profile in ("RAPIDO", "PRUDENTE"):
             profile_learning[profile] = operator.learning_status(profile)
+    timings_ms["estado_aprendizaje"] = round((time.perf_counter() - learning_status_started) * 1000, 2)
     settings = getattr(request.app.state, "settings", None)
     try:
         meta_config = operator.core.config()
@@ -770,13 +789,19 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
             "extended_allocation": allocation_ready,
         }
 
+    mark_timing("bootstrap_y_medidores")
     grid_intelligence = _grid_intelligence_summary(db)
+    mark_timing("inteligencia_grids")
     grid_readiness_alerts = _grid_intelligence_readiness_alerts(grid_intelligence)
     dispatcher = getattr(request.app.state, "alert_dispatcher", None)
     note_readiness = getattr(dispatcher, "note_intelligence_readiness", None)
     if callable(note_readiness):
         note_readiness({**readiness_switches, "GRIDS": grid_readiness_alerts})
-    return {"updated_at": datetime.now(timezone.utc).isoformat(),
+    timings_ms["total"] = round((time.perf_counter() - request_started) * 1000, 2)
+    if timings_ms["total"] >= 1000:
+        _logger.warning("INTELLIGENCE_TIMINGS timings_ms=%s active_threads=%s",
+            timings_ms, __import__("threading").active_count())
+    return {"updated_at": datetime.now(timezone.utc).isoformat(), "timings_ms": timings_ms,
         "data": {"summary_text": eval_msg + coverage_msg + forecast_msg + learning_msg,
             "candles": {"available": False,
             "reason": "La base de datos de la aplicación no conserva velas; el análisis usa el proveedor histórico existente."},

@@ -64,3 +64,11 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 - `a750418 Fase 42-42b: etiquetas y medidores de grids`
 - `f45e365 Fase 42-42c: activación opcional por grid`
 - `3328f6f Fase 42-42c: alertas C27 para grids`
+
+## C38a — Instrumentación y medición sintética
+
+- `api/routes/intelligence.py:162-173, 292, 399, 456, 490, 641, 774-788` instrumenta las secciones de la ruta. La respuesta incluye `timings_ms`; si el total supera 1 s, `asple.slow` registra el desglose y los hilos activos.
+- `tests/test_intelligence_api.py:186-240` añade un escenario sintético con 15.000 muestras, 4.000 etiquetas, 5.000 eventos de bitácora y un grid.
+- Comando: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c38a-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_intelligence_api.py -q -s --basetemp $bt`. Resultado: **3 passed, 3 warnings, 18,51 s**.
+- Medición de la petición sintética: **1.089,07 ms**. Cinco tramos más lentos: lecturas SQL 493,99 ms; bootstrap/medidores 364,51 ms; muestras/señales 194,38 ms; estado de aprendizaje 97,34 ms; inteligencia de grids 36,09 ms.
+- La prueba no reprodujo los 70–95 s de S1. Aunque coincide en cantidad de filas, usa JSON mínimo y no incluye la densidad de referencias de señales, predicciones ni etiquetas/recomendaciones de grids de la BD de S1. El costo de bootstrap y la lectura repetida de aprendizaje siguen siendo sospechosos y se resolverán con precálculo/cache en C38b.
