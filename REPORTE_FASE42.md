@@ -109,9 +109,18 @@ Revisa el bloque "Grids Smart y Simple" en Inteligencia y el detalle de cada gri
 - Comando de observación en S1: `journalctl -u asple-predictor -o short-iso | grep asple.slow`.
 
 
-## C39a ? Inventario reescalado y comparaci?n pareada
 
-- `grid/grid_intelligence.py:22,45-76,80-105,458-479` valora el inventario de cada ventana hist?rica por el camino relativo de sus cierres aplicado al precio de referencia actual. Las etiquetas posteriores conservan precios reales: la llamada de `grid/grid_intelligence.py:725` no pasa referencia ni reescala.
-- Cada candidato guarda `expected_gain_7d`, `expected_gain_7d_baseline`, `paired_diff_median` y `paired_diff_p10`; la selecci?n compara diferencias por ventana y exige que la mediana pareada alcance el 0,3 % del capital. `api/routes/intelligence.py:67-119` limita el medidor a `method_version=grid_shadow_42c39_v2` y expone ambas diferencias; las filas anteriores permanecen almacenadas y no se cuentan.
-- La prueba confirma que una ventana hist?rica 2? del precio actual se escala antes de marcar inventario, que geometr?as iguales dan diferencia 0 y que una variaci?n com?n del inventario se cancela al parear. El mecanismo de aplicaci?n contin?a detr?s del interruptor existente y las recomendaciones persisten con `would_apply=false`.
+
+## C39a: Inventario reescalado y comparación pareada
+
+- `grid/grid_intelligence.py:22,45-76,80-105,458-479` valora el inventario de cada ventana histórica por el camino relativo de sus cierres aplicado al precio de referencia actual. Las etiquetas posteriores conservan precios reales: la llamada de `grid/grid_intelligence.py:725` no pasa referencia ni reescala.
+- Cada candidato guarda `expected_gain_7d`, `expected_gain_7d_baseline`, `paired_diff_median` y `paired_diff_p10`; la selección compara diferencias por ventana y exige que la mediana pareada alcance el 0,3 % del capital. `api/routes/intelligence.py:67-119` limita el medidor a `method_version=grid_shadow_42c39_v2` y expone ambas diferencias; las filas anteriores permanecen almacenadas y no se cuentan.
+- La prueba confirma que una ventana histórica 2× del precio actual se escala antes de marcar inventario, que geometrías iguales dan diferencia 0 y que una variación común del inventario se cancela al parear. El mecanismo de aplicación continúa detrás del interruptor existente y las recomendaciones persisten con `would_apply=false`.
 - Comando exacto: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c39a-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_grid_intelligence.py tests/test_intelligence_api.py -q --basetemp $bt`. Resultado: **20 passed, 4 warnings, 5,05 s**.
+
+## C39b: Edad del libro y desfase del reloj
+
+- `grid/meta.py:88-128` devuelve `age_s` también cuando la lectura es inválida y diferencia un libro futuro por reloj de una lectura de profundidad vieja. `grid/meta.py:573-579,590-600` toma de nuevo el reloj después de obtener el libro y registra edad/motivo por símbolo. El límite efectivo de antigüedad sigue en 60 s.
+- La revisión del uso de `executable_value` confirma que el cálculo central de `MetaCore` es quien lo invoca para valorar el inventario. La revisión de operador utiliza su propia lectura/validación de profundidad y conserva su reintento, desfase y motivos C17.
+- Pruebas en `tests/test_meta_core.py`: lectura simulada que tarda 5 s queda `KNOWN`; lectura de 61 s queda `DESCONOCIDO`, informa `age_s=61` y mantiene bloqueadas piezas nuevas y reinicia el contador de pérdida. Una edad futura negativa tiene motivo explícito. Comando exacto: `$env:ASPLE_OFFLINE='1'; $env:PYTHONIOENCODING='utf-8'; $bt=Join-Path $env:TEMP ('asple-c39b-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $bt | Out-Null; .\venv\Scripts\python.exe -m pytest tests/test_meta_core.py -q --basetemp $bt`. Resultado: **40 passed, 5,09 s**.
+- No se usaron S1, Testnet, red, `.env` ni la base real. No se ejecutó la suite completa.

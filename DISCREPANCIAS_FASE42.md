@@ -53,7 +53,13 @@ La base sintética alcanzó las cantidades solicitadas para muestras, etiquetas 
 - El estudio con 180 días usó velas planas sintéticas y una geometría simple; los tiempos de cada símbolo y las exclusiones de producción deben confirmarse observando `GRID_INTEL_JOB_SUMMARY` en S1.
 
 
+
+
 ## C39a
 
-- La comparaci?n pareada usa el prefijo com?n ordenado de ventanas cuando el presupuesto deja una evaluaci?n parcial; as? no se emparejan fechas distintas. Las etiquetas ya maduras no se recalculan ni se borran. Se separan por versi?n del m?todo en el medidor porque representan el criterio previo y no son comparables con la m?trica nueva.
-- La valoraci?n de etiquetas 42b mantiene el precio real posterior; el reescalado solo se aplica a las ventanas hist?ricas usadas para recomendar cambios del grid.
+- La comparación pareada usa el prefijo común ordenado de ventanas cuando el presupuesto deja una evaluación parcial; así no se emparejan fechas distintas. Las etiquetas ya maduras no se recalculan ni se borran. Se separan por versión del método en el medidor porque representan el criterio previo y no son comparables con la métrica nueva.
+- La valoración de etiquetas 42b mantiene el precio real posterior; el reescalado solo se aplica a las ventanas históricas usadas para recomendar cambios del grid.
+
+## C39b
+
+- La corrección toma el reloj después de la lectura y mantiene el límite de 60 s. Una discrepancia futura mayor de 1 s sigue dando `DESCONOCIDO`, pero ahora queda diagnosticada como desfase de reloj con `age_s` negativo; no se tolera como libro válido.

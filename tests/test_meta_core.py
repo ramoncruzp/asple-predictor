@@ -142,7 +142,86 @@ def test_executable_value_consumes_depth_and_marks_partial_unknown_and_stale():
     empty = executable_value("1", [], .1, 1, now, now, 60)
     stale = executable_value("1", [("10", "1")], .1, 1, now - timedelta(seconds=61), now, 60)
     assert empty["status"] == stale["status"] == "DESCONOCIDO"
+    assert stale["reason"] == "lectura de profundidad vieja"
+    assert stale["age_s"] == 61
     assert empty["received_net"] is stale["received_net"] is None
+
+
+def test_executable_value_reports_future_clock_age_separately():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    future = executable_value("1", [("10", "1")], .1, 1,
+        now + timedelta(seconds=5), now, 60)
+    assert future["status"] == "DESCONOCIDO"
+    assert future["reason"] == "libro en el futuro (reloj)"
+    assert future["age_s"] == -5
+
+
+def test_slow_depth_read_uses_clock_after_io_and_stays_known(tmp_path):
+    clock_now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+
+    class SlowTestnet(FakeTestnet):
+        def get_order_book_depth(self, symbol, limit=5):
+            clock_now[0] += timedelta(seconds=5)
+            return {"bids": [(Decimal("10"), Decimal("100"))], "asks": [],
+                "read_at": clock_now[0]}
+
+    db, core = _core(tmp_path, exchange=SlowTestnet())
+    core.clock = lambda: clock_now[0]
+    core.exchange.clock = lambda: clock_now[0]
+    goal = core.create_goal(100, 10)
+    now = clock_now[0].replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1, range_high=2,
+            n_levels=1, capital_total=100, reserve=0, status="ACTIVE", created_at=now,
+            environment="testnet", strategy="simple", params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0, price=1, capital=100,
+            state="HOLDING", held_qty=1, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
+            grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now))
+    value = core.valuation(goal["id"])
+    assert value["status"] == "KNOWN"
+    assert value["symbol_valuations"]["XRPUSDT"]["age_s"] == 0
+
+
+def test_really_stale_depth_still_blocks_meta_and_resets_loss_counter(tmp_path):
+    from sqlalchemy import select
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    class StaleTestnet(FakeTestnet):
+        def get_order_book_depth(self, symbol, limit=5):
+            return {"bids": [(Decimal("10"), Decimal("100"))], "asks": [],
+                "read_at": now - timedelta(seconds=61)}
+
+    db, core = _core(tmp_path, exchange=StaleTestnet())
+    core.clock = lambda: now
+    core.exchange.clock = lambda: now
+    goal = core.create_goal(100, 10)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1, range_high=2,
+            n_levels=1, capital_total=100, reserve=0, status="ACTIVE", created_at=now.replace(tzinfo=None),
+            environment="testnet", strategy="simple", params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0, price=1, capital=100,
+            state="HOLDING", held_qty=1, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now.replace(tzinfo=None)))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now.replace(tzinfo=None), realized_extra_usdt=0,
+            loss_limit_breach_count=1)).inserted_primary_key[0]
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=now.replace(tzinfo=None)))
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=run_id,
+            grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id, created_at=now.replace(tzinfo=None)))
+    outcome = core.run_once()[0]
+    assert outcome["new_pieces_allowed"] is False
+    assert core.get_goal(goal["id"])["status"] == "PIECES_BLOCKED"
+    blocked = next(row for row in core.ledger(goal["id"]) if row["event_type"] == "META_PIECES_BLOCKED")
+    diag = blocked["details"]["symbols"]["XRPUSDT"]
+    assert "lectura de profundidad vieja" in diag["reason"]
+    assert diag["age_s"] == 61
+    with db.engine.connect() as conn:
+        assert conn.execute(select(db.meta_runs.c.loss_limit_breach_count).where(
+            db.meta_runs.c.id == run_id)).scalar_one() == 0
 
 
 def test_meta_target_percent_and_disabled_gate(tmp_path):

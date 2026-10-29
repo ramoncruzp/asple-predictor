@@ -87,6 +87,7 @@ def attributable_cash(capital_initial, delivered, returned, commissions) -> Deci
 
 def executable_value(qty, bids, fee_pct, haircut_pct, read_at, now, max_age_s):
     """Valora una venta contra niveles de bids; una lectura dudosa nunca equivale a cero."""
+    age = None
     try:
         quantity = _d(qty)
         fee = _d(fee_pct) / Decimal(100)
@@ -96,7 +97,9 @@ def executable_value(qty, bids, fee_pct, haircut_pct, read_at, now, max_age_s):
         read = read_at if read_at.tzinfo else read_at.replace(tzinfo=timezone.utc)
         current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
         age = (current - read).total_seconds()
-        if age < -1 or age > float(max_age_s):
+        if age < -1:
+            raise ValueError("libro en el futuro (reloj)")
+        if age > float(max_age_s):
             raise ValueError("lectura de profundidad vieja")
         remaining, gross, absorbed, last_price = quantity, Decimal(0), Decimal(0), Decimal(0)
         for row in bids:
@@ -122,7 +125,7 @@ def executable_value(qty, bids, fee_pct, haircut_pct, read_at, now, max_age_s):
     except Exception as exc:
         return {"status": "DESCONOCIDO", "reason": str(exc), "received_net": None,
                 "absorbed_qty": "0", "missing_qty": str(qty), "missing_value_est": None,
-                "last_absorbed_price": None, "age_s": None}
+                "last_absorbed_price": None, "age_s": age}
 
 
 def smart_grid_params_for_goal(goal: dict) -> dict:
@@ -570,6 +573,11 @@ class MetaCore:
                         if not hasattr(self, "_depth_cache"):
                             self._depth_cache = {}
                         self._depth_cache[symbol] = (now, book)
+                # Recalcular después del I/O: una lectura de Testnet puede tardar
+                # y read_at sería posterior al reloj tomado antes de pedirla.
+                now = self.clock()
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=timezone.utc)
                 bid = _d(book.get("bids", [(0, 0)])[0][0]) if book.get("bids") else Decimal(0)
                 best_gross = quantity * bid if bid > 0 else None
                 executable = executable_value(quantity, book.get("bids"), 0.1, haircut,
@@ -586,6 +594,8 @@ class MetaCore:
                 if executable["status"] == "DESCONOCIDO" and reason:
                     if not book.get("bids"):
                         reason = f"libro sin compradores; {reason}"
+                    elif age_s is not None and age_s < -1:
+                        reason = f"libro en el futuro (reloj; {age_s:.1f} s); {reason}"
                     elif age_s is not None and age_s > 60:
                         reason = f"lectura de profundidad vieja ({age_s:.1f} s); {reason}"
                 symbol_diagnostics[symbol] = {"status": executable["status"], "reason": reason,
