@@ -220,3 +220,14 @@ Comando exacto de prueba, anotado antes de ejecutar:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6d-script-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate_script.py tests/test_scenarios_history.py --basetemp="$base"
 ```
+
+
+## 43e-7 - interfaz pública del paquete
+
+`research.scenarios` exporta las evaluaciones de escenarios/historia y las funciones de objetivo; `V2ScenarioEngine.available` permanece falso. No se conecta al operador.
+
+Comando exacto de prueba, anotado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e7-api-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_public_api.py tests/test_scenarios_objective.py --basetemp="$base"
+```

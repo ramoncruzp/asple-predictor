@@ -802,3 +802,8 @@ Límite: el modo historia aún no evalúa Smart exacto ni implementa el benchmar
 # 43e-6d - validador de resumen histórico (parcial)
 
 `scenarios_validar.py` enumera monedas activas `operar` si no se especifican y emite un reporte Markdown con resultados del evaluador histórico de 6c. Prueba enfocada: **3 pasaron en 22,54 s**, comando exacto en `reports/DISCREPANCIAS_FASE43.md`. La prueba del evaluador domina el tiempo. No se ejecutó contra `market_data.db` real y no debe interpretarse como aceptación predictiva.
+
+
+# 43e-7 - interfaz para 43f
+
+`research.scenarios` exporta `evaluate_pieces`, `evaluate_history` y el objetivo informativo. `grid/engines/v2_escenarios.py` sigue con `available=False`. La API pública y el estado no disponible pasaron **5 pruebas en 0,19 s**; el comando est? en `reports/DISCREPANCIAS_FASE43.md`. En 43f el cálculo deberá invocarse en worker aislado y mantener la cach? fuera del proceso de servicio.
