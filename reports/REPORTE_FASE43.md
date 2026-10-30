@@ -799,7 +799,7 @@ Pruebas enfocadas: comando exacto en `reports/DISCREPANCIAS_FASE43.md`; la corri
 Límite: el modo historia aún no evalúa Smart exacto ni implementa el benchmark OU frente a GBM solicitado para atribuir el efecto de reversión a la media. Los intervalos son remuestreo circular de resultados de ventanas, no una secuencia no solapada. Validar esas extensiones antes de usar resultados para decisiones. Nada afecta decisiones: v2 continúa desconectado.
 
 
-# 43e-6d - validador de resumen histórico (parcial)
+# 43e-6d - validacion predictiva completada en 6f
 
 `scenarios_validar.py` enumera monedas activas `operar` si no se especifican y emite un reporte Markdown con resultados del evaluador histórico de 6c. Prueba enfocada: **3 pasaron en 22,54 s**, comando exacto en `reports/DISCREPANCIAS_FASE43.md`. La prueba del evaluador domina el tiempo. No se ejecutó contra `market_data.db` real y no debe interpretarse como aceptación predictiva.
 
@@ -828,7 +828,7 @@ tail -f ~/validar_43e.log
 En esta entrega local solo se probaron velas sintéticas/fixtures y no se usaron datos reales, red, S1 ni Testnet. `V2ScenarioEngine.available=False` se conserva.
 
 
-Auditoría final de codificación (515a5aa..HEAD, 16 archivos): UTF-8 válido en 16/16, BOM 0, CRLF 0; `scripts/revisar_codificacion.py` devolvi? `HALLAZGOS=0`. El motor v2 sigue sin disponibilidad y la validación histórica queda expresamente parcial.
+Auditoria historica previa: 16 archivos, UTF-8 valido, BOM 0 y CRLF 0. Esta fase confirma el scanner en los archivos nuevos; v2 sigue sin disponibilidad.
 
 
 # 43e-6e - correcciones y cierre de historia
@@ -841,4 +841,29 @@ Pruebas finales: **100 pasaron en 24,70 s**; factores causales **6 pasaron en 6,
 
 Medición local sintética: 750 dias, Simple de 6 niveles, paso diario, **701 ventanas**, dos variantes, **25,773 s y 485,3 MB de pico RSS** en esta máquina Windows. No se usaron datos reales. No se aisló un benchmark de velocidad Smart; se limita a 200 arranques por pieza.
 
-43e-6c queda completada funcionalmente por 6e. La validación predictiva completa de 43e-6f sigue pendiente; v2 permanece deshabilitado y estos resultados no deciden capital.
+43e-6c queda completada funcionalmente por 6e. 6f implementa validacion predictiva sintetica; falta la corrida de S1. v2 permanece deshabilitado y no decide capital.
+
+## 43e-6f y 43e-6g — validación predictiva
+
+Se reemplazó el resumen histórico por `research/scenarios/validate.py`: predicción con `evaluate_pieces(before=t)`, realidad de los 20 días siguientes y baseline con 23 ventanas históricas completas de 20 días, separadas por 7 días y terminadas antes de `t`. El informe y el JSON conservan todos los pares y métricas por geometría y agregadas: cobertura P10–P90, PIT por deciles y χ², sesgo con bootstrap por fecha, Brier de meta y pérdida, IC de la diferencia de Brier y calibración de meta en cinco grupos. El CLI anuncia una estimación antes de comenzar y progreso cada diez fechas.
+
+Prueba enfocada final: **20 pasaron en 9,39 s**. Comando exacto y corridas iterativas anotadas en `reports/DISCREPANCIAS_FASE43.md`. `py_compile` pasó y `scripts/revisar_codificacion.py` dio `HALLAZGOS=0` en los archivos de 6f. No se corrió la validación completa ni se usaron datos de S1.
+
+Estimación de planificación para 21 monedas: 52 fechas por moneda a paso de 7 días × 5 geometrías = 5.460 casos. La heurística del CLI (2 s por caso) estima **10.920 s, unas 3 h 2 min**; recomienda usar `--paso-dias 14` o menos monedas. No es una medición de ejecución. El pico RSS de una validación completa queda **sin medir**; el script imprime el máximo al finalizar.
+
+Pasos para Ramón en S1, después de desplegar:
+
+```bash
+cd ~/asple-predictor
+# después de desplegar con bash deploy/actualizar.sh desde el PC:
+nice -n 10 venv2/bin/python scripts/escenarios_evaluar.py --db market_data.db --perfil RAPIDO --capital 100 --meta 3 --modo historia --paso-dias 1 --pieza "JUPUSDT:simple:70:n=6:ancho=2sigma" --pieza "JUPUSDT:simple:70:n=10:ancho=0.5sigma" --pieza "JUPUSDT:smart:70:n=6:ancho=2sigma" --pieza "XRPUSDT:simple:70:n=10:ancho=0.5sigma" --pieza "XRPUSDT:bot:30:compra=-1.5"
+nohup nice -n 10 venv2/bin/python scripts/escenarios_validar.py --db market_data.db --meses 12 --paso-dias 7 > ~/validar_43e.log 2>&1 &
+```
+
+La línea base de 6f reusa `evaluate_history` con la geometría relativa por arranque. No se pudo demostrar que cada ventana de la línea base conserve una única geometría absoluta fija; esta limitación debe tenerse presente al interpretar el Brier v2 frente a v1. La validación es experimental y no modifica decisiones; v2 sigue `available=False`.
+
+Comando final de pruebas de 6f:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-causal-strict-20261030-r9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```

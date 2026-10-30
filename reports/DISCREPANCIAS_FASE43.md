@@ -211,7 +211,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6c-historia-2026103
 ```
 
 
-## 43e-6d - script de resumen histórico (parcial)
+## 43e-6d - validador predictivo implementado en 6f
 
 Se añadió `scripts/escenarios_validar.py`, que recorre el mismo cálculo histórico descriptivo y escribe un reporte Markdown con PnL, P(meta), P(límite), IC y variante sin tendencia. Se ejecuta solo con la DB indicada por Ramón. No implementa el protocolo completo de aceptación de la petición: no compara distribuciones FHS de 1.000 escenarios con resultados realizados ni baseline v1.
 
@@ -235,7 +235,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e7-api-20261030-r1';
 
 ## 43e-8 - cierre y estado
 
-43e-6c y 43e-6d se dejaron con commits parciales porque falta Smart histórico, el experimento OU/GBM y la comparación predictiva walk-forward completa contra v1. Los comandos de S1 para producir resultados con datos reales están en `reports/REPORTE_FASE43.md`; no se corrieron localmente. El motor v2 continúa deshabilitado.
+43e-6c se completo en 6e y 6d se implemento en 6f. La validacion sintetica paso; falta correr el analisis completo en S1. v2 permanece deshabilitado.
 
 
 ## 43e-6e - pruebas y medicion
@@ -321,6 +321,8 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-integracion-2026
 ```
 
 La ultima regresion enfocada paso 20 pruebas en 9,55 s. No se midio el tiempo/RSS de una corrida completa del validador. Estimacion de planificacion para S1: 12 meses / 7 dias = 52 fechas por moneda; 21 monedas x 52 x 5 geometrias = 5.460 casos. Con la regla heuristica de 2 s/caso del CLI: 10.920 s (3 h 2 min); el CLI debe sugerir paso de 14 dias. La estimacion no es una medicion.
+
+Discrepancia conservadora: `evaluate_history` replica la geometría relativa (ancho basado en sigma y precio de cada arranque) al producir las ventanas de baseline. No se certifica que sea exactamente una geometría absoluta única para los 23 periodos; el Brier comparativo requiere validación adicional antes de interpretar ventaja predictiva.
 
 Comando exacto tras hacer estrictos los inicios de baseline y exigir el IC del Brier en el veredicto:
 
