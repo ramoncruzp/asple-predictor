@@ -287,3 +287,22 @@ Segundo intento: corregido el conteo del calentamiento, que exigía una vela adi
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c1-walk-rerun2-727ac9e0'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
 ```
 Resultado 43c-1: 2 passed en 0,06 s. El walk-forward usa solo cierres con timestamp menor que t; omite la ventana final incompleta y cuenta huecos interiores. La salida retiene índices de la ventana objetivo, no copia ni cachea los datos de velas.
+
+## 43c-2/3 — pronósticos de volatilidad y diagnósticos
+
+Comando anotado antes de probar walk-forward causal, sigma acumulada, calibración y métricas:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c23-core-1ffebcdf'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+
+Comando anotado antes de probar los diagnósticos de ruptura y el modo seco con SQLite sintética:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c23-synth-845edd52'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+Resultado 43c-2/3: 4 passed en 0,11 s. Se verificó causalidad, sigma acumulada, calibración, probabilidad de ruptura decreciente al ampliar banda, ER dentro de [0,1], y lectura seca de DB sintética byte-identica sin crear tablas de resultados.
+
+Comando de regresión antes de cerrar la base estadística 43c-2/3:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c23-final-2499ec4f'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+Resultado de cierre 43c-2/3: 3 passed en 0,06 s.

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from research.scorecard.metrics import calibration, qlike
+from research.scorecard.diagnostics import efficiency_ratio, rupture_probabilities
 from research.scorecard.walkforward import walk_forward
 
 
@@ -35,3 +36,11 @@ def test_sigma_accumulated_units_and_calibration_factor():
     assert qlike(actual, actual).mean() == 0
     result = calibration(actual / 2, actual)
     assert abs(result["factor_calibracion"] - 2) < 1e-9
+
+
+def test_break_probability_declines_when_band_widens_and_efficiency_bounds():
+    probabilities = rupture_probabilities(100, 90, 110, 0.03, 24)
+    assert probabilities[1.0] > probabilities[3.0]
+    assert 0 <= efficiency_ratio([100, 99, 101, 100, 102], 4) <= 1
+
+
