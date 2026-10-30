@@ -52,3 +52,8 @@ La especificación observa dos convenciones distintas: `SimExchange` usa cruces 
 ## Fase 43e-3b
 
 FastSim se vectoriza por escenarios y celdas y conserva bucle temporal/resincronización. La prueba inicial falló en 26 casos porque el capital de prueba era demasiado bajo para el filtro de step size real de `FILTERS`; al usar 1000 USDT en los casos de precio USD, el replay de geometría fue válido y la regresión completa pasó (44 pruebas). El benchmark sintético usa OHLC constantes y no mide el coste de fills frecuentes.
+
+
+## Fase 43e-3c
+
+El runner histórico se verificó con una SQLite temporal sintética (20 días), no con `market_data.db` real. Para conservar el contrato de replay usa `FILTERS` por defecto de `grid.sim.runner`; el almacén público no persiste filtros de exchange por símbolo y no se consultó red. En S1 se requiere revisar símbolos cuyo precio/filtros no sean compatibles con ese filtro; el script omite geometrías inválidas y falla si no completa todos los casos.

@@ -647,3 +647,28 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-goal-candle-8f56
 ```
 
 Resultado final de fastsim/paridad: 44 passed en 0,40 s. Benchmark sintético, 1000 escenarios procesados en lotes de 250 con OHLC float64 constante (sin ejecuciones de fills): 20 días, 1,998 s y RSS máximo 87,6 MB; 45 días, 4,325 s y RSS máximo 156,7 MB. El RSS pico se midió con `GetProcessMemoryInfo`/PeakWorkingSetSize en Windows. El objetivo temporal se cumplió por margen estrecho en 20 días. La ayuda del script de paridad abre correctamente; no se ejecutó sobre base real.
+
+
+43e-3c, prueba del runner de paridad con una SQLite temporal sintética de 20 días:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3c-script-0a3ea4f7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_parity_script.py --basetemp="$base"
+```
+
+La primera prueba del script detectó conversión implícita de valores `Decimal` en `np.allclose`; ahora las trazas de referencia se convierten explícitamente a float antes de comparar. Comando de repetición:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3c-script-rerun-e63103a4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_parity_script.py --basetemp="$base"
+```
+
+Validación final conjunta de FastSim y el script histórico en DB sintética; incluye ahora paridad del caso PEPE y comprueba RSS positivo:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3c-final-6260cba1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py --basetemp="$base"
+```
+
+Resultado final 43e-3c: 45 passed en 1,32 s; el runner sintético completa 1/1 caso, cero discrepancias y RSS positivo. No se ejecutó contra `market_data.db` real. Pasos para S1 (ejecutar allí después del despliegue):
+
+```bash
+cd ~/asple-predictor
+# después de desplegar con bash deploy/actualizar.sh desde el PC:
+nice -n 10 venv2/bin/python scripts/escenarios_biblioteca.py --db market_data.db
+nice -n 10 venv2/bin/python scripts/escenarios_paridad.py --db market_data.db --casos 200
+```

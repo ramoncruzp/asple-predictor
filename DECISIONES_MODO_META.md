@@ -463,3 +463,8 @@ FastSim deberá conservar la diferencia entre el replay de grid, el bot individu
 ### Fase 43e-3b ? FastSim
 
 FastSim usa lotes de matrices OHLC float64, curva muestreada float32 y reglas del replay documentadas. La paridad local no cambia decisiones ni conecta el motor v2; sus resultados siguen siendo experimentales.
+
+
+### Fase 43e-3c ? paridad offline
+
+El script de paridad abre el almacén de mercado en solo lectura y solo usa símbolos `role=operar`. Los datos de referencia no cambian decisiones: v2 sigue `available=False`; la corrida con historia real queda a cargo de S1.
