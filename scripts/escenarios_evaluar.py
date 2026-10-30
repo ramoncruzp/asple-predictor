@@ -116,8 +116,8 @@ def main(argv=None):
                 f"{row['fee_comparison_pct']:.4f}% | {row['n']} | "
                 f"{row['pnl_usdt']['mean']:.4f} | {row['p_target']['mean']:.4f} | "
                 f"{row['p_loss']['mean']:.4f}")
-        limits = objective_limits(args.perfil,
-            settings_db=args.settings_db or args.db)
+    if args.modo == "alternativas":
+        limits = objective_limits(args.perfil, settings_db=args.settings_db or args.db)
         ranked = rank_alternatives_v2(result["pieces"], perfil=args.perfil,
             capital_meta=args.capital, max_loss_pct=limits["max_loss_pct"],
             p_limit_cap=limits["p_limit_cap"], ev_floor_pct=limits["ev_floor_pct"])

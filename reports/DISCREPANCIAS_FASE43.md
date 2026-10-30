@@ -236,3 +236,32 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e7-api-20261030-r1';
 ## 43e-8 - cierre y estado
 
 43e-6c y 43e-6d se dejaron con commits parciales porque falta Smart histórico, el experimento OU/GBM y la comparación predictiva walk-forward completa contra v1. Los comandos de S1 para producir resultados con datos reales están en `reports/REPORTE_FASE43.md`; no se corrieron localmente. El motor v2 continúa deshabilitado.
+
+
+## 43e-6e - pruebas y medicion
+
+Las iteraciones iniciales detectaron asignaciones por mascara incompletas en FastSim y fixtures de base/calibracion; se corrigieron sin cambiar tolerancias. La regresion final de 6e dio **100 pasaron en 24,70 s**:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6e-historia-20261030-r10'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py tests/test_smart_exact.py --basetemp="$base"
+```
+
+La prueba especifica de factores posteriores dio **6 pasaron en 6,01 s**:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6e-calibration-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py --basetemp="$base"
+```
+
+Smart historico y runner dieron **8 pasaron en 7,68 s**:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6e-smart-history-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_smart_exact.py --basetemp="$base"
+```
+
+Liberar la pila OHLC por candidata dio **92 pasaron en 9,04 s**:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6e-memory-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Medicion sintetica local: BD temporal, 750 dias, 701 ventanas, una geometria Simple, 2 variantes, paso diario: **25,773 s, pico RSS 485,3 MB**. Se midio en proceso fresco; Smart no tuvo benchmark de velocidad aislado.

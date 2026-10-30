@@ -829,3 +829,16 @@ En esta entrega local solo se probaron velas sintéticas/fixtures y no se usaron
 
 
 Auditoría final de codificación (515a5aa..HEAD, 16 archivos): UTF-8 válido en 16/16, BOM 0, CRLF 0; `scripts/revisar_codificacion.py` devolvi? `HALLAZGOS=0`. El motor v2 sigue sin disponibilidad y la validación histórica queda expresamente parcial.
+
+
+# 43e-6e - correcciones y cierre de historia
+
+El CLI imprime `OBJETIVO_V2` siempre en modo alternativas, también sin comparar comisiones. `causal_sigma_24h` es compartida: EWMA de retornos log a 5 min, inicializada con 30 dias, lambda `0.97 ** (1/12)` y factor de calibración verificado solo si terminó antes de t. `evaluate_pieces(before=t)` recorta precio y volatilidad al mismo corte que historia. Los bots usan offsets desde el precio de inicio y el margen predeterminado de `evaluate_pieces`.
+
+Historia reúne todos los arranques por pieza en un lote FastSim por variante. Smart usa replay exacto con muestra determinista de hasta 200 arranques para las variantes real y sin tendencia. La variante sin tendencia conserva el primer cierre y deja la pendiente OLS de log-cierre por debajo de 1e-12. Una fixture OU y GBM con sigma igual verificó mayor ganancia media para el grid en OU.
+
+Pruebas finales: **100 pasaron en 24,70 s**; factores causales **6 pasaron en 6,01 s**; Smart histórico **8 pasaron en 7,68 s**; tras liberar lotes, FastSim parity e historia **92 pasaron en 9,04 s**. Los comandos exactos están en `reports/DISCREPANCIAS_FASE43.md`.
+
+Medición local sintética: 750 dias, Simple de 6 niveles, paso diario, **701 ventanas**, dos variantes, **25,773 s y 485,3 MB de pico RSS** en esta máquina Windows. No se usaron datos reales. No se aisló un benchmark de velocidad Smart; se limita a 200 arranques por pieza.
+
+43e-6c queda completada funcionalmente por 6e. La validación predictiva completa de 43e-6f sigue pendiente; v2 permanece deshabilitado y estos resultados no deciden capital.

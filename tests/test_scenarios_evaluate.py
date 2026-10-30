@@ -4,7 +4,7 @@ import math
 from grid.sim.meta_portfolio import pack_curve
 from data.market_store import CandleStore
 from research.scenarios.evaluate import (evaluate_pieces, _paired_alternatives,
-    _log_width_from_sigma_24h)
+    _log_width_from_sigma_24h, evaluate_history)
 
 
 def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, monkeypatch):
@@ -12,7 +12,7 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     store = CandleStore(db)
     rows = []
     previous = 100.0
-    for index in range(50 * 288):
+    for index in range(51 * 288):
         close = 100 + .5 * np.sin(index / 37)
         rows.append({"open_ts": index * 300, "open": previous,
             "high": max(previous, close) + .01, "low": min(previous, close) - .01,
@@ -28,8 +28,10 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     library.mkdir()
     values = np.zeros((50, 288, 3), dtype=np.float32)
     values[:, :, 1], values[:, :, 2] = .2, -.2
-    dates = np.arange(1_700_000_000 // 86400, 1_700_000_000 // 86400 + 50,
+    dates = np.arange(0, 51,
         dtype=np.int64) * 86400
+    values = np.zeros((51, 288, 3), dtype=np.float32)
+    values[:, :, 1], values[:, :, 2] = .2, -.2
     np.savez_compressed(library / "SYNTHUSDT.npz", values=values, dates=dates,
         daily_z_return_sum=np.zeros(50), mean_z_return=np.float32(0))
     result = evaluate_pieces([
@@ -69,8 +71,8 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
         return simulate_simple(*args, low=low, high=high, **kwargs)
     monkeypatch.setattr(evaluate_module, "simulate_simple", capture_geometry)
     rng = np.random.default_rng(43)
-    z_return = rng.normal(0, 1, (50, 288)).astype(np.float32)
-    wide_values = np.empty((50, 288, 3), dtype=np.float32)
+    z_return = rng.normal(0, 1, (51, 288)).astype(np.float32)
+    wide_values = np.empty((51, 288, 3), dtype=np.float32)
     wide_values[:, :, 0] = z_return
     wide_values[:, :, 1] = np.maximum(z_return, 0) + 60
     wide_values[:, :, 2] = np.minimum(z_return, 0) - 60
@@ -85,6 +87,16 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     assert math.isclose(math.log(resolved[-1][1] / resolved[-1][0]) / 2,
         expected_log_width, rel_tol=1e-9)
     assert wide["pieces"][0]["fills_mean"] > 5
+    monkeypatch.undo()
+    before = int(rows[30 * 288 + 1]["open_ts"])
+    piece = {"symbol": "SYNTHUSDT", "strategy": "simple", "capital": 40,
+        "low": 70, "high": 130, "n": 6}
+    scenario_result = evaluate_pieces([piece], perfil="RAPIDO", capital=100, meta=3,
+        n_scenarios=1, seed=43, before=before, db_path=db, library_dir=library)
+    history_result = evaluate_history([piece], perfil="RAPIDO", capital=100, meta=3,
+        db_path=db, since=before, step_days=1, replicas=5)
+    historical_sigma = history_result["symbols"]["SYNTHUSDT"]["pieces"][0]["geometrias"][0]["sigma_24h"]
+    assert abs(scenario_result["sigma_today_24h"]["SYNTHUSDT"] - historical_sigma) <= 1e-12
 
 
 def test_portfolio_mode_rejects_piece_sum_over_meta_capital(tmp_path):
@@ -143,7 +155,9 @@ def test_evaluation_script_prints_paired_simple_mean_and_pair_count(monkeypatch,
 
     monkeypatch.setattr(cli, "evaluate_pieces", lambda *_args, **_kwargs: {
         "pieces": [{"piece": {"symbol": "JUPUSDT", "strategy": "simple"},
-            "metrics": {"n": 1000}, "fills_mean": 4.0, "aviso": None}],
+                "metrics": {"n": 1000, "pnl_mean_usdt": -.4, "cvar_5_usdt": -20,
+                    "p_target": .1, "p_loss_ci95": [.01, .02], "days_to_target_p50": None},
+                "fills_mean": 4.0, "aviso": None}],
         "portfolio": None,
         "smart_paired": [{"label": "smart_menos_simple", "n": 200,
             "from_index": 0, "to_index": 1, "simple_mean_pnl_usdt": -.4,

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 
 from data.market_store import CandleStore, market_db_path
 from grid.meta import DEFAULT_PROFILES
+from grid.sim.data import CandleData
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 from research.scenarios.generator import generate
 from research.scenarios.metrics import summarize, summarize_portfolio
@@ -18,40 +20,111 @@ def _log_width_from_sigma_24h(sigma_24h, horizon_days, multiplier):
     return float(multiplier) * float(sigma_24h) * np.sqrt(float(horizon_days))
 
 
-def _sigma_estimates(data):
-    returns = np.diff(np.log(np.asarray(data.close, dtype=np.float64)))
-    if len(returns) < 12 * 24 * 30:
-        raise ValueError("faltan 30 días para estimar volatilidad")
+def causal_sigma_24h(close, timestamp, upto_index=None, calibration=1.0):
+    """Sigma EWMA logarítmica de 24 h con datos estrictamente anteriores al índice."""
+    close = np.asarray(close, dtype=np.float64)
+    stamps = np.asarray(timestamp, dtype=np.int64)
+    stop = len(close) if upto_index is None else min(int(upto_index), len(close))
+    if stop < 30 * 288 + 1:
+        raise ValueError("faltan 30 días para estimar volatilidad causal")
+    returns = np.diff(np.log(close[:stop]))
+    if len(stamps) < stop:
+        raise ValueError("timestamps y precios desalineados")
     lam = .97 ** (1 / 12)
     variance = float(np.mean(returns[:12 * 24 * 30] ** 2))
     for value in returns[12 * 24 * 30:]:
         variance = lam * variance + (1 - lam) * float(value * value)
+    return float(np.sqrt(max(variance, 1e-16) * 288) * float(calibration))
+
+
+def _sigma_estimates(data, *, upto_index=None):
+    close = np.asarray(data.close, dtype=np.float64)
+    stop = len(close) if upto_index is None else min(int(upto_index), len(close))
+    returns = np.diff(np.log(close[:stop]))
+    sigma_24h = causal_sigma_24h(close, data.timestamp, stop)
     daily = []
-    days = np.asarray(data.timestamp[1:] // 86400)
+    days = np.asarray(data.timestamp[1:stop] // 86400)
     for day in np.unique(days)[-180:]:
         values = returns[days == day]
         if len(values) == 288:
             daily.append(float(np.sqrt(np.sum(values * values))))
-    return float(np.sqrt(max(variance, 1e-16) * 288)), float(np.median(daily)) if daily else 0.0
+    return sigma_24h, float(np.median(daily)) if daily else 0.0
 
 
-def _calibration_factors(path, symbols):
+def _calibration_factors(path, symbols, *, before=None):
     factors = {}
     try:
+        path = Path(path).expanduser().resolve()
         with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {"scorecard_runs", "calibration_factors"} <= tables:
                 return factors
             for symbol in symbols:
-                row = conn.execute("SELECT f.factor FROM calibration_factors f JOIN scorecard_runs r "
+                sql = ("SELECT f.factor FROM calibration_factors f JOIN scorecard_runs r "
                     "ON r.id=f.run_id WHERE r.status='completed' AND f.symbol=? AND f.kind='sigma' "
-                    "AND f.horizon_h=24 ORDER BY r.finished_at DESC,f.computed_at DESC LIMIT 1",
-                    (symbol,)).fetchone()
+                    "AND f.horizon_h=24")
+                params = [symbol]
+                if before is not None:
+                    cutoff = float(before) if isinstance(before, (float, int)) else _to_timestamp(before)
+                    sql += " AND julianday(r.finished_at) < julianday(?)"
+                    params.append(cutoff / 86400 + 2440587.5)
+                sql += " ORDER BY r.finished_at DESC,f.computed_at DESC LIMIT 1"
+                row = conn.execute(sql, params).fetchone()
                 if row and row[0] is not None and float(row[0]) > 0:
                     factors[symbol] = float(row[0])
     except sqlite3.Error:
         return factors
     return factors
+
+
+def _calibration_factor_timeline(path, symbol):
+    """Carga una vez factores verificados para seleccionarlos causalmente por fecha."""
+    try:
+        path = Path(path).expanduser().resolve()
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"scorecard_runs", "calibration_factors"} <= tables:
+                return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+            rows = conn.execute("SELECT r.finished_at,f.factor FROM calibration_factors f "
+                "JOIN scorecard_runs r ON r.id=f.run_id WHERE r.status='completed' "
+                "AND f.symbol=? AND f.kind='sigma' AND f.horizon_h=24 "
+                "AND f.factor>0 ORDER BY r.finished_at,f.computed_at", (symbol,)).fetchall()
+        dates, factors = [], []
+        for stamp, factor in rows:
+            try:
+                dates.append(_to_timestamp(stamp))
+                factors.append(float(factor))
+            except (TypeError, ValueError):
+                continue
+        return np.asarray(dates, dtype=np.int64), np.asarray(factors, dtype=np.float64)
+    except (OSError, sqlite3.Error):
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+
+
+def _to_timestamp(value):
+    from datetime import datetime, timezone
+    if isinstance(value, (int, float)):
+        return int(value)
+    stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return int(stamp.timestamp())
+
+
+def _remove_log_trend(bars):
+    """Quita pendiente OLS del log-cierre y conserva el primer precio exacto."""
+    close = np.asarray(bars["close"], dtype=np.float64)
+    x = np.arange(close.shape[-1], dtype=np.float64)
+    x = x - x.mean()
+    logs = np.log(close)
+    slope = np.sum((logs - logs.mean(axis=-1, keepdims=True)) * x, axis=-1) / np.sum(x * x)
+    factor = np.exp(-slope[..., None] * np.arange(close.shape[-1], dtype=np.float64))
+    result = {name: np.asarray(values, dtype=np.float64) * factor
+        for name, values in bars.items()}
+    # La normalización mantiene el close inicial de cada ventana sin alterar su retorno.
+    initial_factor = close[..., :1] / result["close"][..., :1]
+    return {name: values * initial_factor for name, values in result.items()}
 
 
 def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
@@ -84,11 +157,24 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     symbols = sorted({str(piece["symbol"]).upper() for piece in pieces})
     db_path = market_db_path(db_path)
     store = CandleStore(db_path)
-    data = {symbol: store.load(symbol, "5m") for symbol in symbols}
+    loaded = {symbol: store.load(symbol, "5m") for symbol in symbols}
+    cutoff = None if before is None else _to_timestamp(before)
+    data = {}
+    for symbol, candles in loaded.items():
+        stop = (len(candles.close) if cutoff is None else
+            int(np.searchsorted(candles.timestamp, cutoff, side="left")))
+        if stop < 30 * 288 + 1:
+            raise ValueError(f"{symbol}: historia anterior a before insuficiente")
+        data[symbol] = CandleData(np.asarray(candles.timestamp[:stop]),
+            np.asarray(candles.open[:stop]), np.asarray(candles.high[:stop]),
+            np.asarray(candles.low[:stop]), np.asarray(candles.close[:stop]), candles.gaps)
     price = {symbol: float(data[symbol].close[-1]) for symbol in symbols}
     sigma = {symbol: _sigma_estimates(data[symbol]) for symbol in symbols}
-    calibration = _calibration_factors(db_path, symbols)
+    calibration = (_calibration_factors(db_path, symbols) if cutoff is None else
+        _calibration_factors(db_path, symbols, before=cutoff))
     today = {symbol: sigma[symbol][0] for symbol in symbols}
+    today_calibrated = {symbol: today[symbol] * calibration.get(symbol, 1.0)
+        for symbol in symbols}
     long = {symbol: sigma[symbol][1] for symbol in symbols}
     target_count = int(n_scenarios)
     has_smart = any(str(piece["strategy"]).lower() == "smart" for piece in pieces)
@@ -111,7 +197,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             market = batch["symbols"][symbol]
             low, high = piece.get("low"), piece.get("high")
             if piece.get("width_sigma") is not None:
-                width = _log_width_from_sigma_24h(today[symbol], horizon,
+                width = _log_width_from_sigma_24h(today_calibrated[symbol], horizon,
                     piece["width_sigma"])
                 low, high = price[symbol] * np.exp(-width), price[symbol] * np.exp(width)
             if strategy == "bot" and piece.get("buy_offset_pct") is not None:
@@ -220,10 +306,14 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     if mode == "alternativas":
         comparisons = _paired_alternatives(pieces, piece_scenario_curves, capital=capital,
             target=meta, loss_pct=loss_pct, seed=seed)
+    effective_sigma = {symbol: today[symbol] * calibration.get(symbol, 1.0)
+        for symbol in symbols}
     return {"profile": str(perfil).upper(), "mode": mode, "fee_pct": float(fee_pct),
         "horizon_days": horizon,
         "n_scenarios": target_count, "pieces": piece_results, "portfolio": portfolio,
-        "smart_paired": comparisons, "calibration_factors": calibration}
+        "smart_paired": comparisons, "calibration_factors": calibration,
+        "sigma_today_24h": effective_sigma,
+        "as_of_ts": cutoff if cutoff is not None else int(max(data[s].timestamp[-1] for s in symbols))}
 
 
 def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=1000):
@@ -256,127 +346,144 @@ def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=
 
 def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
         months=24, step_days=7, since=None, symbols=None, fee_pct=.1,
-        library_dir="data/derived/scenario_lib", seed=43, replicas=1000):
-    """Evalúa piezas en ventanas históricas causales y en una variante sin tendencia.
-
-    Cada geometría se centra en el precio de inicio y usa una sigma estimada solo
-    con las 30 jornadas anteriores. La segunda variante elimina la pendiente
-    lineal del log-precio en la ventana, conservando los movimientos relativos.
-    """
-    from datetime import datetime, timezone
+        library_dir="data/derived/scenario_lib", seed=43, replicas=1000,
+        n_smart=200, workers=2):
+    """Evalua historia real causal por lotes y una variante sin tendencia lineal."""
     from research.scenarios.fastsim import simulate_simple, simulate_bot
+    from research.scenarios.metrics import summarize
     from grid.sim.meta_portfolio import evaluate_portfolio
     if not pieces or capital <= 0 or step_days <= 0 or fee_pct < 0:
-        raise ValueError("piezas, capital, paso y comisión deben ser válidos")
+        raise ValueError("piezas, capital, paso y comision deben ser validos")
     profile = DEFAULT_PROFILES[str(perfil).upper()]
     horizon_days = int(profile["max_days"])
     horizon_bars = horizon_days * 288
     symbols_used = sorted({str(p["symbol"]).upper() for p in pieces})
     store = CandleStore(market_db_path(db_path))
-    start_cutoff = None
-    if since:
-        start_cutoff = int(datetime.fromisoformat(str(since).replace("Z", "+00:00"))
-            .replace(tzinfo=timezone.utc).timestamp())
+    start_cutoff = None if since is None else _to_timestamp(since)
     result = {"mode": "historia", "fee_pct": float(fee_pct),
         "horizon_days": horizon_days, "symbols": {}}
     for symbol in symbols_used:
         data = store.load(symbol, "5m")
         ts = np.asarray(data.timestamp, dtype=np.int64)
         close = np.asarray(data.close, dtype=np.float64)
-        open_ = np.asarray(data.open, dtype=np.float64)
+        opn = np.asarray(data.open, dtype=np.float64)
         high = np.asarray(data.high, dtype=np.float64)
         low = np.asarray(data.low, dtype=np.float64)
-        min_history = 30 * 288 + horizon_bars
-        if len(close) < min_history:
+        calibration_ts, calibration_values = _calibration_factor_timeline(
+            getattr(store, "path", db_path), symbol)
+        if len(close) < 30 * 288 + horizon_bars:
             result["symbols"][symbol] = {"estado": "historia_insuficiente", "ventanas": 0}
             continue
-        latest = int(ts[-1])
-        cutoff = start_cutoff if start_cutoff is not None else latest - int(months) * 30 * 86400
-        first_start = max(30 * 288, int(np.searchsorted(ts, cutoff)))
-        end_start = len(close) - horizon_bars
-        starts = list(range(first_start, end_start + 1, int(step_days) * 288))
-        by_piece = []
-        for piece in [p for p in pieces if str(p["symbol"]).upper() == symbol]:
+        cutoff = start_cutoff if start_cutoff is not None else int(ts[-1] - months * 30 * 86400)
+        first = max(30 * 288 + 1, int(np.searchsorted(ts, cutoff, side="left")))
+        last = len(close) - horizon_bars
+        starts = np.arange(first, last + 1, int(step_days) * 288, dtype=np.int64)
+        pieces_result = []
+        for piece_index, piece in enumerate(p for p in pieces if str(p["symbol"]).upper() == symbol):
             strategy = str(piece["strategy"]).lower()
-            pnl_by_variant = {"real": [], "sin_tendencia": []}
-            loss_by_variant = {"real": [], "sin_tendencia": []}
-            target_by_variant = {"real": [], "sin_tendencia": []}
-            for start in starts:
-                stop = start + horizon_bars + 1
-                train = np.diff(np.log(close[start - 30 * 288:start + 1]))
-                sigma_24h = float(np.sqrt(np.sum(train[-288:] ** 2)))
-                if not np.isfinite(sigma_24h) or sigma_24h <= 0:
-                    continue
-                price0 = float(close[start])
-                width = float(piece.get("width_sigma", 2.0)) * sigma_24h * np.sqrt(horizon_days)
-                lower, upper = piece.get("low"), piece.get("high")
-                if lower is None or upper is None:
-                    lower, upper = price0 * np.exp(-width), price0 * np.exp(width)
+            if strategy not in {"simple", "bot", "smart"}:
+                raise ValueError("historia solo admite simple, bot y smart")
+            chosen = starts.copy()
+            if strategy == "smart" and len(chosen) > int(n_smart):
+                chosen = np.sort(np.random.default_rng(seed + piece_index).choice(
+                    chosen, size=int(n_smart), replace=False))
+            sigmas, prices0 = [], []
+            for start in chosen:
+                calibration_index = int(np.searchsorted(calibration_ts, ts[start], side="left")) - 1
+                calibration = (float(calibration_values[calibration_index])
+                    if calibration_index >= 0 else 1.0)
+                sigmas.append(causal_sigma_24h(close, ts, int(start), calibration))
+                prices0.append(float(opn[start]))
+            sigmas = np.asarray(sigmas, dtype=np.float64)
+            prices0 = np.asarray([close[i - 1] for i in chosen], dtype=np.float64)
+            if not len(chosen):
+                pieces_result.append({"piece": piece, "estado": "sin_ventanas"})
+                continue
+            widths = float(piece.get("width_sigma", 2.0)) * sigmas * np.sqrt(horizon_days)
+            lower = prices0 * np.exp(-widths)
+            upper = prices0 * np.exp(widths)
+            if piece.get("low") is not None and piece.get("high") is not None:
+                reference = float(close[-1])
+                lower = float(piece["low"]) * prices0 / reference
+                upper = float(piece["high"]) * prices0 / reference
+            if strategy == "bot":
+                buy = prices0 * (1 + float(piece.get("buy_offset_pct", -1.5)) / 100)
+                margin = float(profile["min_margin_pct"]) + .2
+                default_sell = buy * (1 + (margin + .2) / 100)
+                sell = prices0 * (1 + float(piece["sell_offset_pct"]) / 100) \
+                    if piece.get("sell_offset_pct") is not None else default_sell
+                buy = np.asarray(piece.get("buy_price", buy), dtype=np.float64)
+                sell = np.asarray(piece.get("sell_price", sell), dtype=np.float64)
+                if buy.ndim == 0: buy = buy * prices0 / float(close[-1])
+                if sell.ndim == 0: sell = sell * prices0 / float(close[-1])
+            starts_bars = {"open": np.stack([opn[i:i+horizon_bars] for i in chosen]),
+                "high": np.stack([high[i:i+horizon_bars] for i in chosen]),
+                "low": np.stack([low[i:i+horizon_bars] for i in chosen]),
+                "close": np.stack([close[i:i+horizon_bars] for i in chosen])}
+            variants = {"real": starts_bars, "sin_tendencia": _remove_log_trend(starts_bars)}
+            variant_results = {}
+            geometry_rows = []
+            if strategy == "bot":
+                geometry_rows = [{"timestamp": int(ts[index]), "sigma_24h": float(sigmas[row]),
+                    "buy_price": float(buy[row]),
+                    "sell_price": float(sell[row])} for row, index in enumerate(chosen)]
+            else:
+                geometry_rows = [{"timestamp": int(ts[index]), "sigma_24h": float(sigmas[row]),
+                    "low": float(lower[row]),
+                    "high": float(upper[row])} for row, index in enumerate(chosen)]
+            for variant, bars in variants.items():
+                if strategy == "simple":
+                    sim = simulate_simple(bars, n_levels=int(piece.get("n", 6)),
+                        capital=float(piece["capital"]), low=lower, high=upper,
+                        filters=store.filters(symbol), max_loss_pct=float(profile["max_loss_pct"]),
+                        target_usdt=meta, initial_timestamp=1_700_000_100,
+                        pack_curves=True, fee_pct=fee_pct)
+                    curves = sim["curves"]
+                    cycles, inventory, inv_value = sim["cycles"], sim["inventory_qty"], sim["inventory_value"]
+                elif strategy == "bot":
+                    sim = simulate_bot(bars, capital=float(piece["capital"]),
+                        buy_price=buy, sell_price=sell, filters=store.filters(symbol),
+                        max_loss_pct=float(profile["max_loss_pct"]), target_usdt=meta,
+                        initial_timestamp=1_700_000_100, pack_curves=True, fee_pct=fee_pct)
+                    curves = sim["curves"]
+                    cycles, inventory, inv_value = sim["cycles"], sim["inventory_qty"], sim["inventory_value"]
                 else:
-                    # La especificación se expresa respecto al último precio y
-                    # se escala al precio causal de inicio de cada ventana.
-                    reference_price = float(close[-1])
-                    lower = float(lower) * price0 / reference_price
-                    upper = float(upper) * price0 / reference_price
-                raw = {"open": open_[start:stop].copy(), "high": high[start:stop].copy(),
-                    "low": low[start:stop].copy(), "close": close[start:stop].copy()}
-                variants = {"real": raw}
-                log_close = np.log(raw["close"])
-                x = np.arange(len(log_close), dtype=np.float64)
-                slope = float(np.polyfit(x, log_close, 1)[0])
-                factor = np.exp(-slope * x)
-                variants["sin_tendencia"] = {key: value * factor for key, value in raw.items()}
-                for variant, bars in variants.items():
-                    scenario = {key: value[None, :] for key, value in bars.items()}
-                    if strategy == "bot":
-                        buy = float(piece.get("buy_price", lower))
-                        sell = float(piece.get("sell_price", upper))
-                        sim = simulate_bot(scenario, capital=float(piece["capital"]),
-                            buy_price=buy, sell_price=sell, filters=store.filters(symbol),
-                            max_loss_pct=float(profile["max_loss_pct"]), target_usdt=meta,
-                            initial_timestamp=1_700_000_100, pack_curves=True, fee_pct=fee_pct)
-                        curve = sim["curves"][0]
-                    elif strategy == "simple":
-                        sim = simulate_simple(scenario, n_levels=int(piece.get("n", 6)),
-                            capital=float(piece["capital"]), low=lower, high=upper,
-                            filters=store.filters(symbol), max_loss_pct=float(profile["max_loss_pct"]),
-                            target_usdt=meta, initial_timestamp=1_700_000_100,
-                            pack_curves=True, fee_pct=fee_pct)
-                        curve = sim["curves"][0]
-                    else:
-                        raise ValueError("evaluate_history admite simple y bot; Smart se evalúa aparte")
-                    outcome = evaluate_portfolio([curve], capital_initial=float(capital),
-                        target_usdt=meta, max_loss_pct=float(profile["max_loss_pct"]))
-                    pnl_by_variant[variant].append(float(outcome["pnl_usdt"]))
-                    loss_by_variant[variant].append(bool(outcome["loss_cut"]))
-                    target_by_variant[variant].append(bool(outcome["reached"]))
-            variants_summary = {}
-            for variant in pnl_by_variant:
-                pnls = np.asarray(pnl_by_variant[variant], dtype=np.float64)
-                if not len(pnls):
-                    variants_summary[variant] = {"n": 0, "estado": "sin_ventanas"}
-                    continue
+                    sigma_path = np.repeat(sigmas[:, None], horizon_days, axis=1)
+                    smart = evaluate_smart_scenarios(bars, n_levels=int(piece.get("n", 6)),
+                        capital=float(piece["capital"]), low=lower, high=upper,
+                        filters=store.filters(symbol), sigma_path=sigma_path,
+                        n_smart=min(len(chosen), int(n_smart)), workers=workers,
+                        max_loss_pct=float(profile["max_loss_pct"]), fee_pct=fee_pct)
+                    curves = [row["curve"] for row in smart]
+                    cycles = np.asarray([row["metrics"].get("cycles_completed", 0) for row in smart])
+                    inventory = np.asarray([row["inventory_qty"] for row in smart])
+                    inv_value = np.asarray([row["inventory_value"] for row in smart])
+                summary = summarize(curves, capital_initial=float(capital), target_usdt=meta,
+                    max_loss_pct=float(profile["max_loss_pct"]), horizon_days=horizon_days,
+                    cycles=cycles, inventory_qty=inventory, inventory_value=inv_value,
+                    seed=seed, replicas=replicas)
+                rows = [evaluate_portfolio([curve], capital_initial=float(capital),
+                    target_usdt=meta, max_loss_pct=float(profile["max_loss_pct"])) for curve in curves]
+                pnls = np.asarray([row["pnl_usdt"] for row in rows])
                 block = max(1, int(np.ceil(20 / step_days)))
-                rng = np.random.default_rng(seed + len(variants_summary))
+                rng = np.random.default_rng(seed + piece_index)
                 boot = []
                 for _ in range(int(replicas)):
                     selected = []
                     while len(selected) < len(pnls):
-                        idx = int(rng.integers(0, len(pnls)))
-                        selected.extend((idx + np.arange(block)) % len(pnls))
+                        pos = int(rng.integers(0, len(pnls)))
+                        selected.extend((pos + np.arange(block)) % len(pnls))
                     boot.append(float(np.mean(pnls[np.asarray(selected[:len(pnls)], dtype=int)])))
-                variants_summary[variant] = {"n": len(pnls),
-                    "ventanas_independientes_aprox": max(1, int(np.ceil(len(pnls) / block))),
-                    "pnl_medio_usdt": float(pnls.mean()),
-                    "pnl_diario_usdt": float(pnls.mean() / horizon_days),
-                    "pnl_p10_usdt": float(np.quantile(pnls, .1)),
-                    "pnl_p50_usdt": float(np.quantile(pnls, .5)),
-                    "pnl_p90_usdt": float(np.quantile(pnls, .9)),
-                    "p_loss": float(np.mean(loss_by_variant[variant])),
-                    "p_target": float(np.mean(target_by_variant[variant])),
-                    "ic95_pnl_medio": [float(np.quantile(boot, .025)), float(np.quantile(boot, .975))]}
-            by_piece.append({"piece": piece, "variantes": variants_summary})
-        result["symbols"][symbol] = {"ventanas_candidatas": len(starts), "pieces": by_piece}
+                summary["pnl_mean_ci95"] = [float(np.quantile(boot, .025)), float(np.quantile(boot, .975))]
+                variant_results[variant] = {"metrics": summary,
+                    "starts": [{"timestamp": int(ts[i]), "sigma_24h": float(sigma),
+                        "pnl_usdt": float(row["pnl_usdt"]), "reached": bool(row["reached"]),
+                        "loss_cut": bool(row["loss_cut"])}
+                        for i, sigma, row in zip(chosen, sigmas, rows)]}
+            del starts_bars, variants, bars
+            pieces_result.append({"piece": piece, "n": len(chosen), "variantes": variant_results})
+            pieces_result[-1]["geometrias"] = geometry_rows
+        result["symbols"][symbol] = {"ventanas_candidatas": len(starts), "pieces": pieces_result}
     return result
 
 

@@ -46,6 +46,8 @@ def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
         for key in ("open", "high", "low", "close")}
     n = min(int(n_smart), bars["close"].shape[0])
     length = bars["close"].shape[1]
+    lows = np.broadcast_to(np.asarray(low, dtype=np.float64), (bars["close"].shape[0],))
+    highs = np.broadcast_to(np.asarray(high, dtype=np.float64), (bars["close"].shape[0],))
     sigma = (None if sigma_path is None else
         np.repeat(np.asarray(sigma_path, dtype=np.float64)[:n], 288, axis=1)[:, :length])
     filters = FILTERS if filters is None else filters
@@ -53,7 +55,7 @@ def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
     for index in range(n):
         row = {key: value[index].copy() for key, value in bars.items()}
         row_sigma = None if sigma is None else sigma[index].copy()
-        tasks.append((row, row_sigma, int(n_levels), float(capital), float(low), float(high),
+        tasks.append((row, row_sigma, int(n_levels), float(capital), float(lows[index]), float(highs[index]),
             filters, max_loss_pct, float(fee_pct), index))
     if int(workers) > 1 and len(tasks) > 1:
         with get_context("spawn").Pool(processes=int(workers)) as pool:
