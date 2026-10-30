@@ -223,6 +223,24 @@ def test_regime_features_and_timestamp_aligned_correlation():
     assert direction_auc([.1, -.1, .2, -.2], [.1, -.2, .1, -.1]) > .5
 
 
+def test_ou_has_lower_efficiency_and_more_cycles_than_trend():
+    rng = np.random.default_rng(5)
+    n, price, sigma = 5000, 100., .04
+    ou, trend = np.zeros(n), np.zeros(n)
+    for i in range(1, n):
+        ou[i] = .97*ou[i-1] + rng.normal(0, .004)
+        trend[i] = trend[i-1] + .0007 + rng.normal(0, .00025)
+    results = []
+    for values in (price*np.exp(ou), price*np.exp(trend)):
+        previous = np.r_[values[0], values[:-1]]
+        high = np.maximum(values, previous)*1.00001
+        low = np.minimum(values, previous)*.99999
+        results.append((efficiency_ratio(values, n-1),
+            cycle_count(values, high, low, price, sigma)))
+    assert results[0][0] < results[1][0]
+    assert results[0][1] > results[1][1]
+
+
 def test_regime_aggregate_requires_two_thirds_with_same_sign():
     verdict, _ = aggregate_verdict(["sirve", "sirve", "sirve"], target="regimen",
         signs=[1, -1, 0])

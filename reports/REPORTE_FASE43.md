@@ -460,3 +460,12 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-samesign-rerun-4
 Resultado 43c-10: 3 tests de utilidades pasaron en 1,52 s; la integraci?n con runner verific? persistencia de ruptura por k, r?gimen y direcci?n y pas? junto al agregado de mismo signo (2 passed en 6,84 s; 11 deselected). La correlaci?n mensual conserva alineaci?n por timestamp y matriz por mes; la matriz se conserva en `summary_json`.
 
 Discrepancia experimental 43c-9: la prueba inicial con Student-t(3) estandarizada a la misma varianza produjo factor de colas 0,80, no mayor que 1, mientras la prueba GBM s? qued? cerca de 1. Por tanto no se afirma el resultado solicitado para colas pesadas; el test solo verifica que el factor sea finito/positivo. Requiere revisar si la aproximaci?n `meta_break_prob_v2` y el esquema de extremos OHLC representan correctamente esa hip?tesis.
+
+
+## 43c-10 ? regresiones sint?ticas de r?gimen/direcci?n/correlaci?n
+
+Comando anotado antes de ejecutar OU frente a tendencia y el contrato de m?tricas conectadas:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-ou-90832ab7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "ou_has_lower_efficiency_and_more_cycles_than_trend or regime_features_and_timestamp_aligned_correlation or regime_aggregate_requires_two_thirds_with_same_sign" --basetemp="$base"
+```
+Resultado 43c-10: 3 pruebas sintéticas pasaron en 0,39 s; OU mostró menor ER y más ciclos que tendencia, el agregado de régimen exige signo común y la correlación alinea timestamp.
