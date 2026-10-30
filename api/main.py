@@ -47,6 +47,8 @@ from grid.meta_operator import MetaOperator
 from grid.intelligence_readiness import IntelligenceReadinessJob
 from grid.grid_intelligence import GridIntelligenceJob
 from grid.intelligence_snapshot import IntelligenceSnapshotService
+from data.market_store import CandleStore, market_db_path
+from data.market_sync import MarketSyncJob
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,6 +136,13 @@ async def lifespan(app: FastAPI):
     app.state.training_job_service = training_job_service
     app.state.coin_onboarding_service = coin_onboarding_service
     public_market_client = BinanceClient("", "")
+    market_sync_job = None
+    market_path = market_db_path(settings.market_data_db)
+    if settings.market_sync_enabled and market_path.is_file():
+        market_sync_job = MarketSyncJob(CandleStore(market_path), public_market_client)
+        market_sync_job.start()
+    elif settings.market_sync_enabled:
+        logging.getLogger(__name__).warning("MARKET_SYNC no registrado: no existe %s", market_path)
     grid_scan_service = GridScanService(db, public_market_client, settings)
     grid_auto_open = GridAutoOpen(grid_scan_service, db, grid_engine, testnet_client, settings)
     alert_dispatcher = AlertDispatcher(db, Settings)
@@ -265,6 +274,7 @@ async def lifespan(app: FastAPI):
             "GRIDS": summary.get("grid_intelligence_readiness") or {}}
     grid_intelligence_job = IntelligenceReadinessJob(evaluate_grid_readiness, alert_dispatcher)
     app.state.grid_intelligence_job = grid_intelligence_job
+    app.state.market_sync_job = market_sync_job
     grid_intelligence_job.start()
     grid_intel_shadow_job.start()
     prediction_loop.start()
@@ -298,6 +308,8 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_intelligence_job.stop()
+        if market_sync_job is not None:
+            market_sync_job.stop()
         intelligence_snapshot.shutdown()
         grid_intel_shadow_job.stop()
         meta_core.stop()

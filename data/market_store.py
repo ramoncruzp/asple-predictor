@@ -194,6 +194,33 @@ class CandleStore:
                 "ON CONFLICT(symbol_id,interval) DO UPDATE SET last_sync_at=excluded.last_sync_at,last_error=excluded.last_error",
                 (symbol_id, str(interval), datetime.now(timezone.utc).isoformat(), str(error)))
 
+    def active_symbols(self):
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT symbol,role FROM symbols WHERE active=1 ORDER BY symbol")]
+
+    def sync_position(self, symbol, interval="5m"):
+        with self._connect() as conn:
+            symbol_id = self._symbol_id(conn, symbol)
+            if symbol_id is None:
+                return None
+            row = conn.execute("SELECT last_closed_ts FROM sync_state WHERE symbol_id=? AND interval=?",
+                (symbol_id, str(interval))).fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+            result = conn.execute("SELECT MAX(open_ts) FROM candles WHERE symbol_id=? AND interval=?",
+                (symbol_id, str(interval))).fetchone()
+            return int(result[0]) if result and result[0] is not None else None
+
+    def update_sync_state(self, symbol, interval, last_closed_ts, source):
+        symbol_id = self.register_symbol(symbol)
+        with self._connect() as conn:
+            conn.execute("INSERT INTO sync_state(symbol_id,interval,first_ts,last_closed_ts,last_sync_at,last_source,last_error) "
+                "VALUES(?,?,NULL,?,?,?,NULL) ON CONFLICT(symbol_id,interval) DO UPDATE SET "
+                "last_closed_ts=excluded.last_closed_ts,last_sync_at=excluded.last_sync_at,"
+                "last_source=excluded.last_source,last_error=NULL",
+                (symbol_id, str(interval), int(last_closed_ts), datetime.now(timezone.utc).isoformat(), str(source)))
+
     def _symbol_id(self, conn, symbol):
         key = str(symbol).strip().upper().replace("/", "")
         row = conn.execute("SELECT id FROM symbols WHERE symbol=?", (key,)).fetchone()
