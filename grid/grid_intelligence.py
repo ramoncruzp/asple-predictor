@@ -177,15 +177,17 @@ class GridIntelligenceJob:
         if not self._grid_intel_guard.acquire(blocking=False):
             return {"status": "skipped", "reason": "ejecución horaria anterior activa"}
         started = time.perf_counter()
+        self._lower_job_priority()
         summary = {"status": "completed", "included": [], "included_details": [], "excluded": [],
             "recommendations": 0, "candidates_evaluated": 0, "budget_exceeded": False,
-            "per_grid_budget_s": self.per_grid_budget_s, "grid_results": [],
+            "per_grid_budget_s": self.per_grid_budget_s, "total_budget_s": self.budget_s, "grid_results": [],
             "duration_s": 0.0, "timings_s": {"candles": 0.0, "advisor": 0.0,
                 "replay": 0.0, "persistence": 0.0}, "cache_hits": 0}
         try:
             self._prune_process_caches()
             grids = self.db.list_grids_by_status({"OPENING", "ACTIVE", "PAUSED", "CLOSING",
                 "HOLDING", "CLOSED", "CANCELLED", "FAILED", "ERROR"})
+            grids = self._rotate_grids(grids)
             for grid in grids:
                 reason = self._excluded_reason(grid)
                 if reason:
@@ -406,14 +408,11 @@ class GridIntelligenceJob:
         strategy = str(grid["strategy"]).lower()
         params = _json(grid.get("params"))
         levels = self.db.get_grid_levels(grid_id)
-        inventory_cells = [row for row in levels if float(row.get("held_qty") or 0) > 0]
-        free_cells = [row for row in levels if float(row.get("held_qty") or 0) <= 0]
+        accounting = _inventory_accounting(levels)
+        inventory_cells, free_cells = accounting["inventory_cells"], accounting["free_cells"]
+        inventory_lots = accounting["inventory_lots"]
         capital = float(grid.get("capital_total") or sum(float(row.get("capital") or 0) for row in levels))
-        free_cash = sum(float(row.get("capital") or 0) for row in free_cells
-            if str(row.get("state", "")).upper() in {"IDLE", "DONE"} and row.get("order_id") is None)
-        free_cash_cells = [row for row in free_cells if str(row.get("state", "")).upper() in {"IDLE", "DONE"}
-            and row.get("order_id") is None]
-        free_cash_level_ids = [int(row["level_idx"]) for row in free_cash_cells]
+        free_cash, free_cash_level_ids = accounting["free_cash"], accounting["free_cash_level_ids"]
         candles_started = time.perf_counter()
         candles = self._candles(symbol)
         summary["timings_s"]["candles"] += time.perf_counter() - candles_started
