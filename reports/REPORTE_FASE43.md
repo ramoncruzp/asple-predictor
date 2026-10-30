@@ -306,3 +306,11 @@ Comando de regresión antes de cerrar la base estadística 43c-2/3:
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c23-final-2499ec4f'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
 ```
 Resultado de cierre 43c-2/3: 3 passed en 0,06 s.
+
+## 43c-4 — persistencia, CLI y modo seco
+
+Comando anotado antes de verificar que la corrida seca no muta la BD sintética y que el motor estadístico sigue pasando:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c4-runner-60b6a957'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+Resultado 43c-4: 4 passed en 0,12 s. El CLI muestra los argumentos solicitados. La prueba de `--dry-run` confirmó bytes sin cambios y ausencia de tablas nuevas. No se midió tiempo sobre dos años ni se ejecutó sobre las 21 monedas: solo DB sintéticas están autorizadas.

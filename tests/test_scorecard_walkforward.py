@@ -4,6 +4,7 @@ import numpy as np
 
 from research.scorecard.metrics import calibration, qlike
 from research.scorecard.diagnostics import efficiency_ratio, rupture_probabilities
+from research.scorecard.runner import run_scorecard
 from research.scorecard.walkforward import walk_forward
 
 
@@ -42,5 +43,24 @@ def test_break_probability_declines_when_band_widens_and_efficiency_bounds():
     probabilities = rupture_probabilities(100, 90, 110, 0.03, 24)
     assert probabilities[1.0] > probabilities[3.0]
     assert 0 <= efficiency_ratio([100, 99, 101, 100, 102], 4) <= 1
+
+
+def test_dry_run_reads_synthetic_market_database_without_writing(tmp_path):
+    import sqlite3
+    from data.market_store import CandleStore
+
+    path = tmp_path / "market_data.db"
+    store = CandleStore(path)
+    store.register_symbol("SYNUSDT", role="datos")
+    store.upsert("SYNUSDT", "5m", [
+        {"open_ts": 1_700_000_100 + i * 300, "open": 100, "high": 101,
+         "low": 99, "close": 100 + i * .001} for i in range(100)], "synthetic")
+    before = path.read_bytes()
+    result = run_scorecard(path, symbols=["SYNUSDT"], horizons=(24,), dry_run=True)
+    assert before == path.read_bytes()
+    assert result["summary"]["insufficient"] == ["SYNUSDT"]
+    with sqlite3.connect(path) as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "scorecard_runs" not in names
 
 
