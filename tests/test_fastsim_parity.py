@@ -101,8 +101,16 @@ def test_pepe_geometry_uses_tick_filters():
     filters = SymbolFilters(Decimal("0.00000001"), Decimal("0.00000001"), Decimal("1"),
         Decimal("1"), Decimal("1"), Decimal("100000000000"), Decimal("0.0001"),
         True, 200)
-    close = np.full(20, 0.0001)
+    close = np.r_[np.full(5, .0001), np.linspace(.0001, .000087, 5),
+        np.linspace(.000087, .000112, 10)]
     scenario = _scenario(close)
+    trace = []
+    reference = run_simulation(_candles(scenario), strategy="simple", n=4,
+        capital=1, low=.00008, high=.00012, filters=filters, params={}, fee_pct=.1,
+        resync_candles=3, meta_portfolio_piece=True, trace_callback=trace.append)
     result = simulate_simple(scenario, n_levels=4, capital=1,
-        low=.00008, high=.00012, filters=filters)
+        low=.00008, high=.00012, filters=filters, initial_timestamp=0)
     assert result["final_equity"].dtype == np.float64
+    assert result["buys"][0] == sum(event["type"] == "BUY_FILLED" for event in reference["events"])
+    assert result["sells"][0] == sum(event["type"] == "SELL_FILLED" for event in reference["events"])
+    assert abs(float(result["pnl_usdt"][0]) - reference["metrics"]["pnl_total_net_usdt"]) <= .02
