@@ -209,3 +209,14 @@ La primera ejecución tuvo dos fallas por notional insuficiente en la geometría
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6c-historia-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
 ```
+
+
+## 43e-6d - script de resumen histórico (parcial)
+
+Se añadió `scripts/escenarios_validar.py`, que recorre el mismo cálculo histórico descriptivo y escribe un reporte Markdown con PnL, P(meta), P(límite), IC y variante sin tendencia. Se ejecuta solo con la DB indicada por Ramón. No implementa el protocolo completo de aceptación de la petición: no compara distribuciones FHS de 1.000 escenarios con resultados realizados ni baseline v1.
+
+Comando exacto de prueba, anotado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6d-script-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate_script.py tests/test_scenarios_history.py --basetemp="$base"
+```
