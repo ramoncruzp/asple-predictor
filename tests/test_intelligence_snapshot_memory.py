@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import time
 import tracemalloc
 
 from database.db_manager import DBManager
@@ -49,5 +50,19 @@ def test_oversized_snapshot_does_not_replace_the_last_valid_one(tmp_path, monkey
     assert service.wait(2)
     assert service.snapshot is previous
     assert "supera el l\u00edmite" in service.status()["last_error"]
+
+
+def test_auxiliary_snapshot_cache_has_a_byte_cap(tmp_path, monkeypatch):
+    import grid.intelligence_snapshot as snapshot_module
+
+    db = DBManager(f"sqlite:///{tmp_path / 'snapshot-aux-limit.sqlite'}")
+    monkeypatch.setattr(snapshot_module, "INTELLIGENCE_AUX_CACHE_MAX_BYTES", 256)
+    service = IntelligenceSnapshotService(db, lambda: {"ok": True})
+    service.request_aux_refresh("grande", lambda: {"payload": "x" * 1000})
+    deadline = time.monotonic() + 2
+    while service._aux_active and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert service.get_aux("grande") is None
+    assert service.status()["aux_cache_bytes"] == 0
 
 

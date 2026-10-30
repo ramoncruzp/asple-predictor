@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -19,7 +20,7 @@ GRID_INTEL_BUDGET_S = 60.0
 GRID_INTEL_PER_GRID_BUDGET_S = 45.0
 GRID_INTEL_MIN_GAIN_PCT = 0.3
 GRID_INTEL_MAX_DRAWDOWN_DELTA_PP = 1.0
-GRID_INTEL_METHOD_VERSION = "grid_shadow_42c39_v2"
+GRID_INTEL_METHOD_VERSION = "grid_shadow_42c40_v3"
 GRID_INTEL_RETENTION_DAYS = 30
 GRID_INTEL_WINDOW_DAYS = 7
 GRID_INTEL_WINDOW_STEP_DAYS = 14
@@ -28,6 +29,7 @@ GRID_INTEL_MIN_BOT_CASH_USDT = 5.5
 GRID_INTEL_BREAK_PAUSE_THRESHOLD = 0.70
 GRID_INTEL_HIGH_VOLATILITY_THRESHOLD = 0.10
 GRID_INTEL_PROCESS_CACHE_MAX = 512
+GRID_INTEL_PROCESS_CACHE_MAX_BYTES = 200 * 1024 * 1024
 GRID_INTEL_PERSISTENCE_H = 2
 GRID_INTEL_COOLDOWN_H = 6
 GRID_INTEL_MAX_CHANGES_24H = 2
@@ -77,6 +79,27 @@ def recommend_grid_action(candidates, capital):
     return eligible[0], "supera ganancia mínima y límite de drawdown"
 
 
+def _inventory_accounting(levels):
+    inventory_cells = [row for row in levels if float(row.get("held_qty") or 0) > 0]
+    free_cells = [row for row in levels if float(row.get("held_qty") or 0) <= 0]
+    free_cash_cells = [row for row in free_cells if str(row.get("state", "")).upper() in {"IDLE", "DONE"}
+        and row.get("order_id") is None]
+    free_cash = sum(float(row.get("capital") or 0) for row in free_cash_cells)
+    inventory_lots = []
+    for row in inventory_cells:
+        entry_price = float(row.get("entry_price") or 0)
+        if entry_price <= 0:
+            raise ValueError(f"precio de entrada ausente en celda {row.get('level_idx')}")
+        entry_cost = float(row.get("held_qty") or 0) * entry_price
+        actual_fee = float(row.get("fee_paid") or 0)
+        inventory_lots.append({"held_qty": float(row.get("held_qty") or 0),
+            "entry_cost": entry_cost, "entry_fee_usdt": actual_fee if actual_fee > 0 else entry_cost * .001})
+    return {"inventory_cells": inventory_cells, "free_cells": free_cells,
+        "free_cash_cells": free_cash_cells, "free_cash": free_cash,
+        "free_cash_level_ids": [int(row["level_idx"]) for row in free_cash_cells],
+        "inventory_lots": inventory_lots}
+
+
 def retained_inventory_metrics(candle_timestamps, closes, trace_rows, free_equity, inventory_lots, starting_cash,
                                fee_rate=.001, reference_price=None, window_start_price=None):
     """Ganancia y drawdown con inventario retenido marcado a bid neto de comisión."""
@@ -92,8 +115,10 @@ def retained_inventory_metrics(candle_timestamps, closes, trace_rows, free_equit
             raise ValueError("el precio inicial de la ventana debe ser positivo")
         scale = float(reference_price) / start_price
     path = []
-    for item, value in zip(trace_rows, free_equity):
-        pos = int(np.searchsorted(candle_timestamps, int(item["timestamp"]), side="right") - 1)
+    trace_timestamps = trace_rows if isinstance(trace_rows, np.ndarray) else np.fromiter(
+        (int(item["timestamp"]) for item in trace_rows), dtype=np.int64)
+    for stamp, value in zip(trace_timestamps, free_equity):
+        pos = int(np.searchsorted(candle_timestamps, int(stamp), side="right") - 1)
         pos = max(0, min(pos, len(closes) - 1))
         path.append(float(value) + held_qty * float(closes[pos]) * scale * (1 - fee_rate))
     if not path:
@@ -128,6 +153,11 @@ class GridIntelligenceJob:
         self.last_summary = {"status": "not_run"}
         self._replay_cache = OrderedDict()
         self._candles_cache = OrderedDict()
+        self._replay_cache_bytes = 0
+        self._candles_cache_bytes = 0
+        self._last_grid_order = []
+        self._cache_day = int(self.clock().timestamp() // 86400)
+        self._cache_lru = OrderedDict()
 
     def start(self):
         self.scheduler.add_job(self.run_once, "cron", minute=7, second=0, timezone="UTC",
@@ -203,6 +233,9 @@ class GridIntelligenceJob:
             logger.exception("Falló el job horario de inteligencia de grids")
         finally:
             summary["duration_s"] = round(time.perf_counter() - started, 3)
+            summary["process_memory"] = self._process_memory_stats()
+            self._last_grid_order = [int(item["grid_id"]) for item in summary.get("grid_results", [])
+                if item.get("status") == "partial"] + [int(value) for value in summary.get("unprocessed_grid_ids", [])]
             summary["timings_s"] = {key: round(float(value), 3)
                 for key, value in summary.get("timings_s", {}).items()}
             try:
@@ -243,6 +276,7 @@ class GridIntelligenceJob:
         cached = self._candles_cache.get(cache_key)
         if cached is not None:
             self._candles_cache.move_to_end(cache_key)
+            self._touch_cache("candles", cache_key)
             return cached
         from grid.sim.data import CandleData
         import pandas as pd
@@ -254,16 +288,108 @@ class GridIntelligenceJob:
             high=frame.high.to_numpy(float), low=frame.low.to_numpy(float),
             close=frame.close.to_numpy(float), gaps=0)
         self._candles_cache[cache_key] = candles
-        while len(self._candles_cache) > GRID_INTEL_PROCESS_CACHE_MAX:
-            self._candles_cache.popitem(last=False)
+        size = self._estimate_entry_bytes(cache_key, candles)
+        self._candles_cache_bytes += size
+        self._touch_cache("candles", cache_key)
+        self._trim_caches()
         return candles
 
     def _prune_process_caches(self):
         today = int(self.clock().timestamp() // 86400)
         self._candles_cache = OrderedDict((key, value) for key, value in self._candles_cache.items()
             if key[1] == today)
-        # La caché de replay se retiene por LRU: su día es el corte histórico
-        # de la ventana, no el día UTC de hoy.
+        valid = {("candles", key) for key in self._candles_cache}
+        self._cache_lru = OrderedDict((key, None) for key in self._cache_lru if key in valid or key[0] == "replay")
+        self._candles_cache_bytes = sum(self._estimate_entry_bytes(key, value)
+            for key, value in self._candles_cache.items())
+        if today != self._cache_day:
+            self._replay_cache.clear()
+            self._replay_cache_bytes = 0
+            self._cache_lru = OrderedDict((key, value) for key, value in self._cache_lru.items()
+                if key[0] != "replay")
+            self._cache_day = today
+
+    @staticmethod
+    def _estimate_bytes(value):
+        import numpy as np
+        if isinstance(value, np.ndarray):
+            return int(value.nbytes)
+        if hasattr(value, "timestamp") and hasattr(value, "open"):
+            return sum(int(getattr(value, name).nbytes) for name in ("timestamp", "open", "high", "low", "close"))
+        if isinstance(value, dict):
+            return sum(GridIntelligenceJob._estimate_bytes(item) for item in value.values()) + 128
+        if isinstance(value, (tuple, list)):
+            return sum(GridIntelligenceJob._estimate_bytes(item) for item in value) + 64
+        if isinstance(value, (str, bytes)):
+            return len(value)
+        return 64
+
+    @classmethod
+    def _estimate_entry_bytes(cls, key, value):
+        return cls._estimate_bytes(key) + cls._estimate_bytes(value) + 128
+
+    def _trim_caches(self):
+        while (len(self._replay_cache) + len(self._candles_cache) > GRID_INTEL_PROCESS_CACHE_MAX
+                or self._replay_cache_bytes + self._candles_cache_bytes > GRID_INTEL_PROCESS_CACHE_MAX_BYTES):
+            if not self._cache_lru:
+                if self._replay_cache:
+                    self._touch_cache("replay", next(iter(self._replay_cache)))
+                elif self._candles_cache:
+                    self._touch_cache("candles", next(iter(self._candles_cache)))
+                else:
+                    break
+            kind, key = self._cache_lru.popitem(last=False)[0]
+            cache = self._replay_cache if kind == "replay" else self._candles_cache
+            value = cache.pop(key, None)
+            if value is not None and kind == "replay":
+                self._replay_cache_bytes -= self._estimate_entry_bytes(key, value)
+            elif value is not None:
+                self._candles_cache_bytes -= self._estimate_entry_bytes(key, value)
+
+    def _touch_cache(self, kind, key):
+        cache_key = (kind, key)
+        self._cache_lru.pop(cache_key, None)
+        self._cache_lru[cache_key] = None
+
+    def _process_memory_stats(self):
+        cache_bytes = {"replay": self._replay_cache_bytes, "candles": self._candles_cache_bytes}
+        rss = None
+        try:
+            import psutil
+            rss = int(psutil.Process(os.getpid()).memory_info().rss)
+        except (ImportError, OSError):
+            try:
+                if os.name == "posix":
+                    with open("/proc/self/statm", encoding="ascii") as source:
+                        rss = int(source.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+            except (OSError, IndexError, ValueError):
+                pass
+        return {"cache_bytes": cache_bytes, "cache_mb": {key: round(value / 1048576, 3)
+                for key, value in cache_bytes.items()}, "cache_total_mb": round(sum(cache_bytes.values()) / 1048576, 3),
+            "cache_limit_mb": round(GRID_INTEL_PROCESS_CACHE_MAX_BYTES / 1048576, 3), "rss_bytes": rss,
+            "rss_mb": round(rss / 1048576, 3) if rss is not None else None}
+
+    @staticmethod
+    def _lower_job_priority():
+        try:
+            if os.name == "nt":
+                import ctypes
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                return bool(kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1))
+            if os.name == "posix" and hasattr(os, "setpriority"):
+                os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 5)
+                return True
+        except (AttributeError, OSError):
+            return False
+        return False
+
+    def _rotate_grids(self, grids):
+        rows = list(grids)
+        if not rows or not self._last_grid_order:
+            return rows
+        partial = set(self._last_grid_order)
+        return sorted(rows, key=lambda row: (0 if int(row["id"]) in partial else 1,
+            self._last_grid_order.index(int(row["id"])) if int(row["id"]) in partial else 0))
 
     @staticmethod
     def _partial_record(reason):
@@ -340,9 +466,7 @@ class GridIntelligenceJob:
             geometries.append(("pausar_compras", {**baseline_geometry, "pause_buys": True,
                 "break_prob_v2": break_probability, "sigma_24h": sigma}))
         # Existing inventory remains outside every branch: simulations cover free cells/cash only.
-        affected_capital = sum(float(row.get("capital") or 0) for row in free_cells)
-        if affected_capital <= 0:
-            affected_capital = max(0.0, capital - sum(float(row.get("entry_cost") or 0) for row in inventory_cells))
+        affected_capital = free_cash
         affected_capital = min(capital, max(0.0, affected_capital))
         candidates = []
         from grid.adjust import plan_adjust_with_shrink
@@ -410,7 +534,7 @@ class GridIntelligenceJob:
                         break
                     scale = float(sample.open[0]) / max(1e-12, (float(geometry["low"]) + float(geometry["high"])) / 2)
                     replay_capital = (min(float(geometry.get("affected_capital") or 0), affected_capital)
-                        if geometry.get("bot") else max(affected_capital, 5.5))
+                        if geometry.get("bot") else affected_capital)
                     # El resultado depende de la entrada simulada, no del rótulo del candidato.
                     # Así se comparte una curva exacta cuando dos acciones proponen la misma geometría.
                     key = (symbol, strategy, round(replay_capital, 6),
@@ -439,31 +563,36 @@ class GridIntelligenceJob:
                                 direction_signal=([1.0] * len(sample.timestamp) if geometry.get("pause_buys") else None),
                                 trace_callback=trace_rows.append, meta_portfolio_piece=True)
                             sim["trace"] = trace_rows
+                        result = sim["metrics"]
+                        trace = sim.get("trace") or []
+                        if geometry.get("bot"):
+                            compact_equity = [float(item.get("equity") or 0) for item in trace]
+                            fees = float(replay_capital) * .001 * (1 + int(bool(result.get("sold"))))
+                        else:
+                            compact_equity = [float(item.get("equity_incl_dust", item.get("equity", 0)) or 0)
+                                for item in trace]
+                            fees = float(result.get("fees_usdt") or 0)
+                        import numpy as np
+                        sim = {"metrics": result,
+                            "timestamps": np.fromiter((int(item["timestamp"]) for item in trace), dtype=np.int64),
+                            "free_equity": np.asarray(compact_equity, dtype=np.float64), "fees": fees}
                         self._replay_cache[key] = sim
+                        self._replay_cache_bytes += self._estimate_entry_bytes(key, sim)
                         self._replay_cache.move_to_end(key)
-                        while len(self._replay_cache) > GRID_INTEL_PROCESS_CACHE_MAX:
-                            self._replay_cache.popitem(last=False)
+                        self._touch_cache("replay", key)
+                        self._trim_caches()
                     else:
                         self._replay_cache.move_to_end(key)
+                        self._touch_cache("replay", key)
                         summary["cache_hits"] += 1
                     result = sim["metrics"]
-                    trace = sim.get("trace") or []
-                    if geometry.get("bot"):
-                        free_equity = [float(item.get("equity") or 0) for item in trace]
-                        fees = float(replay_capital) * .001 * (1 + int(bool(result.get("sold"))))
-                    else:
-                        free_equity = [float(item.get("equity_incl_dust", item.get("equity", 0)) or 0)
-                            for item in trace]
-                        fees = float(result.get("fees_usdt") or 0)
-                    combined = retained_inventory_metrics(sample.timestamp, sample.close, trace,
-                        free_equity, [{"held_qty": row.get("held_qty"),
-                            "entry_cost": row.get("entry_cost"),
-                            "entry_fee_usdt": row.get("entry_fee_usdt")} for row in inventory_cells],
+                    combined = retained_inventory_metrics(sample.timestamp, sample.close, sim["timestamps"],
+                        sim["free_equity"], inventory_lots,
                         replay_capital, reference_price=current_price, window_start_price=float(sample.open[0]))
                     gain, worst_dd = combined["gain"], combined["drawdown"]
                     metrics.append({"gain": gain,
                         "drawdown": worst_dd,
-                        "fees": fees})
+                        "fees": sim["fees"]})
                 if not metrics:
                     raise ValueError("sin ventanas históricas simulables")
                 gains = sorted(row["gain"] for row in metrics)
@@ -503,9 +632,7 @@ class GridIntelligenceJob:
             "signals": {"inventory_cells_retained": len(inventory_cells), "free_cells": len(free_cells),
                 "free_cash_usdt": free_cash, "sigma_24h": sigma, "sigma_source": sigma_source,
                 "break_prob_v2": break_probability,
-                "inventory_lots": [{"held_qty": float(row.get("held_qty") or 0),
-                    "entry_cost": float(row.get("entry_cost") or 0),
-                    "entry_fee_usdt": float(row.get("entry_fee_usdt") or 0)} for row in inventory_cells],
+                "inventory_lots": inventory_lots,
                 "simulation_scope": "curva total: parte afectada simulada + inventario retenido marcado a bid neto de 0,1 %"}}
 
     def _persist(self, grid, record):

@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 logger = logging.getLogger("asple.slow")
 INTELLIGENCE_AUX_CACHE_MAX = 50
+INTELLIGENCE_AUX_CACHE_MAX_BYTES = 16 * 1024 * 1024
 INTELLIGENCE_AUX_TTL_S = 300
 INTELLIGENCE_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
 
@@ -28,6 +29,7 @@ class IntelligenceSnapshotService:
         self._snapshot = self._load()
         self._last_error = None
         self._aux_cache = OrderedDict()
+        self._aux_cache_bytes = 0
         self._aux_pending = OrderedDict()
         self._aux_active = False
 
@@ -76,6 +78,8 @@ class IntelligenceSnapshotService:
                 return {"status": "ready", "shared": True}
             self._aux_pending[key] = builder
             self._aux_pending.move_to_end(key)
+            while len(self._aux_pending) > INTELLIGENCE_AUX_CACHE_MAX:
+                self._aux_pending.popitem(last=False)
             if self._aux_active:
                 return {"status": "calculando", "shared": True}
             self._aux_active = True
@@ -92,11 +96,19 @@ class IntelligenceSnapshotService:
             started = time.perf_counter()
             try:
                 value = json.loads(json.dumps(builder(), ensure_ascii=False, default=str))
+                entry_bytes = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + len(key.encode("utf-8")) + 128
                 with self._lock:
-                    self._aux_cache[key] = (time.monotonic(), value)
-                    self._aux_cache.move_to_end(key)
-                    while len(self._aux_cache) > INTELLIGENCE_AUX_CACHE_MAX:
-                        self._aux_cache.popitem(last=False)
+                    if entry_bytes <= INTELLIGENCE_AUX_CACHE_MAX_BYTES:
+                        previous = self._aux_cache.pop(key, None)
+                        if previous is not None:
+                            self._aux_cache_bytes -= previous[2]
+                        self._aux_cache[key] = (time.monotonic(), value, entry_bytes)
+                        self._aux_cache_bytes += entry_bytes
+                        self._aux_cache.move_to_end(key)
+                        while (len(self._aux_cache) > INTELLIGENCE_AUX_CACHE_MAX
+                                or self._aux_cache_bytes > INTELLIGENCE_AUX_CACHE_MAX_BYTES):
+                            _old_key, _old_value = self._aux_cache.popitem(last=False)
+                            self._aux_cache_bytes -= _old_value[2]
                 logger.warning("INTELLIGENCE_AUX_REFRESH key=%s duration_s=%.3f", key,
                     time.perf_counter() - started)
             except Exception:
@@ -151,4 +163,5 @@ class IntelligenceSnapshotService:
         return {"status": "calculando" if self.calculating else snapshot.get("status", "sin_datos"),
             "computed_at": snapshot.get("computed_at"), "snapshot_bytes": len(json.dumps(
                 snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) if snapshot else 0,
-            "last_error": self._last_error}
+            "aux_cache_rows": len(self._aux_cache), "aux_cache_bytes": self._aux_cache_bytes,
+            "aux_cache_limit_bytes": INTELLIGENCE_AUX_CACHE_MAX_BYTES, "last_error": self._last_error}

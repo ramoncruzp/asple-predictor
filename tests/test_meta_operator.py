@@ -288,6 +288,16 @@ def test_process_cache_day_pruning_lru_cap_and_mid_plan_safety():
     assert list(cache) == [(day, "first"), (day, "third")]
 
 
+def test_process_cache_enforces_estimated_byte_limit():
+    from grid.meta_operator import MetaOperator
+    operator = MetaOperator(object(), object(), None, None, None)
+    operator.PROCESS_CACHE_MAX_BYTES = 256
+    operator._cache[("replay-v", "XRPUSDT", 1, "simple")] = {"payload": "x" * 1000}
+    operator._advisor_cache[(1, "XRPUSDT")] = {"payload": "y" * 1000}
+    operator._prune_process_caches(now=86_400)
+    assert sum(row["kb_estimated"] for row in operator._process_cache_stats().values()) == 0
+
+
 def test_noop_payload_compacts_review_result_and_links_plan():
     import json
     from grid.meta_operator import MetaOperator

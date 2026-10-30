@@ -364,6 +364,7 @@ class MetaOperator:
     ADVISOR_CACHE_METHOD_VERSION = "advisor_relative_v1"
     TOUCH_CACHE_METHOD_VERSION = "touch_signal_v2"
     PROCESS_CACHE_MAX_ENTRIES = 500
+    PROCESS_CACHE_MAX_BYTES = 40 * 1024 * 1024
 
     def __init__(self, core, db, scanner, engine, settings, *, advisor=None, alert=None,
                  clock=time.time, price_drift_pct=1.0, cache_enabled=True, cache_writes=True):
@@ -439,6 +440,10 @@ class MetaOperator:
             if enforce_limit:
                 while len(cache) > self.PROCESS_CACHE_MAX_ENTRIES:
                     cache.popitem(last=False)
+                cache_bytes = sum(self._estimated_size(item) for item in cache.items())
+                while cache and cache_bytes > self.PROCESS_CACHE_MAX_BYTES:
+                    key, value = cache.popitem(last=False)
+                    cache_bytes -= self._estimated_size((key, value))
         return self._process_cache_stats()
 
     @classmethod
@@ -465,9 +470,7 @@ class MetaOperator:
         result = {}
         for name, cache in named.items():
             count = len(cache)
-            sample = list(cache.items())[:25]
-            sampled_bytes = sum(self._estimated_size(item) for item in sample)
-            estimated = sampled_bytes / len(sample) * count if sample else 0
+            estimated = sum(self._estimated_size(item) for item in cache.items())
             result[name] = {"rows": count, "kb_estimated": round(estimated / 1024, 2)}
         return result
 

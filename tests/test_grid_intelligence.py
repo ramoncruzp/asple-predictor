@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from database.db_manager import DBManager
 from grid.grid_intelligence import (GRID_INTEL_METHOD_VERSION, GridIntelligenceJob,
-    paired_gain_metrics, recommend_grid_action, retained_inventory_metrics)
+    _inventory_accounting, paired_gain_metrics, recommend_grid_action, retained_inventory_metrics)
 from api.routes.intelligence import _grid_intelligence_readiness_alerts
 from api.routes import grids as grids_api
 from grid.sim.runner import FILTERS
@@ -60,11 +60,75 @@ def test_shadow_recommendation_requires_gain_and_drawdown_gates():
 
 
 def test_retained_inventory_is_valued_at_bid_net_fee_for_gain_and_drawdown():
+    trace = [{"timestamp": 0}, {"timestamp": 300}]
+    equity = [80, 80]
+    lots = [{"held_qty": 2, "entry_cost": 20, "entry_fee_usdt": 0}]
     result = retained_inventory_metrics([0, 300], [10, 8],
-        [{"timestamp": 0}, {"timestamp": 300}], [80, 80],
-        [{"held_qty": 2, "entry_cost": 20, "entry_fee_usdt": 0}], 80)
+        trace, equity, lots, 80)
+    compact = retained_inventory_metrics(np.asarray([0, 300], dtype=np.int64), [10, 8],
+        np.asarray([0, 300], dtype=np.int64), np.asarray(equity, dtype=np.float64), lots, 80)
     assert result["gain"] == pytest.approx(80 + 2 * 8 * .999 - 100)
     assert result["drawdown"] == pytest.approx((100 - (80 + 2 * 8 * .999)) / 100 * 100)
+    assert compact == result
+
+
+def test_compact_replay_cache_stays_under_byte_cap_across_eight_hourly_runs(monkeypatch):
+    import gc
+    import tracemalloc
+    import grid.grid_intelligence as intelligence
+    job = GridIntelligenceJob(None, None, None)
+    monkeypatch.setattr(intelligence, "GRID_INTEL_PROCESS_CACHE_MAX_BYTES", 64 * 1024)
+    gc.collect()
+    tracemalloc.start()
+    for _hour in range(8):
+        for grid_id in range(2):
+            for window_id in range(25):
+                for candidate_id in range(6):
+                    key = (grid_id, window_id, candidate_id, _hour)
+                    item = {"metrics": {"trades": 2, "fees_usdt": 0.2},
+                        "timestamps": np.arange(2000, dtype=np.int64),
+                        "free_equity": np.arange(2000, dtype=np.float64), "fees": .2}
+                    job._replay_cache[key] = item
+                    job._replay_cache_bytes += job._estimate_entry_bytes(key, item)
+                    job._touch_cache("replay", key)
+                    job._trim_caches()
+        assert job._replay_cache_bytes <= 64 * 1024
+        assert all("trace" not in value for value in job._replay_cache.values())
+    retained, _peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert job._process_memory_stats()["cache_total_mb"] <= 64 / 1024
+    assert retained < 256 * 1024
+    print("C40a memoria retenida bytes=", retained, "caché_estimado_bytes=", job._replay_cache_bytes)
+
+
+def test_inventory_cost_uses_real_grid_levels_columns_and_free_cash(tmp_path):
+    db = DBManager(f"sqlite:///{tmp_path / 'grid-intel-inventory.sqlite'}")
+    assert {"entry_price", "held_qty", "fee_paid"}.issubset(db.grid_levels.c.keys())
+    assert "entry_cost" not in db.grid_levels.c.keys()
+    now = datetime(2026, 1, 8, tzinfo=timezone.utc)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=90,
+            range_high=110, n_levels=4, capital_total=100, reserve=0, status="ACTIVE",
+            created_at=now, environment="testnet", strategy="simple", params="{}")).inserted_primary_key[0]
+        common = {"grid_id": grid_id, "capital_base": 0, "capital_compound": 0,
+            "capital_loan": 0, "order_id": None, "cycles_completed": 0, "pnl": 0,
+            "sell_price": None, "bought_at": None, "stop_loss_pct": None,
+            "client_order_id": None, "buy_client_order_id": None, "updated_at": now}
+        conn.execute(db.grid_levels.insert(), [
+            {**common, "level_idx": 0, "price": 90, "capital": 40, "state": "HOLDING",
+                "entry_price": 100, "held_qty": .4, "fee_paid": 0},
+            {**common, "level_idx": 1, "price": 110, "capital": 60, "state": "IDLE",
+                "entry_price": None, "held_qty": 0, "fee_paid": 0}])
+
+    accounting = _inventory_accounting(db.get_grid_levels(grid_id))
+    assert accounting["free_cash"] == pytest.approx(60)
+    assert accounting["inventory_lots"] == [{"held_qty": .4, "entry_cost": 40,
+        "entry_fee_usdt": pytest.approx(.04)}]
+    # Una curva sintética estable de 7 días deja el inventario marcado a valor neto de comisión.
+    stamps = np.asarray([0, 7 * 86400], dtype=np.int64)
+    result = retained_inventory_metrics(stamps, [100, 100], stamps, [60, 60],
+        accounting["inventory_lots"], accounting["free_cash"])
+    assert result["gain"] < 5
 
 
 def test_historical_window_inventory_uses_current_price_scale():

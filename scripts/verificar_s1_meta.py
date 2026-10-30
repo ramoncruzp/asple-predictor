@@ -295,9 +295,13 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
         if "grid_intel_recommendations" not in tables or "grid_intel_labels" not in tables:
             print("  tablas de inteligencia de grids no instaladas")
         else:
-            rec_count = conn.execute("SELECT COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours')").fetchone()[0]
-            action_rows = conn.execute("SELECT action, COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours') GROUP BY action ORDER BY action").fetchall()
-            mature = conn.execute("SELECT COUNT(*) FROM grid_intel_labels WHERE status='mature'").fetchone()[0]
+            from grid.grid_intelligence import GRID_INTEL_METHOD_VERSION
+            rec_count = conn.execute("SELECT COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours') AND method_version=?",
+                (GRID_INTEL_METHOD_VERSION,)).fetchone()[0]
+            action_rows = conn.execute("SELECT action, COUNT(*) FROM grid_intel_recommendations WHERE datetime(created_at) >= datetime('now','-24 hours') AND method_version=? GROUP BY action ORDER BY action",
+                (GRID_INTEL_METHOD_VERSION,)).fetchall()
+            mature = conn.execute("SELECT COUNT(*) FROM grid_intel_labels l JOIN grid_intel_recommendations r ON r.id=l.recommendation_id WHERE l.status='mature' AND r.method_version=?",
+                (GRID_INTEL_METHOD_VERSION,)).fetchone()[0]
             applied = conn.execute("SELECT COUNT(*) FROM grid_events WHERE event_type='GRID_INTEL_APPLIED' AND datetime(ts) >= datetime('now','-24 hours')").fetchone()[0] if "grid_events" in tables else 0
             summary_rows = _rows(conn, "grid_events", ("details", "ts"),
                 "event_type='GRID_INTEL_JOB_SUMMARY' AND datetime(ts) >= datetime('now','-24 hours')", (), "ts DESC", 1)
@@ -306,6 +310,10 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
             print("  acciones 24 h: " + (", ".join(f"{row[0]}={row[1]}" for row in action_rows) if action_rows else "ninguna"))
             if job_summary:
                 print(f"  último job: {job_summary.get('status')}; duración={job_summary.get('duration_s')} s; incluidos={len(job_summary.get('included') or [])}; excluidos={len(job_summary.get('excluded') or [])}; budget_exceeded={job_summary.get('budget_exceeded', False)}")
+                memory = job_summary.get("process_memory") or {}
+                cache_mb = memory.get("cache_mb") or {}
+                print("  memoria de cachés: " + (", ".join(f"{name}={value:.3f} MB" for name, value in sorted(cache_mb.items()))
+                    if cache_mb else "no registrada") + f"; total={memory.get('cache_total_mb', 'NA')} MB; RSS={memory.get('rss_mb', 'NA')} MB")
                 reasons = Counter(item.get("reason", "sin motivo") for item in job_summary.get("excluded") or [])
                 print("  exclusiones: " + (", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items())) if reasons else "ninguna"))
             else:
