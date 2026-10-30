@@ -563,3 +563,15 @@ Comando de prueba enfocado (se registra antes de ejecutarlo):
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e0-scorecard-6deec4a1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
 ```
 Resultado: 16 passed en 5,07 s.
+
+## Fase 43e-1 — biblioteca histórica
+
+Comando de prueba enfocado (anotado antes de correr):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e1-library-892ebf75'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+Repetición corregida tras hacer explícito que `mean` conserva la media previa al centrado:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e1-library-rerun-00a2fbc9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+Resultado final de la parte: 2 passed en 0,07 s. La primera ejecución detectó una aserción incorrecta del test sobre la media ya centrada; se corrigió para comprobar que el metadato conserva la media precentrado y el rerun pasó.
