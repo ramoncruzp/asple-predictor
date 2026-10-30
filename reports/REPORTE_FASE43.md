@@ -332,3 +332,28 @@ El reintento ya autenticó; el mismatch restante es la tilde en `todavía` dentr
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c5-panel-rerun2-5fc1b88f'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_intelligence_api.py -k scorecard_panel_readonly_handles_missing_and_synthetic_run --basetemp="$base"
 ```
 Resultado 43c-5: endpoint sin BD/sin corrida y endpoint con corrida/veredicto sintéticos: 1 passed en 0,97 s. `node --check frontend/intelligence.js` pasó. El endpoint consulta `market_data.db` con `mode=ro` y la pantalla muestra última corrida, veredictos y factores.
+
+
+## 43c ? cierre de entrega parcial
+
+Commits: a35240f (43c-0), 28f93d0 (43c-1), 16ac395 (43c-2), 241533a (43c-4), a80476a (43c-5). Sin push.
+
+### L?mites pendientes
+
+- El walk-forward incluye simple, EWMA y una aproximaci?n HAR. No se midieron series GBM de r?gimen ni el rendimiento con dos a?os completos.
+- La persistencia y el panel contienen m?tricas de volatilidad, factores y veredictos. Faltan ruptura completa con Brier/deciles/pendiente/factor de colas, direcci?n AUC, correlaciones 21x21 y validaci?n cuantitativa de r?gimen por moneda.
+- Falta el job semanal y su interruptor apagado por defecto.
+- La cobertura 80 % guardada actualmente es exploratoria, no out-of-sample validada; no se debe interpretar como calibraci?n certificada.
+- No se hizo benchmark sint?tico de dos a?os ni medici?n en S1. Esos resultados quedan pendientes.
+
+### Pasos S1 (los ejecutar? Ram?n)
+
+```bash
+cd ~/asple-predictor
+# despu?s de desplegar con bash deploy/actualizar.sh desde el PC:
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles --dry-run
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles
+HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/verificar_velas.py --db market_data.db --comparar-api 7
+nohup venv2/bin/python scripts/marcador_pronosticos.py --db market_data.db --registro-db asple_predictor.db > ~/marcador_43c.log 2>&1 &
+tail -f ~/marcador_43c.log
+```

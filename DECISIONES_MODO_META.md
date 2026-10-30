@@ -415,6 +415,15 @@ Cuando una evaluación entra en “Listo para encender” o “No conviene”, s
 
 Los medidores de evidencia cuentan solo muestras del método vigente y admitidas para entrenamiento. Las alertas de preparación conservan eventos encolados durante envíos concurrentes. Ninguno de estos cambios activa interruptores ni altera decisiones del operador.
 
+## Fase 43, parte C — marcador de pronósticos
+
+- El marcador mide volatilidad walk-forward con velas públicas de 5 minutos; en cada origen solo usa observaciones anteriores al instante pronosticado. La sigma se expresa como raíz de la suma de retornos logarítmicos al cuadrado acumulada en el horizonte de 24 o 72 horas.
+- Un modelo se considera útil solo si QLIKE mejora al menos 5 % frente a `simple` y el intervalo bootstrap por bloques al 95 % de la diferencia excluye cero. Ruptura requiere Brier skill score de al menos 0,05 y pendiente de calibración entre 0,8 y 1,2. Los diagnósticos no autorizan cambios de política.
+- El diagnóstico de régimen (ER, varianza relativa y ciclos) pertenece a la medición 43c. La versión implementada aún no calcula toda la validación por monedas requerida; sus resultados no son evidencia para habilitar modelos.
+- El job semanal se define para permanecer apagado por defecto hasta que Ramón valide una corrida manual. Esta entrega no registra el job ni expone su interruptor.
+- Los arreglos C43-1 a C43-5 corrigen el orden y los papeles del inventario de velas, comparan API hasta la última vela guardada, muestran el estado de aprendizaje apagado y representan la decisión de operador estructurada. Ninguno de estos arreglos cambia decisiones reales.
+- Todo el marcador y su panel son de observación. No conectan resultados al motor v1 ni a decisiones reales.
+
 ## Inteligencia para grids no Meta — Fase 42
 
 Smart y Simple activos ajenos a Meta reciben evaluación horaria en sombra. La métrica es ganancia neta a siete días (PnL realizado mós inventario a bid neto de comisión), con drawdown como límite. Se permiten mover el rango sin vender inventario, cambiar niveles, agregar un bot de un nivel con efectivo libre o pausar compras.
