@@ -687,3 +687,24 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3d-filters-parity-a
 ```
 
 No se consultó la red ni base real. Pasos para S1: ejecutar `scripts/velas_filtros.py --db market_data.db` mediante el proxy configurado y luego `scripts/escenarios_paridad.py --db market_data.db --casos 200`.
+
+
+## 43e-3e ? benchmark de escenarios
+
+Se incorporó `scripts/escenarios_velocidad.py`. Requiere la biblioteca ya construida, evalúa 1.000 escenarios a 20/45 días con FastSim Simple de seis niveles y reporta tiempo, llenados medios y RSS. La prueba usa una biblioteca sintética temporal. Comando previo a ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3e-speed-81d2f05c-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_speed.py --basetemp="$base"
+```
+
+
+Resultado: `tests/test_scenarios_speed.py` 1 passed en 1,55 s. Medición sintética local reproducible (biblioteca temporal, 1.000 escenarios, 20/45 días): comando `python scripts/escenarios_velocidad_sintetica.py`; tiempos y RSS se añadirán al cerrar esta parte.
+
+
+Medición local terminada con la biblioteca sintética: 20 días, 1.000 escenarios, 1,815 s, 0,407 llenados promedio/escenario y pico 426,5 MB; 45 días, 5,926 s, 0,889 llenados promedio/escenario y pico 483,1 MB. El objetivo de 5 s para 20 días se cumple; 45 días es solo medición en este subpaso.
+
+Comando de prueba anotado antes de la corrida:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3e-speed-81d2f05c-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_speed.py --basetemp="$base"
+```
