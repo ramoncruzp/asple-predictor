@@ -269,3 +269,21 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-ui-meta-2b9c882c'
 ```
 
 Resultados 43c-0: pruebas de almacén/backfill/verificación: 15 passed en 2,36 s. Prueba UI del medidor: 1 passed en 1,40 s; revisión de bitácora: 1 passed en 1,50 s. Un primer intento de UI falló porque la aserción abarcaba el texto de confirmación oculto; se limitó al medidor mostrado y pasó. `node --check frontend/metas.js` y `git diff --check` pasaron.
+
+## 43c-1 — walk-forward causal y métricas base
+
+Comando anotado antes de ejecutar las pruebas sintéticas:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c1-walk-93c001ab'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+
+La primera ejecución encontró que el límite del dataset estaba contando una ventana final incompleta como hueco. Se corrigió para descartarla sin sumarla a huecos internos. Comando de reintento:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c1-walk-rerun-b1ee1507'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+
+Segundo intento: corregido el conteo del calentamiento, que exigía una vela adicional y clasificaba el primer instante elegible como hueco. Comando:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c1-walk-rerun2-727ac9e0'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+Resultado 43c-1: 2 passed en 0,06 s. El walk-forward usa solo cierres con timestamp menor que t; omite la ventana final incompleta y cuenta huecos interiores. La salida retiene índices de la ventana objetivo, no copia ni cachea los datos de velas.
