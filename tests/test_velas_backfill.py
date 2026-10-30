@@ -8,7 +8,7 @@ import pytest
 
 from data.market_store import CandleStore
 from scripts.velas_backfill import (BackfillRunner, ChecksumError, VisionClient,
-    archive_specs, normalize_open_timestamp, parse_vision_zip)
+    LISTA_INICIAL_DATOS, archive_specs, normalize_open_timestamp, parse_vision_zip, parse_args)
 
 
 def _zip(rows):
@@ -105,3 +105,9 @@ def test_backfill_persiste_y_reanuda_archivo_completo(tmp_path):
     assert len(store.load("XRPUSDT", "5m", spec.start_ts, spec.end_ts - 1).timestamp) == 288
     assert second["resumed"] == 1
     assert client.calls.count(spec.url) == 1
+
+
+def test_lista_inicial_es_constante_de_datos_y_seleccion_exclusiva():
+    assert len(LISTA_INICIAL_DATOS) == 15
+    assert "BTCUSDT" in LISTA_INICIAL_DATOS and "SHIBUSDT" in LISTA_INICIAL_DATOS
+    assert parse_args(["--db", "market_data.db", "--lista-inicial"]).lista_inicial

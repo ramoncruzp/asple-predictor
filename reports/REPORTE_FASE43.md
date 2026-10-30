@@ -123,3 +123,13 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b35-rerun-8a11991c';
 ```
 
 Resultado: 3 passed en 1,02 s.
+
+## 43b-4 — lista inicial de monedas
+
+Comando anotado antes de ejecutar la prueba enfocada:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b4-test-0d4b1ce8'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_velas_backfill.py --basetemp="$base"
+```
+
+Resultado: 5 passed en 0,24 s.
