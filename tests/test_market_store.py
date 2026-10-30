@@ -96,3 +96,24 @@ def test_symbol_filters_round_trip_in_temporary_market_db(tmp_path):
     loaded = store.filters("JUPUSDT")
     assert loaded == saved
     assert str(loaded.tick_size) == "0.0001"
+
+
+def test_filter_downloader_accepts_fake_public_client(tmp_path):
+    from scripts.velas_filtros import actualizar_filtros
+    store = CandleStore(tmp_path / "fake-client.sqlite")
+    store.register_symbol("JUPUSDT", role="operar")
+    store.register_symbol("XRPUSDT", role="datos", active=False)
+    info = {"filters": [
+        {"filterType": "PRICE_FILTER", "minPrice": "0.0001", "maxPrice": "1000", "tickSize": "0.0001"},
+        {"filterType": "LOT_SIZE", "minQty": "0.1", "maxQty": "1000000", "stepSize": "0.1"},
+        {"filterType": "MIN_NOTIONAL", "minNotional": "5", "applyToMarket": True},
+    ]}
+    class FakeClient:
+        def __init__(self): self.symbols = []
+        def get_symbol_info(self, symbol):
+            self.symbols.append(symbol)
+            return info
+    client = FakeClient()
+    assert actualizar_filtros(store, client) == {"actualizados": 2, "sin_ficha": 0}
+    assert client.symbols == ["JUPUSDT", "XRPUSDT"]
+    assert store.filters("XRPUSDT") is not None

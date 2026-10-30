@@ -116,3 +116,20 @@ def test_pepe_geometry_uses_tick_filters():
     assert result["buys"][0] == sum(event["type"] == "BUY_FILLED" for event in reference["events"])
     assert result["sells"][0] == sum(event["type"] == "SELL_FILLED" for event in reference["events"])
     assert abs(float(result["pnl_usdt"][0]) - reference["metrics"]["pnl_total_net_usdt"]) <= .02
+
+
+def test_jup_low_capital_geometry_matches_reference_filters():
+    filters = SymbolFilters(Decimal("0.0001"), Decimal("0.0001"), Decimal("1000"),
+        Decimal("0.1"), Decimal("0.1"), Decimal("1000000"), Decimal("5"), True, 200)
+    close = .25 * np.exp(np.cumsum(np.r_[0., np.sin(np.arange(1, 60) / 5) * .004]))
+    scenario = _scenario(close)
+    trace = []
+    reference = run_simulation(_candles(scenario, 1_727_740_800), strategy="simple", n=4,
+        capital=80, low=.20, high=.30, filters=filters, params={}, fee_pct=.1,
+        resync_candles=3, meta_portfolio_piece=True, trace_callback=trace.append)
+    fast = simulate_simple(scenario, n_levels=4, capital=80, low=.20, high=.30,
+        filters=filters, initial_timestamp=1_727_740_800)
+    assert int(fast["buys"][0]) == sum(event["type"] == "BUY_FILLED" for event in reference["events"])
+    assert int(fast["sells"][0]) == sum(event["type"] == "SELL_FILLED" for event in reference["events"])
+    assert abs(float(fast["pnl_usdt"][0]) -
+        (reference["metrics"]["equity_final_after_repository_liquidation"] - 80)) <= .02
