@@ -95,13 +95,15 @@ def evaluate_portfolio(curves, *, capital_initial, target_usdt, max_loss_pct=Non
         "capital_unused_usdt": capital - used}
 
 
-def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=None, min_margin_pct=.3):
+def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=None,
+        min_margin_pct=.3, sigma_values=None, meta_max_loss_pct=None,
+        include_replay=False):
     """Sin objetivo ni corte de pérdida por pieza; resolución de quince minutos."""
     times, cash, equity = [], [], []
     count = 0
     def trace(row):
         nonlocal count
-        include = (strategy != "individual_bot" or int(row["timestamp"]) % 900 == 0 or count == 0
+        include = (int(row["timestamp"]) % 900 == 0 or count == 0
             or row["timestamp"] == int(candles.timestamp[-1]))
         count += 1
         if include:
@@ -116,9 +118,13 @@ def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=No
         extra = {"bought": replay["bought"], "sold": replay["sold"]}
     else:
         from grid.sim.runner import run_simulation
-        run_simulation(candles, strategy=strategy, n=n, capital=capital, low=low, high=high,
+        replay = run_simulation(candles, strategy=strategy, n=n, capital=capital, low=low, high=high,
             width_pct=None, params={}, fee_pct=.1, filters=filters,
             close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
-            meta_max_loss_pct=None, meta_portfolio_piece=True, trace_callback=trace, resync_candles=3)
+            meta_max_loss_pct=meta_max_loss_pct, meta_portfolio_piece=True, trace_callback=trace,
+            resync_candles=3, sigma_values=sigma_values, respacing_enabled=False,
+            idle_shrink_enabled=False, direction_signal=None, include_details=include_replay)
         extra = {}
+        if include_replay:
+            extra["replay"] = replay
     return {"curve": pack_curve(times, cash, equity, capital), **extra}

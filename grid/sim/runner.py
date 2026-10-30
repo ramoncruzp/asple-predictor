@@ -819,6 +819,8 @@ def run_simulation(candles, *, strategy="simple", n=10, capital=100, low=None, h
             "csv_sha256": csv_hash, "params_sha256": params_digest, "metrics": metric,
             "events": events, "equity": equity}
     if include_details:
+        result["effective_params"] = dict(effective)
+    if include_details:
         result["details"] = {
             "balances": {"USDT": str(exchange.usdt), "XRP": str(exchange.base)},
             "fees_usdt": str(exchange.fees),

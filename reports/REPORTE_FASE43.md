@@ -708,3 +708,15 @@ Comando de prueba anotado antes de la corrida:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3e-speed-81d2f05c-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_speed.py --basetemp="$base"
 ```
+
+
+## 43e-4 ? Smart exacto (en curso)
+
+`smart_exact` ejecuta los primeros escenarios con `simulate_piece_curve` y el replay Smart de producci?n. Usa dos workers por defecto y fija pr?stamos/compound/ADJUST/reespaciado/niveles ociosos/stop-loss/filtro direccional apagados; mantiene `out_of_range_mode=wait`. Comando enfocado previsto:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e4-smart-exact-6e72b4a1-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
+```
+
+
+El comparador `paired_smart_simple` resume Smart menos Simple en los mismos escenarios con IC bootstrap reproducible para ganancia, P(límite) y P(meta). La primera corrida unitaria halló una diferencia en el cómputo de la longitud de OHLC 1D; se corrigió. Resultado final del comando abajo: 1 passed. No se midió todavía el tiempo de 200 escenarios Smart, por lo que el requisito de rendimiento por geometría queda pendiente.
