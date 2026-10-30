@@ -4,6 +4,7 @@ from research.scenarios.validate import baseline_window_indices, summarize_valid
 from data.market_store import CandleStore
 from grid.sim.data import CandleData
 from research.scenarios.evaluate import evaluate_pieces
+from scripts.escenarios_validar import _rss_max_mb
 
 
 def test_validation_baseline_uses_only_23_complete_windows_before_t():
@@ -40,6 +41,12 @@ def test_validation_metrics_compute_coverage_pit_brier_and_date_block_ci():
 
 def test_validation_reports_no_pairs_without_inventing_metrics():
     assert summarize_validation([]) == {"n": 0, "estado": "sin_pares"}
+
+
+def test_validation_rss_helper_reports_peak_on_this_platform():
+    peak = _rss_max_mb()
+    assert peak is not None
+    assert 0 < peak < 600
 
 
 def test_gbm_like_matching_distribution_has_expected_coverage_and_flat_pit():

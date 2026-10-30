@@ -849,7 +849,7 @@ Se reemplazó el resumen histórico por `research/scenarios/validate.py`: predic
 
 Prueba enfocada final: **20 pasaron en 9,39 s**. Comando exacto y corridas iterativas anotadas en `reports/DISCREPANCIAS_FASE43.md`. `py_compile` pasó y `scripts/revisar_codificacion.py` dio `HALLAZGOS=0` en los archivos de 6f. No se corrió la validación completa ni se usaron datos de S1.
 
-Estimación de planificación para 21 monedas: 52 fechas por moneda a paso de 7 días × 5 geometrías = 5.460 casos. La heurística del CLI (2 s por caso) estima **10.920 s, unas 3 h 2 min**; recomienda usar `--paso-dias 14` o menos monedas. No es una medición de ejecución. El pico RSS de una validación completa queda **sin medir**; el script imprime el máximo al finalizar.
+Estimación de planificación para 21 monedas: 52 fechas por moneda a paso de 7 días × 5 geometrías = 5.460 casos. La heurística del CLI (2 s por caso) estima **10.920 s, unas 3 h 2 min**; recomienda usar `--paso-dias 14` o menos monedas. No es una medición de ejecución. El pico RSS de una validación completa queda **sin medir**; el script imprime el máximo al finalizar. El lector RSS Windows se probó aparte: 40,57 MB de pico del proceso de prueba, no de la corrida completa.
 
 Pasos para Ramón en S1, después de desplegar:
 

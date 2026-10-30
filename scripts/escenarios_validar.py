@@ -20,35 +20,8 @@ from research.scenarios.validate import validate_scenarios
 
 
 def _rss_max_mb():
-    if os.name == "posix":
-        try:
-            import resource
-            value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return value / 1024 if sys.platform == "darwin" else value / (1024 * 1024)
-        except (ImportError, AttributeError):
-            return None
-    try:
-        import psutil
-        info = psutil.Process().memory_info()
-        peak = getattr(info, "peak_wset", None)
-        return peak / (1024 * 1024) if peak is not None else info.rss / (1024 * 1024)
-    except ImportError:
-        try:
-            import ctypes
-            from ctypes import wintypes
-            class Counters(ctypes.Structure):
-                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
-            counters = Counters()
-            counters.cb = ctypes.sizeof(counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
-            return counters.PeakWorkingSetSize / (1024 * 1024) if ok else None
-        except (AttributeError, OSError):
-            return None
+    from scripts.escenarios_velocidad import _rss_mb
+    return _rss_mb()
 
 
 def render_report(result):

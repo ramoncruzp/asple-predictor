@@ -362,3 +362,11 @@ Comando exacto de cierre tras afirmar que cada par FHS real/sin tendencia compar
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6h-pareo-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_line_null.py tests/test_scenarios_validate.py --basetemp="$base" -s
 ```
+
+Comando exacto para verificar el lector de RSS maximo de Windows despues de corregir la llamada nativa:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-rss-windows-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py --basetemp="$base"
+```
+
+Resultado: 7 pruebas pasaron en 1,73 s; el helper devolvió RSS máximo no nulo y menor de 600 MB. Medición puntual del proceso local: 40,57 MB; no representa el pico de la validación completa.
