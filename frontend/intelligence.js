@@ -148,9 +148,25 @@
     try {
       render(await api.get(`/api/intelligence?page=${decisionPage}&page_size=50${decisionMeta ? `&meta_id=${encodeURIComponent(decisionMeta)}` : ''}`));
       const scorecard = await api.get('/api/intelligence/scorecard');
-      const verdictRows = (scorecard.verdicts || []).map(x => [x.symbol || 'Agregado', x.target, `${x.horizon_h} h`, x.model, x.verdict, x.reason]);
-      const factorRows = (scorecard.factors || []).map(x => [x.symbol, x.kind, `${x.horizon_h} h`, x.model, num(x.factor), x.n]);
-      const scorecardPanel = `<section class="card" data-scorecard-panel><h2>Marcador de pronósticos</h2>${scorecard.run ? `<p>Última corrida: ${esc(scorecard.run.finished_at || scorecard.run.started_at)}</p><p>${esc(scorecard.run.status)}</p>${table(['Moneda','Objetivo','Horizonte','Modelo','Veredicto','Motivo'],verdictRows)}${table(['Moneda','Factor','Horizonte','Modelo','Valor','n'],factorRows)}` : `<p>${esc(scorecard.message || 'Sin corridas del marcador todavía')}</p>`}</section>`;
+      const verdicts = scorecard.verdicts || [], factors = scorecard.factors || [];
+      const aggregateRows = verdicts.filter(x => !x.symbol).map(x => [x.target, `${x.horizon_h} h`, x.model, x.verdict, x.reason]);
+      const symbols = [...new Set([...verdicts.map(x => x.symbol), ...factors.map(x => x.symbol)].filter(Boolean))].sort();
+      const factorCell = (symbol, kind, horizon) => {
+        const x = factors.find(item => item.symbol === symbol && item.kind === kind && Number(item.horizon_h) === horizon);
+        return x ? `${num(x.factor)} [${num(x.ci_low)}, ${num(x.ci_high)}]` : '—';
+      };
+      const coinRows = symbols.map(symbol => [symbol,
+        factorCell(symbol, 'sigma', 24), factorCell(symbol, 'sigma', 72),
+        factorCell(symbol, 'colas', 24), factorCell(symbol, 'colas', 72),
+        verdicts.filter(x => x.symbol === symbol && x.target === 'regimen').map(x => `${x.horizon_h}h ${x.model}: ${x.verdict}`).join('; ') || '—']);
+      const diag = scorecard.summary?.diagnostics || {};
+      const ruptureRows = Object.entries(diag).filter(([key, value]) => key.includes(':') && value?.rupture)
+        .flatMap(([key, value]) => value.rupture.map(x => [key.split(':')[0], `${key.split(':')[1]} h`, x.k,
+          num(x.brier_skill), `${num(x.brier_skill_ci_low)}–${num(x.brier_skill_ci_high)}`,
+          num(x.calibration_slope), (x.deciles || []).map(d => `${num(d.predicted)}/${num(d.observed)}`).join('; ')]));
+      const corr = diag.correlation_last_complete_month;
+      const corrRows = corr ? [[corr.month, num(corr.media), num(corr.mediana), (corr.symbols || []).length]] : [];
+      const scorecardPanel = `<section class="card" data-scorecard-panel><h2>Marcador de pronósticos</h2>${scorecard.run ? `<p>Última corrida: ${esc(scorecard.run.finished_at || scorecard.run.started_at)}</p><p>${esc(scorecard.run.status)}</p>${table(['Objetivo','Horizonte','Modelo','Veredicto agregado','Motivo'],aggregateRows)}${table(['Moneda','Factor σ 24 h (IC)','Factor σ 72 h (IC)','Factor colas 24 h (IC)','Factor colas 72 h (IC)','Veredicto de régimen'],coinRows)}${detail('Ruptura por moneda y k','Skill Brier, IC bootstrap, pendiente y deciles predicho/observado.',table(['Moneda','H','k','Skill','IC 95 %','Pendiente','Deciles predicho/observado'],ruptureRows))}${detail('Correlación del último mes completo','Promedio y mediana fuera de la diagonal.',table(['Mes','Media','Mediana','Monedas'],corrRows))}` : `<p>${esc(scorecard.message || 'Sin corridas del marcador todavía')}</p>`}</section>`;
       host.insertAdjacentHTML('afterbegin', scorecardPanel);
     }
     catch (error) { $('#intelligence-content').innerHTML = `<p class="cuenta-error">No se pudo consultar Inteligencia: ${esc(error.message)}</p>`; }

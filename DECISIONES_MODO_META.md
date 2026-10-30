@@ -429,3 +429,11 @@ Los medidores de evidencia cuentan solo muestras del método vigente y admitidas
 Smart y Simple activos ajenos a Meta reciben evaluación horaria en sombra. La métrica es ganancia neta a siete días (PnL realizado mós inventario a bid neto de comisión), con drawdown como límite. Se permiten mover el rango sin vender inventario, cambiar niveles, agregar un bot de un nivel con efectivo libre o pausar compras.
 La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de la acción, ganancia media de aplicar frente a mantener positiva e intervalo de confianza enteramente sobre cero, y confirmación explícita de Ramón. Tras encender: dos recomendaciones horarias iguales, seis horas de enfriamiento, máximo dos cambios diarios, grid ACTIVE y valoración conocida. El sistema no enciende interruptores por sí solo. Las transiciones a estado listo o adverso generan alertas por grid y acción mediante el job horario C35, con deduplicación.
 
+
+
+## Fase 43c, continuaci?n ? estado del marcador
+
+- C43-7 optimiza el c?lculo causal; benchmark de 218.000 velas: 0,184 s para 24 h y 0,212 s para 72 h.
+- C43-8 guarda cobertura causal, IC de factores, pron?stico vivo con escala ra?z de H cuando hay SQLite expl?cita, veredictos por s?mbolo y agregados.
+- C43-9/10 conectan al runner los objetivos de ruptura, r?gimen, direcci?n y correlaci?n mensual. Los resultados son m?tricas de investigaci?n; no se conectan al motor v1.
+- El panel muestra veredictos agregados y detalle por moneda. El job semanal queda pendiente de C43-12 y no est? registrado todav?a.

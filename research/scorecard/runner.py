@@ -341,4 +341,5 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
             conn.executemany("INSERT INTO calibration_factors VALUES(?,?,?,?,?,?,?,?,?,?)", factors)
             conn.executemany("INSERT INTO scorecard_verdicts "
                 "(run_id,symbol,target,horizon_h,model,verdict,reason) VALUES(?,?,?,?,?,?,?)", verdicts)
-    return {"run_id": run_id, "records": records, "summary": summary}
+    return {"run_id": run_id, "records": records, "factors": factors,
+        "verdicts": verdicts, "summary": summary}

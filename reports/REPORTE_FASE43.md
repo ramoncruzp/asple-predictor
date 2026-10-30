@@ -469,3 +469,29 @@ Comando anotado antes de ejecutar OU frente a tendencia y el contrato de m?trica
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-ou-90832ab7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "ou_has_lower_efficiency_and_more_cycles_than_trend or regime_features_and_timestamp_aligned_correlation or regime_aggregate_requires_two_thirds_with_same_sign" --basetemp="$base"
 ```
 Resultado 43c-10: 3 pruebas sintéticas pasaron en 0,39 s; OU mostró menor ER y más ciclos que tendencia, el agregado de régimen exige signo común y la correlación alinea timestamp.
+
+
+## 43c-11 ? reporte y panel completos
+
+Comando anotado antes de ejecutar script y API con tres monedas sint?ticas de 200 d?as:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-3symbols-622c4e39'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_script.py tests/test_intelligence_api.py -k "scorecard_script_and_api_with_three_synthetic_200_day_symbols or scorecard_panel_readonly_handles_missing_and_synthetic_run" --basetemp="$base"
+```
+
+Reejecución concisa de la prueba de integración para capturar su salida y código de terminación completos:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-rerun-q-a48133fe'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_script.py -k scorecard_script_and_api_with_three_synthetic_200_day_symbols -q --tb=short --basetemp="$base"
+```
+
+El runner añade el indicador `correlation_last_complete_month` sin clave símbolo:horizonte; el escritor ahora omite ese resumen agregado al recorrer deciles. El test integrado conserva 3 monedas × 200 días y limita ejecución a 24 h para reducir la duración. Comando corregido:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-fixed-3coins-8d744a1d'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_script.py tests/test_intelligence_api.py -k "scorecard_script_and_api_with_three_synthetic_200_day_symbols or scorecard_panel_readonly_handles_missing_and_synthetic_run" -q --tb=short --basetemp="$base"
+```
+
+El script generó el reporte y persistió métricas, pero la API serializó NaN de diagnósticos cuando un Brier base era cero. Se sanitizan valores no finitos a `null` antes de responder. Reintento integrado:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-api-finite-3e03d865'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_script.py tests/test_intelligence_api.py -k "scorecard_script_and_api_with_three_synthetic_200_day_symbols or scorecard_panel_readonly_handles_missing_and_synthetic_run" -q --tb=short --basetemp="$base"
+```
+
+
+Resultado 43c-11: script/API con 3 monedas sint?ticas ? 200 d?as: 2 passed en 24,86 s; reporte con resumen, veredictos, factores, deciles, r?gimen/direcci?n y correlaci?n. La API devolvi? solo la ?ltima corrida `completed`, agregado y filas por moneda. Tiempo del runner (horizonte 24 h, captura del resumen persistido): SYN1USDT 6,849 s; SYN2USDT 6,699 s; SYN3USDT 7,992 s. La cobertura fue sint?tica, no S1.

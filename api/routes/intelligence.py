@@ -21,6 +21,16 @@ router = APIRouter()
 _logger = logging.getLogger("asple.slow")
 
 
+def _scorecard_json_safe(value):
+    if isinstance(value, dict):
+        return {key: _scorecard_json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scorecard_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 @router.get("/scorecard")
 def scorecard_readonly(request: Request):
     """Lee la última corrida del marcador desde market_data.db en modo solo lectura."""
@@ -33,7 +43,8 @@ def scorecard_readonly(request: Request):
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            run = conn.execute("SELECT * FROM scorecard_runs ORDER BY id DESC LIMIT 1").fetchone()
+            run = conn.execute("SELECT * FROM scorecard_runs WHERE status='completed' "
+                "ORDER BY id DESC LIMIT 1").fetchone()
             if run is None:
                 return {"status": "empty", "message": "Sin corridas del marcador todavía", "run": None,
                     "metrics": [], "factors": [], "verdicts": []}
@@ -54,8 +65,13 @@ def scorecard_readonly(request: Request):
     except sqlite3.Error:
         return {"status": "empty", "message": "Sin corridas del marcador todavía", "run": None,
             "metrics": [], "factors": [], "verdicts": []}
-    return {"status": "ready", "message": "", "run": dict(run), "metrics": metrics,
-        "factors": factors, "verdicts": verdicts}
+    run_dict = dict(run)
+    try:
+        summary = json.loads(run_dict.get("summary_json") or "{}")
+    except (TypeError, ValueError):
+        summary = {}
+    return _scorecard_json_safe({"status": "ready", "message": "", "run": run_dict,
+        "summary": summary, "metrics": metrics, "factors": factors, "verdicts": verdicts})
 
 
 def _json(value, default=None):
