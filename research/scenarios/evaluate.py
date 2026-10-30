@@ -51,15 +51,26 @@ def _calibration_factors(path, symbols):
 
 def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
-        library_dir="data/derived/scenario_lib", workers=2):
+        library_dir="data/derived/scenario_lib", workers=2, mode="alternativas"):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
     bot usa `buy_price`/`sell_price`. Si indica `width_sigma`, arma ancho
-    log-simétrico en unidades de sigma del horizonte del perfil.
+    log-simétrico en unidades de sigma del horizonte del perfil. En modo
+    `alternativas`, cada candidata se evalúa sola contra el capital total de la
+    meta (su capital no asignado queda quieto); `cartera` suma piezas.
     """
+    mode = str(mode).lower()
+    if mode not in {"alternativas", "cartera"}:
+        raise ValueError("modo debe ser alternativas o cartera")
     if not pieces or capital <= 0 or n_scenarios <= 0:
         raise ValueError("piezas, capital y escenarios válidos requeridos")
+    pieces = [dict(piece) for piece in pieces]
+    if mode == "cartera":
+        pieces_total = sum(float(piece["capital"]) for piece in pieces)
+        if pieces_total > float(capital) + 1e-6:
+            raise ValueError(f"las piezas suman {pieces_total:g} USDT y la meta tiene "
+                f"{float(capital):g}; usa --modo alternativas para compararlas")
     profile = DEFAULT_PROFILES[str(perfil).upper()]
     horizon = int(profile["max_days"])
     loss_pct = float(profile["max_loss_pct"])
@@ -148,16 +159,69 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     for index, piece in enumerate(pieces):
         values = raw[index]
         piece_results.append({"piece": piece, "metrics": summarize(piece_curves[index],
-            capital_initial=float(piece["capital"]), target_usdt=meta, max_loss_pct=loss_pct,
+            capital_initial=(float(capital) if mode == "alternativas" else float(piece["capital"])),
+            target_usdt=meta, max_loss_pct=loss_pct,
             horizon_days=horizon, cycles=values["cycles"], inventory_qty=values["inventory_qty"],
             inventory_value=values["inventory_value"], seed=seed)})
-    portfolio = summarize_portfolio(piece_curves, capital_initial=capital, target_usdt=meta,
-        max_loss_pct=loss_pct, horizon_days=horizon, seed=seed)
+    portfolio = (summarize_portfolio(piece_curves, capital_initial=capital, target_usdt=meta,
+        max_loss_pct=loss_pct, horizon_days=horizon, seed=seed) if mode == "cartera" else None)
     comparisons = []
-    for smart_index, (smart_results, simple_curves) in paired.items():
-        comparisons.append({"piece_index": smart_index, **paired_smart_simple(smart_results, simple_curves,
-            capital_initial=float(pieces[smart_index]["capital"]), target_usdt=meta, max_loss_pct=loss_pct,
-            replicas=1000, seed=seed)})
-    return {"profile": str(perfil).upper(), "horizon_days": horizon,
+    if mode == "cartera":
+        for smart_index, (smart_results, simple_curves) in paired.items():
+            comparisons.append({"piece_index": smart_index, **paired_smart_simple(smart_results, simple_curves,
+                capital_initial=float(pieces[smart_index]["capital"]), target_usdt=meta, max_loss_pct=loss_pct,
+                replicas=1000, seed=seed)})
+    if mode == "alternativas":
+        comparisons = _paired_alternatives(pieces, piece_curves, capital=capital,
+            target=meta, loss_pct=loss_pct, seed=seed)
+    return {"profile": str(perfil).upper(), "mode": mode, "horizon_days": horizon,
         "n_scenarios": target_count, "pieces": piece_results, "portfolio": portfolio,
         "smart_paired": comparisons, "calibration_factors": calibration}
+
+
+def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):
+    """Compara resultados por escenario, priorizando pares Smart-Simple geométricos."""
+    from grid.sim.meta_portfolio import evaluate_portfolio
+    pairs = []
+    used = set()
+    for smart_index, smart in enumerate(pieces):
+        if str(smart["strategy"]).lower() != "smart":
+            continue
+        simple_index = next((index for index, simple in enumerate(pieces)
+            if str(simple["strategy"]).lower() == "simple"
+            and str(simple["symbol"]).upper() == str(smart["symbol"]).upper()
+            and int(simple.get("n", 6)) == int(smart.get("n", 6))
+            and (simple.get("low"), simple.get("high"), simple.get("width_sigma"))
+                == (smart.get("low"), smart.get("high"), smart.get("width_sigma"))), None)
+        if simple_index is not None:
+            pairs.append((simple_index, smart_index, "smart_menos_simple"))
+            used.update((simple_index, smart_index))
+    for index in range(1, len(pieces)):
+        if index not in used:
+            pairs.append((0, index, "pieza_menos_primera"))
+    output = []
+    for left_index, right_index, label in pairs:
+        count = min(len(curves[left_index]), len(curves[right_index]))
+        if count < 1:
+            continue
+        left = [evaluate_portfolio([curve], capital_initial=capital,
+            target_usdt=target, max_loss_pct=loss_pct) for curve in curves[left_index][:count]]
+        right = [evaluate_portfolio([curve], capital_initial=capital,
+            target_usdt=target, max_loss_pct=loss_pct) for curve in curves[right_index][:count]]
+        deltas = {
+            "pnl_usdt": np.asarray([b["pnl_usdt"] - a["pnl_usdt"] for a, b in zip(left, right)]),
+            "loss_probability": np.asarray([float(b["loss_cut"]) - float(a["loss_cut"])
+                for a, b in zip(left, right)]),
+            "target_probability": np.asarray([float(b["reached"]) - float(a["reached"])
+                for a, b in zip(left, right)]),
+        }
+        rng = np.random.default_rng(seed + left_index * 101 + right_index)
+        comparison = {"n": count, "from_index": left_index, "to_index": right_index,
+            "label": label}
+        for name, values in deltas.items():
+            samples = values[rng.integers(0, count, size=(1000, count))].mean(axis=1)
+            comparison[name] = {"mean": float(values.mean()),
+                "ci_low": float(np.quantile(samples, .025)),
+                "ci_high": float(np.quantile(samples, .975))}
+        output.append(comparison)
+    return output

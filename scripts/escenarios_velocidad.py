@@ -20,6 +20,24 @@ from research.scenarios.fastsim import simulate_simple
 from research.scenarios.generator import generate
 
 
+def _volatility_estimates(data):
+    """Estima sigma actual y mediana diaria con retornos alineados a sus velas."""
+    returns = np.diff(np.log(np.asarray(data.close, dtype=np.float64)))
+    lam = .97 ** (1 / 12)
+    variance = float(np.mean(returns[:30 * 288] ** 2))
+    for value in returns[30 * 288:]:
+        variance = lam * variance + (1 - lam) * float(value * value)
+    return_sigma = float(np.sqrt(max(variance, 1e-16) * 288))
+    days = np.asarray(data.timestamp[1:] // 86400)
+    daily_sigma = []
+    for day in np.unique(days)[-180:]:
+        values = returns[days == day]
+        if len(values) == 288:
+            daily_sigma.append(float(np.sqrt(np.sum(values * values))))
+    long_sigma = float(np.median(daily_sigma)) if daily_sigma else return_sigma
+    return return_sigma, long_sigma
+
+
 def _rss_mb():
     try:
         import psutil
@@ -94,19 +112,7 @@ def main(argv=None):
     data = store.load(args.symbol, "5m")
     if len(data.close) < 288 * 30:
         raise ValueError("se requieren al menos 30 días de velas")
-    returns = np.diff(np.log(data.close))
-    lam = .97 ** (1 / 12)
-    variance = float(np.mean(returns[:30 * 288] ** 2))
-    for value in returns[30 * 288:]:
-        variance = lam * variance + (1 - lam) * float(value * value)
-    sigma_today = float(np.sqrt(max(variance, 1e-16) * 288))
-    days = np.asarray(data.timestamp // 86400)
-    daily_sigma = []
-    for day in np.unique(days)[-180:]:
-        values = returns[1:][days[1:] == day]
-        if len(values) == 287:
-            daily_sigma.append(float(np.sqrt(np.sum(values * values))))
-    sigma_long = float(np.median(daily_sigma)) if daily_sigma else sigma_today
+    sigma_today, sigma_long = _volatility_estimates(data)
     results = benchmark(library_directory=args.library_dir, symbol=args.symbol.upper(),
         price=float(data.close[-1]), sigma_today=sigma_today, sigma_long=sigma_long,
         n_scenarios=args.escenarios, filters=store.filters(args.symbol))

@@ -82,3 +82,20 @@ Comprobación adicional del adaptador Smart exacto (1 pasada):
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5b-smart-exact-6d565d9-c3e6b128-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py -k "smart_exact_matches_direct_runner_and_keeps_restrictions_off" --basetemp="$base"
 ```
+## 43e-5c - correcciones de scripts de escenarios
+
+La salida de paridad en S1 contaba falsos errores porque `ganancia` comparaba PnL antes de liquidar el inventario. El chequeo ahora usa `equity_final_after_repository_liquidation - capital`, la misma magnitud usada por `pnl_error`, e informa diferencias separadas por chequeo. Para volatilidad diaria, los timestamps de los retornos se alinean con `data.timestamp[1:]`.
+
+La evaluación admite `alternativas` (predeterminado): cada pieza se evalúa sola con su capital declarado, el capital restante de la meta queda quieto y las métricas se miden sobre el capital total; se comparan diferencias pareadas sobre idénticos escenarios, priorizando Smart menos Simple para la misma geometría. `cartera` mantiene la suma actual de piezas y valida el total antes de leer datos.
+
+Comando enfocado anotado antes de ejecutarlo:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5c-scripts-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_parity_script.py tests/test_scenarios_speed.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+Después de añadir la cobertura de capital quieto y el pareo de alternativas sin geometría coincidente, se anotó esta segunda corrida enfocada:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5c-scripts-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_parity_script.py tests/test_scenarios_speed.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```

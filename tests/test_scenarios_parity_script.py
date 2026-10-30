@@ -2,7 +2,7 @@ import math
 import re
 import sqlite3
 
-from scripts.escenarios_paridad import main
+from scripts.escenarios_paridad import main, _gain_error
 
 
 def _market_db(path):
@@ -29,5 +29,15 @@ def test_parity_script_runs_against_temporary_synthetic_database(tmp_path, capsy
     assert main(["--db", str(db_path), "--casos", "1", "--semilla", "43"]) == 0
     output = capsys.readouterr().out
     assert "casos_completados=1 discrepancias=0" in output
+    assert "diferencias_por_chequeo={}" in output
     rss = re.search(r"rss_max_mb=([0-9.]+)", output)
     assert rss and float(rss.group(1)) > 0
+
+
+def test_parity_gain_uses_final_value_after_inventory_liquidation():
+    reference = {"metrics": {"pnl_total_net_usdt": 0.5,
+        "equity_final_after_repository_liquidation": 125.0}}
+    error, reference_pnl = _gain_error(reference, 25.0, 100.0)
+    assert reference["metrics"]["pnl_total_net_usdt"] != reference_pnl
+    assert reference_pnl == 25.0
+    assert error == 0.0

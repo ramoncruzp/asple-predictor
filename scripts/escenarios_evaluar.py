@@ -45,6 +45,7 @@ def main(argv=None):
     parser.add_argument("--capital", required=True, type=float)
     parser.add_argument("--meta", required=True, type=float)
     parser.add_argument("--pieza", action="append", required=True)
+    parser.add_argument("--modo", choices=("alternativas", "cartera"), default="alternativas")
     parser.add_argument("--escenarios", type=int, default=1000)
     parser.add_argument("--n-smart", type=int, default=200)
     parser.add_argument("--semilla", type=int, default=43)
@@ -54,11 +55,20 @@ def main(argv=None):
     result = evaluate_pieces([_parse_piece(item) for item in args.pieza],
         perfil=args.perfil, capital=args.capital, meta=args.meta,
         n_scenarios=args.escenarios, n_smart=args.n_smart, seed=args.semilla,
-        db_path=args.db, library_dir=args.library_dir)
+        db_path=args.db, library_dir=args.library_dir, mode=args.modo)
     for index, row in enumerate(result["pieces"], 1):
         print(f"PIEZA {index} {row['piece']} {json.dumps(row['metrics'], ensure_ascii=False)}")
-    print(f"CARTERA {json.dumps(result['portfolio'], ensure_ascii=False)}")
-    print(f"SMART_MENOS_SIMPLE {json.dumps(result['smart_paired'], ensure_ascii=False)}")
+    if args.modo == "cartera":
+        print(f"CARTERA {json.dumps(result['portfolio'], ensure_ascii=False)}")
+    else:
+        print("COMPARACIÓN PAREADA | tipo | pieza base | alternativa | Δ ganancia media [IC 95 %] | Δ P(límite) | Δ P(meta)")
+        for item in result["smart_paired"]:
+            pnl = item["pnl_usdt"]
+            loss = item["loss_probability"]
+            target = item["target_probability"]
+            print(f"{item['label']} | {item['from_index'] + 1} | {item['to_index'] + 1} | "
+                f"{pnl['mean']:.4f} [{pnl['ci_low']:.4f}, {pnl['ci_high']:.4f}] | "
+                f"{loss['mean']:.4f} | {target['mean']:.4f}")
     print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
     return 0
 

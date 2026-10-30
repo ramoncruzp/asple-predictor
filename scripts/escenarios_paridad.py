@@ -96,6 +96,13 @@ def _window(conn, symbol, rng, bars):
         *(np.asarray([r[i] for r in rows], np.float64) for i in range(1, 5)), 0)
 
 
+def _gain_error(reference, fast_pnl, capital):
+    """Compara la misma ganancia, liquidando el inventario final del replay."""
+    reference_pnl = (float(reference["metrics"]["equity_final_after_repository_liquidation"])
+        - float(capital))
+    return abs(float(fast_pnl) - reference_pnl), reference_pnl
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True)
@@ -117,6 +124,7 @@ def main(argv=None):
     bars = 20 * 288
     worst = {"pnl_abs_usdt": 0.0}
     mismatches = 0
+    mismatch_types = Counter()
     completed = 0
     invalid = Counter()
     attempts = 0
@@ -171,6 +179,7 @@ def main(argv=None):
                             abs(float(ref_value) - float(fast_value)) > max(.02, abs(float(ref_value)) * .005))
                         if failed:
                             mismatches += 1
+                            mismatch_types[name] += 1
                             print(f"PARIDAD_DIFERENCIA caso={case} moneda={symbol} chequeo={name} referencia={ref_value} rápido={fast_value}")
                     completed += 1
                     continue
@@ -188,8 +197,8 @@ def main(argv=None):
             fills = (sum(event["type"] == "BUY_FILLED" for event in events),
                 sum(event["type"] == "SELL_FILLED" for event in events))
             expected = (int(fast["buys"][0]), int(fast["sells"][0]))
-            pnl_error = abs(float(fast["pnl_usdt"][0]) -
-                (reference["metrics"]["equity_final_after_repository_liquidation"] - capital))
+            pnl_error, reference_pnl = _gain_error(reference,
+                fast["pnl_usdt"][0], capital)
             ref_loss = next((event for event in events if event["type"] == "META_LOSS_CUT"), None)
             cut_matches = bool(fast["loss_cut"][0]) == (ref_loss is not None)
             if ref_loss is not None:
@@ -213,8 +222,7 @@ def main(argv=None):
             completed += 1
             checks = {
                 "llenados": (fills, expected),
-                "ganancia": (reference["metrics"]["pnl_total_net_usdt"],
-                    float(fast["pnl_usdt"][0])),
+                "ganancia": (reference_pnl, float(fast["pnl_usdt"][0])),
                 "corte": (bool(ref_loss), bool(fast["loss_cut"][0])),
                 "meta": (reference_portfolio["reached"], bool(fast_reached)),
                 "curva": (bool(trace_matches), True),
@@ -225,6 +233,7 @@ def main(argv=None):
                     abs(float(ref_value) - float(fast_value)) > max(.02, abs(float(ref_value)) * .005))
                 if failed or (name == "corte" and not cut_matches) or (name == "meta" and not target_matches):
                     mismatches += 1
+                    mismatch_types[name] += 1
                     print(f"PARIDAD_DIFERENCIA caso={case} moneda={symbol} chequeo={name} referencia={ref_value} rápido={fast_value}")
             if pnl_error > worst["pnl_abs_usdt"]:
                 worst = {"pnl_abs_usdt": pnl_error, "symbol": symbol,
@@ -233,7 +242,8 @@ def main(argv=None):
                 print(f"PARIDAD caso={completed}/{cases} discrepancias={mismatches}")
     print(f"PARIDAD resumen casos_solicitados={cases} casos_completados={completed} "
         f"discrepancias={mismatches} geometria_invalida={sum(invalid.values())} "
-        f"motivo_comun={invalid.most_common(1)} peor={worst}")
+        f"motivo_comun={invalid.most_common(1)} diferencias_por_chequeo={dict(sorted(mismatch_types.items()))} "
+        f"peor={worst}")
     print(f"PARIDAD rss_max_mb={rss.peak:.1f}")
     return 1 if mismatches else 0
 

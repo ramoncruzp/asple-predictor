@@ -39,6 +39,7 @@ def summarize(curves, *, capital_initial, target_usdt, max_loss_pct=None,
         "cycles_expected": float(np.mean(cycles)) if cycles is not None else None,
         "p_inventory": float(np.mean(np.asarray(inventory_qty) > 0)) if inventory_qty is not None else None,
         "inventory_value_mean_usdt": float(np.mean(inventory_value)) if inventory_value is not None else None,
+        "capital_unused_usdt": float(outcomes[0]["capital_unused_usdt"]),
         "pnl_mean_ci95": [float(np.quantile(pnl_means, .025)), float(np.quantile(pnl_means, .975))],
         "p_loss_ci95": [float(np.quantile(loss_rates, .025)), float(np.quantile(loss_rates, .975))]}
 

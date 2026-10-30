@@ -761,3 +761,8 @@ Se restauró en `simulate_piece_curve` el filtro de traza legado por defecto; lo
 La inspección de `runner.py` en `6d565d9` determinó que los grids ya enviaban trazas cada 15 minutos cuando `meta_portfolio_piece=True`; por eso la salida efectiva observada de v1 permanece byte a byte igual. La condición antigua del envoltorio se restauró sin ampliar las llamadas del runner. La versión de caché/replay subió a `rolling_7d_v4_equity`; las filas anteriores se conservan y se marcan para recalcular.
 
 Pruebas enfocadas: 14 pasaron en el comando anotado en `DISCREPANCIAS_FASE43.md`; la prueba adicional de Smart exacto también pasó (1/1) con el comando separado anotado allí.
+# 43e-5c - arreglos de scripts de escenarios
+
+Se corrigió la comparación de ganancia de paridad para liquidar inventario antes de comparar, se añadió el conteo de discrepancias por chequeo y se alineó la agrupación diaria de retornos a sus timestamps. `escenarios_evaluar.py` ahora ofrece `--modo alternativas|cartera` (predeterminado: `alternativas`); cada candidata se evalúa sola con su capital asignado y el remanente queda quieto dentro del capital total de la meta. Calcula diferencias pareadas con IC sobre escenarios compartidos. El modo cartera conserva la suma conjunta y explica el error cuando las piezas exceden el capital de la meta.
+
+Pruebas enfocadas: primera corrida **6 pasaron en 10,42 s**; corrida final con cobertura adicional **7 pasaron en 4,43 s**. Los comandos previos a cada ejecución están en `reports/DISCREPANCIAS_FASE43.md`. `scripts/revisar_codificacion.py` reportó `HALLAZGOS=0` en los diez archivos tocados.
