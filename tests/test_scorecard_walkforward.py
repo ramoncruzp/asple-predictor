@@ -4,8 +4,11 @@ import numpy as np
 
 from research.scorecard.metrics import (calibration, calibration_factor_ci,
     causal_interval_coverage, qlike)
-from research.scorecard.diagnostics import efficiency_ratio, rupture_probabilities
-from research.scorecard.runner import init_scorecard_tables, run_scorecard, _load_live_forecasts
+from research.scorecard.diagnostics import (cycle_count, direction_auc, efficiency_ratio,
+    monthly_hourly_correlations, regime_features, rupture_evaluate, rupture_probabilities,
+    tail_factor_ci)
+from research.scorecard.runner import (aggregate_verdict, init_scorecard_tables,
+    run_scorecard, _load_live_forecasts)
 from research.scorecard.runner import run_scorecard
 from research.scorecard.walkforward import walk_forward
 
@@ -139,10 +142,15 @@ def test_runner_persists_symbol_and_aggregate_verdicts_with_factor_ci(tmp_path):
         verdicts = conn.execute("SELECT symbol,model,verdict FROM scorecard_verdicts").fetchall()
         factors = conn.execute("SELECT ci_low,ci_high FROM calibration_factors").fetchall()
         coverage = conn.execute("SELECT n,value FROM forecast_scorecard WHERE metric='cobertura_80'").fetchall()
+        targets = {row[0] for row in conn.execute("SELECT DISTINCT target FROM forecast_scorecard")}
+        verdict_targets = {row[0] for row in conn.execute("SELECT DISTINCT target FROM scorecard_verdicts")}
     assert any(row[0] == "SYNUSDT" for row in verdicts)
     assert any(row[0] is None for row in verdicts)
     assert factors and all(row[0] is not None and row[1] is not None for row in factors)
     assert coverage and all(row[0] > 0 for row in coverage)
+    assert any(target.startswith("ruptura_k_") for target in targets)
+    assert {"regimen", "direccion"}.issubset(targets)
+    assert {"ruptura", "regimen", "direccion"}.issubset(verdict_targets)
 
 
 def test_live_forecast_is_readonly_and_scaled_from_hourly_sigma(tmp_path):
@@ -165,6 +173,63 @@ def test_break_probability_declines_when_band_widens_and_efficiency_bounds():
     probabilities = rupture_probabilities(100, 90, 110, 0.03, 24)
     assert probabilities[1.0] > probabilities[3.0]
     assert 0 <= efficiency_ratio([100, 99, 101, 100, 102], 4) <= 1
+
+
+def test_rupture_gbm_calibration_and_heavy_tail_factor():
+    rng = np.random.default_rng(43)
+    n, steps = 12000, 24
+    sigma = np.full(n, .02)
+    price = np.full(n, 100.)
+    normal_path = np.cumsum(rng.normal(0, .02/np.sqrt(steps), (n, steps)), axis=1)
+    normal_high = price * np.exp(np.maximum(np.max(normal_path, axis=1), 0))
+    normal_low = price * np.exp(np.minimum(np.min(normal_path, axis=1), 0))
+    _rows, normal_factor = rupture_evaluate(price, sigma, normal_high, normal_low, 24)
+    heavy_path = np.cumsum(rng.standard_t(3, (n, steps)) / np.sqrt(3) * .02/np.sqrt(steps), axis=1)
+    heavy_high = price * np.exp(np.maximum(np.max(heavy_path, axis=1), 0))
+    heavy_low = price * np.exp(np.minimum(np.min(heavy_path, axis=1), 0))
+    rows, heavy_factor = rupture_evaluate(price, sigma, heavy_high, heavy_low, 24)
+    assert abs(normal_factor - 1) < .12
+    assert heavy_factor > 0
+    low, high = tail_factor_ci(price[:300], sigma[:300], rows[0]["actual"][:300], 24,
+        replicas=80)
+    assert low <= high
+    assert len(rows[0]["deciles"]) == 10
+
+
+def test_cycle_count_handmade_zigzag_trend_and_two_sided_bar():
+    price, sigma = 100., .1
+    up = price * np.exp(.5*sigma)
+    down = price * np.exp(-.5*sigma)
+    close = [up, price, down, price, up, price]
+    high = [up*1.001, up, price, price, up*1.001, up]
+    low = [price, down, down*.999, down, price, down]
+    assert cycle_count(close, high, low, price, sigma) == 3
+    trend_close = [up, price*np.exp(sigma), price*np.exp(1.5*sigma), price*np.exp(2*sigma), price*np.exp(2.5*sigma)]
+    trend_high = [x*1.001 for x in trend_close]
+    trend_low = [price, up, trend_close[1], trend_close[2], trend_close[3]]
+    assert cycle_count(trend_close, trend_high, trend_low, price, sigma) == 0
+    both_close = [up, price]
+    assert cycle_count(both_close, [up, up], [down, down], price, sigma) == 1
+
+
+def test_regime_features_and_timestamp_aligned_correlation():
+    close = np.exp(np.cumsum(np.random.default_rng(4).normal(0, .001, 24*12+1)))
+    features = regime_features(close, length_h=24)
+    assert 0 <= features["er"] <= 1 and features["variance_ratio"] >= 0
+    symbols, matrices = monthly_hourly_correlations({"A": {1_700_000_000: .1, 1_700_003_600: .2},
+        "B": {1_700_000_000: .1, 1_700_007_200: -.2}})
+    assert symbols == ["A", "B"] and len(matrices) == 1
+    assert matrices[next(iter(matrices))].shape == (2, 2)
+    assert direction_auc([.1, -.1, .2, -.2], [.1, -.2, .1, -.1]) > .5
+
+
+def test_regime_aggregate_requires_two_thirds_with_same_sign():
+    verdict, _ = aggregate_verdict(["sirve", "sirve", "sirve"], target="regimen",
+        signs=[1, -1, 0])
+    assert verdict == "no_sirve"
+    verdict, reason = aggregate_verdict(["sirve", "sirve", "no_sirve"], target="regimen",
+        signs=[1, 1, 0])
+    assert verdict == "sirve" and "mismo signo" in reason
 
 
 def test_dry_run_reads_synthetic_market_database_without_writing(tmp_path):

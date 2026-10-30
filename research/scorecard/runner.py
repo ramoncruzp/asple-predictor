@@ -11,6 +11,9 @@ import numpy as np
 
 from data.market_store import market_db_path
 from grid.sim.data import CandleData
+from research.scorecard.diagnostics import (cycle_count, direction_auc_block_ci,
+    efficiency_ratio, monthly_hourly_correlations, regime_features, rupture_evaluate,
+    spearman_block_ci, tail_factor_ci)
 from research.scorecard.metrics import (block_bootstrap_difference, calibration,
     calibration_factor_ci, causal_interval_coverage, qlike)
 from research.scorecard.walkforward import walk_forward
@@ -32,6 +35,23 @@ CREATE TABLE IF NOT EXISTS scorecard_verdicts(
  run_id INTEGER NOT NULL, symbol TEXT, target TEXT NOT NULL, horizon_h INTEGER NOT NULL,
  model TEXT NOT NULL, verdict TEXT NOT NULL, reason TEXT NOT NULL);
 """
+
+
+def aggregate_verdict(outcomes, *, target, signs=None):
+    total = len(outcomes)
+    if not total:
+        return "datos_insuficientes", "sin monedas con historia completa"
+    wins = sum(value == "sirve" for value in outcomes)
+    if target == "regimen":
+        signs = signs or []
+        positive = sum(value > 0 for value in signs)
+        negative = sum(value < 0 for value in signs)
+        serves = max(positive, negative) / total >= 2/3
+        return ("sirve" if serves else "no_sirve",
+            f"sirve en {max(positive, negative)} de {total} monedas con historia completa; mismo signo")
+    serves = wins / total >= 2/3
+    return ("sirve" if serves else "no_sirve",
+        f"sirve en {wins} de {total} monedas con historia completa")
 
 
 def init_scorecard_tables(path):
@@ -110,9 +130,18 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
     run_id = int(time.time())
     records, factors, verdicts, insufficient, per_symbol_seconds = [], [], [], [], {}
     verdict_counts = {}
+    regime_signs = {}
+    diagnostic_summary = {}
+    hourly_returns_by_symbol = {}
     for symbol in selected:
         symbol_start = time.perf_counter()
         data = _load_data_readonly(path, symbol)
+        close_indexes = np.arange(11, len(data.timestamp), 12)
+        if len(close_indexes) > 1:
+            hourly_values = np.log(data.close[close_indexes][1:] / data.close[close_indexes][:-1])
+            hourly_stamps = data.timestamp[close_indexes][1:]
+            hourly_returns_by_symbol[symbol] = {int(stamp): float(value)
+                for stamp, value in zip(hourly_stamps, hourly_values)}
         point_counts = {}
         if len(data.timestamp) < 180 * 288:
             insufficient.append(symbol)
@@ -165,6 +194,7 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
                     records.append((run_id, symbol, "volatilidad", int(horizon), model, None,
                         coverage_n, "cobertura_80", coverage, None, None))
             baseline = np.asarray(qlike(models["simple"], real))
+            model_verdicts = {"simple": "no_sirve"}
             for model in ("ewma", "har"):
                 score = np.asarray(qlike(models[model], real))
                 improvement = (float(np.mean(baseline)) - float(np.mean(score))) / max(float(np.mean(baseline)), 1e-12)
@@ -172,10 +202,95 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
                 verdict = "sirve" if improvement >= .05 and low > 0 else "no_sirve"
                 reason = f"mejora_qlike={improvement:.4f}; IC95_delta=[{low:.6g},{high:.6g}]"
                 verdicts.append((run_id, symbol, "volatilidad", int(horizon), model, verdict, reason))
+                model_verdicts[model] = verdict
                 verdict_counts.setdefault((int(horizon), model), []).append(verdict)
             verdicts.append((run_id, symbol, "volatilidad", int(horizon), "simple", "no_sirve",
                 "línea base; no supera a sí mismo"))
             verdict_counts.setdefault((int(horizon), "simple"), []).append("no_sirve")
+            valid_models = [name for name in ("ewma", "har") if model_verdicts.get(name) == "sirve"]
+            chosen_model = min(valid_models, key=lambda name: float(np.mean(qlike(models[name], real))) \
+                ) if valid_models else "simple"
+            forecast = np.asarray(models[chosen_model], float)
+            point_prices, highs, lows = [], [], []
+            for point in points:
+                start_index = int(np.searchsorted(data.timestamp, point.timestamp, side="left"))
+                point_prices.append(float(data.close[start_index - 1]))
+                indices = np.asarray(point.target_indices, dtype=int)
+                highs.append(float(np.max(data.high[indices])))
+                lows.append(float(np.min(data.low[indices])))
+            rupture_rows, tail_factor = rupture_evaluate(point_prices, forecast, highs, lows, int(horizon))
+            factor_low, factor_high = tail_factor_ci(point_prices, forecast,
+                rupture_rows[0]["actual"], int(horizon), replicas=1000, seed=43)
+            factors.append((run_id, symbol, "colas", int(horizon), chosen_model, tail_factor,
+                len(points), factor_low, factor_high, datetime.now(timezone.utc).isoformat()))
+            diagnostic_summary[f"{symbol}:{horizon}"] = {"best_sigma_model": chosen_model,
+                "tail_factor": tail_factor, "rupture": []}
+            for row in rupture_rows:
+                diff_ci = block_bootstrap_difference(row["base_error"], row["brier_error"],
+                    block=7, replicas=1000, seed=43)
+                skill_ci = tuple(value / row["brier_base_causal"] for value in diff_ci) \
+                    if row["brier_base_causal"] > 0 else (None, None)
+                verdict = "sirve" if row["brier_skill"] >= .05 and .8 <= row["calibration_slope"] <= 1.2 else "no_sirve"
+                key = (int(horizon), f"ruptura_k_{row['k']:g}")
+                verdicts.append((run_id, symbol, "ruptura", int(horizon), f"k_{row['k']:g}", verdict,
+                    f"Brier skill={row['brier_skill']:.4f}; pendiente={row['calibration_slope']:.4f}"))
+                verdict_counts.setdefault(key, []).append(verdict)
+                for metric, value in (("brier", row["brier"]),
+                    ("brier_base_causal", row["brier_base_causal"]),
+                    ("brier_skill", row["brier_skill"]),
+                    ("pendiente_calibracion", row["calibration_slope"])):
+                    records.append((run_id, symbol, f"ruptura_k_{row['k']:g}", int(horizon),
+                        chosen_model, row["k"], row["n"], metric, float(value),
+                        skill_ci[0] if metric == "brier_skill" else None,
+                        skill_ci[1] if metric == "brier_skill" else None))
+                diagnostic_summary[f"{symbol}:{horizon}"]["rupture"].append({
+                    **{key: value for key, value in row.items() if key not in {
+                        "actual", "probability", "brier_error", "base_error"}},
+                    "brier_skill_ci_low": skill_ci[0], "brier_skill_ci_high": skill_ci[1]})
+            regime_er24, regime_er72, variance_ratios, cycles, future_ers = [], [], [], [], []
+            for point, price, sigma, high, low in zip(points, point_prices, forecast, highs, lows):
+                history_end = int(np.searchsorted(data.timestamp, point.timestamp, side="left"))
+                past = data.close[:history_end]
+                feature24 = regime_features(past, length_h=24)
+                feature72 = regime_features(past, length_h=72)
+                regime_er24.append(feature24["er"])
+                regime_er72.append(feature72["er"])
+                variance_ratios.append(feature72["variance_ratio"])
+                indices = np.asarray(point.target_indices, dtype=int)
+                target_close = np.concatenate(([data.close[history_end-1]], data.close[indices]))
+                cycles.append(cycle_count(target_close[1:], data.high[indices], data.low[indices], price, sigma)
+                    / float(horizon))
+                future_ers.append(efficiency_ratio(target_close, len(target_close)-1))
+            for label, predictor in (("er24", regime_er24), ("er72", regime_er72),
+                    ("variance_ratio", variance_ratios)):
+                rho, ci_low, ci_high = spearman_block_ci(predictor, cycles, block=7, replicas=1000, seed=43)
+                verdict = "sirve" if abs(rho) >= .15 and (ci_low > 0 or ci_high < 0) else "no_sirve"
+                verdicts.append((run_id, symbol, "regimen", int(horizon), label, verdict,
+                    f"rho_ciclos={rho:.4f}; IC95=[{ci_low:.4f},{ci_high:.4f}]"))
+                verdict_counts.setdefault((int(horizon), f"regimen_{label}"), []).append(verdict)
+                regime_signs.setdefault((int(horizon), f"regimen_{label}"), []).append(
+                    float(np.sign(rho)) if verdict == "sirve" else 0.0)
+                records.append((run_id, symbol, "regimen", int(horizon), chosen_model, None,
+                    len(points), f"rho_ciclos_{label}", rho, ci_low, ci_high))
+            rho, ci_low, ci_high = spearman_block_ci(regime_er24, future_ers,
+                block=7, replicas=1000, seed=43)
+            records.append((run_id, symbol, "regimen", int(horizon), chosen_model, None,
+                len(points), "rho_er24_vs_er_futuro", rho, ci_low, ci_high))
+            if int(horizon) == 24:
+                past_returns, future_returns = [], []
+                for point in points:
+                    idx = int(np.searchsorted(data.timestamp, point.timestamp, side="left"))
+                    target = np.asarray(point.target_indices[:288], dtype=int)
+                    past_returns.append(float(np.log(data.close[idx-1] / data.close[idx-289])))
+                    future_returns.append(float(np.log(data.close[target[-1]] / data.close[idx-1])))
+                auc, auc_low, auc_high = direction_auc_block_ci(past_returns, future_returns,
+                    block=7, replicas=1000, seed=43)
+                direction_verdict = "sirve" if auc >= .55 and auc_low > .5 else "no_sirve"
+                verdicts.append((run_id, symbol, "direccion", 24, "momento_24h", direction_verdict,
+                    f"AUC={auc:.4f}; IC95=[{auc_low:.4f},{auc_high:.4f}]"))
+                verdict_counts.setdefault((24, "direccion_momento_24h"), []).append(direction_verdict)
+                records.append((run_id, symbol, "direccion", 24, "momentum_24h", None,
+                    len(past_returns), "auc", auc, auc_low, auc_high))
             if discarded:
                 records.append((run_id, symbol, "volatilidad", int(horizon), "simple", None,
                     discarded, "puntos_descartados_huecos", float(discarded), None, None))
@@ -184,12 +299,36 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
             f"{h}h:{point_counts.get(int(h), 0)}" for h in horizons) +
             f" duración_s={per_symbol_seconds[symbol]:.3f}")
     for (horizon, model), outcomes in sorted(verdict_counts.items()):
-        valid = len(outcomes)
-        wins = sum(outcome == "sirve" for outcome in outcomes)
-        serves = valid > 0 and wins / valid >= 2 / 3
-        verdicts.append((run_id, None, "volatilidad", horizon, model,
-            "sirve" if serves else "no_sirve", f"sirve en {wins} de {valid} monedas con historia completa"))
+        target = ("ruptura" if model.startswith("ruptura_") else
+            "regimen" if model.startswith("regimen_") else
+            "direccion" if model.startswith("direccion_") else "volatilidad")
+        verdict, reason = aggregate_verdict(outcomes, target=target,
+            signs=regime_signs.get((horizon, model)))
+        verdicts.append((run_id, None, target, horizon, model, verdict, reason))
+    correlation_summary = {}
+    if len(hourly_returns_by_symbol) >= 2:
+        correlation_symbols, correlation_matrices = monthly_hourly_correlations(hourly_returns_by_symbol)
+        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        complete_months = [month for month in correlation_matrices if month < current_month]
+        for month, matrix in sorted(correlation_matrices.items()):
+            off_diagonal = matrix[np.triu_indices(len(correlation_symbols), 1)]
+            off_diagonal = off_diagonal[np.isfinite(off_diagonal)]
+            if len(off_diagonal):
+                records.append((run_id, "TODAS", "correlacion", 0, month, None,
+                    len(off_diagonal), "media_mes", float(np.mean(off_diagonal)), None, None))
+                records.append((run_id, "TODAS", "correlacion", 0, month, None,
+                    len(off_diagonal), "mediana_mes", float(np.median(off_diagonal)), None, None))
+            correlation_summary[month] = {"symbols": correlation_symbols,
+                "matrix": np.nan_to_num(matrix, nan=0.0).tolist(),
+                "media": float(np.nanmean(off_diagonal)) if len(off_diagonal) else None,
+                "mediana": float(np.nanmedian(off_diagonal)) if len(off_diagonal) else None}
+        if complete_months:
+            last = complete_months[-1]
+            diagnostic_summary["correlation_last_complete_month"] = {
+                "month": last, **correlation_summary[last]}
     summary = {"symbols": len(selected), "insufficient": insufficient,
+        "diagnostics": diagnostic_summary,
+        "correlations_by_month": correlation_summary,
         "seconds": time.perf_counter() - t0, "per_symbol_seconds": per_symbol_seconds}
     if not dry_run:
         init_scorecard_tables(path)

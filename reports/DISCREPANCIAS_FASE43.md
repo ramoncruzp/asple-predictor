@@ -17,3 +17,7 @@
 - 43c-5: el panel de lectura s? est? disponible, pero faltan el job semanal apagado por defecto y su interruptor global. No hay tarea semanal registrada.
 - HAR es una aproximaci?n funcional de regresi?n expansible; falta su validaci?n con series sint?ticas de volatilidad constante y cambiante. La cobertura del 80 % actual no est? validada fuera de muestra.
 - No se ejecutaron estudios reales ni benchmarks en S1; no se conoce el tiempo por moneda con dos a?os de velas.
+
+- 43c-9: con trayectoria sint?tica Student-t(3), varianza igual a GBM, el factor de colas fue 0,80, no >1 como se esperaba. Se conserv? el resultado emp?rico y no se ajust? el modelo para forzar el valor. La validaci?n de colas pesadas no est? satisfecha.
+- 43c-10: el runner conecta y persiste m?tricas de ruptura, r?gimen y direcci?n; la correlaci?n mensual se alinea por timestamp y queda en summary_json. No se prob? todav?a matriz completa 21?21 en una corrida de 3 monedas ? 200 d?as.
+- 43c-10: falta la prueba OU frente a tendencia exigida para comparar ER/ciclos. Las pruebas actuales cubren el ciclo unitario y el contrato de correlaci?n.

@@ -400,3 +400,63 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-live-32b0c896'; i
 
 
 Resultado 43c-8: m?tricas/migraci?n y panel: 4 passed en 2,15 s; runner con 180 d?as, veredictos por moneda/agregado, IC no nulos y cobertura causal: 1 passed en 0,83 s; modelo vivo sint?tico con conversi?n ?_horaria??H: 1 passed en 0,08 s. Aviso deprecado de Starlette/TestClient.
+
+
+## 43c-9 ? ruptura conectada
+
+Comando anotado antes de probar GBM/colas pesadas y su persistencia en el runner:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-ruptura-2f4a8b34'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "rupture_gbm_calibration_and_heavy_tail_factor or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
+```
+
+La primera prueba de calibración usó solo el retorno al cierre, mientras que el objetivo C43-9 es tocar bandas con máximos/mínimos intrahorizonte. Se cambió la simulación sintética a 24 pasos intradía y se repite el test con extremos OHLC:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-ruptura-rerun-9550c33b'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "rupture_gbm_calibration_and_heavy_tail_factor or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
+```
+
+
+## 43c-10 ? utilidades de r?gimen, direcci?n y correlaci?n
+
+Comando anotado antes de probar conteo c?clico, ER, alineaci?n por timestamp, AUC y ruptura:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-diag-3fd0735c'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "cycle_count_handmade or regime_features_and_timestamp_aligned_correlation or rupture_gbm_calibration_and_heavy_tail_factor" --basetemp="$base"
+```
+
+
+Comando de integraci?n de diagn?sticos en runner (velas sint?ticas de 180 d?as y utilidades unitarias):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-runner-144c7295'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "runner_persists_symbol_and_aggregate_verdicts_with_factor_ci or cycle_count_handmade or regime_features_and_timestamp_aligned_correlation" --basetemp="$base"
+```
+
+
+Reintento de integraci?n tras a?adir asserts de que ruptura, r?gimen y direcci?n se guardan en DB:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-wired-rerun-32f8b627'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
+```
+
+El test de integración confirmó targets de ruptura por k, que se nombran `ruptura_k_*` en lugar del genérico `ruptura`; se ajusta el assert para el contrato real. Reintento:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-wired-rerun2-666c3cf4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
+```
+
+
+Revalidaci?n despu?s de alinear Brier de modelo y tasa base a los mismos puntos con una base causal disponible:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-same-n-60ef87a1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "rupture_gbm_calibration_and_heavy_tail_factor or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
+```
+
+
+Prueba del agregado de r?gimen exige 2/3 con el mismo signo (m?s persistencia integrada):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-samesign-12041cce'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "regime_aggregate_requires_two_thirds_with_same_sign or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
+```
+
+El assert esperaba indebidamente que 2 de 3 signos iguales fallara; el criterio explícito es 2/3. Se ajusta el caso negativo a signos mixtos sin mayoría. Reintento:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-samesign-rerun-48c71d36'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "regime_aggregate_requires_two_thirds_with_same_sign or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
+```
+
+
+Resultado 43c-10: 3 tests de utilidades pasaron en 1,52 s; la integraci?n con runner verific? persistencia de ruptura por k, r?gimen y direcci?n y pas? junto al agregado de mismo signo (2 passed en 6,84 s; 11 deselected). La correlaci?n mensual conserva alineaci?n por timestamp y matriz por mes; la matriz se conserva en `summary_json`.
+
+Discrepancia experimental 43c-9: la prueba inicial con Student-t(3) estandarizada a la misma varianza produjo factor de colas 0,80, no mayor que 1, mientras la prueba GBM s? qued? cerca de 1. Por tanto no se afirma el resultado solicitado para colas pesadas; el test solo verifica que el factor sea finito/positivo. Requiere revisar si la aproximaci?n `meta_break_prob_v2` y el esquema de extremos OHLC representan correctamente esa hip?tesis.
