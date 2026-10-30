@@ -184,7 +184,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-smart-20261030-r
 ```
 
 
-Reejecuci?n tras completar la referencia congelada de los argumentos por defecto:
+Reejecución tras completar la referencia congelada de los argumentos por defecto:
 
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-comision-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_portfolio_resolution.py tests/test_scenarios_commission.py tests/test_scenarios_evaluate.py --basetemp="$base"
@@ -192,4 +192,20 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-comision-2026103
 
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-smart-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
+```
+
+## 43e-6c - evaluación histórica causal
+
+Se agregó `evaluate_history` y `--modo historia`: geometría centrada con sigma de las 30 jornadas previas, ventana real y variante que quita la pendiente lineal del log-precio; resume PnL, probabilidades, IC bootstrap por bloques de 20 días y cantidad aproximada de ventanas independientes. El modo queda restringido a Simple y bot; Smart histórico exacto se deja para extensión separada porque el runner exacto requiere replay por ventana. No se usa la biblioteca FHS para escoger entradas históricas.
+
+Comando exacto de prueba, anotado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6c-historia-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+La primera ejecución tuvo dos fallas por notional insuficiente en la geometría sintética. La segunda tuvo una por precio histórico fuera del rango absoluto; se escaló la geometría fija con el precio de cada ventana. La ejecución final fue:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6c-historia-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
 ```

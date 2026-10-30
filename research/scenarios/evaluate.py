@@ -254,6 +254,132 @@ def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=
     return output
 
 
+def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
+        months=24, step_days=7, since=None, symbols=None, fee_pct=.1,
+        library_dir="data/derived/scenario_lib", seed=43, replicas=1000):
+    """Evalúa piezas en ventanas históricas causales y en una variante sin tendencia.
+
+    Cada geometría se centra en el precio de inicio y usa una sigma estimada solo
+    con las 30 jornadas anteriores. La segunda variante elimina la pendiente
+    lineal del log-precio en la ventana, conservando los movimientos relativos.
+    """
+    from datetime import datetime, timezone
+    from research.scenarios.fastsim import simulate_simple, simulate_bot
+    from grid.sim.meta_portfolio import evaluate_portfolio
+    if not pieces or capital <= 0 or step_days <= 0 or fee_pct < 0:
+        raise ValueError("piezas, capital, paso y comisión deben ser válidos")
+    profile = DEFAULT_PROFILES[str(perfil).upper()]
+    horizon_days = int(profile["max_days"])
+    horizon_bars = horizon_days * 288
+    symbols_used = sorted({str(p["symbol"]).upper() for p in pieces})
+    store = CandleStore(market_db_path(db_path))
+    start_cutoff = None
+    if since:
+        start_cutoff = int(datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            .replace(tzinfo=timezone.utc).timestamp())
+    result = {"mode": "historia", "fee_pct": float(fee_pct),
+        "horizon_days": horizon_days, "symbols": {}}
+    for symbol in symbols_used:
+        data = store.load(symbol, "5m")
+        ts = np.asarray(data.timestamp, dtype=np.int64)
+        close = np.asarray(data.close, dtype=np.float64)
+        open_ = np.asarray(data.open, dtype=np.float64)
+        high = np.asarray(data.high, dtype=np.float64)
+        low = np.asarray(data.low, dtype=np.float64)
+        min_history = 30 * 288 + horizon_bars
+        if len(close) < min_history:
+            result["symbols"][symbol] = {"estado": "historia_insuficiente", "ventanas": 0}
+            continue
+        latest = int(ts[-1])
+        cutoff = start_cutoff if start_cutoff is not None else latest - int(months) * 30 * 86400
+        first_start = max(30 * 288, int(np.searchsorted(ts, cutoff)))
+        end_start = len(close) - horizon_bars
+        starts = list(range(first_start, end_start + 1, int(step_days) * 288))
+        by_piece = []
+        for piece in [p for p in pieces if str(p["symbol"]).upper() == symbol]:
+            strategy = str(piece["strategy"]).lower()
+            pnl_by_variant = {"real": [], "sin_tendencia": []}
+            loss_by_variant = {"real": [], "sin_tendencia": []}
+            target_by_variant = {"real": [], "sin_tendencia": []}
+            for start in starts:
+                stop = start + horizon_bars + 1
+                train = np.diff(np.log(close[start - 30 * 288:start + 1]))
+                sigma_24h = float(np.sqrt(np.sum(train[-288:] ** 2)))
+                if not np.isfinite(sigma_24h) or sigma_24h <= 0:
+                    continue
+                price0 = float(close[start])
+                width = float(piece.get("width_sigma", 2.0)) * sigma_24h * np.sqrt(horizon_days)
+                lower, upper = piece.get("low"), piece.get("high")
+                if lower is None or upper is None:
+                    lower, upper = price0 * np.exp(-width), price0 * np.exp(width)
+                else:
+                    # La especificación se expresa respecto al último precio y
+                    # se escala al precio causal de inicio de cada ventana.
+                    reference_price = float(close[-1])
+                    lower = float(lower) * price0 / reference_price
+                    upper = float(upper) * price0 / reference_price
+                raw = {"open": open_[start:stop].copy(), "high": high[start:stop].copy(),
+                    "low": low[start:stop].copy(), "close": close[start:stop].copy()}
+                variants = {"real": raw}
+                log_close = np.log(raw["close"])
+                x = np.arange(len(log_close), dtype=np.float64)
+                slope = float(np.polyfit(x, log_close, 1)[0])
+                factor = np.exp(-slope * x)
+                variants["sin_tendencia"] = {key: value * factor for key, value in raw.items()}
+                for variant, bars in variants.items():
+                    scenario = {key: value[None, :] for key, value in bars.items()}
+                    if strategy == "bot":
+                        buy = float(piece.get("buy_price", lower))
+                        sell = float(piece.get("sell_price", upper))
+                        sim = simulate_bot(scenario, capital=float(piece["capital"]),
+                            buy_price=buy, sell_price=sell, filters=store.filters(symbol),
+                            max_loss_pct=float(profile["max_loss_pct"]), target_usdt=meta,
+                            initial_timestamp=1_700_000_100, pack_curves=True, fee_pct=fee_pct)
+                        curve = sim["curves"][0]
+                    elif strategy == "simple":
+                        sim = simulate_simple(scenario, n_levels=int(piece.get("n", 6)),
+                            capital=float(piece["capital"]), low=lower, high=upper,
+                            filters=store.filters(symbol), max_loss_pct=float(profile["max_loss_pct"]),
+                            target_usdt=meta, initial_timestamp=1_700_000_100,
+                            pack_curves=True, fee_pct=fee_pct)
+                        curve = sim["curves"][0]
+                    else:
+                        raise ValueError("evaluate_history admite simple y bot; Smart se evalúa aparte")
+                    outcome = evaluate_portfolio([curve], capital_initial=float(capital),
+                        target_usdt=meta, max_loss_pct=float(profile["max_loss_pct"]))
+                    pnl_by_variant[variant].append(float(outcome["pnl_usdt"]))
+                    loss_by_variant[variant].append(bool(outcome["loss_cut"]))
+                    target_by_variant[variant].append(bool(outcome["reached"]))
+            variants_summary = {}
+            for variant in pnl_by_variant:
+                pnls = np.asarray(pnl_by_variant[variant], dtype=np.float64)
+                if not len(pnls):
+                    variants_summary[variant] = {"n": 0, "estado": "sin_ventanas"}
+                    continue
+                block = max(1, int(np.ceil(20 / step_days)))
+                rng = np.random.default_rng(seed + len(variants_summary))
+                boot = []
+                for _ in range(int(replicas)):
+                    selected = []
+                    while len(selected) < len(pnls):
+                        idx = int(rng.integers(0, len(pnls)))
+                        selected.extend((idx + np.arange(block)) % len(pnls))
+                    boot.append(float(np.mean(pnls[np.asarray(selected[:len(pnls)], dtype=int)])))
+                variants_summary[variant] = {"n": len(pnls),
+                    "ventanas_independientes_aprox": max(1, int(np.ceil(len(pnls) / block))),
+                    "pnl_medio_usdt": float(pnls.mean()),
+                    "pnl_diario_usdt": float(pnls.mean() / horizon_days),
+                    "pnl_p10_usdt": float(np.quantile(pnls, .1)),
+                    "pnl_p50_usdt": float(np.quantile(pnls, .5)),
+                    "pnl_p90_usdt": float(np.quantile(pnls, .9)),
+                    "p_loss": float(np.mean(loss_by_variant[variant])),
+                    "p_target": float(np.mean(target_by_variant[variant])),
+                    "ic95_pnl_medio": [float(np.quantile(boot, .025)), float(np.quantile(boot, .975))]}
+            by_piece.append({"piece": piece, "variantes": variants_summary})
+        result["symbols"][symbol] = {"ventanas_candidatas": len(starts), "pieces": by_piece}
+    return result
+
+
 def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):
     """Compara curvas por índice global, priorizando pares Smart-Simple geométricos."""
     from grid.sim.meta_portfolio import evaluate_portfolio

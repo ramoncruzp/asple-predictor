@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from research.scenarios.evaluate import evaluate_pieces, paired_fee_sensitivity
+from research.scenarios.evaluate import evaluate_history, evaluate_pieces, paired_fee_sensitivity
 from research.scenarios.objective import objective_limits, rank_alternatives_v2
 from scripts.escenarios_velocidad import _rss_mb
 
@@ -46,7 +46,10 @@ def main(argv=None):
     parser.add_argument("--capital", required=True, type=float)
     parser.add_argument("--meta", required=True, type=float)
     parser.add_argument("--pieza", action="append", required=True)
-    parser.add_argument("--modo", choices=("alternativas", "cartera"), default="alternativas")
+    parser.add_argument("--modo", choices=("alternativas", "cartera", "historia"), default="alternativas")
+    parser.add_argument("--meses", type=int, default=24)
+    parser.add_argument("--paso-dias", type=int, default=7)
+    parser.add_argument("--desde", help="fecha ISO inicial para la historia")
     parser.add_argument("--escenarios", type=int, default=1000)
     parser.add_argument("--n-smart", type=int, default=200)
     parser.add_argument("--comision", type=float, default=.1,
@@ -60,6 +63,16 @@ def main(argv=None):
     started = time.perf_counter()
     if args.comision < 0 or (args.comparar_comision is not None and args.comparar_comision < 0):
         parser.error("las comisiones no pueden ser negativas")
+    if args.modo == "historia":
+        if args.comparar_comision is not None:
+            parser.error("--comparar-comision no se combina con --modo historia")
+        history = evaluate_history([_parse_piece(item) for item in args.pieza],
+            perfil=args.perfil, capital=args.capital, meta=args.meta, db_path=args.db,
+            months=args.meses, step_days=args.paso_dias, since=args.desde,
+            fee_pct=args.comision, library_dir=args.library_dir, seed=args.semilla)
+        print(json.dumps(history, ensure_ascii=False, indent=2))
+        print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
+        return 0
     result = evaluate_pieces([_parse_piece(item) for item in args.pieza],
         perfil=args.perfil, capital=args.capital, meta=args.meta,
         n_scenarios=args.escenarios, n_smart=args.n_smart, seed=args.semilla,

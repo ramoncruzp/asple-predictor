@@ -788,3 +788,12 @@ Implementada la clasificación informativa por P(meta) con restricciones de gana
 # 43e-6b - sensibilidad a comisiones
 
 Se añadió comisión configurable para Simple, bot y Smart exacto, conservando 0,1 % por lado como default. La comparación vuelve a correr con semilla idéntica y empareja por índice; muestra la diferencia de ganancia y probabilidades de meta y pérdida. Pruebas: **13 pasaron en 5,00 s**, además de **1 prueba Smart exacto en 0,24 s**. Codificación `HALLAZGOS=0`.
+
+
+# 43e-6c - evaluación histórica local
+
+Se implementó `evaluate_history` y `--modo historia` para Simple y bot. Selecciona entradas cada 7 días, estima volatilidad con los 30 días previos, aplica la geometría relativa al precio inicial de cada ventana y compara velas observadas contra la serie con tendencia lineal logarítmica removida. Incluye PnL por día, cuantiles, P(límite), P(meta), IC bootstrap por bloques aproximados de 20 días y recuento aproximado de ventanas independientes.
+
+Pruebas enfocadas: comando exacto en `reports/DISCREPANCIAS_FASE43.md`; la corrida final dio **8 pasaron en 9,82 s**. Hubo dos iteraciones fallidas por geometrías sintéticas no válidas (notional y precio fuera de rango); se corrigieron sin relajar validaciones y quedaron documentadas. No se midió desempeño con datos reales; está prohibido localmente.
+
+Límite: el modo historia aún no evalúa Smart exacto ni implementa el benchmark OU frente a GBM solicitado para atribuir el efecto de reversión a la media. Los intervalos son remuestreo circular de resultados de ventanas, no una secuencia no solapada. Validar esas extensiones antes de usar resultados para decisiones. Nada afecta decisiones: v2 continúa desconectado.
