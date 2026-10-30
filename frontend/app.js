@@ -37,6 +37,7 @@ class ApiClient {
   grid(params) { return this.get('/api/grid/recommend', params, 45000); }
   coinsAvailable() { return this.get('/api/coins/available'); }
   coinsList(includeInactive = false) { return this.get(`/api/coins${includeInactive ? '?include_inactive=true' : ''}`); }
+  coinVolatility(symbol, days) { return this.get(`/api/coins/${encodeURIComponent(symbol)}/volatility`, { days }, 10000); }
   addCoin(symbol, notes) { return this.post('/api/coins', { symbol, notes: notes || null }); }
   removeCoin(symbol) { return this.delete(`/api/coins/${symbol}`); }
   prepareCoin(symbol) { return this.post(`/api/coins/${symbol}/prepare`, {}); }
@@ -536,6 +537,8 @@ APP.coinsPendingDelete = null;
 APP.coinsRows = [];
 APP.coinsPoll = null;
 APP.coinsLoading = false;
+APP.coinVolatilityKey = null;
+APP.coinVolatilityLoading = false;
 const COIN_ACTIVE_STATES = new Set(['descargando', 'entrenando', 'consensuando']);
 const COIN_STATE_LABELS = { pendiente: 'Pendiente', descargando: 'Descargando historial', entrenando: 'Entrenando modelos', consensuando: 'Calculando consenso', lista: 'Lista', datos_insuficientes: 'Datos insuficientes', error: 'Error' };
 function coinReadiness(row) {
@@ -594,9 +597,54 @@ async function loadCoins() {
   loadCoinsAvailableOnce();
   if (APP.coinsLoading) return;
   APP.coinsLoading = true;
-  try { const rows = await api.coinsList($('#coins-show-inactive')?.checked); APP.coinsRows = rows || []; showCoinsError(null); renderCoinsTable(APP.coinsRows); }
+  try { const rows = await api.coinsList($('#coins-show-inactive')?.checked); APP.coinsRows = rows || []; showCoinsError(null); renderCoinsTable(APP.coinsRows); renderCoinVolatilitySelector(); }
   catch (error) { APP.coinsRows = []; stopCoinsPolling(); showCoinsError(panelLoadError('Monedas', error)); $('#coins-table').innerHTML = '<tbody><tr><td colspan="10">No se pudo cargar la lista; puedes reintentar.</td></tr></tbody>'; }
   finally { APP.coinsLoading = false; }
+}
+function renderCoinVolatilitySelector() {
+  const select = $('#coin-volatility-symbol'); if (!select) return;
+  const active = APP.coinsRows.filter(row => row.active !== false && row.active !== 0);
+  const previous = select.value || APP.coinVolatilitySymbol;
+  select.innerHTML = active.map(row => `<option value="${escapeHtml(row.symbol)}">${escapeHtml(row.symbol)}</option>`).join('');
+  const symbol = active.some(row => row.symbol === previous) ? previous : active.some(row => row.symbol === 'XRPUSDT') ? 'XRPUSDT' : active[0]?.symbol;
+  if (!symbol) { APP.coinVolatilitySymbol = null; $('#coin-volatility-summary').textContent = 'No hay monedas activas para mostrar.'; return; }
+  select.value = symbol; APP.coinVolatilitySymbol = symbol;
+  const key = `${symbol}:${$('#coin-volatility-days')?.value || 7}`;
+  if (key !== APP.coinVolatilityKey) loadCoinVolatility();
+}
+function volatilityNumber(value, digits = 2) { return Number(value).toLocaleString('es-ES', { minimumFractionDigits: digits, maximumFractionDigits: digits }); }
+function renderCoinVolatility(data) {
+  const days = Number(data.days);
+  const date = new Date(`${data.widest_day.date}T12:00:00Z`).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', timeZone: 'UTC' });
+  const maximumDate = new Date(data.maximum.at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: UI_TIME_ZONE });
+  const minimumDate = new Date(data.minimum.at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: UI_TIME_ZONE });
+  $('#coin-volatility-summary').textContent = `En los últimos ${days} ${days === 1 ? 'día' : 'días'} ${data.symbol} se movió entre ${volatilityNumber(data.minimum.price)} y ${volatilityNumber(data.maximum.price)} USDT (${volatilityNumber(data.range_pct, 1)} %). Rango diario promedio ${volatilityNumber(data.daily_range_avg_pct, 1)} %; el día más movido fue el ${date} (${volatilityNumber(data.widest_day.range_pct, 1)} %). Hoy está en el percentil ${Math.round(data.current_range_percentile_180d)} de los últimos 6 meses.`;
+  const forecast = data.sigma_24h_forecast_pct == null ? 'Sin pronóstico disponible' : `${volatilityNumber(data.sigma_24h_forecast_pct, 2)} %`;
+  $('#coin-volatility-stats').innerHTML = `<span>Precio inicial / final: <b>${volatilityNumber(data.price_initial)} / ${volatilityNumber(data.price_final)} USDT</b></span><span>Cambio: <b>${volatilityNumber(data.change_pct)} %</b></span><span>Rango: <b>${volatilityNumber(data.range_usdt)} USDT (${volatilityNumber(data.range_pct, 1)} %)</b></span><span>Máximo: <b>${volatilityNumber(data.maximum.price)} USDT · ${maximumDate}</b></span><span>Mínimo: <b>${volatilityNumber(data.minimum.price)} USDT · ${minimumDate}</b></span><span>σ realizada 24 h: <b>${data.sigma_24h_realized_pct == null ? '—' : `${volatilityNumber(data.sigma_24h_realized_pct)} %`}</b></span><span>σ período anualizada: <b>${data.sigma_period_annualized_pct == null ? '—' : `${volatilityNumber(data.sigma_period_annualized_pct)} %`}</b></span><span>σ pronosticada 24 h: <b>${forecast}</b></span>`;
+  renderCoinVolatilityPrice(data); renderCoinVolatilityDaily(data);
+}
+function renderCoinVolatilityPrice(data) {
+  const rows = data.price_series || [], el = $('#coin-volatility-price-chart'); if (!rows.length) { el.textContent = 'Sin datos.'; return; }
+  const width = 900, height = 240, pad = 38, min = Number(data.minimum.price), max = Number(data.maximum.price), span = Math.max(max - min, 1e-9);
+  const points = rows.map((row, i) => `${pad + i * (width - 2 * pad) / Math.max(rows.length - 1, 1)},${height - pad - (row.close - min) / span * (height - 2 * pad)}`).join(' ');
+  const lowY = height - pad, highY = pad, mark = (item, label, color) => { const i = item.t == null ? rows.length - 1 : Math.max(0, rows.findIndex(r => r.t >= item.t)); const x = pad + (width - 2 * pad) * (i / Math.max(rows.length - 1, 1)), y = height - pad - (item.price - min) / span * (height - 2 * pad); return `<circle cx="${x}" cy="${y}" r="5" fill="${color}"/><text x="${Math.min(x, width-pad)}" y="${label === 'Máximo' ? pad - 8 : height - pad + 20}" text-anchor="end">${label} ${volatilityNumber(item.price)}</text>`; };
+  const grids = (APP.coinsRows.find(row => row.symbol === data.symbol)?.open_grid_ranges || []).map(grid => `<line x1="${pad}" x2="${width-pad}" y1="${height-pad-(grid.floor-min)/span*(height-2*pad)}" y2="${height-pad-(grid.floor-min)/span*(height-2*pad)}" stroke="#e3b341" stroke-dasharray="5 4"/><line x1="${pad}" x2="${width-pad}" y1="${height-pad-(grid.ceiling-min)/span*(height-2*pad)}" y2="${height-pad-(grid.ceiling-min)/span*(height-2*pad)}" stroke="#e3b341" stroke-dasharray="5 4"/>`).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Precio y rango de ${escapeHtml(data.symbol)}"><rect x="${pad}" y="${highY}" width="${width-2*pad}" height="${lowY-highY}" fill="#4c9aff" opacity=".10"/><line x1="${pad}" x2="${width-pad}" y1="${highY}" y2="${highY}" stroke="#4c9aff"/><line x1="${pad}" x2="${width-pad}" y1="${lowY}" y2="${lowY}" stroke="#4c9aff"/>${grids}<polyline points="${points}" fill="none" stroke="#59a5ff" stroke-width="2"/>${mark(data.maximum,'Máximo','#36c98f')}${mark(data.minimum,'Mínimo','#ff6b72')}</svg>`;
+}
+function renderCoinVolatilityDaily(data) {
+  const rows = data.daily_ranges || [], el = $('#coin-volatility-daily-chart'); if (!rows.length) { el.textContent = 'Sin datos.'; return; }
+  const w = 900, h = 220, pad = 36, max = Math.max(...rows.map(row => row.range_pct), 0.1), slot = (w - 2 * pad) / rows.length, bar = Math.max(6, slot * .55);
+  const bars = rows.map((row,i) => { const bh = (h - 2 * pad) * row.range_pct / max, x = pad + i * slot + (slot - bar) / 2, y = h - pad - bh, label = new Date(`${row.date}T12:00:00Z`).toLocaleDateString('es-ES',{day:'2-digit',month:'2-digit',timeZone:'UTC'}); return `<rect x="${x}" y="${y}" width="${bar}" height="${bh}" rx="2" fill="#59a5ff"><title>${label}: ${volatilityNumber(row.range_pct,1)} %</title></rect><text x="${x+bar/2}" y="${Math.max(y-4,10)}" text-anchor="middle">${volatilityNumber(row.range_pct,1)}%</text><text x="${x+bar/2}" y="${h-8}" text-anchor="middle">${label}</text>`; }).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Rango diario porcentual de ${escapeHtml(data.symbol)}">${bars}</svg>`;
+}
+async function loadCoinVolatility() {
+  const symbol = $('#coin-volatility-symbol')?.value || APP.coinVolatilitySymbol, days = Number($('#coin-volatility-days')?.value || 7);
+  if (!symbol || APP.coinVolatilityLoading) return;
+  const key = `${symbol}:${days}`; APP.coinVolatilitySymbol = symbol; APP.coinVolatilityLoading = true;
+  $('#coin-volatility-error').classList.add('hidden'); $('#coin-volatility-summary').textContent = 'Cargando volatilidad…';
+  try { const data = await api.coinVolatility(symbol, days); if (`${$('#coin-volatility-symbol')?.value || APP.coinVolatilitySymbol}:${$('#coin-volatility-days')?.value || 7}` === key) { renderCoinVolatility(data); APP.coinVolatilityKey = key; } }
+  catch (error) { if (`${$('#coin-volatility-symbol')?.value || APP.coinVolatilitySymbol}:${$('#coin-volatility-days')?.value || 7}` === key) { $('#coin-volatility-error').textContent = error.message || 'No se pudo cargar la volatilidad.'; $('#coin-volatility-error').classList.remove('hidden'); } }
+  finally { APP.coinVolatilityLoading = false; const selectedKey = `${$('#coin-volatility-symbol')?.value || APP.coinVolatilitySymbol}:${$('#coin-volatility-days')?.value || 7}`; if (selectedKey !== APP.coinVolatilityKey) setTimeout(loadCoinVolatility, 0); }
 }
 async function handleCoinFormSubmit(event) {
   event.preventDefault();
@@ -643,4 +691,4 @@ async function handleCoinsTableClick(event) {
   try { await api.removeCoin(symbol); showCoinsNotice(null); await loadCoins(); }
   catch (error) { await loadCoins(); showCoinsError(error.message || 'No se pudo sacar la moneda.'); }
 }
-document.addEventListener('DOMContentLoaded', () => { $('#coins-form')?.addEventListener('submit', handleCoinFormSubmit); $('#coins-table')?.addEventListener('click', handleCoinsTableClick); $('#coins-show-inactive')?.addEventListener('change', loadCoins); });
+document.addEventListener('DOMContentLoaded', () => { $('#coins-form')?.addEventListener('submit', handleCoinFormSubmit); $('#coins-table')?.addEventListener('click', handleCoinsTableClick); $('#coins-show-inactive')?.addEventListener('change', loadCoins); $('#coin-volatility-symbol')?.addEventListener('change', loadCoinVolatility); $('#coin-volatility-days')?.addEventListener('change', loadCoinVolatility); });

@@ -140,6 +140,32 @@ def test_coin_polling_stops_when_leaving_coins(ui_page, live_server):
     assert requests['count']==settled
 
 
+def test_coin_volatility_panel_loads_seven_and_fourteen_days(ui_page, live_server):
+    rows = [_row('XRPUSDT', 'lista')]
+    calls = []
+    def volatility(route):
+        days = int(route.request.url.split('days=')[-1])
+        calls.append(days)
+        route.fulfill(json={
+            'symbol': 'XRPUSDT', 'days': days, 'minimum': {'price': 1.31, 'at': '2026-10-25T00:00:00+00:00'},
+            'maximum': {'price': 1.45, 'at': '2026-10-27T00:00:00+00:00'}, 'price_initial': 1.34, 'price_final': 1.42, 'range_pct': 10.7, 'range_usdt': 0.14,
+            'change_pct': 2.0, 'daily_range_avg_pct': 3.2,
+            'widest_day': {'date': '2026-10-27', 'range_pct': 6.1},
+            'current_range_percentile_180d': 64,
+            'sigma_24h_realized_pct': 2.2, 'sigma_period_annualized_pct': 72.0,
+            'sigma_24h_forecast_pct': 2.4,
+            'price_series': [{'t': 1, 'close': 1.34}, {'t': 2, 'close': 1.42}],
+            'daily_ranges': [{'date': '2026-10-27', 'range_pct': 6.1, 'range_usdt': 0.08}],
+        })
+    _coins_page(ui_page, live_server, rows, {'/api/coins/XRPUSDT/volatility': volatility})
+    expect(ui_page.locator('#coin-volatility-summary')).to_contain_text('últimos 7 días')
+    expect(ui_page.locator('#coin-volatility-price-chart svg')).to_have_count(1)
+    expect(ui_page.locator('#coin-volatility-daily-chart svg')).to_contain_text('6,1%')
+    ui_page.locator('#coin-volatility-days').select_option('14')
+    expect(ui_page.locator('#coin-volatility-summary')).to_contain_text('últimos 14 días')
+    assert calls == [7, 14]
+
+
 def test_grid_selector_disables_unready_coins_and_keeps_xrp_enabled(ui_page, live_server):
     rows=[_row('XRPUSDT','lista'),_row('ADAUSDT','entrenando'),_row('BTCUSDT','lista')]
     _coins_page(ui_page,live_server,rows)
