@@ -8,6 +8,8 @@ class V1ReplayEngine(DecisionEngine):
     available = True
 
     def plan(self, operator, goal, *, plan_kind, allocation_free_cash=None, record=True):
+        if plan_kind == "analisis" and allocation_free_cash is None and record:
+            return operator._build_plan(goal)
         return operator._build_plan(goal, plan_kind=plan_kind,
             allocation_free_cash=allocation_free_cash, record=record)
 

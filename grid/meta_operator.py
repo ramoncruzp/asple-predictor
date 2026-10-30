@@ -395,6 +395,7 @@ class MetaOperator:
         self._legacy_import_attempted = False
         self._thread = None
         self._opener = None
+        self._engine_failure_alert_at = {}
         self.scheduler = BackgroundScheduler(timezone="UTC")
         self._operation_lock = getattr(getattr(self.core, "monitor", None), "ops_lock", None) or threading.RLock()
 
@@ -1138,7 +1139,9 @@ class MetaOperator:
     def _run_analysis(self, job_id, goal):
         started = time.perf_counter()
         try:
-            data = self._build_plan(goal)
+            engine = self._engine_for_goal(goal)
+            data = engine.plan(self, goal, plan_kind="analisis")
+            data["engine"] = {"name": engine.name, "version": engine.version}
             plan_id = uuid.uuid4().hex
             now = self.clock()
             seconds = round(time.perf_counter() - started, 4)
@@ -3503,6 +3506,10 @@ class MetaOperator:
             raise ValueError("Plan vencido; solicite un análisis nuevo.")
         goal = self.core.get_goal(meta_id)
         cfg = goal.get("config_snapshot") or {}
+        expected_engine = str(cfg.get("decision_engine") or "v1").lower()
+        planned_engine = str((plan.get("engine") or {}).get("name") or "v1").lower()
+        if planned_engine != expected_engine:
+            raise ValueError("El plan fue calculado con otro motor; vuelve a analizar.")
         max_drift = float(cfg.get("plan_price_drift_pct", self.price_drift_pct))
         if self.engine is not None:
             for piece in plan.get("pieces", []):
@@ -3768,14 +3775,18 @@ class MetaOperator:
 
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
+        engine = self._engine_for_goal(goal)
+        engine_meta = {"name": engine.name, "version": engine.version}
         if goal["status"] != "ACTIVE":
             self._reset_rotation_streaks(meta_id, "meta no activa")
             result = {"decision": "no_hacer_nada", "reason": f"meta no activa: estado {goal['status']}"}
             value = None
-            self._ledger(meta_id, "META_OPERATOR_NOOP", self._noop_payload(result, value, None))
+            self._ledger(meta_id, "META_OPERATOR_NOOP", {**self._noop_payload(result, value, None),
+                "engine": engine_meta, "engine_shadow": None})
             self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
                 "ledger_schema_version": 2, "plan_decision_id": None,
                 "decision": self._compact_review_result(result), "shadow_decision": None, "valuation": value,
+                "engine": engine_meta, "engine_shadow": None,
                 "decision_choices": {"comparison_version": 2,
                     "real": {"decision": "mantener", "alternative_id": None},
                     "scanner_advisor": {"decision": "mantener", "alternative_id": None},
@@ -3789,24 +3800,28 @@ class MetaOperator:
                 "Revisión Meta %s cancelada por valoración desconocida tras dos intentos: %s; intentos=%s",
                 meta_id, diagnostic, valuation_attempts)
             result = {"decision": "no_hacer_nada", "reason": "valoración DESCONOCIDO tras dos intentos"}
-            self._record_review(meta_id, result, value, None,
+            self._record_review(meta_id, result, value, None, engine=engine,
                 diagnostics={"valuation_unknown": diagnostic, "valuation_attempts": valuation_attempts})
             return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
             self._reset_rotation_streaks(meta_id, "bloqueo 75% del limite de perdida")
             result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida"}
-            self._record_review(meta_id, result, value, None)
+            self._record_review(meta_id, result, value, None, engine=engine)
             return result
         # Scanner/Advisor/replays can take minutes. They must not hold the
         # monitor lock because MetaCore's one-minute loss guard uses it too.
         try:
-            plan = self._build_plan(goal, plan_kind="revision",
+            plan = engine.plan(self, goal, plan_kind="revision",
                 allocation_free_cash=value.get("cash_usdt"))
+            plan["engine"] = engine_meta
         except Exception as exc:
-            self._reset_rotation_streaks(meta_id, f"analisis no disponible: {exc}")
+            self._reset_rotation_streaks(meta_id, f"motor {engine.name} falló: {exc}")
             result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}
-            self._record_review(meta_id, result, value, None)
+            result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
+            self._alert_engine_failure(meta_id, engine, exc)
+            engine_shadow = self._run_engine_shadow(goal, value, None, engine)
+            self._record_review(meta_id, result, value, None, engine=engine, engine_shadow=engine_shadow)
             return result
         try:
             touch_bot_proposals = self._touch_bot_shadow_proposals(goal, plan)
@@ -3838,8 +3853,14 @@ class MetaOperator:
                 self._reset_rotation_streaks(meta_id, "precio cambio durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "precio cambió durante el análisis; recalcular en la siguiente revisión"}
             else:
-                result = self._review_allocations(current_goal, current_value, plan=plan)
+                try:
+                    result = engine.review(self, current_goal, current_value, plan=plan)
+                except Exception as exc:
+                    self._reset_rotation_streaks(meta_id, f"motor {engine.name} falló: {exc}")
+                    result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
+                    self._alert_engine_failure(meta_id, engine, exc)
             value = current_value
+        engine_shadow = self._run_engine_shadow(goal, value, plan, engine)
         choices = self._safe_active_review_choices(plan, result, meta_id)
         for proposal in touch_bot_proposals:
             self._ledger(meta_id, "META_BOT_TOUCH_SHADOW", proposal)
@@ -3850,6 +3871,7 @@ class MetaOperator:
             **comparison_error,
             "decision": self._compact_review_result(result),
             "shadow_decision": getattr(self, "_last_review_shadow", None),
+            "engine": engine_meta, "engine_shadow": engine_shadow,
             "valuation": value,
             **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
                 if value.get("status") != "KNOWN" else {}),
@@ -3865,12 +3887,15 @@ class MetaOperator:
         if result.get("decision") == "no_hacer_nada":
             self._ledger(meta_id, "META_OPERATOR_NOOP", {
                 **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error,
+                "engine": engine_meta, "engine_shadow": engine_shadow,
                 "valuation_attempts": valuation_attempts,
                 **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
                     if value.get("status") != "KNOWN" else {})})
         return result
 
-    def _record_review(self, meta_id, result, value, shadow, plan=None, diagnostics=None):
+    def _record_review(self, meta_id, result, value, shadow, plan=None, diagnostics=None,
+            engine=None, engine_shadow=None):
+        engine_meta = {"name": engine.name, "version": engine.version} if engine else {"name": "v1", "version": "1"}
         choices = self._safe_active_review_choices(plan, result, meta_id)
         comparison_error = ({"decision_choices_error": choices["decision_choices_error"]}
             if "decision_choices_error" in choices else {})
@@ -3878,6 +3903,7 @@ class MetaOperator:
             "ledger_schema_version": 2, "plan_decision_id": (plan or {}).get("decision_id"),
             **comparison_error,
             "decision": self._compact_review_result(result), "shadow_decision": shadow, "valuation": value,
+            "engine": engine_meta, "engine_shadow": engine_shadow,
             **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
                 if value.get("status") != "KNOWN" else {}),
             **(diagnostics or {}),
@@ -3885,7 +3911,51 @@ class MetaOperator:
             "comparison_version": 2})
         self._ledger(meta_id, "META_OPERATOR_NOOP", {
             **self._noop_payload(result, value, (plan or {}).get("decision_id")), **comparison_error,
+            "engine": engine_meta, "engine_shadow": engine_shadow,
             **(diagnostics or {})})
+
+    def _engine_for_goal(self, goal):
+        from grid.engines import DEFAULT_ENGINE, get_engine
+        config = goal.get("config_snapshot") or {}
+        return get_engine(config.get("decision_engine") or DEFAULT_ENGINE)
+
+    def _alert_engine_failure(self, meta_id, engine, error):
+        now = float(self.clock())
+        previous = self._engine_failure_alert_at.get(int(meta_id))
+        if previous is not None and now - previous < 3600:
+            return
+        self._engine_failure_alert_at[int(meta_id)] = now
+        try:
+            self.alert("META_DECISION_ENGINE_FAILURE", int(meta_id), {
+                "engine": engine.name, "error": f"{type(error).__name__}: {error}"})
+        except Exception:
+            logging.getLogger(__name__).exception("No se pudo alertar del fallo del motor Meta %s", meta_id)
+
+    def _run_engine_shadow(self, goal, value, plan, engine):
+        from grid.engines import get_engine
+        shadow_engine = get_engine("v2" if engine.name == "v1" else "v1")
+        done = threading.Event()
+        state = {}
+        started = time.perf_counter()
+        def evaluate():
+            try:
+                state["result"] = shadow_engine.shadow_review(self, goal, value, plan or {})
+            except Exception as exc:
+                state["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                done.set()
+        threading.Thread(target=evaluate, daemon=True, name=f"meta-shadow-{goal.get('id')}").start()
+        if not done.wait(30.0):
+            return {"name": shadow_engine.name, "decision": "budget_exceeded",
+                "reason": "la evaluación sombra superó 30 s",
+                "elapsed_s": round(time.perf_counter() - started, 4), "error": None}
+        elapsed = round(time.perf_counter() - started, 4)
+        if "error" in state:
+            return {"name": shadow_engine.name, "decision": "error", "reason": None,
+                "elapsed_s": elapsed, "error": state["error"]}
+        result = state.get("result") or {}
+        return {"name": shadow_engine.name, "decision": result.get("decision"),
+            "reason": result.get("reason"), "elapsed_s": elapsed, "error": None}
 
     def _valuation_with_retry(self, meta_id):
         attempts = []

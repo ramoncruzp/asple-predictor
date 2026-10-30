@@ -16,6 +16,7 @@ DEPTH_CACHE_TTL_S = 20
 VALUATION_STATES = {"KNOWN": 0, "PARCIAL": 1, "DESCONOCIDO": 2}
 DEFAULT_PROFILES = {
     "PRUDENTE": {"capital_per_coin_pct": 40, "max_grids": 2, "max_bots": 4,
+                 "decision_engine": "v1",
                  "max_loss_pct": 8, "warning_loss_pct": 6, "max_days": 45, "loan_cap_pct": 30,
                  "min_effective_verifications": 30,
                  "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.7,
@@ -45,6 +46,7 @@ DEFAULT_PROFILES = {
                  "rotation_cooldown_hours": 1.0,
                  "max_rotations_per_24h": 2},
     "RAPIDO": {"capital_per_coin_pct": 70, "max_grids": 4, "max_bots": 8,
+               "decision_engine": "v1",
                "max_loss_pct": 18, "warning_loss_pct": 13.5, "max_days": 20, "loan_cap_pct": 50,
                "min_effective_verifications": 30,
                "sigma_q33": 0.333333, "sigma_q67": 0.666667, "min_margin_pct": 0.3,
@@ -260,6 +262,8 @@ class MetaCore:
         if set(values) - allowed:
             raise ValueError("Parámetros no permitidos.")
         merged = {**DEFAULT_PROFILES[profile], **values}
+        if merged.get("decision_engine", "v1") not in {"v1", "v2"}:
+            raise ValueError("decision_engine debe ser v1 o v2.")
         if "reconfig_persistence_reviews" in values:
             persistence = values["reconfig_persistence_reviews"]
             if isinstance(persistence, bool) or int(persistence) != float(persistence) or int(persistence) < 1:
@@ -269,7 +273,8 @@ class MetaCore:
                 raise ValueError("signal_weights debe ser un objeto de pesos.")
             merged["signal_weights"] = {**DEFAULT_PROFILES[profile]["signal_weights"],
                                          **values["signal_weights"]}
-        scalar_values = [v for k, v in merged.items() if k != "signal_weights" and not isinstance(v, bool)]
+        scalar_values = [v for k, v in merged.items()
+            if k not in {"signal_weights", "decision_engine"} and not isinstance(v, bool)]
         scalar_values.extend((merged.get("signal_weights") or {}).values())
         if any(Decimal(str(v)) < 0 for v in scalar_values):
             raise ValueError("Los parámetros deben ser positivos.")
