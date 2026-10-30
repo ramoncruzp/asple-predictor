@@ -370,3 +370,47 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-rss-windows-2026
 ```
 
 Resultado: 7 pruebas pasaron en 1,73 s; el helper devolvió RSS máximo no nulo y menor de 600 MB. Medición puntual del proceso local: 40,57 MB; no representa el pico de la validación completa.
+## 43e-6i — línea base v1 fiel y paridad de FastSim
+
+La validación anterior no aplicaba la geometría de hoy a las ventanas históricas como v1. Se replica la referencia del precio y el escalado descritos en `grid/meta_operator.py:3236-3250`, ejecutando cada ventana con piso y techo escalados por `open[0]/ref`. Si no existe una ventana v1 válida, el par queda fuera de Brier v1 y se cuenta en `v1_excluded_pairs`; no se inventa un resultado falso.
+
+Comando exacto anotado antes de ejecutar las pruebas enfocadas:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+
+La prueba de regresión compara resultados Simple y bot con huellas congeladas obtenidas de `6f3bb7b`; otra comprueba que cotas vectoriales constantes equivalen a cotas escalares. La línea base sintética verifica el escalado dentro del rango y la media geométrica cuando el precio actual está fuera del rango. `--estimar` mide una fecha para dos monedas por grupo Simple/bot y Smart, e informa la proyección; `--sin-smart` omite ese grupo. No se usó BD real ni red.
+
+Resultado de la primera corrida: 98 pruebas pasaron en 7,96 s. Se añadió además una prueba sintética de `--estimar` que comprueba el trabajo para dos símbolos y que `--sin-smart` ejecuta únicamente el grupo Simple/bot. Comando exacto para repetir el conjunto final:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+
+La corrida r3 encontró un error de fixture: `CandleStore` se importa dentro de `_estimate`, no como atributo del módulo CLI. Se cambió el parche de la prueba al módulo origen. Comando exacto de la corrida corregida:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+
+Resultado r4: **99 pasaron en 8,21 s**. El valor de mercado de referencia en esta validación es el último cierre previo a `t`, porque no se consulta el libro de órdenes ni la BD operativa; es una aproximación conservadora documentada, necesaria para mantener la validación offline y aislada.
+
+Se ajustó la proyección de `--estimar` para contar siempre todas las monedas activas con papel `operar`, incluso si `--symbols` limita las dos monedas de medición. Comando exacto final:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+Resultado r5: **99 pasaron en 7,77 s**. El cómputo de `--estimar` se ejercitó con dos almacenes sintéticos; no se midió el rendimiento de producción porque habría requerido BD real.
+
+Se añadió el conteo de una ventana como excluida si el simulador la rechaza durante el replay, aunque haya pasado la validación previa de geometría. Comando exacto de verificación final:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+Resultado r6: **99 pasaron en 8,24 s**.
+Reejecución tras fijar las huellas a las obtenidas ejecutando el archivo congelado de `6f3bb7b` directamente:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
+```

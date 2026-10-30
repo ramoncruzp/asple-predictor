@@ -875,3 +875,16 @@ Comando final de pruebas de 6f:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-causal-strict-20261030-r9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
 ```
+## 43e-6i — línea base v1 fiel y paridad de FastSim
+
+Se corrigió la comparación predictiva de v1: en cada fecha la geometría absoluta prevista se aplica a las ventanas históricas escalándola por `open[0] / ref`, según `grid/meta_operator.py:3236-3250`. Si no quedan ventanas v1 válidas, el par se excluye del Brier de v1 y se informa en `v1_excluded_pairs`; no se rellena con un falso `False`.
+
+Se añadieron pruebas de la fórmula con velas sintéticas, tanto dentro del rango como con precio fuera del rango (referencia geométrica); pruebas de regresión Simple/bot contra huellas obtenidas ejecutando el código de `6f3bb7b`; equivalencia entre cotas escalares y arreglos constantes; y cobertura de `--estimar` / `--sin-smart` usando dobles sintéticos.
+
+Pruebas: `tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py` — **98 pasaron en 7,96 s**. Tras agregar el caso de estimación, se vuelve a ejecutar el conjunto completo (resultado consignado abajo al cerrar). La primera huella Simple anotada no coincidió con el formato del serializador; se recalculó ejecutando el archivo congelado de `6f3bb7b`, sin ajustar tolerancias. La coincidencia fue byte por byte para Simple y bot.
+
+No se midió el tiempo con datos reales: queda para Ramón ejecutar `scripts/escenarios_validar.py --db market_data.db --estimar` en S1, o `--estimar --sin-smart` para proyectar solo Simple/bot. No se leyó BD real ni se usó red en este trabajo. El cálculo de tiempo/RSS de esta estimación se imprime por símbolo, fecha y familia; la proyección usa el conteo de símbolos activos `operar` y fechas del período.
+
+Resultado final enfocado: **99 pasaron en 8,24 s**, con `ASPLE_OFFLINE=1`; incluye las pruebas de paridad Simple/bot heredadas y el escenario de estimación con almacén falso. La verificación `scripts/revisar_codificacion.py` sobre todos los archivos tocados informó `HALLAZGOS=0`. La única comparación no ejecutada es la medición con dos monedas de S1: no se usó BD de despliegue en esta sesión.
+
+Nada de esta parte modifica decisiones reales; v2 continúa con `available=False` y la validación permanece diagnóstica.
