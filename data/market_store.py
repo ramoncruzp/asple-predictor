@@ -130,13 +130,13 @@ class CandleStore:
         trades = int(values[7])
         return (stamp, *numeric, trades)
 
-    def upsert(self, symbol, interval, rows, source, *, role="operar", active=True):
-        step = self._step(interval)
-        symbol_id = self.register_symbol(symbol, role=role, active=active)
+    @classmethod
+    def validate_rows(cls, interval, rows):
+        step = cls._step(interval)
         accepted, rejected = [], 0
         for row in rows:
             try:
-                stamp, opn, high, low, close, volume, quote_volume, trades = self._row_values(row)
+                stamp, opn, high, low, close, volume, quote_volume, trades = cls._row_values(row)
                 if stamp % step or not all(math.isfinite(value) for value in
                         (opn, high, low, close, volume, quote_volume)):
                     raise ValueError("timestamp desalineado o valor no finito")
@@ -144,10 +144,16 @@ class CandleStore:
                     raise ValueError("precio, volumen o trades fuera de rango")
                 if low > min(opn, close) or high < max(opn, close) or low > high:
                     raise ValueError("relación OHLC inválida")
-                accepted.append((symbol_id, str(interval), stamp, opn, high, low, close,
-                    volume, quote_volume, trades))
+                accepted.append((stamp, opn, high, low, close, volume, quote_volume, trades))
             except (IndexError, KeyError, TypeError, ValueError, OverflowError):
                 rejected += 1
+        return accepted, rejected
+
+    def upsert(self, symbol, interval, rows, source, *, role="operar", active=True):
+        step = self._step(interval)
+        symbol_id = self.register_symbol(symbol, role=role, active=active)
+        valid_rows, rejected = self.validate_rows(interval, rows)
+        accepted = [(symbol_id, str(interval), *row) for row in valid_rows]
         now = datetime.now(timezone.utc).isoformat()
         gaps_detected = 0
         with self._connect() as conn:
