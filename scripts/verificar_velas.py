@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from data.binance_client import BinanceClient
@@ -56,16 +55,18 @@ def compare_api(path, days, client=None):
             local = {int(r[0]): tuple(r[1:]) for r in rows}
             frame = client.get_historical_klines(item["symbol"], "5m", days,
                 start_time=datetime.fromtimestamp(start, timezone.utc))
-            diffs = 0
+            remote = {}
             for row in frame.to_dict("records"):
                 stamp = row["timestamp"]
                 stamp = int(stamp.timestamp()) if hasattr(stamp, "timestamp") else int(stamp)
                 if stamp > last_closed:
                     continue
                 values = tuple(row[k] for k in ("open", "high", "low", "close", "volume", "quote_volume", "trades"))
-                if stamp not in local or any(float(a) != float(b) for a,b in zip(local[stamp], values)):
-                    diffs += 1
-            differences[item["symbol"]] = diffs
+                remote[stamp] = values
+            differences[item["symbol"]] = sum(
+                1 for stamp in local.keys() | remote.keys()
+                if stamp not in local or stamp not in remote or
+                any(float(a) != float(b) for a, b in zip(local[stamp], remote[stamp])))
     finally:
         conn.close()
     return differences

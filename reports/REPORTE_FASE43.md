@@ -133,3 +133,13 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b4-test-0d4b1ce8'; i
 ```
 
 Resultado: 5 passed en 0,24 s.
+
+## 43b-5 — verificador de velas
+
+Comando anotado antes de repetir la prueba enfocada tras hacer bidireccional la comparación API/BD:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b5-rerun-711e0eab'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_verificar_velas.py --basetemp="$base"
+```
+
+Resultado: 1 passed en 0,94 s.
