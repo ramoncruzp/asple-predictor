@@ -746,11 +746,11 @@ nice -n 10 venv2/bin/python scripts/escenarios_evaluar.py --db market_data.db --
 ```
 
 
-43e-3d follow-up: se a?adieron pruebas con un cliente falso para `velas_filtros` (incluye papel `datos` inactivo) y paridad JUP con capital 80 USDT y filtros sint?ticos. Comando enfocado previo:
+43e-3d follow-up: se añadieron pruebas con un cliente falso para `velas_filtros` (incluye papel `datos` inactivo) y paridad JUP con capital 80 USDT y filtros sintéticos. Comando enfocado previo:
 
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3d-followup-fake-jup-6dc1a7b2-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_market_store.py tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py --basetemp="$base"
 ```
 
-La primera aserci?n JUP mezcl? PnL antes de liquidaci?n con equity final luego de liquidar. Se aline? al campo de paridad usado por el resto de las pruebas (`equity_final_after_repository_liquidation`), conservando el umbral existente de 0,02 USDT.
+La primera aserción JUP mezcló PnL antes de liquidación con equity final luego de liquidar. Se alineó al campo de paridad usado por el resto de las pruebas (`equity_final_after_repository_liquidation`), conservando el umbral existente de 0,02 USDT.
 Resultado del follow-up 43e-3d: **93 passed en 2,22 s**.
