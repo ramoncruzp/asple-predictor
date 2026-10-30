@@ -97,7 +97,7 @@ def evaluate_portfolio(curves, *, capital_initial, target_usdt, max_loss_pct=Non
 
 def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=None,
         min_margin_pct=.3, sigma_values=None, meta_max_loss_pct=None,
-        include_replay=False, curve_every_candle=None):
+        include_replay=False, curve_every_candle=None, fee_pct=.1):
     """Sin objetivo por pieza; conserva por defecto la resolución histórica de v1."""
     times, cash, equity = [], [], []
     count = 0
@@ -117,13 +117,13 @@ def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=No
     if strategy == "individual_bot":
         from grid.sim.meta_bot import run_meta_bot
         replay = run_meta_bot(candles, capital=capital, buy_price=low, sell_price=high,
-            target_usdt=None, fee_pct=.1, max_loss_pct=None, filters=filters,
+            target_usdt=None, fee_pct=fee_pct, max_loss_pct=None, filters=filters,
             min_margin_pct=min_margin_pct, trace_callback=trace)
         extra = {"bought": replay["bought"], "sold": replay["sold"]}
     else:
         from grid.sim.runner import run_simulation
         replay = run_simulation(candles, strategy=strategy, n=n, capital=capital, low=low, high=high,
-            width_pct=None, params={}, fee_pct=.1, filters=filters,
+            width_pct=None, params={}, fee_pct=fee_pct, filters=filters,
             close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
             meta_max_loss_pct=meta_max_loss_pct, meta_portfolio_piece=True, trace_callback=trace,
             resync_candles=3, sigma_values=sigma_values, respacing_enabled=False,

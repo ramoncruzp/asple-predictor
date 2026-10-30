@@ -23,7 +23,7 @@ def _candles(days=20):
 
 
 def _curve_as_of_6d565d9(candles, *, strategy, n, capital, low, high, min_margin_pct=.3):
-    """Copia de referencia de simulate_piece_curve en 6d565d9."""
+    """Referencia congelada de la ruta precomisión de 515a5aa (fee=0,1 %)."""
     timestamps, cash, equity = [], [], []
     count = 0
 
@@ -47,7 +47,8 @@ def _curve_as_of_6d565d9(candles, *, strategy, n, capital, low, high, min_margin
             width_pct=None, params={}, fee_pct=.1, filters=None,
             close_wait_enabled=True, adjust_enabled_global=False, stoploss_enabled=False,
             meta_max_loss_pct=None, meta_portfolio_piece=True, trace_callback=trace,
-            resync_candles=3)
+            resync_candles=3, sigma_values=None, respacing_enabled=False,
+            idle_shrink_enabled=False, direction_signal=None, include_details=False)
         extra = {}
     return {"curve": pack_curve(timestamps, cash, equity, capital), **extra}
 
@@ -62,8 +63,13 @@ def test_curve_bytes_match_6d565d9_for_all_piece_strategies(strategy, low, high,
         capital=1000 if strategy != "individual_bot" else 20, low=low, high=high)
     actual = simulate_piece_curve(candles, strategy=strategy, n=n,
         capital=1000 if strategy != "individual_bot" else 20, low=low, high=high)
+    explicit_default = simulate_piece_curve(candles, strategy=strategy, n=n,
+        capital=1000 if strategy != "individual_bot" else 20, low=low, high=high,
+        fee_pct=.1)
     assert json.dumps(actual, sort_keys=True, separators=(",", ":")).encode() == \
         json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+    assert json.dumps(actual, sort_keys=True, separators=(",", ":")).encode() == \
+        json.dumps(explicit_default, sort_keys=True, separators=(",", ":")).encode()
     stamps, _, _ = unpack_curve(actual["curve"])
     assert len(stamps) == expected["curve"]["count"]
 

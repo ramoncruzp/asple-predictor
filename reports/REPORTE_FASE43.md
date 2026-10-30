@@ -784,3 +784,7 @@ Resultado: **6 pruebas pasaron en 6,57 s**. La media pareada deliberadamente dis
 # 43e-6a - objetivo de selección v2
 
 Implementada la clasificación informativa por P(meta) con restricciones de ganancia esperada, cota superior del IC de P(límite) y CVaR. El ranking no se conecta al motor v1 ni cambia decisiones reales. Pruebas enfocadas: **4 pasaron en 0,15 s**; comando exacto en `reports/DISCREPANCIAS_FASE43.md`.
+
+# 43e-6b - sensibilidad a comisiones
+
+Se añadió comisión configurable para Simple, bot y Smart exacto, conservando 0,1 % por lado como default. La comparación vuelve a correr con semilla idéntica y empareja por índice; muestra la diferencia de ganancia y probabilidades de meta y pérdida. Pruebas: **13 pasaron en 5,00 s**, además de **1 prueba Smart exacto en 0,24 s**. Codificación `HALLAZGOS=0`.

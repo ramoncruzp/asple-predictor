@@ -13,13 +13,14 @@ START_TS = 1_700_000_100 // 300 * 300
 
 
 def _one_smart(task):
-    bars, sigma, n, capital, low, high, filters, max_loss_pct, scenario_index = task
+    bars, sigma, n, capital, low, high, filters, max_loss_pct, fee_pct, scenario_index = task
     count = bars["close"].shape[0]
     candles = CandleData(START_TS + np.arange(count, dtype=np.int64) * 300,
         bars["open"], bars["high"], bars["low"], bars["close"], 0)
     result = simulate_piece_curve(candles, strategy="smart", n=n, capital=capital,
         low=low, high=high, filters=filters, sigma_values=sigma,
-        meta_max_loss_pct=max_loss_pct, include_replay=True, curve_every_candle=False)
+        meta_max_loss_pct=max_loss_pct, include_replay=True, curve_every_candle=False,
+        fee_pct=fee_pct)
     replay = result["replay"]
     cells = (replay.get("details") or {}).get("cells", [])
     inventory_qty = sum(float(cell.get("held_qty") or 0) for cell in cells)
@@ -31,7 +32,8 @@ def _one_smart(task):
 
 
 def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
-        filters=None, sigma_path=None, n_smart=200, workers=2, max_loss_pct=None):
+        filters=None, sigma_path=None, n_smart=200, workers=2, max_loss_pct=None,
+        fee_pct=.1):
     """Reproduce Smart para los primeros escenarios comunes con Simple.
 
     Desactiva crédito, compound, ADJUST, reespaciado, reducción de niveles ociosos,
@@ -52,7 +54,7 @@ def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
         row = {key: value[index].copy() for key, value in bars.items()}
         row_sigma = None if sigma is None else sigma[index].copy()
         tasks.append((row, row_sigma, int(n_levels), float(capital), float(low), float(high),
-            filters, max_loss_pct, index))
+            filters, max_loss_pct, float(fee_pct), index))
     if int(workers) > 1 and len(tasks) > 1:
         with get_context("spawn").Pool(processes=int(workers)) as pool:
             return pool.map(_one_smart, tasks, chunksize=1)

@@ -56,7 +56,8 @@ def _calibration_factors(path, symbols):
 
 def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
-        library_dir="data/derived/scenario_lib", workers=2, mode="alternativas"):
+        library_dir="data/derived/scenario_lib", workers=2, mode="alternativas",
+        fee_pct=.1):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
@@ -69,7 +70,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     mode = str(mode).lower()
     if mode not in {"alternativas", "cartera"}:
         raise ValueError("modo debe ser alternativas o cartera")
-    if not pieces or capital <= 0 or n_scenarios <= 0:
+    if not pieces or capital <= 0 or n_scenarios <= 0 or float(fee_pct) < 0:
         raise ValueError("piezas, capital y escenarios válidos requeridos")
     pieces = [dict(piece) for piece in pieces]
     if mode == "cartera":
@@ -131,7 +132,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 results = evaluate_smart_scenarios(common, n_levels=int(piece.get("n", 6)),
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), sigma_path=market["sigma_path"],
-                    n_smart=smart_count, workers=workers, max_loss_pct=loss_pct)
+                    n_smart=smart_count, workers=workers, max_loss_pct=loss_pct,
+                    fee_pct=fee_pct)
                 for offset, result in enumerate(results):
                     piece_curves[index].append(result["curve"])
                     scenario_index = int(batch["scenario_start"]) + offset
@@ -145,7 +147,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             elif strategy == "bot":
                 fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
                     sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
-                    target_usdt=meta, initial_timestamp=START_TS, pack_curves=True)
+                    target_usdt=meta, initial_timestamp=START_TS, pack_curves=True,
+                    fee_pct=fee_pct)
                 piece_curves[index].extend(fast["curves"])
                 start_index = int(batch["scenario_start"])
                 piece_scenario_curves[index].update({start_index + offset: curve
@@ -159,7 +162,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
-                    initial_timestamp=START_TS, pack_curves=True)
+                    initial_timestamp=START_TS, pack_curves=True, fee_pct=fee_pct)
                 piece_curves[index].extend(fast["curves"])
                 start_index = int(batch["scenario_start"])
                 piece_scenario_curves[index].update({start_index + offset: curve
@@ -193,9 +196,19 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         zero_fill_fraction = (float(np.mean(np.asarray(values["fills"]) == 0))
             if values["fills"] else 1.0)
         warning = "la geometría casi nunca se toca" if zero_fill_fraction > .95 else None
+        from grid.sim.meta_portfolio import evaluate_portfolio
+        scenario_results = []
+        if mode == "alternativas":
+            for scenario_id, curve in sorted(piece_scenario_curves[index].items()):
+                outcome = evaluate_portfolio([curve], capital_initial=float(capital),
+                    target_usdt=meta, max_loss_pct=loss_pct)
+                scenario_results.append({"scenario_index": int(scenario_id),
+                    "pnl_usdt": outcome["pnl_usdt"], "loss_cut": outcome["loss_cut"],
+                    "reached": outcome["reached"]})
         piece_results.append({"piece": piece, "metrics": metrics,
             "fills_mean": float(np.mean(values["fills"])) if values["fills"] else 0.0,
-            "aviso": warning, "zero_fill_fraction": zero_fill_fraction})
+            "aviso": warning, "zero_fill_fraction": zero_fill_fraction,
+            "scenario_results": scenario_results})
     portfolio = (summarize_portfolio(piece_curves, capital_initial=capital, target_usdt=meta,
         max_loss_pct=loss_pct, horizon_days=horizon, seed=seed) if mode == "cartera" else None)
     comparisons = []
@@ -207,9 +220,38 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     if mode == "alternativas":
         comparisons = _paired_alternatives(pieces, piece_scenario_curves, capital=capital,
             target=meta, loss_pct=loss_pct, seed=seed)
-    return {"profile": str(perfil).upper(), "mode": mode, "horizon_days": horizon,
+    return {"profile": str(perfil).upper(), "mode": mode, "fee_pct": float(fee_pct),
+        "horizon_days": horizon,
         "n_scenarios": target_count, "pieces": piece_results, "portfolio": portfolio,
         "smart_paired": comparisons, "calibration_factors": calibration}
+
+
+def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=1000):
+    """Compara comisiones por pieza y por índice global de escenario compartido."""
+    output = []
+    for index, (base, comparison) in enumerate(zip(base_result["pieces"],
+            comparison_result["pieces"])):
+        left = {row["scenario_index"]: row for row in base.get("scenario_results", [])}
+        right = {row["scenario_index"]: row for row in comparison.get("scenario_results", [])}
+        ids = sorted(set(left).intersection(right))
+        if not ids:
+            continue
+        deltas = {
+            "pnl_usdt": np.asarray([right[i]["pnl_usdt"] - left[i]["pnl_usdt"] for i in ids]),
+            "p_loss": np.asarray([float(right[i]["loss_cut"]) - float(left[i]["loss_cut"])
+                for i in ids]),
+            "p_target": np.asarray([float(right[i]["reached"]) - float(left[i]["reached"])
+                for i in ids]),
+        }
+        rng = np.random.default_rng(seed + index)
+        row = {"piece_index": index, "n": len(ids), "fee_base_pct": base_result["fee_pct"],
+            "fee_comparison_pct": comparison_result["fee_pct"], "scenario_indices": ids}
+        for name, values in deltas.items():
+            samples = values[rng.integers(0, len(ids), size=(int(replicas), len(ids)))].mean(axis=1)
+            row[name] = {"mean": float(values.mean()), "ci_low": float(np.quantile(samples, .025)),
+                "ci_high": float(np.quantile(samples, .975))}
+        output.append(row)
+    return output
 
 
 def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):

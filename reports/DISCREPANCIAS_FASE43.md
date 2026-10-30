@@ -167,3 +167,29 @@ Comando enfocado anotado antes de ejecutar:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6a-objetivo-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_objective.py --basetemp="$base"
 ```
+## 43e-6b - sensibilidad a comisiones
+
+Se parametrizó la comisión de FastSim y Smart exacto; `simulate_piece_curve(..., fee_pct=.1)` conserva el default de la base 515a5aa. `--comision` selecciona la comisión de la corrida, y `--comparar-comision` repite determinísticamente la evaluación con igual semilla, empareja por índice global y muestra Δ de ganancia, P(meta) y P(límite).
+
+Comando de pruebas anotado antes de ejecutarlo:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-comision-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_portfolio_resolution.py tests/test_scenarios_commission.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+Prueba adicional del worker Smart exacto y el fee default, anotada antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-smart-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
+```
+
+
+Reejecuci?n tras completar la referencia congelada de los argumentos por defecto:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-comision-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_portfolio_resolution.py tests/test_scenarios_commission.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6b-smart-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
+```
