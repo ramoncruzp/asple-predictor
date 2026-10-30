@@ -184,6 +184,7 @@ class MetaCore:
                 "learning_limits": {"max_templates_per_run": int(profiles.get("GLOBAL", {}).get(
                     "learning_max_templates_per_run", 30)), "time_budget_minutes": float(
                     profiles.get("GLOBAL", {}).get("learning_time_budget_minutes", 20))},
+                "learning_v1_enabled": bool(profiles.get("GLOBAL", {}).get("learning_v1_enabled", True)),
                 "maintenance": {"cache_retention_days": int(profiles.get("GLOBAL", {}).get(
                     "cache_retention_days", 7)), "ledger_plan_detail_days": int(profiles.get("GLOBAL", {}).get(
                     "ledger_plan_detail_days", 14))},

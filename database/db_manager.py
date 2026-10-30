@@ -411,6 +411,10 @@ class DBManager:
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("profile", String(16), nullable=False), Column("engine", String(16), nullable=False),
             Column("actor", String(80), nullable=False), Column("changed_at", DateTime(timezone=True), nullable=False))
+        self.meta_learning_v1_switch_events = Table("meta_learning_v1_switch_events", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
+            Column("changed_at", DateTime(timezone=True), nullable=False))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
@@ -492,6 +496,7 @@ class DBManager:
                     profile="GLOBAL", settings=json.dumps({"max_active": 1,
                         "learning_max_templates_per_run": 30,
                         "learning_time_budget_minutes": 20,
+                        "learning_v1_enabled": True,
                         "reconfig_persistence_40d6b_migrated": True}, sort_keys=True), updated_at=now))
             else:
                 row = conn.execute(select(self.meta_profile_settings.c.settings).where(
@@ -500,6 +505,7 @@ class DBManager:
                 global_values.setdefault("max_active", 1)
                 global_values.setdefault("learning_max_templates_per_run", 30)
                 global_values.setdefault("learning_time_budget_minutes", 20)
+                global_values.setdefault("learning_v1_enabled", True)
                 if not migration_pending:
                     global_values["reconfig_persistence_40d6b_migrated"] = True
                 conn.execute(self.meta_profile_settings.update().where(

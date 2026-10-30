@@ -121,6 +121,12 @@ El motor queda fijo en el `config_snapshot` de cada meta: las metas existentes s
 Las velas públicas de 5 min se guardan en `market_data.db`, separada de la BD de trading, excluida de respaldos de despliegue y git. El backfill cubre 24 meses cerrados y los días cerrados del mes actual; la actualización horaria usa la API pública existente y no guarda velas en curso. La lista B3 de monedas de datos es editable en `scripts/velas_backfill.py`; se excluyen las monedas activas de operar cuando el Coin Registry está disponible. Ningún componente de Meta ni Fase 42 consume todavía este almacén. La entrega no altera decisiones reales.
 
 | 43 | Interfaz de motor v1/v2 en sombra y almacén separado de velas públicas | Hecha y verificada offline; v2 no disponible, datos sin consumidores, sin red ni BD real |
+
+### 43a-4 — cambio de D6 (2026-10-30)
+
+Ramón decidió apagar el aprendizaje diario v1: sus medidores están en 0–6/30, la corrida demora alrededor de 90 minutos y retrasa Inteligencia. Se agrega un interruptor global auditable. Al apagarlo se bloquean el job de las 08:30 UTC, la corrida manual y las escrituras/etiquetas nuevas de aprendizaje; no se eliminan datos ni cambia la decisión v1. El apagado requiere que `use_learned_weights` esté apagado en Prudente y Rápido. El valor predeterminado queda `true` para conservar el comportamiento previo hasta que Ramón lo cambie en Laboratorio.
+
+| 43a-4 | Interruptor global para suspender el aprendizaje diario v1 | Implementado y probado offline; debe apagarse manualmente tras desplegar, pues no se accedió a la BD real |
 | 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
 | 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; 40d-6B restaura los frenos de reajuste real previos al refactor |
 | 40d-7A | Diagnóstico de saturación de señales | Correcciones de unidades, signo, cobertura y trazabilidad aplicadas directamente en Fase 41a |

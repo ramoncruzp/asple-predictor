@@ -697,7 +697,18 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
         meta_config = operator.core.config()
         profile_configs = meta_config.get("profiles") or {}
     except Exception:
+        meta_config = {}
         profile_configs = {}
+    learning_v1 = (operator.learning_v1_status() if operator is not None else {
+        "enabled": bool(meta_config.get("learning_v1_enabled", True)), "changed_at": None,
+        "label": "Encendido"})
+    if not learning_v1["enabled"]:
+        for profile in ("RAPIDO", "PRUDENTE"):
+            readiness[profile]["label"] = learning_v1["label"]
+            readiness[profile]["status"] = "gris"
+            if profile in profile_learning:
+                profile_learning[profile]["readiness"]["label"] = learning_v1["label"]
+                profile_learning[profile]["readiness"]["status"] = "gris"
     shadow_switches = {profile: {"use_centered_signals": bool((profile_configs.get(profile) or {}).get(
             "use_centered_signals", False)), "use_touch_bots": bool((profile_configs.get(profile) or {}).get(
             "use_touch_bots", False)), "use_break_prob_v2": bool((profile_configs.get(profile) or {}).get(
@@ -907,6 +918,7 @@ def _intelligence_summary(request: Request, *, page=1, page_size=50, meta_id=Non
         "grid_intelligence_readiness": grid_readiness_alerts,
         "switches": switches, "shadow_switches": shadow_switches,
         "readiness_switches": readiness_switches, "global_flags": global_flags,
+        "learning_v1": learning_v1,
         "models_link": "#models", "battle_link": "#battle"}
 
 

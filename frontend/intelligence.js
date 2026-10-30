@@ -163,7 +163,14 @@
   async function loadLearningLast() {
     const node = $('#learning-last-run'); if (!node) return;
     try {
-      const data = await api.get('/api/metas/learning/last');
+      const [data, switchState] = await Promise.all([api.get('/api/metas/learning/last'), api.get('/api/metas/learning-v1')]);
+      const runButton = $('#learning-run');
+      if (runButton) runButton.disabled = !switchState.enabled;
+      if (!switchState.enabled) {
+        node.textContent = switchState.label;
+        $('#learning-run-status').textContent = 'aprendizaje v1 apagado';
+        return;
+      }
       const run = data.run;
       node.textContent = run ? `Última corrida: ${run.status} · origen ${run.trigger} · inicio ${run.started_at} · fin ${run.finished_at || 'en curso'} · muestras fallidas ${run.samples_failed} · geometrías inválidas ${run.labels_invalid_geometry}` : 'Aún no hay corridas de aprendizaje.';
     } catch (error) { node.textContent = `No se pudo consultar la última corrida: ${error.message}`; }
@@ -173,7 +180,7 @@
     if (button) button.disabled = true;
     try {
       const result = await api.post('/api/metas/learning/run', {});
-      statusNode.textContent = `HTTP 202 · ${result.status} · trabajo ${result.job_id} · agendado ${result.scheduled_at}`;
+      statusNode.textContent = result.status === 'disabled' ? result.reason : `HTTP 202 · ${result.status} · trabajo ${result.job_id} · agendado ${result.scheduled_at}`;
       $('#learning-run-confirm').hidden = true;
       await loadLearningLast();
     } catch (error) {
@@ -186,7 +193,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     $('#intelligence-refresh')?.addEventListener('click', load);
     $('#intelligence-recalculate')?.addEventListener('click', recalculate);
-    $('#learning-run')?.addEventListener('click', () => { $('#learning-run-confirm').hidden = false; });
+    $('#learning-run')?.addEventListener('click', () => { if (!$('#learning-run').disabled) $('#learning-run-confirm').hidden = false; });
     $('#learning-run-confirm-yes')?.addEventListener('click', startLearning);
     $('#learning-run-confirm-no')?.addEventListener('click', () => { $('#learning-run-confirm').hidden = true; });
     $('#learning-last-refresh')?.addEventListener('click', loadLearningLast);

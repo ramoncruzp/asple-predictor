@@ -27,8 +27,11 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
             parameters_json TEXT,provenance_json TEXT);
         CREATE TABLE meta_learning_labels(id INTEGER,sample_id INTEGER,horizon TEXT,label_json TEXT,labeled_at TEXT);
         CREATE TABLE alert_state(key TEXT,value TEXT,updated_at TEXT);
+        CREATE TABLE meta_profile_settings(profile TEXT,settings TEXT,updated_at TEXT);
+        CREATE TABLE meta_learning_v1_switch_events(id INTEGER,enabled INTEGER,actor TEXT,changed_at TEXT);
         CREATE TABLE grid_intel_recommendations(id INTEGER,grid_id INTEGER,symbol TEXT,strategy TEXT,
-            created_at TEXT,action TEXT,expected_gain_7d REAL,expected_gain_7d_baseline REAL,drawdown REAL,would_apply INTEGER);
+            created_at TEXT,action TEXT,expected_gain_7d REAL,expected_gain_7d_baseline REAL,drawdown REAL,would_apply INTEGER,
+            method_version TEXT);
         CREATE TABLE grid_intel_labels(id INTEGER,recommendation_id INTEGER,status TEXT,label_json TEXT,labeled_at TEXT);
         CREATE TABLE grid_events(id INTEGER,ts TEXT,event_type TEXT,details TEXT);
         ''')
@@ -36,6 +39,9 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
             json.dumps({"RAPIDO:learned_weights":{"state":"Recolectando datos","n":12,
                 "n_required":30,"estimated_ready_at":"2026-11-02T00:00:00+00:00"}}),
             "2026-10-28 12:00:00"))
+        conn.execute("INSERT INTO meta_profile_settings VALUES('GLOBAL',?,?)",
+            (json.dumps({"learning_v1_enabled": False}), "2026-10-30 08:30:00"))
+        conn.execute("INSERT INTO meta_learning_v1_switch_events VALUES(1,0,'Ramón','2026-10-30 08:30:00')")
         conn.execute("INSERT INTO meta_goals VALUES(1,'RAPIDO','ACTIVE',100,3,'TESTNET')")
         conn.execute("INSERT INTO grids VALUES(12,'XRPUSDT','smart','ACTIVE',70,.9,1.1,5)")
         conn.execute("INSERT INTO meta_piece_links VALUES(1,1,12,'grid',NULL)")
@@ -67,7 +73,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
         conn.execute("INSERT INTO meta_analysis_cache VALUES('c2','replay',?,?)",
             (json.dumps({'window_results':[{'curve':{'curve_format_version':2}}]}),now))
         recent=now
-        conn.execute("INSERT INTO grid_intel_recommendations VALUES(1,99,'ADAUSDT','simple',?,'mantener',.2,.2,1,0)",(recent,))
+        conn.execute("INSERT INTO grid_intel_recommendations VALUES(1,99,'ADAUSDT','simple',?,'mantener',.2,.2,1,0,'grid_shadow_42c40_v3')",(recent,))
         conn.execute("INSERT INTO grid_intel_labels VALUES(1,1,'mature',?,?)",
             (json.dumps({'gain_difference_usdt':.1}),recent))
         conn.execute("INSERT INTO grid_events VALUES(1,?,'GRID_INTEL_JOB_SUMMARY',?)",
@@ -77,6 +83,7 @@ def test_s1_diagnostic_is_read_only_and_reports_synthetic_meta_state(tmp_path,ca
     assert module.verify(path,hours=10000)==0
     output=capsys.readouterr().out
     assert 'mode=ro' in output and 'Meta #1' in output and 'XRPUSDT smart ACTIVE' in output
+    assert 'Aprendizaje diario v1:\n  interruptor: APAGADO; último cambio: 2026-10-30 08:30:00' in output
     assert '¿Qué puedo encender?' in output
     assert 'RAPIDO:learned_weights: Recolectando datos · 12 / 30 · estimado: 2026-11-02T00:00:00+00:00' in output
     assert 'probability_replay' in output and 'allocation_shadow' in output

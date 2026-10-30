@@ -163,3 +163,79 @@ journalctl -u asple-predictor --since "1 hour ago" --no-pager | grep MARKET_SYNC
 ```
 
 No se observó diferencia intencional en las decisiones v1; la regresión enfocada fue 11 passed para los motores y la ruta histórica del operador. La lista completa de commits de esta entrega se presenta en la respuesta de cierre.
+
+## 43a-4 — interruptor de aprendizaje diario v1
+
+Comando anotado antes de ejecutar las pruebas dirigidas:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-tests-59fd82c1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py tests/test_meta_operator.py --basetemp="$base"
+```
+
+Resultado inicial: 93 passed y 1 failed; el endpoint rechazó la falta de token con HTTP 403 (la prueba esperaba 401). Se corrigió la expectativa al contrato real de autorización.
+
+Comando anotado antes de repetir:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-rerun-ec992716'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py tests/test_meta_operator.py --basetemp="$base"
+```
+
+Resultado: 94 passed en 15,20 s (incluye `tests/test_meta_operator.py`).
+
+Comando anotado antes de validar también la salida del verificador S1 con BD sintética:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-final-38f279ab'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py --basetemp="$base"
+```
+
+Resultado de esa verificación: 94 passed y 1 failed porque la aserción del fixture juntaba el encabezado y el detalle del interruptor en una sola línea; el verificador los imprime en dos. Se corrigió la aserción para respetar la salida real.
+
+Comando anotado antes de repetir tras ajustar el fixture:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-final-rerun-a49e3520'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py --basetemp="$base"
+```
+
+La segunda corrida repitió la falla del verificador; se acota ahora el diagnóstico a esa prueba con traceback breve para identificar la aserción exacta.
+
+Comando anotado antes del diagnóstico:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-diag-s1-3ab780e1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_s1_diagnostic.py --basetemp="$base" --tb=short
+```
+
+El traceback identificó que el fixture no incluía la columna `method_version` que el verificador ya consulta. Se completó el esquema sintético con la columna y versión vigente.
+
+Comando anotado antes de la siguiente verificación:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-diag-s1-rerun-9c061d5b'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_s1_diagnostic.py --basetemp="$base" --tb=short
+```
+
+Resultado: 1 passed en 0,37 s.
+
+Comando anotado antes de la verificación final enfocada, que incluye readiness, UI y contrato del verificador:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-final2-073f2db7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py tests/test_meta_operator.py tests/test_meta_s1_diagnostic.py --basetemp="$base"
+```
+
+Resultado final: 95 passed en 20,47 s; un aviso deprecado de Starlette/TestClient. `node --check frontend/metas.js` y `node --check frontend/intelligence.js` pasaron.
+
+La configuración global conserva el valor predeterminado activo por compatibilidad. Después del despliegue, Ramón debe apagarlo en Laboratorio → Reglas globales para suspender las corridas diarias.
+
+Comando anotado antes de la comprobación final de bloqueo en ambos perfiles tras corregir los mensajes mojibake existentes en la misma sección del operador:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-profiles-62db4608'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py --basetemp="$base"
+```
+
+Resultado: 4 passed en 1,21 s; un aviso deprecado de Starlette/TestClient.
+
+Comando anotado antes de verificar que no se persisten observaciones de toque al estar apagado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-final3-78d4d1ee'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_learning_v1_switch.py --basetemp="$base"
+```
+
+Resultado: 4 passed en 1,17 s; un aviso deprecado de Starlette/TestClient.

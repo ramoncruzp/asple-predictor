@@ -319,6 +319,20 @@ def verify(db_path: Path, hours=2, journal=False, detail=False):
             else:
                 print("  último job: no registrado en las últimas 24 h")
 
+        print("\nAprendizaje diario v1:")
+        if "meta_profile_settings" not in tables:
+            print("  interruptor: no disponible (tabla de ajustes ausente)")
+        else:
+            raw = conn.execute("SELECT settings FROM meta_profile_settings WHERE profile='GLOBAL'").fetchone()
+            values = _json(raw[0]) if raw else {}
+            enabled = bool(values.get("learning_v1_enabled", True))
+            changed_at = None
+            if "meta_learning_v1_switch_events" in tables:
+                row = conn.execute("SELECT changed_at FROM meta_learning_v1_switch_events "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+                changed_at = row[0] if row else None
+            print(f"  interruptor: {'ENCENDIDO' if enabled else 'APAGADO'}; último cambio: {changed_at or 'sin evento (valor predeterminado)'}")
+
     if journal:
         try:
             result=subprocess.run(["journalctl","-u","asple-predictor","--since",f"{hours} hours ago","--no-pager"],

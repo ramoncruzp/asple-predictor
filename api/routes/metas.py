@@ -96,6 +96,13 @@ class DecisionEngineSwitch(BaseModel):
     actor: str = Field(min_length=1, max_length=80)
 
 
+class LearningV1Switch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    confirm: StrictBool = False
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -169,6 +176,21 @@ def learning_last(request: Request):
 @router.post("/learning/run", status_code=status.HTTP_202_ACCEPTED)
 def run_learning_manual(request: Request):
     return _call(_operator(request).schedule_learning_manual)
+
+
+@router.get("/learning-v1")
+def learning_v1_status(request: Request):
+    return _operator(request).learning_v1_status()
+
+
+@router.put("/learning-v1/switch")
+def update_learning_v1_switch(request: Request, body: LearningV1Switch):
+    result = _call(_operator(request).set_learning_v1_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+    service = getattr(request.app.state, "intelligence_snapshot", None)
+    if service is not None:
+        service.request_refresh()
+    return result
 
 
 @router.put("/learning/switch")

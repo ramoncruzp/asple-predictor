@@ -787,9 +787,9 @@ class MetaOperator:
         from sqlalchemy import select
         profile = str(profile).upper()
         if profile not in {"PRUDENTE", "RAPIDO"}:
-            raise ValueError("Perfil Meta no vÃ¡lido.")
+            raise ValueError("Perfil Meta no válido.")
         if not confirm or not str(actor or "").strip():
-            raise ValueError("Confirma el cambio e indica quiÃ©n lo autorizÃ³.")
+            raise ValueError("Confirma el cambio e indica quién lo autorizó.")
         with self.db.engine.begin() as conn:
             raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
                 self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
@@ -807,6 +807,61 @@ class MetaOperator:
             conn.execute(self.db.meta_allocation_switch_events.insert().values(profile=profile,
                 enabled=bool(enabled), actor=str(actor).strip()[:80], changed_at=datetime.now(timezone.utc)))
         return {"profile": profile, "enabled": bool(enabled), "actor": str(actor).strip()[:80]}
+
+    def learning_v1_status(self):
+        from sqlalchemy import select
+        settings_table = getattr(self.db, "meta_profile_settings", None)
+        event_table = getattr(self.db, "meta_learning_v1_switch_events", None)
+        if settings_table is None or getattr(self.db, "engine", None) is None:
+            return {"enabled": True, "changed_at": None, "label": "Encendido"}
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(settings_table.c.settings).where(
+                settings_table.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            event = (conn.execute(select(event_table).order_by(
+                event_table.c.id.desc()).limit(1)).mappings().first() if event_table is not None else None)
+        enabled = bool(values.get("learning_v1_enabled", True))
+        changed_at = str(event["changed_at"]) if event else None
+        return {"enabled": enabled, "changed_at": changed_at,
+            "label": ("Encendido" if enabled else f"Aprendizaje v1 apagado desde {changed_at or 'fecha desconocida'}")}
+
+    def _learning_v1_enabled(self):
+        try:
+            return self.learning_v1_status()["enabled"]
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "No se pudo leer el interruptor global; se conserva el comportamiento previo del aprendizaje")
+            return True
+
+    def set_learning_v1_enabled(self, enabled, *, confirm, actor):
+        from sqlalchemy import select
+        if not confirm or not str(actor or "").strip():
+            raise ValueError("Confirma el cambio e indica quién lo autoriza.")
+        enabled = bool(enabled)
+        now = datetime.now(timezone.utc)
+        with self.db.engine.begin() as conn:
+            if not enabled:
+                for profile in ("PRUDENTE", "RAPIDO"):
+                    raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                        self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+                    if bool(json.loads(raw or "{}").get("use_learned_weights", False)):
+                        raise ValueError("Apaga primero 'usar pesos aprendidos' en Prudente y Rápido.")
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["learning_v1_enabled"] = enabled
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == "GLOBAL").values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=now))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile="GLOBAL",
+                    settings=json.dumps(values, sort_keys=True), updated_at=now))
+            conn.execute(self.db.meta_learning_v1_switch_events.insert().values(
+                enabled=enabled, actor=str(actor).strip()[:80], changed_at=now))
+        return {"enabled": enabled, "actor": str(actor).strip()[:80], "changed_at": now.isoformat()}
 
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
@@ -964,10 +1019,14 @@ class MetaOperator:
             readiness_status, readiness_label = "verde", "Listo para encender"
         else:
             readiness_status, readiness_label = "amarillo", "Hay datos, sin señal útil todavía"
+        global_learning = self.learning_v1_status()
+        if not global_learning["enabled"]:
+            readiness_label = global_learning["label"]
         allocation_switch_details = (None if allocation_switch is None else {
             "enabled": bool(allocation_switch["enabled"]), "actor": allocation_switch["actor"],
             "changed_at": str(allocation_switch["changed_at"])})
         return {"profile": profile, "enabled": enabled,
+            "learning_v1": global_learning,
             "use_extended_allocation": bool(config.get("use_extended_allocation", False)),
             "allocation_switch": allocation_switch_details,
             "readiness": {"status": readiness_status, "label": readiness_label,
@@ -990,6 +1049,8 @@ class MetaOperator:
 
     def schedule_learning_manual(self):
         """Agenda el aprendizaje fuera del hilo HTTP y evita duplicar una corrida activa."""
+        if not self._learning_v1_enabled():
+            return {"status": "disabled", "reason": "aprendizaje v1 apagado"}
         if self._learning_guard.locked():
             raise ValueError("El aprendizaje Meta ya está en curso.")
         scheduled_at = datetime.now(timezone.utc)
@@ -2199,6 +2260,8 @@ class MetaOperator:
         return {key: result[key] for key in allowed if key in (result or {})}
 
     def _persist_touch_observations(self, meta_id, decision_id, alternatives):
+        if not self._learning_v1_enabled():
+            return
         table = getattr(self.db, "meta_signal_observations", None)
         if table is None:
             return
@@ -2282,7 +2345,9 @@ class MetaOperator:
         return rows
 
     def _persist_learning_samples(self, goal, decision_id, alternatives):
-        """Congela señales y geometría puntuales, sin copiar filas de replay futuras."""
+        """Congela señales y geometría puntuales sin escribir si el aprendizaje está apagado."""
+        if not self._learning_v1_enabled():
+            return 0
         from grid.meta_learning import REPLAY_METHOD_VERSION
         table = getattr(self.db, "meta_learning_samples", None)
         if table is None:
@@ -2490,7 +2555,9 @@ class MetaOperator:
             "with_piece_parameters": {**common, "pieces": base_pieces + [addition]}}
 
     def _label_allocation_shadows(self, candles_by_symbol, filters_by_symbol, now_s):
-        """Etiqueta propuestas maduras con velas posteriores al momento de decisión."""
+        """Etiqueta propuestas maduras solo mientras el aprendizaje está activo."""
+        if not self._learning_v1_enabled():
+            return 0
         from sqlalchemy import select
         from grid.meta_learning import replay_allocation_counterfactual
         with self.db.engine.connect() as conn:
@@ -2698,6 +2765,8 @@ class MetaOperator:
     def run_learning_daily(self, trigger="scheduled"):
         """Etiqueta en prioridad baja sin tomar ops_lock ni ejecutar órdenes."""
         from sqlalchemy import select
+        if not self._learning_v1_enabled():
+            return {"status": "disabled", "reason": "aprendizaje v1 apagado"}
         if not bool(getattr(self.settings, "meta_mode_enabled", False)):
             return {"status": "disabled", "reason": "Modo Meta apagado"}
         if not self._learning_guard.acquire(blocking=False):
@@ -3766,6 +3835,8 @@ class MetaOperator:
 
     def _label_touch_bot_shadows(self, now=None):
         """Guarda etiquetas 24/72 h al madurar las propuestas, sin operar."""
+        if not self._learning_v1_enabled():
+            return 0
         from sqlalchemy import select
         now = int(self.clock() if now is None else now)
         with self.db.engine.connect() as conn:
