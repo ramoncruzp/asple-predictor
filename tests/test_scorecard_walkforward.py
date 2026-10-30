@@ -223,6 +223,30 @@ def test_regime_features_and_timestamp_aligned_correlation():
     assert direction_auc([.1, -.1, .2, -.2], [.1, -.2, .1, -.1]) > .5
 
 
+def test_missing_symbol_month_is_nan_not_zero():
+    symbols, matrices = monthly_hourly_correlations({
+        "A": {1_700_000_000: .1, 1_700_003_600: .2},
+        "B": {1_700_000_000: .3},
+        "C": {1_700_003_600: -.2},
+    })
+    matrix = matrices[next(iter(matrices))]
+    assert np.isnan(matrix[symbols.index("B"), symbols.index("C")])
+
+
+def test_har_forecast_has_positive_floor():
+    from grid.sim.data import CandleData
+    from research.scorecard.walkforward import walk_forward
+    rng = np.random.default_rng(430)
+    returns = rng.normal(0, .002, 365 * 288)
+    close = 100 * np.exp(np.cumsum(returns))
+    timestamps = 1_700_000_000 + np.arange(len(close)) * 300
+    data = CandleData(timestamps, close, close, close, close, 0)
+    points, _ = walk_forward(data, horizon_h=24, step_h=24)
+    assert points
+    assert all(p.forecast_har > 0 for p in points)
+    assert all(p.forecast_har >= .25 * p.forecast_simple for p in points)
+
+
 def test_ou_has_lower_efficiency_and_more_cycles_than_trend():
     rng = np.random.default_rng(5)
     n, price, sigma = 5000, 100., .04

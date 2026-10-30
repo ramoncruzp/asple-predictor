@@ -25,3 +25,7 @@
 - C43-12 resuelve la ausencia del job semanal: ya se registra con comprobaci?n din?mica de la opci?n GLOBAL apagada por defecto y evento con actor. La primera corrida manual validada sigue siendo requisito operativo antes de encenderlo.
 - C43-9 conserva una discrepancia experimental: Student-t(3) de igual varianza produjo factor de colas 0,80; no se confirm? la expectativa >1. Ver la secci?n 43c-9 del reporte.
 - No se midi? el runner completo con dos a?os y 21 monedas. El benchmark de 218.000 velas mide solo `walk_forward` (24/72 h); la corrida integrada medida cubre tres monedas sint?ticas de 200 d?as y horizonte 24 h.
+
+## Fase 43e-0
+
+HAR se mantiene como regresión sobre RV y se aplica un piso `max(HAR, 0,25 × simple, 1e-12)`. Se conserva el método existente y se evita que predicciones degeneradas contaminen QLIKE. Las correlaciones ausentes se conservan como no disponibles en JSON (`null`), y se excluyen de los resúmenes numéricos.

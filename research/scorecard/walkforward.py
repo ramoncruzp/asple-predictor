@@ -112,6 +112,8 @@ def walk_forward(candles, *, horizon_h=24, step_h=None, warmup_days=30,
                 hourly_prefix[rv_len] - hourly_prefix[rv_len - 168],
                 hourly_prefix[rv_len] - hourly_prefix[rv_len - 720]])
             forecast_har = float(np.sqrt(max(0.0, components @ cached_har_coef) * horizon_h))
+        # Piso conservador: limita extrapolaciones degeneradas de HAR.
+        forecast_har = max(forecast_har, 0.25 * forecast_simple, 1e-12)
         target_close = close[target_indices_array]
         target_returns = np.diff(np.log(np.concatenate(([close[history_end - 1]], target_close))))
         points.append(EvaluationPoint(t, int(stamps[history_end - 1]),

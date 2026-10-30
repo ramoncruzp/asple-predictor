@@ -319,7 +319,8 @@ def run_scorecard(db_path, *, symbols=None, horizons=(24, 72), dry_run=False,
                 records.append((run_id, "TODAS", "correlacion", 0, month, None,
                     len(off_diagonal), "mediana_mes", float(np.median(off_diagonal)), None, None))
             correlation_summary[month] = {"symbols": correlation_symbols,
-                "matrix": np.nan_to_num(matrix, nan=0.0).tolist(),
+                "matrix": [[float(value) if np.isfinite(value) else None for value in row]
+                    for row in matrix],
                 "media": float(np.nanmean(off_diagonal)) if len(off_diagonal) else None,
                 "mediana": float(np.nanmedian(off_diagonal)) if len(off_diagonal) else None}
         if complete_months:

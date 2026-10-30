@@ -553,3 +553,13 @@ Resultado del n?cleo final: 18 passed en 28,74 s; un aviso deprecado de Starlett
 
 
 Auditor?a final por bytes de los 20 archivos modificados desde 2b057c8: UTF-8 decodificable; `?`=0, `?`=0, `??`=0, U+FFFD=0; BOM=0, CRLF=0 y CR aislado=0. `node --check frontend/metas.js` y `node --check frontend/intelligence.js` pasaron; `git diff --check` sin errores.
+
+## Fase 43e-0 — arreglos del marcador
+
+Decisión conservadora: HAR conserva la regresión existente y aplica un piso de 25 % del pronóstico simple, para impedir pronósticos no positivos o degenerados sin alterar el resto del walk-forward. Correlaciones no disponibles se serializan como `null`, no como cero; el resumen ejecutivo etiqueta cada veredicto agregado con objetivo y horizonte.
+
+Comando de prueba enfocado (se registra antes de ejecutarlo):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e0-scorecard-6deec4a1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+Resultado: 16 passed en 5,07 s.

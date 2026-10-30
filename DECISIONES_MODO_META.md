@@ -440,3 +440,7 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 
 
 - C43-12: el job semanal queda bajo `scorecard_weekly_enabled=false` por defecto; solo un actor confirmado puede cambiarlo. Cambiarlo en caliente no requiere reiniciar. Evento auditado en `scorecard_switch_events`.
+
+### Fase 43e — decisiones de escenarios
+
+El marcador mantiene correlaciones ausentes como NaN internamente y null al serializar; HAR usa un piso conservador del 25 % del pronóstico simple para evitar degeneración. Estas correcciones de investigación no alteran decisiones reales.
