@@ -672,3 +672,18 @@ cd ~/asple-predictor
 nice -n 10 venv2/bin/python scripts/escenarios_biblioteca.py --db market_data.db
 nice -n 10 venv2/bin/python scripts/escenarios_paridad.py --db market_data.db --casos 200
 ```
+
+
+## Continuación 43e-3d — filtros y paridad con capital realista
+
+Se agregó almacenamiento `symbol_filters` a `CandleStore`, lectura de filtros por símbolo y `scripts/velas_filtros.py` para obtener fichas públicas de Binance al ejecutarlo explícitamente. El comparador contrasta cortes con índices relativos, informa cada control fallido, separa geometrías/ventanas inválidas y usa los filtros guardados; si faltan, avisa y usa `FILTERS`. Añade geometrías simples con capital alto y bajo y casos de bot individual.
+
+La primera corrida ampliada detectó que el reporte de meta mostraba el booleano de igualdad como el resultado rápido. Se corrigieron los valores reportados. Resultado final: **91 passed en 2,13 s**.
+
+Comando final ejecutado (anotado antes de correrlo):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3d-filters-parity-a1c4f60e-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_market_store.py tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py --basetemp="$base"
+```
+
+No se consultó la red ni base real. Pasos para S1: ejecutar `scripts/velas_filtros.py --db market_data.db` mediante el proxy configurado y luego `scripts/escenarios_paridad.py --db market_data.db --casos 200`.

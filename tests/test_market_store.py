@@ -82,3 +82,17 @@ def test_gap_is_recorded_and_not_filled_and_coverage_reports_it(tmp_path):
     assert data.gaps == coverage["gaps"] == 1
     assert coverage["gap_ranges"] == coverage["largest_gap"] == 1
     assert coverage["sync_state"]["last_source"] == "fixture"
+
+
+def test_symbol_filters_round_trip_in_temporary_market_db(tmp_path):
+    store = CandleStore(tmp_path / "filters.sqlite")
+    info = {"symbol": "JUPUSDT", "filters": [
+        {"filterType": "PRICE_FILTER", "minPrice": "0.0001", "maxPrice": "1000", "tickSize": "0.0001"},
+        {"filterType": "LOT_SIZE", "minQty": "0.1", "maxQty": "1000000", "stepSize": "0.1"},
+        {"filterType": "MIN_NOTIONAL", "minNotional": "5", "applyToMarket": True},
+    ]}
+    assert store.filters("JUPUSDT") is None
+    saved = store.save_symbol_filters("JUP/USDT", info, fetched_at="2026-10-30T00:00:00+00:00")
+    loaded = store.filters("JUPUSDT")
+    assert loaded == saved
+    assert str(loaded.tick_size) == "0.0001"

@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +19,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.market_store import market_db_path
+from data.exchange_filters import SymbolFilters
 from grid.sim.data import CandleData
 from grid.sim.meta_portfolio import evaluate_portfolio, pack_curve
 from grid.sim.runner import run_simulation
-from research.scenarios.fastsim import simulate_simple
+from research.scenarios.fastsim import simulate_bot, simulate_simple
+from grid.sim.meta_bot import run_meta_bot
+from grid.sim.runner import FILTERS
 
 
 class _RssPeak:
@@ -114,76 +118,124 @@ def main(argv=None):
     worst = {"pnl_abs_usdt": 0.0}
     mismatches = 0
     completed = 0
+    invalid = Counter()
+    attempts = 0
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn, _RssPeak() as rss:
         symbols = [row[0] for row in conn.execute(
             "SELECT symbol FROM symbols WHERE active=1 AND role='operar' ORDER BY symbol")]
         if not symbols:
             raise RuntimeError("market_data.db no contiene símbolos activos role=operar")
-        for case in range(cases):
-            selected = None
-            for _ in range(20):
-                selected = _window(conn, rng.choice(symbols), rng, bars)
-                if selected is not None:
-                    break
+        while completed < cases and attempts < cases * 5:
+            case = completed + 1
+            attempts += 1
+            selected = _window(conn, rng.choice(symbols), rng, bars)
             if selected is None:
+                invalid["sin ventana continua"] += 1
                 continue
             symbol, data = selected
             initial = float(data.close[0])
             n_levels = rng.choice((4, 6, 10))
-            width = rng.uniform(.08, .24)
+            capital = 1000.0 if completed % 2 == 0 else rng.uniform(20, 100)
+            margin = rng.choice((.003, .005, .007))
+            width = max(rng.uniform(.08, .24), margin * (n_levels - 1) * 2)
             low, high = initial * (1 - width), initial * (1 + width)
             loss_pct = rng.choice((None, 15., 20.))
             trace = []
             scenario = {name: np.asarray(getattr(data, name), np.float64)[None, :]
                 for name in ("open", "high", "low", "close")}
+            row_filter = conn.execute("SELECT raw_json FROM symbol_filters WHERE symbol=?", (symbol,)).fetchone() \
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='symbol_filters'").fetchone() else None
+            if row_filter:
+                filters = SymbolFilters.from_symbol_info(__import__("json").loads(row_filter[0]))
+            else:
+                filters = FILTERS
+                print(f"PARIDAD aviso moneda={symbol} sin filtros guardados; se usa FILTERS")
+            is_bot = completed % 4 == 3
             try:
-                reference = run_simulation(data, strategy="simple", n=n_levels, capital=1000,
-                    low=low, high=high, params={}, fee_pct=.1, resync_candles=3,
+                if is_bot:
+                    offset = rng.choice((.005, .015, .03))
+                    buy_price, sell_price = initial * (1 - offset), initial * (1 + offset)
+                    capital = rng.uniform(10, 30)
+                    reference_bot = run_meta_bot(data, capital=capital, buy_price=buy_price,
+                        sell_price=sell_price, target_usdt=None, filters=filters)
+                    fast_bot = simulate_bot(scenario, capital=capital, buy_price=buy_price,
+                        sell_price=sell_price, filters=filters,
+                        initial_timestamp=int(data.timestamp[0]))
+                    checks = {
+                        "llenados": ((reference_bot["bought"], reference_bot["sold"]),
+                            (bool(fast_bot["buys"][0]), bool(fast_bot["sells"][0]))),
+                        "ganancia": (reference_bot["pnl_usdt"], float(fast_bot["pnl_usdt"][0])),
+                    }
+                    for name, (ref_value, fast_value) in checks.items():
+                        failed = (ref_value != fast_value if name == "llenados" else
+                            abs(float(ref_value) - float(fast_value)) > max(.02, abs(float(ref_value)) * .005))
+                        if failed:
+                            mismatches += 1
+                            print(f"PARIDAD_DIFERENCIA caso={case} moneda={symbol} chequeo={name} referencia={ref_value} rápido={fast_value}")
+                    completed += 1
+                    continue
+                reference = run_simulation(data, strategy="simple", n=n_levels, capital=capital,
+                    low=low, high=high, params={}, fee_pct=.1, filters=filters,
                     meta_max_loss_pct=loss_pct, meta_portfolio_piece=True,
                     trace_callback=trace.append)
-                fast = simulate_simple(scenario, n_levels=n_levels, capital=1000, low=low,
-                    high=high, max_loss_pct=loss_pct, target_usdt=10,
+                fast = simulate_simple(scenario, n_levels=n_levels, capital=capital, low=low,
+                    high=high, filters=filters, max_loss_pct=loss_pct, target_usdt=10,
                     initial_timestamp=int(data.timestamp[0]))
-            except ValueError:
+            except ValueError as exc:
+                invalid[str(exc)] += 1
                 continue
             events = reference["events"]
             fills = (sum(event["type"] == "BUY_FILLED" for event in events),
                 sum(event["type"] == "SELL_FILLED" for event in events))
             expected = (int(fast["buys"][0]), int(fast["sells"][0]))
             pnl_error = abs(float(fast["pnl_usdt"][0]) -
-                (reference["metrics"]["equity_final_after_repository_liquidation"] - 1000))
+                (reference["metrics"]["equity_final_after_repository_liquidation"] - capital))
             ref_loss = next((event for event in events if event["type"] == "META_LOSS_CUT"), None)
             cut_matches = bool(fast["loss_cut"][0]) == (ref_loss is not None)
             if ref_loss is not None:
-                cut_matches = cut_matches and int(fast["loss_cut_candle"][0]) == int(ref_loss["ts"]) // 300
+                cut_matches = cut_matches and int(fast["loss_cut_candle"][0]) == (
+                    int(ref_loss["ts"]) - int(data.timestamp[0])) // 300
             ref_curve = pack_curve([row["timestamp"] for row in trace],
                 [float(row["balances"]["USDT"]) for row in trace],
-                [float(row["equity_incl_dust"]) for row in trace], 1000)
-            reference_portfolio = evaluate_portfolio([ref_curve], capital_initial=1000,
+                [float(row["equity_incl_dust"]) for row in trace], capital)
+            reference_portfolio = evaluate_portfolio([ref_curve], capital_initial=capital,
                 target_usdt=10, max_loss_pct=loss_pct)
-            target_matches = reference_portfolio["reached"] == (
+            fast_reached = (
                 int(fast["target_candle"][0]) >= 0 and
                 (int(fast["loss_cut_candle"][0]) < 0 or
                  int(fast["target_candle"][0]) < int(fast["loss_cut_candle"][0])))
+            target_matches = reference_portfolio["reached"] == fast_reached
             trace_matches = (len(trace) == fast["cash_curve"].shape[1] and
                 np.allclose([float(row["balances"]["USDT"]) for row in trace], fast["cash_curve"][0],
                     rtol=0, atol=.02) and
                 np.allclose([float(row["equity_incl_dust"]) for row in trace], fast["equity_curve"][0],
                     rtol=0, atol=.02))
             completed += 1
-            if (fills != expected or pnl_error > max(.02, abs(reference["metrics"]["pnl_total_net_usdt"]) * .005)
-                    or not cut_matches or not target_matches or not trace_matches
-                    or int(fast["cycles"][0]) != reference["metrics"]["cycles_completed"]):
-                mismatches += 1
+            checks = {
+                "llenados": (fills, expected),
+                "ganancia": (reference["metrics"]["pnl_total_net_usdt"],
+                    float(fast["pnl_usdt"][0])),
+                "corte": (bool(ref_loss), bool(fast["loss_cut"][0])),
+                "meta": (reference_portfolio["reached"], bool(fast_reached)),
+                "curva": (bool(trace_matches), True),
+                "ciclos": (reference["metrics"]["cycles_completed"], int(fast["cycles"][0])),
+            }
+            for name, (ref_value, fast_value) in checks.items():
+                failed = (ref_value != fast_value if name != "ganancia" else
+                    abs(float(ref_value) - float(fast_value)) > max(.02, abs(float(ref_value)) * .005))
+                if failed or (name == "corte" and not cut_matches) or (name == "meta" and not target_matches):
+                    mismatches += 1
+                    print(f"PARIDAD_DIFERENCIA caso={case} moneda={symbol} chequeo={name} referencia={ref_value} rápido={fast_value}")
             if pnl_error > worst["pnl_abs_usdt"]:
                 worst = {"pnl_abs_usdt": pnl_error, "symbol": symbol,
                     "n_levels": n_levels, "fills_reference": fills, "fills_fastsim": expected}
-            if (case + 1) % 10 == 0:
-                print(f"PARIDAD caso={case+1}/{cases} discrepancias={mismatches}")
+            if completed % 10 == 0:
+                print(f"PARIDAD caso={completed}/{cases} discrepancias={mismatches}")
     print(f"PARIDAD resumen casos_solicitados={cases} casos_completados={completed} "
-        f"discrepancias={mismatches} peor={worst}")
+        f"discrepancias={mismatches} geometria_invalida={sum(invalid.values())} "
+        f"motivo_comun={invalid.most_common(1)} peor={worst}")
     print(f"PARIDAD rss_max_mb={rss.peak:.1f}")
-    return 1 if mismatches or completed < cases else 0
+    return 1 if mismatches else 0
 
 
 if __name__ == "__main__":

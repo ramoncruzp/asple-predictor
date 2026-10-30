@@ -179,6 +179,12 @@ class BinanceClient:
             return None
         return info.get("status")
 
+    def get_symbol_info(self, symbol: str) -> dict[str, Any] | None:
+        """Obtiene la ficha pública completa del símbolo para leer sus filtros."""
+        binance_symbol = self._binance_symbol(symbol)
+        return self._request_with_retries(
+            lambda: self.client.get_symbol_info(binance_symbol), symbol=binance_symbol)
+
     def get_24h_stats(self, symbol: str) -> dict[str, float]:
         """Return 24h ticker stats with a single attempt (no retry wait)."""
         binance_symbol = self._binance_symbol(symbol)

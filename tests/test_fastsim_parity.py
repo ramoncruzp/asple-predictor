@@ -20,13 +20,14 @@ def _scenario(close):
         "low": low[None, :], "close": close[None, :]}
 
 
-def _candles(scenario):
-    return CandleData(np.arange(scenario["close"].shape[1], dtype=np.int64) * 300,
+def _candles(scenario, start_ts=0):
+    return CandleData(start_ts + np.arange(scenario["close"].shape[1], dtype=np.int64) * 300,
         *(scenario[key][0] for key in ("open", "high", "low", "close")), 0)
 
 
 @pytest.mark.parametrize("case", range(40))
-def test_simple_batch_matches_production_replay(case):
+@pytest.mark.parametrize("start_ts", [0, 1_727_740_800])
+def test_simple_batch_matches_production_replay(case, start_ts):
     rng = np.random.default_rng(case + 43)
     noise = rng.normal(0, .018, 60)
     if case % 5 == 0:
@@ -44,20 +45,21 @@ def test_simple_batch_matches_production_replay(case):
     n_levels = (4, 6, 10)[case % 3]
     max_loss = 20. if case % 2 else None
     trace = []
-    reference = run_simulation(_candles(scenario), strategy="simple", n=n_levels,
+    reference = run_simulation(_candles(scenario, start_ts), strategy="simple", n=n_levels,
         capital=1000, low=80, high=120, params={}, fee_pct=.1,
         resync_candles=3, meta_max_loss_pct=max_loss, meta_portfolio_piece=True,
         include_details=True,
         trace_callback=trace.append)
     fast = simulate_simple(scenario, n_levels=n_levels, capital=1000,
-        low=80, high=120, max_loss_pct=max_loss, target_usdt=20, initial_timestamp=0)
+        low=80, high=120, max_loss_pct=max_loss, target_usdt=20, initial_timestamp=start_ts)
     events = reference["events"]
     assert int(fast["buys"][0]) == sum(event["type"] == "BUY_FILLED" for event in events)
     assert int(fast["sells"][0]) == sum(event["type"] == "SELL_FILLED" for event in events)
     assert int(fast["cycles"][0]) == reference["metrics"]["cycles_completed"]
     assert bool(fast["loss_cut"][0]) == reference["metrics"]["loss_cut_reached"]
     cut_event = next((event for event in reference["events"] if event["type"] == "META_LOSS_CUT"), None)
-    assert int(fast["loss_cut_candle"][0]) == (-1 if cut_event is None else int(cut_event["ts"]) // 300)
+    assert int(fast["loss_cut_candle"][0]) == (-1 if cut_event is None else
+        (int(cut_event["ts"]) - start_ts) // 300)
     assert abs(float(fast["pnl_usdt"][0]) - reference["metrics"]["equity_final_after_repository_liquidation"] + 1000) <= .02
     assert abs(float(fast["fees_usdt"][0]) - float(reference["details"]["fees_usdt"])) <= .02
     curve = pack_curve([row["timestamp"] for row in trace],

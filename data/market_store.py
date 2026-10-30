@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +64,10 @@ class CandleStore:
                     symbol_id INTEGER NOT NULL REFERENCES symbols(id), interval TEXT NOT NULL,
                     from_ts INTEGER NOT NULL, to_ts INTEGER NOT NULL,
                     detected_at TEXT NOT NULL, reason TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS symbol_filters(
+                    symbol TEXT PRIMARY KEY, tick_size TEXT NOT NULL, step_size TEXT NOT NULL,
+                    min_qty TEXT NOT NULL, min_notional TEXT NOT NULL, raw_json TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_market_gap
                     ON gaps(symbol_id, interval, from_ts, to_ts);
                 CREATE INDEX IF NOT EXISTS ix_market_candles_ts
@@ -212,6 +217,36 @@ class CandleStore:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT symbol,role FROM symbols WHERE active=1 ORDER BY symbol")]
+
+    def filter_symbols(self):
+        """Devuelve todos los símbolos de ambos papeles de datos públicos."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT symbol,role FROM symbols WHERE role IN ('operar','datos') ORDER BY symbol")]
+
+    def save_symbol_filters(self, symbol, info, *, fetched_at=None):
+        """Guarda los filtros públicos originales y sus campos de uso frecuente."""
+        from data.exchange_filters import SymbolFilters
+        filters = SymbolFilters.from_symbol_info(info)
+        key = str(symbol).strip().upper().replace("/", "")
+        stamp = fetched_at or datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("INSERT INTO symbol_filters VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(symbol) DO UPDATE SET tick_size=excluded.tick_size,"
+                "step_size=excluded.step_size,min_qty=excluded.min_qty,"
+                "min_notional=excluded.min_notional,raw_json=excluded.raw_json,"
+                "fetched_at=excluded.fetched_at", (key, str(filters.tick_size),
+                str(filters.step_size), str(filters.min_qty), str(filters.min_notional),
+                json.dumps(info, ensure_ascii=False, separators=(",", ":")), stamp))
+        return filters
+
+    def filters(self, symbol):
+        """Lee filtros guardados; devuelve None si el símbolo aún no tiene."""
+        from data.exchange_filters import SymbolFilters
+        key = str(symbol).strip().upper().replace("/", "")
+        with self._connect() as conn:
+            row = conn.execute("SELECT raw_json FROM symbol_filters WHERE symbol=?", (key,)).fetchone()
+        return None if row is None else SymbolFilters.from_symbol_info(json.loads(row[0]))
 
     def symbol_roles(self):
         with self._connect() as conn:
