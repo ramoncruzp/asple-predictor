@@ -44,8 +44,10 @@ def scorecard_readonly(request: Request):
             factors = [dict(row) for row in conn.execute(
                 "SELECT symbol,kind,horizon_h,model,factor,n,ci_low,ci_high,computed_at "
                 "FROM calibration_factors WHERE run_id=? ORDER BY kind,horizon_h,symbol", (run_id,))]
+            verdict_columns = {row[1] for row in conn.execute("PRAGMA table_info(scorecard_verdicts)")}
+            symbol_field = "symbol" if "symbol" in verdict_columns else "NULL AS symbol"
             verdicts = [dict(row) for row in conn.execute(
-                "SELECT target,horizon_h,model,verdict,reason FROM scorecard_verdicts WHERE run_id=? "
+                f"SELECT {symbol_field},target,horizon_h,model,verdict,reason FROM scorecard_verdicts WHERE run_id=? "
                 "ORDER BY target,horizon_h,model", (run_id,))]
         finally:
             conn.close()

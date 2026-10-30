@@ -38,7 +38,7 @@ def main(argv=None):
     args = parse_args(argv)
     _lower_priority()
     result = run_scorecard(args.db, symbols=args.symbols, horizons=args.horizontes,
-        dry_run=args.dry_run, output_dir=args.out)
+        dry_run=args.dry_run, output_dir=args.out, registry_db_path=args.registro_db)
     out = Path(args.out)
     lines = ["# Marcador de pronósticos", "", f"Corrida: {result['run_id']}", "",
         f"Duración: {result['summary']['seconds']:.2f} s", "",

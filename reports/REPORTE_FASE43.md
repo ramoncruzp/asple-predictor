@@ -373,3 +373,30 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-legacy-7e69a09c';
 ```
 
 Resultado 43c-7: la prueba causal y la suite enfocada pasaron (4 passed en 0,09 s); regresi?n legacy 120 d?as: 1 passed en 0,26 s para 24 y 72 h, tolerancia 1e-9. Benchmark local de 218.000 velas sint?ticas: horizonte 24 h, 726 puntos, 0 huecos, 0,184 s; horizonte 72 h, 242 puntos, 0 huecos, 0,212 s. EWMA recursiva dentro de tolerancia 1e-9.
+
+
+## 43c-8 ? cobertura causal, factores y veredictos
+
+Comando anotado antes de probar las m?tricas y la migraci?n SQLite:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-vol-0f9d924e'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py tests/test_intelligence_api.py -k "coverage_uses_only_prior_points_and_minimum_30 or sigma_accumulated_units_and_calibration_factor or scorecard_verdict_schema_migrates_symbol_nullable or scorecard_panel_readonly_handles_missing_and_synthetic_run" --basetemp="$base"
+```
+
+
+Comando de integraci?n 43c-8 en mercado sint?tico de 180 d?as, para verificar filas por moneda/agregadas, IC y cobertura causal:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-runner-884c099a'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_per_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
+```
+El filtro del comando anterior no coincidió con el nombre real (`symbol_and_aggregate`); pytest no ejecutó pruebas (8 deselected). Comando corregido:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-runner-rerun-54455b8e'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
+```
+
+
+Comando anotado antes de verificar pron?stico vivo con DB temporal (unidad por hora y escalado ra?z de H):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-live-32b0c896'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k live_forecast_is_readonly_and_scaled_from_hourly_sigma --basetemp="$base"
+```
+
+
+Resultado 43c-8: m?tricas/migraci?n y panel: 4 passed en 2,15 s; runner con 180 d?as, veredictos por moneda/agregado, IC no nulos y cobertura causal: 1 passed en 0,83 s; modelo vivo sint?tico con conversi?n ?_horaria??H: 1 passed en 0,08 s. Aviso deprecado de Starlette/TestClient.

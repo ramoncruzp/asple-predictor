@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from research.scorecard.metrics import calibration, qlike
+from research.scorecard.metrics import (calibration, calibration_factor_ci,
+    causal_interval_coverage, qlike)
 from research.scorecard.diagnostics import efficiency_ratio, rupture_probabilities
+from research.scorecard.runner import init_scorecard_tables, run_scorecard, _load_live_forecasts
 from research.scorecard.runner import run_scorecard
 from research.scorecard.walkforward import walk_forward
 
@@ -93,6 +95,70 @@ def test_sigma_accumulated_units_and_calibration_factor():
     assert qlike(actual, actual).mean() == 0
     result = calibration(actual / 2, actual)
     assert abs(result["factor_calibracion"] - 2) < 1e-9
+    low, high = calibration_factor_ci(actual / 2, actual, replicas=200)
+    assert low <= 2 <= high
+
+
+def test_coverage_uses_only_prior_points_and_minimum_30():
+    pred = np.ones(32)
+    real = np.ones(32)
+    real[-1] = 10
+    coverage, n = causal_interval_coverage(pred, real, minimum_history=30)
+    assert n == 2
+    assert coverage == 0.5
+
+
+def test_scorecard_verdict_schema_migrates_symbol_nullable(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "market_data.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE scorecard_verdicts(run_id INTEGER,target TEXT,horizon_h INTEGER,"
+            "model TEXT,verdict TEXT,reason TEXT)")
+    init_scorecard_tables(path)
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(scorecard_verdicts)")}
+    assert "symbol" in columns
+
+
+def test_runner_persists_symbol_and_aggregate_verdicts_with_factor_ci(tmp_path):
+    import sqlite3
+    from data.market_store import CandleStore
+
+    path = tmp_path / "market_data.db"
+    store = CandleStore(path)
+    n = 180 * 288
+    rng = np.random.default_rng(8)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, .001, n)))
+    rows = [{"open_ts": 1_700_000_100 + i * 300, "open": float(close[i]),
+        "high": float(close[i] * 1.001), "low": float(close[i] * .999),
+        "close": float(close[i])} for i in range(n)]
+    store.upsert("SYNUSDT", "5m", rows, "synthetic", role="datos")
+    run_scorecard(path, symbols=["SYNUSDT"], horizons=(24,), dry_run=False)
+    with sqlite3.connect(path) as conn:
+        verdicts = conn.execute("SELECT symbol,model,verdict FROM scorecard_verdicts").fetchall()
+        factors = conn.execute("SELECT ci_low,ci_high FROM calibration_factors").fetchall()
+        coverage = conn.execute("SELECT n,value FROM forecast_scorecard WHERE metric='cobertura_80'").fetchall()
+    assert any(row[0] == "SYNUSDT" for row in verdicts)
+    assert any(row[0] is None for row in verdicts)
+    assert factors and all(row[0] is not None and row[1] is not None for row in factors)
+    assert coverage and all(row[0] > 0 for row in coverage)
+
+
+def test_live_forecast_is_readonly_and_scaled_from_hourly_sigma(tmp_path):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    path = tmp_path / "registry.sqlite"
+    forecast_at = datetime.fromtimestamp(1_700_000_000, timezone.utc).isoformat()
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE vol_forecasts(symbol TEXT,horizon_h INTEGER,model_name TEXT,"
+            "forecast_at TEXT,pred_logvol_cal REAL,realized_logvol REAL,verified_at TEXT)")
+        conn.execute("INSERT INTO vol_forecasts VALUES(?,?,?,?,?,?,?)",
+            ("SYNUSDT", 24, "model_a", forecast_at, .02, .03, forecast_at))
+    rows = _load_live_forecasts(path, "SYNUSDT", 24)
+    assert rows[0][1] == "vivo_model_a"
+    assert abs(rows[0][2] - .02 * np.sqrt(24)) < 1e-12
 
 
 def test_break_probability_declines_when_band_widens_and_efficiency_bounds():
