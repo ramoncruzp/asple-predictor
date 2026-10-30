@@ -42,3 +42,8 @@ Solo están completas las correcciones del marcador, la biblioteca histórica y 
 ## Fase 43e-2b
 
 Se elevó la versión de biblioteca a `scenario_fhs_v2`. Los valores estandarizados quedan sin centrar en disco; `load_library(before=...)` calcula y resta la media solo sobre los días seleccionados. Los primeros 30 días no se publican como escenarios; días parciales quedan excluidos pero sus retornos válidos actualizan EWMA. La reconstrucción de precio y sigma usa float64. La primera prueba de precisión falló por reducción prematura de sigma a float32; tras corregirla, 5 pruebas pasan.
+
+
+## Fase 43e-3a
+
+La especificación observa dos convenciones distintas: `SimExchange` usa cruces estrictos y órdenes activas desde la vela siguiente; `run_meta_bot` usa cruces inclusivos y compra/venta única. `evaluate_portfolio` evalúa pérdida en equity muestreada, mientras el corte directo de `run_simulation` usa el low de la vela. `FASTSIM_SPEC.md` conserva esta distinción para impedir una paridad falsa.

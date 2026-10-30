@@ -609,3 +609,8 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-repeat-24d704ee'
 ```
 
 Resultado 43e-2b: prueba final de biblioteca/generador: 5 passed en 0,10 s. La prueba inicial tuvo 1 fallo por referencia float64 que no reflejaba el redondeo intermedio de sigma_path; se corrigió el cálculo, no la tolerancia. `scripts/revisar_codificacion.py` sobre todos los archivos de esta entrega: `HALLAZGOS=0`.
+
+
+## Fase 43e-3a ? especificación del simulador de referencia
+
+Se documentan condiciones de llenado, resincronización, orden de órdenes, estado inicial, comisiones, reserva, curvas, meta/corte, bot y polvo en `research/scenarios/FASTSIM_SPEC.md`, con rutas y líneas del código de producción. No se implementó ni probó aún fastsim. Sin cambios a decisiones reales.

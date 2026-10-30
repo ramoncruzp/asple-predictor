@@ -453,3 +453,8 @@ El marcador mantiene correlaciones ausentes como NaN internamente y null al seri
 ### Fase 43e-2b ? método de biblioteca
 
 La biblioteca causal usa `scenario_fhs_v2`: almacena z sin centrar y aplica tendencia cero solo al historial visible antes del origen; la reconstrucción de OHLC es float64 para respetar ticks pequeños.
+
+
+### Fase 43e-3a ? semántica de referencia
+
+FastSim deberá conservar la diferencia entre el replay de grid, el bot individual y el evaluador de cartera documentada en `research/scenarios/FASTSIM_SPEC.md`. Esta especificación no habilita v2 ni altera decisiones reales.
