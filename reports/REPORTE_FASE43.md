@@ -357,3 +357,19 @@ HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/verificar_velas.py --
 nohup venv2/bin/python scripts/marcador_pronosticos.py --db market_data.db --registro-db asple_predictor.db > ~/marcador_43c.log 2>&1 &
 tail -f ~/marcador_43c.log
 ```
+
+
+## 43c-7 ? optimizaci?n y regresi?n
+
+Comando anotado antes de probar:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-walk-4fab9242'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
+```
+
+
+Prueba de regresi?n contra la implementaci?n anterior en serie sint?tica de 120 d?as (24/72 h), tolerancia relativa 1e-9:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-legacy-7e69a09c'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k optimized_walkforward_matches_legacy --basetemp="$base"
+```
+
+Resultado 43c-7: la prueba causal y la suite enfocada pasaron (4 passed en 0,09 s); regresi?n legacy 120 d?as: 1 passed en 0,26 s para 24 y 72 h, tolerancia 1e-9. Benchmark local de 218.000 velas sint?ticas: horizonte 24 h, 726 puntos, 0 huecos, 0,184 s; horizonte 72 h, 242 puntos, 0 huecos, 0,212 s. EWMA recursiva dentro de tolerancia 1e-9.
