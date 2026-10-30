@@ -180,7 +180,7 @@ def test_synthetic_shadow_evaluates_candidates_without_mutating_grid():
     assert summary["candidates_evaluated"] > 0
 
 
-def test_180_day_grid_reports_candidate_timings_and_window_count():
+def test_two_180_day_grids_finish_with_candidate_timings_and_window_count():
     class DB:
         def get_grid_levels(self, _grid_id):
             return [{"level_idx": idx, "capital": 25, "held_qty": 0, "state": "IDLE",
@@ -195,20 +195,30 @@ def test_180_day_grid_reports_candidate_timings_and_window_count():
 
     now = datetime(2026, 6, 30, tzinfo=timezone.utc)
     job = GridIntelligenceJob(DB(), Market(), lambda _symbol: FILTERS,
-        clock=lambda: now, budget_s=20, per_grid_budget_s=15)
+        clock=lambda: now, budget_s=150, per_grid_budget_s=60)
     grid = {"id": 90, "symbol": "XRPUSDT", "strategy": "simple", "status": "ACTIVE",
         "range_low": 90, "range_high": 110, "n_levels": 4, "capital_total": 100, "params": {}}
-    summary = {"timings_s": {"candles": 0, "advisor": 0, "replay": 0, "persistence": 0},
-        "candidates_evaluated": 0, "cache_hits": 0}
     started = __import__("time").perf_counter()
-    result = job._evaluate_grid(grid, started, summary, deadline=started + 15)
-    assert result is not None
-    assert summary["window_counts"]["90"]["step_days"] == 14
-    assert summary["window_counts"]["90"]["windows_available"] >= 8
-    assert summary["candidate_timings_s"]["90"]
-    assert all("duration_s" in item for item in summary["candidate_timings_s"]["90"])
-    print("C38e candidato/ventanas:", summary["candidate_timings_s"]["90"],
-        summary["window_counts"]["90"], "duración_total_s=",
+    summaries = []
+    for grid_id in (90, 91):
+        summary = {"timings_s": {"candles": 0, "advisor": 0, "replay": 0, "persistence": 0},
+            "candidates_evaluated": 0, "cache_hits": 0}
+        grid["id"] = grid_id
+        grid_started = __import__("time").perf_counter()
+        result = job._evaluate_grid(grid, started, summary,
+            deadline=min(started + 150, grid_started + 60))
+        baseline = next(item for item in result["candidates"] if item.get("action") == "mantener")
+        assert baseline.get("expected_gain_7d") is not None
+        assert baseline["windows"] == baseline["windows_expected"]
+        assert summary["window_counts"][str(grid_id)]["step_days"] == 14
+        assert summary["window_counts"][str(grid_id)]["windows_available"] >= 8
+        assert summary["candidate_timings_s"][str(grid_id)]
+        assert all("duration_s" in item for item in summary["candidate_timings_s"][str(grid_id)])
+        summaries.append(summary)
+    assert __import__("time").perf_counter() - started < 150
+    assert summaries[1]["cache_hits"] > 0
+    print("C40c candidato/ventanas:", [item["candidate_timings_s"] for item in summaries],
+        "duración_total_s=",
         round(__import__("time").perf_counter() - started, 3))
 
 

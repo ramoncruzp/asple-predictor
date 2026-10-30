@@ -16,8 +16,9 @@ from sqlalchemy import select
 from grid.sim.runner import run_simulation
 
 logger = logging.getLogger(__name__)
-GRID_INTEL_BUDGET_S = 60.0
-GRID_INTEL_PER_GRID_BUDGET_S = 45.0
+GRID_INTEL_BUDGET_S = 150.0
+GRID_INTEL_PER_GRID_BUDGET_S = 60.0
+GRID_INTEL_TOTAL_BUDGET_S = 150.0
 GRID_INTEL_MIN_GAIN_PCT = 0.3
 GRID_INTEL_MAX_DRAWDOWN_DELTA_PP = 1.0
 GRID_INTEL_METHOD_VERSION = "grid_shadow_42c40_v3"
@@ -136,7 +137,7 @@ class GridIntelligenceJob:
 
     def __init__(self, db, market_client, filters_resolver, *, advisor=None, settings=None,
                  vol_provider=None, scheduler=None,
-                 clock=None, budget_s=GRID_INTEL_BUDGET_S,
+                 clock=None, budget_s=GRID_INTEL_TOTAL_BUDGET_S,
                  per_grid_budget_s=GRID_INTEL_PER_GRID_BUDGET_S, apply_callback=None,
                  valuation_checker=None, ops_lock=None):
         self.db, self.market_client, self.filters_resolver = db, market_client, filters_resolver
