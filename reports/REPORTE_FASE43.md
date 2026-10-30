@@ -826,3 +826,6 @@ tail -f ~/validar_43e.log
 ```
 
 En esta entrega local solo se probaron velas sintéticas/fixtures y no se usaron datos reales, red, S1 ni Testnet. `V2ScenarioEngine.available=False` se conserva.
+
+
+Auditoría final de codificación (515a5aa..HEAD, 16 archivos): UTF-8 válido en 16/16, BOM 0, CRLF 0; `scripts/revisar_codificacion.py` devolvi? `HALLAZGOS=0`. El motor v2 sigue sin disponibilidad y la validación histórica queda expresamente parcial.
