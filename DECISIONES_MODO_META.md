@@ -84,10 +84,10 @@ Los números son punto de partida y se ajustan con los resultados.
 
 - **40d-2 (modelo y frenos):** la etiqueta de 72 h entrena y la etiqueta del plazo valida en fechas posteriores. El replay histórico usa ventanas del plazo con paso de 7 días, solo cerradas antes del corte; `p_replay` suavizado es `(éxitos + 1) / (ventanas + 2)`.
 - Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
-- Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
+- Una versión por fecha, perfil y origen (`live` o `histórical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
 - **40d-3 (completada):** decisiones real/Scanner+Advisor/aprendida en bitácora, etiquetas contrafactuales existentes, interruptor manual apagado por defecto y vista de evidencia por señal.
 - Pesos estimados con regresión logística, offset `logit(p_replay)`, regularización hacia 0,25, parámetros editables por perfil, tope por señal y ajuste total ±1,0. Las señales ausentes son neutrales y no cuentan para su muestra. Mínimo 30 muestras efectivas por señal, reducción por bloques no solapados, errores agrupados por fecha/moneda y corrección Holm.
-- Una versión por fecha, perfil y origen (`live` o `historical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
+- Una versión por fecha, perfil y origen (`live` o `histórical_reconstructed`) registra muestras, corte, métricas log-loss/Brier y frenos. El cambio máximo es 0,05 y solo se conserva si mejora ambas métricas frente a replay en validación posterior; el modelo sigue en sombra y no alimenta decisiones.
 - **40d-3 (completada):** decisiones real/Scanner+Advisor/aprendida en bitácora, etiquetas contrafactuales existentes, interruptor manual apagado por defecto y vista de evidencia por señal.
 
 - Medir el acierto de cada señal con lo que pasó después, en ventanas no solapadas.
@@ -107,7 +107,7 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40b-6A | Prudente con 30 verificaciones efectivas, umbral editable y presentación de readiness en español | Implementada y commiteada (`9797d9f`); pruebas enfocadas y suite completa offline verdes |
 | 40b-6B | Operador activo: reajuste de piezas abiertas, materialidad, frenos y presentación de cambios | Implementada, pruebas enfocadas y suite completa offline verdes; commit de esta entrega |
 | 40c | Pantalla Metas en la app, bitácora, historial, comparación con grupo de control; filtros reales en el replay, medidor ampliado, caché estable y Advisor reanclado al precio; pruebas de punta a punta pendientes de 40b-2 | Hecha (2026-10-24): commits `2d1b442` (B+C), `897f0d1` (A) y `3a513dc` (40c-3: defectos de presentación de la prueba de QA en S1); siguiente fase 40d |
-| 40d-1 | Etiquetas 72 h/plazo, backfill causal y almacenamiento separado `live`/`historical_reconstructed` | Implementada y verificada offline en esta entrega; sin S1 ni despliegue |
+| 40d-1 | Etiquetas 72 h/plazo, backfill causal y almacenamiento separado `live`/`histórical_reconstructed` | Implementada y verificada offline en esta entrega; sin S1 ni despliegue |
 | 40d-2 | Regresión logística, errores agrupados, Holm y frenos de actualización | Implementada y verificada offline; pesos solo en sombra |
 | 40d-3 | Caché acotada, decisiones en sombra, pesos efectivos y vista de evidencia | Implementada y verificada offline; sin despliegue |
 | 40d-3C | Interruptores por perfil en Laboratorio, aprendizaje global en Metas y recarga parcial | Implementada y verificada offline; sin despliegue |
@@ -322,7 +322,7 @@ Lección para fases futuras: un plan sintético bien formado en las pruebas de i
 
 - La falta de una alternativa de una pieza para el grid actual se anota en la comparación con su motivo conocido. Un error de la comparación en sombra deja traceback y `decision_choices_error`; la decisión real y el NOOP correspondiente se guardan igualmente.
 - No se cambian materialidad, empate, persistencia, enfriamientos, límites, pesos ni reglas del operador.
-- Desde 41b-11 la Meta puede volver a reajustar/rotar una pieza que tenga ventas vivas. Al evaluar el reemplazo se excluye solo su propio grid del mismo símbolo, identificado en el plan por `own_grid_excluded_from_check`; las demás piezas propias, de otras metas o manuales siguen contando. Antes de actuar se repiten las validaciones existentes.
+- Desde 41b-11 la Meta puede volver a reajustar/rotar una pieza que tenga ventas vivas. Al evaluar el reemplazo se excluye solo su propio grid del mismo símbolo, identificado en el plan por `own_grid_excluded_from_check`; las demás piezas propias, de otras metas o manuales siguen contando. Antes de actuar se repiten las validaciónes existentes.
 - Iniciar y agregar piezas nuevas no excluyen grids existentes. La estimación de efectivo de un posible cierre no se usa como efectivo libre para aperturas adicionales ni para retiradas con ventas vivas.
 
 ## Fase 41c — rendimiento y coherencia del replay (2026-10-27)
@@ -451,4 +451,6 @@ E1: evaluar Simple, bots individuales y Smart. E2: tendencia cero en escenarios.
 
 El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, niveles ociosos, stop-loss por celda y filtro direccional; mantiene esperar fuera de rango. Los resultados de FHS, FastSim y Smart se usan solo para investigación. La prueba sintética local midió 15,453 s y 166,4 MB para 200 escenarios Smart de 20 días. Nada cambia decisiones reales; v2 permanece `available=False`.
 
-43e-6 (validación contra historia), 43e-7 (API integrada a 43f) y 43e-8 (cierre general) siguen pendientes y no se certifican en esta entrega.
+43e-6a fija el objetivo informativo: PnL medio >= -1 % del capital, cota superior del IC de P(límite) <= 5 % Prudente / 15 % Rápido y CVaR 5 % dentro de la pérdida maxima del perfil. Ordena por P(meta), mediana de días a meta y PnL; si todo falla, mantiene USDT quieto como alternativa factible.
+
+43e-6c/6d están parciales: la evaluación histórica implementada cubre Simple y bot; faltan Smart exacto, benchmark OU/GBM y aceptación predictiva completa con 1.000 escenarios y baseline v1. 43e-7 exporta la API pública de investigación. 43e-8 documenta la entrega, sin certificar validación histórica. Nada cambia decisiones reales; v2 permanece `available=False`.

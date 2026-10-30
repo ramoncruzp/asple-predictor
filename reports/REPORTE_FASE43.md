@@ -806,4 +806,23 @@ Límite: el modo historia aún no evalúa Smart exacto ni implementa el benchmar
 
 # 43e-7 - interfaz para 43f
 
-`research.scenarios` exporta `evaluate_pieces`, `evaluate_history` y el objetivo informativo. `grid/engines/v2_escenarios.py` sigue con `available=False`. La API pública y el estado no disponible pasaron **5 pruebas en 0,19 s**; el comando est? en `reports/DISCREPANCIAS_FASE43.md`. En 43f el cálculo deberá invocarse en worker aislado y mantener la cach? fuera del proceso de servicio.
+`research.scenarios` exporta `evaluate_pieces`, `evaluate_history` y el objetivo informativo. `grid/engines/v2_escenarios.py` sigue con `available=False`. La API pública y el estado no disponible pasaron **5 pruebas en 0,19 s**; el comando está en `reports/DISCREPANCIAS_FASE43.md`. En 43f el cálculo deberá invocarse en worker aislado y mantener la caché fuera del proceso de servicio.
+
+
+# 43e-8 - cierre de la entrega
+
+La función objetivo de v2 es informativa: exige PnL medio no peor que -1 % del capital, límite superior del IC 95 % de P(límite) dentro del tope (5 % Prudente, 15 % Rápido) y CVaR 5 % no peor que el límite del perfil. Ordena factibles por P(meta), días medianos a meta y PnL medio; si no hay factibles propone USDT quieto. No modifica decisiones reales.
+
+**Pendientes explícitos:** 43e-6c y 43e-6d están parciales; faltan Smart histórico, benchmark OU/GBM y protocolo completo de validación FHS contra realidad más baseline v1. No se certifica el uso del objetivo para decidir capital hasta completar esa validación.
+
+Pasos para Ramón en S1, después del despliegue:
+
+```bash
+cd ~/asple-predictor
+nice -n 10 venv2/bin/python scripts/escenarios_evaluar.py --db market_data.db --perfil RAPIDO --capital 100 --meta 3 --modo alternativas --comparar-comision 0.075 --pieza "JUPUSDT:simple:70:n=6:ancho=2sigma" --pieza "JUPUSDT:smart:70:n=6:ancho=2sigma"
+nice -n 10 venv2/bin/python scripts/escenarios_evaluar.py --db market_data.db --perfil RAPIDO --capital 100 --meta 3 --modo historia --meses 12 --pieza "JUPUSDT:simple:70:n=6:ancho=2sigma" --pieza "JUPUSDT:simple:70:n=10:ancho=0.5sigma" --pieza "XRPUSDT:simple:70:n=10:ancho=0.5sigma"
+nohup nice -n 10 venv2/bin/python scripts/escenarios_validar.py --db market_data.db --meses 12 > ~/validar_43e.log 2>&1 &
+tail -f ~/validar_43e.log
+```
+
+En esta entrega local solo se probaron velas sintéticas/fixtures y no se usaron datos reales, red, S1 ni Testnet. `V2ScenarioEngine.available=False` se conserva.

@@ -231,3 +231,8 @@ Comando exacto de prueba, anotado antes de ejecutar:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e7-api-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_public_api.py tests/test_scenarios_objective.py --basetemp="$base"
 ```
+
+
+## 43e-8 - cierre y estado
+
+43e-6c y 43e-6d se dejaron con commits parciales porque falta Smart histórico, el experimento OU/GBM y la comparación predictiva walk-forward completa contra v1. Los comandos de S1 para producir resultados con datos reales están en `reports/REPORTE_FASE43.md`; no se corrieron localmente. El motor v2 continúa deshabilitado.
