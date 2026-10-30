@@ -12,11 +12,11 @@ def test_smart_exact_matches_direct_runner_and_keeps_restrictions_off():
     open_ = np.r_[close[0], close[:-1]]
     high = np.maximum(open_, close) * 1.002
     low = np.minimum(open_, close) * .998
-    scenario = {"open": open_[None], "high": high[None],
-        "low": low[None], "close": close[None]}
-    sigma = np.full((1, 1), .04)
+    scenario = {"open": np.stack((open_, open_)), "high": np.stack((high, high)),
+        "low": np.stack((low, low)), "close": np.stack((close, close))}
+    sigma = np.full((2, 1), .04)
     result = evaluate_smart_scenarios(scenario, n_levels=6, capital=1000,
-        low=80, high=120, sigma_path=sigma, n_smart=1, workers=1)[0]
+        low=80, high=120, sigma_path=sigma, n_smart=2)[0]
     candles = CandleData(START_TS + np.arange(len(close), dtype=np.int64) * 300,
         open_, high, low, close, 0)
     direct = simulate_piece_curve(candles, strategy="smart", n=6, capital=1000,

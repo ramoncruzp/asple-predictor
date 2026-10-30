@@ -21,8 +21,12 @@ def _one_smart(task):
         low=low, high=high, filters=filters, sigma_values=sigma,
         meta_max_loss_pct=max_loss_pct, include_replay=True)
     replay = result["replay"]
+    cells = (replay.get("details") or {}).get("cells", [])
+    inventory_qty = sum(float(cell.get("held_qty") or 0) for cell in cells)
     return {"curve": result["curve"], "metrics": replay["metrics"],
         "events": replay["events"], "effective": replay["effective_params"],
+        "inventory_qty": inventory_qty,
+        "inventory_value": inventory_qty * float(bars["close"][-1]),
         "scenario_index": scenario_index}
 
 
