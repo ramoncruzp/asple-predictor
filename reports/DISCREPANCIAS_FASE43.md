@@ -47,3 +47,8 @@ Se elevó la versión de biblioteca a `scenario_fhs_v2`. Los valores estandariza
 ## Fase 43e-3a
 
 La especificación observa dos convenciones distintas: `SimExchange` usa cruces estrictos y órdenes activas desde la vela siguiente; `run_meta_bot` usa cruces inclusivos y compra/venta única. `evaluate_portfolio` evalúa pérdida en equity muestreada, mientras el corte directo de `run_simulation` usa el low de la vela. `FASTSIM_SPEC.md` conserva esta distinción para impedir una paridad falsa.
+
+
+## Fase 43e-3b
+
+FastSim se vectoriza por escenarios y celdas y conserva bucle temporal/resincronización. La prueba inicial falló en 26 casos porque el capital de prueba era demasiado bajo para el filtro de step size real de `FILTERS`; al usar 1000 USDT en los casos de precio USD, el replay de geometría fue válido y la regresión completa pasó (44 pruebas). El benchmark sintético usa OHLC constantes y no mide el coste de fills frecuentes.

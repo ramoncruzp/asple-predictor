@@ -591,14 +591,14 @@ Partes completas y commits: 43e-0, 43e-1 y 43e-2. 43e-3 quedó iniciada solo com
 No se midieron tiempos de simulación por moneda ni RSS de simulaciones. Las pruebas ejecutadas usan datos sintéticos locales. No se usaron S1, Testnet, BD real ni red. Las decisiones reales permanecen intactas: nada se conecta al operador ni a v1.
 
 
-## Fase 43e-2b ? causalidad de biblioteca y precisión float64
+## Fase 43e-2b — causalidad de biblioteca y precisión float64
 
 Comando anotado antes de correr la prueba enfocada:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-scenarios-7cf4e809'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
 ```
 
-La validación repetida final se anot? antes de ejecutarse (secuencia fresca):
+La validación repetida final se anotó antes de ejecutarse (secuencia fresca):
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-final-53a4c7e1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
 ```
@@ -611,6 +611,39 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-repeat-24d704ee'
 Resultado 43e-2b: prueba final de biblioteca/generador: 5 passed en 0,10 s. La prueba inicial tuvo 1 fallo por referencia float64 que no reflejaba el redondeo intermedio de sigma_path; se corrigió el cálculo, no la tolerancia. `scripts/revisar_codificacion.py` sobre todos los archivos de esta entrega: `HALLAZGOS=0`.
 
 
-## Fase 43e-3a ? especificación del simulador de referencia
+## Fase 43e-3a — especificación del simulador de referencia
 
 Se documentan condiciones de llenado, resincronización, orden de órdenes, estado inicial, comisiones, reserva, curvas, meta/corte, bot y polvo en `research/scenarios/FASTSIM_SPEC.md`, con rutas y líneas del código de producción. No se implementó ni probó aún fastsim. Sin cambios a decisiones reales.
+
+
+43e-3b, primera regresión de paridad (40 escenarios sintéticos Simple, bot y filtros PEPE). Comando anotado antes de ejecutar:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-parity-79a11d20'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Primer resultado de paridad 43e-3b: 26 fallos de preparación del replay se debieron a capital de prueba insuficiente para el filtro de step size del fixture real `FILTERS` (XRP); la geometría de producción rechaza cantidades netas que redondean a cero. Se eleva el capital sintético a 1000 USDT para los casos USD y se conserva el caso PEPE con filtros propios. Repetición enfocada:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-parity-rerun-a5c9c0bf'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+La paridad 43e-3b también compara fills, ciclos, comisiones, equity, la vela del corte y el cruce de meta evaluado con `evaluate_portfolio`. Comando final anotado antes del rerun:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-final-1df85b47'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Regresión ampliada 43e-3b: 40 casos Simple en lateral/tendencia/caída/rebote/salto, niveles 4/6/10, con y sin corte; bot con margen 0,3/0,5/0,7; caso PEPE con tick fino. Comando anotado antes del último run:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-expanded-5f11ab9e'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Comando de verificación final tras optimizar almacenamiento de curvas a float32 con empaquetado opcional:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-final-rerun-10db9e72'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Última asersión de 43e-3b: exige la misma primera vela muestreada de cruce de meta. Comando exacto anotado antes de correr:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3b-goal-candle-8f5622d0'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py --basetemp="$base"
+```
+
+Resultado final de fastsim/paridad: 44 passed en 0,40 s. Benchmark sintético, 1000 escenarios procesados en lotes de 250 con OHLC float64 constante (sin ejecuciones de fills): 20 días, 1,998 s y RSS máximo 87,6 MB; 45 días, 4,325 s y RSS máximo 156,7 MB. El RSS pico se midió con `GetProcessMemoryInfo`/PeakWorkingSetSize en Windows. El objetivo temporal se cumplió por margen estrecho en 20 días. La ayuda del script de paridad abre correctamente; no se ejecutó sobre base real.

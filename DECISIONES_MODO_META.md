@@ -458,3 +458,8 @@ La biblioteca causal usa `scenario_fhs_v2`: almacena z sin centrar y aplica tend
 ### Fase 43e-3a ? semántica de referencia
 
 FastSim deberá conservar la diferencia entre el replay de grid, el bot individual y el evaluador de cartera documentada en `research/scenarios/FASTSIM_SPEC.md`. Esta especificación no habilita v2 ni altera decisiones reales.
+
+
+### Fase 43e-3b ? FastSim
+
+FastSim usa lotes de matrices OHLC float64, curva muestreada float32 y reglas del replay documentadas. La paridad local no cambia decisiones ni conecta el motor v2; sus resultados siguen siendo experimentales.
