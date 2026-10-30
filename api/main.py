@@ -138,6 +138,7 @@ async def lifespan(app: FastAPI):
     public_market_client = BinanceClient("", "")
     market_sync_job = None
     market_path = market_db_path(settings.market_data_db)
+    app.state.market_data_path = market_path
     if settings.market_sync_enabled and market_path.is_file():
         market_sync_job = MarketSyncJob(CandleStore(market_path), public_market_client)
         market_sync_job.start()

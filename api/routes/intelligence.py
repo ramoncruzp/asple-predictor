@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 import math
 import statistics
 import time
+import sqlite3
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func, select
@@ -17,6 +19,41 @@ from grid.readiness import evaluate_readiness, paired_bootstrap_mean_ci
 
 router = APIRouter()
 _logger = logging.getLogger("asple.slow")
+
+
+@router.get("/scorecard")
+def scorecard_readonly(request: Request):
+    """Lee la última corrida del marcador desde market_data.db en modo solo lectura."""
+    _authorize(request)
+    path = Path(getattr(request.app.state, "market_data_path", "market_data.db"))
+    if not path.is_file():
+        return {"status": "empty", "message": "Sin corridas del marcador todavía", "run": None,
+            "metrics": [], "factors": [], "verdicts": []}
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            run = conn.execute("SELECT * FROM scorecard_runs ORDER BY id DESC LIMIT 1").fetchone()
+            if run is None:
+                return {"status": "empty", "message": "Sin corridas del marcador todavía", "run": None,
+                    "metrics": [], "factors": [], "verdicts": []}
+            run_id = int(run["id"])
+            metrics = [dict(row) for row in conn.execute(
+                "SELECT symbol,target,horizon_h,model,k,n,metric,value,ci_low,ci_high "
+                "FROM forecast_scorecard WHERE run_id=? ORDER BY target,horizon_h,symbol,model,metric", (run_id,))]
+            factors = [dict(row) for row in conn.execute(
+                "SELECT symbol,kind,horizon_h,model,factor,n,ci_low,ci_high,computed_at "
+                "FROM calibration_factors WHERE run_id=? ORDER BY kind,horizon_h,symbol", (run_id,))]
+            verdicts = [dict(row) for row in conn.execute(
+                "SELECT target,horizon_h,model,verdict,reason FROM scorecard_verdicts WHERE run_id=? "
+                "ORDER BY target,horizon_h,model", (run_id,))]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {"status": "empty", "message": "Sin corridas del marcador todavía", "run": None,
+            "metrics": [], "factors": [], "verdicts": []}
+    return {"status": "ready", "message": "", "run": dict(run), "metrics": metrics,
+        "factors": factors, "verdicts": verdicts}
 
 
 def _json(value, default=None):

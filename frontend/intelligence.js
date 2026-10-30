@@ -145,7 +145,14 @@
   async function load() {
     const host = $('#intelligence-content');
     if (!host.querySelector('.card')) host.innerHTML = '<p class="muted">Consultando la instantánea guardada…</p>';
-    try { render(await api.get(`/api/intelligence?page=${decisionPage}&page_size=50${decisionMeta ? `&meta_id=${encodeURIComponent(decisionMeta)}` : ''}`)); }
+    try {
+      render(await api.get(`/api/intelligence?page=${decisionPage}&page_size=50${decisionMeta ? `&meta_id=${encodeURIComponent(decisionMeta)}` : ''}`));
+      const scorecard = await api.get('/api/intelligence/scorecard');
+      const verdictRows = (scorecard.verdicts || []).map(x => [x.target, `${x.horizon_h} h`, x.model, x.verdict, x.reason]);
+      const factorRows = (scorecard.factors || []).map(x => [x.symbol, x.kind, `${x.horizon_h} h`, x.model, num(x.factor), x.n]);
+      const scorecardPanel = `<section class="card" data-scorecard-panel><h2>Marcador de pronósticos</h2>${scorecard.run ? `<p>Última corrida: ${esc(scorecard.run.finished_at || scorecard.run.started_at)}</p><p>${esc(scorecard.run.status)}</p>${table(['Objetivo','Horizonte','Modelo','Veredicto','Motivo'],verdictRows)}${table(['Moneda','Factor','Horizonte','Modelo','Valor','n'],factorRows)}` : `<p>${esc(scorecard.message || 'Sin corridas del marcador todavía')}</p>`}</section>`;
+      host.insertAdjacentHTML('afterbegin', scorecardPanel);
+    }
     catch (error) { $('#intelligence-content').innerHTML = `<p class="cuenta-error">No se pudo consultar Inteligencia: ${esc(error.message)}</p>`; }
   }
   async function recalculate() {

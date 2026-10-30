@@ -314,3 +314,21 @@ Comando anotado antes de verificar que la corrida seca no muta la BD sintética 
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c4-runner-60b6a957'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py --basetemp="$base"
 ```
 Resultado 43c-4: 4 passed en 0,12 s. El CLI muestra los argumentos solicitados. La prueba de `--dry-run` confirmó bytes sin cambios y ausencia de tablas nuevas. No se midió tiempo sobre dos años ni se ejecutó sobre las 21 monedas: solo DB sintéticas están autorizadas.
+
+## 43c-5 — panel de lectura
+
+Comando anotado antes de verificar el endpoint del marcador sin datos y con corrida sintética:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c5-panel-72ab57bb'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_intelligence_api.py -k scorecard_panel_readonly_handles_missing_and_synthetic_run --basetemp="$base"
+```
+
+El primer test del endpoint usó el header Bearer, pero la API usa `X-API-Token`; se corrige el cliente de prueba. Comando de reintento:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c5-panel-rerun-427f586b'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_intelligence_api.py -k scorecard_panel_readonly_handles_missing_and_synthetic_run --basetemp="$base"
+```
+
+El reintento ya autenticó; el mismatch restante es la tilde en `todavía` dentro del assert al leer texto legacy mezclado. El test comprueba ahora la frase estable sin tilde. Comando:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c5-panel-rerun2-5fc1b88f'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_intelligence_api.py -k scorecard_panel_readonly_handles_missing_and_synthetic_run --basetemp="$base"
+```
+Resultado 43c-5: endpoint sin BD/sin corrida y endpoint con corrida/veredicto sintéticos: 1 passed en 0,97 s. `node --check frontend/intelligence.js` pasó. El endpoint consulta `market_data.db` con `mode=ro` y la pantalla muestra última corrida, veredictos y factores.

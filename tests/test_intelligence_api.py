@@ -155,7 +155,7 @@ def test_intelligence_api_is_token_protected_aggregated_and_read_only(tmp_path):
         'version_id': calibrated_version_id, 'profile': 'RAPIDO', 'source_kind': 'live',
         'created_at': '2026-10-20 00:00:00', 'message': None}
     assert payload['hits']['replay_calibration'] == [{
-        'horizon': 'validación temporal', 'bin': 'Decil 1', 'n': 12,
+        'horizon': 'validaciÃ³n temporal', 'bin': 'Decil 1', 'n': 12,
         'predicted': .31, 'observed': .4, 'few_samples': True}]
     assert payload['hits']['centered_signal_comparison']['72h']['actual']['n'] == 1
     break_v2 = payload['hits']['break_v2_comparison']
@@ -271,4 +271,32 @@ def test_grid_intelligence_medidor_ignores_old_method_rows_and_exposes_paired_me
     assert row['mature_labels']['n'] == 1
     assert row['mature_labels']['mean_gain_vs_maintain_usdt'] == .4
 
+
+
+
+def test_scorecard_panel_readonly_handles_missing_and_synthetic_run(tmp_path):
+    import sqlite3
+
+    settings = SimpleNamespace(grid_api_token='scorecard-secret')
+    app = FastAPI()
+    app.include_router(intelligence.router, prefix='/api/intelligence')
+    app.state.settings = settings
+    app.state.market_data_path = tmp_path / 'market_data.db'
+    client = TestClient(app)
+    headers = {'X-API-Token': 'scorecard-secret'}
+    assert client.get('/api/intelligence/scorecard', headers=headers).json()['message'].startswith('Sin corridas del marcador')
+    with sqlite3.connect(app.state.market_data_path) as conn:
+        conn.executescript('''
+            CREATE TABLE scorecard_runs(id INTEGER PRIMARY KEY, started_at TEXT, finished_at TEXT,
+                status TEXT, symbols TEXT, params_json TEXT, summary_json TEXT, code_version TEXT);
+            CREATE TABLE forecast_scorecard(run_id INTEGER, symbol TEXT, target TEXT, horizon_h INTEGER,
+                model TEXT, k REAL, n INTEGER, metric TEXT, value REAL, ci_low REAL, ci_high REAL);
+            CREATE TABLE calibration_factors(run_id INTEGER, symbol TEXT, kind TEXT, horizon_h INTEGER,
+                model TEXT, factor REAL, n INTEGER, ci_low REAL, ci_high REAL, computed_at TEXT);
+            CREATE TABLE scorecard_verdicts(run_id INTEGER, target TEXT, horizon_h INTEGER,
+                model TEXT, verdict TEXT, reason TEXT);
+            INSERT INTO scorecard_runs VALUES(1,'start','finish','completed','[]','{}','{}','test');
+            INSERT INTO scorecard_verdicts VALUES(1,'volatilidad',24,'ewma','sirve','IC excluye cero');
+        ''')
+    assert client.get('/api/intelligence/scorecard', headers=headers).json()['verdicts'][0]['verdict'] == 'sirve'
 
