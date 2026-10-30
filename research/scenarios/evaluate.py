@@ -347,7 +347,7 @@ def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=
 def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
         months=24, step_days=7, since=None, symbols=None, fee_pct=.1,
         library_dir="data/derived/scenario_lib", seed=43, replicas=1000,
-        n_smart=200, workers=2):
+        n_smart=200, workers=2, required_starts=None, until=None):
     """Evalua historia real causal por lotes y una variante sin tendencia lineal."""
     from research.scenarios.fastsim import simulate_simple, simulate_bot
     from research.scenarios.metrics import summarize
@@ -377,6 +377,8 @@ def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
         cutoff = start_cutoff if start_cutoff is not None else int(ts[-1] - months * 30 * 86400)
         first = max(30 * 288 + 1, int(np.searchsorted(ts, cutoff, side="left")))
         last = len(close) - horizon_bars
+        if until is not None:
+            last = min(last, int(np.searchsorted(ts, _to_timestamp(until), side="right")) - 1)
         starts = np.arange(first, last + 1, int(step_days) * 288, dtype=np.int64)
         pieces_result = []
         for piece_index, piece in enumerate(p for p in pieces if str(p["symbol"]).upper() == symbol):
@@ -385,8 +387,16 @@ def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
                 raise ValueError("historia solo admite simple, bot y smart")
             chosen = starts.copy()
             if strategy == "smart" and len(chosen) > int(n_smart):
-                chosen = np.sort(np.random.default_rng(seed + piece_index).choice(
-                    chosen, size=int(n_smart), replace=False))
+                required = (required_starts.get(symbol, []) if isinstance(required_starts, dict)
+                    else (required_starts or []))
+                forced = np.asarray([int(np.searchsorted(ts, int(value))) for value in required
+                    if int(np.searchsorted(ts, int(value))) < len(ts)], dtype=np.int64)
+                forced = forced[np.isin(forced, starts)]
+                remaining = starts[~np.isin(starts, forced)]
+                sample_count = max(0, min(int(n_smart) - len(forced), len(remaining)))
+                sampled = (np.random.default_rng(seed + piece_index).choice(
+                    remaining, size=sample_count, replace=False) if sample_count else np.empty(0, dtype=np.int64))
+                chosen = np.sort(np.unique(np.r_[forced, sampled]))
             sigmas, prices0 = [], []
             for start in chosen:
                 calibration_index = int(np.searchsorted(calibration_ts, ts[start], side="left")) - 1

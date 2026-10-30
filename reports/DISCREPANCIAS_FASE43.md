@@ -265,3 +265,65 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6e-memory-20261030-
 ```
 
 Medicion sintetica local: BD temporal, 750 dias, 701 ventanas, una geometria Simple, 2 variantes, paso diario: **25,773 s, pico RSS 485,3 MB**. Se midio en proceso fresco; Smart no tuvo benchmark de velocidad aislado.
+
+## 43e-6f - validacion predictiva
+
+La rutina usa `evaluate_pieces(before=t)` para la distribucion causal, limita la evaluacion historica a `until=t`, extrae realidad de `[t,t+20 dias)` y calcula baseline con 23 inicios de 20 dias separados por 7 dias y anteriores a t. Se emiten metricas por geometria y agregado, pares en JSON, reporte Markdown, progreso cada 10 fechas y estimacion antes del calculo. El RSS pico se imprime al final. La linea base reutiliza el replay historico con geometria porcentual por arranque; no se ejecuto con la base real de S1.
+
+Comandos exactos ejecutados, con resultado:
+
+r1: 16 passed, luego se ampliaron las pruebas:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-validacion-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+r2: 1 failed, 17 passed; fallo de notional minimo en fixture:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-regresion-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+r3: 1 failed, 17 passed; fallo restante de notional neto:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-regresion-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+r4: 18 passed:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-regresion-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+r5: 19 passed:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-regresion-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
+
+r6: 19 passed:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-final-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
+
+r7: 1 failed, 19 passed; corregido el indice de corte esperado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-integracion-20261030-r7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
+
+r8: 20 passed:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-integracion-20261030-r8'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
+
+La ultima regresion enfocada paso 20 pruebas en 9,55 s. No se midio el tiempo/RSS de una corrida completa del validador. Estimacion de planificacion para S1: 12 meses / 7 dias = 52 fechas por moneda; 21 monedas x 52 x 5 geometrias = 5.460 casos. Con la regla heuristica de 2 s/caso del CLI: 10.920 s (3 h 2 min); el CLI debe sugerir paso de 14 dias. La estimacion no es una medicion.
+
+Comando exacto tras hacer estrictos los inicios de baseline y exigir el IC del Brier en el veredicto:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-causal-strict-20261030-r9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
