@@ -510,3 +510,46 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c12-ui-310a0d71'; if
 ```
 
 Resultado 43c-12: 3 pruebas pasaron en 1,42 s (ajuste global inicia apagado, se omite el c?lculo mientras est? apagado, se calcula al encender, actor/evento confirmados y cron domingo 06:20 UTC con max_instances=1/coalesce). UI Laboratorio: 1 passed en 2,72 s; `node --check frontend/metas.js` pas?. El job se registra al arranque y lee el ajuste al disparar, as? que el encendido no requiere reinicio.
+
+
+## 43c-13 ? cierre de continuaci?n
+
+Commits de esta continuaci?n, sin push:
+
+- 47d6e49 ? `Fase 43-43c-7: walk-forward eficiente con regresi?n de resultados`
+- f4a68b1 ? `Fase 43-43c-8: cobertura causal, IC y veredictos por moneda`
+- 4b06d89 ? `Fase 43-43c-9: conecta diagn?sticos de ruptura, r?gimen y direcci?n`
+- d5adbdb ? `Fase 43-43c-10: pruebas sint?ticas de r?gimen y correlaci?n`
+- ad7d320 ? `Fase 43-43c-11: reporte y panel completos del marcador`
+- 981ac26 ? `Fase 43-43c-12: job semanal del marcador apagado por defecto`
+
+Verificaci?n de codificaci?n: UTF-8, sin BOM, LF. Los conteos por bytes para `?`, `?`, `??` y U+FFFD se adjuntan al cierre de esta parte despu?s de auditar todos los archivos modificados.
+
+Pasos para S1 (los ejecutar? Ram?n; no se ejecutaron aqu?):
+
+```bash
+cd ~/asple-predictor
+# despu?s de desplegar con bash deploy/actualizar.sh desde el PC:
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles --dry-run
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles
+HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/verificar_velas.py --db market_data.db --comparar-api 7
+venv2/bin/python scripts/marcador_pronosticos.py --db market_data.db --registro-db asple_predictor.db --symbols XRPUSDT --dry-run
+nohup venv2/bin/python scripts/marcador_pronosticos.py --db market_data.db --registro-db asple_predictor.db > ~/marcador_43c.log 2>&1 &
+tail -f ~/marcador_43c.log
+```
+
+
+Prueba final despu?s de reparar codificaci?n de todos los archivos modificados:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c13-final-core-40a21073'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_job.py tests/test_scorecard_walkforward.py tests/test_scorecard_script.py --basetemp="$base"
+```
+
+
+Comando de regresi?n UI final despu?s de corregir los literales mojibake:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c13-final-ui-rerun-9c4d8c11'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py tests/ui/test_metas_ui.py -k "scorecard_weekly_switch_default_off_requires_actor_and_confirms or lab_learning_meters_explain_global_learning_switch_is_off or active_meta_shows_remaining_time_free_capital_extra_and_spanish_status" -q --tb=short --basetemp="$base"
+```
+Resultado del n?cleo final: 18 passed en 28,74 s; un aviso deprecado de Starlette/TestClient.
+
+
+Auditor?a final por bytes de los 20 archivos modificados desde 2b057c8: UTF-8 decodificable; `?`=0, `?`=0, `??`=0, U+FFFD=0; BOM=0, CRLF=0 y CR aislado=0. `node --check frontend/metas.js` y `node --check frontend/intelligence.js` pasaron; `git diff --check` sin errores.

@@ -21,3 +21,7 @@
 - 43c-9: con trayectoria sint?tica Student-t(3), varianza igual a GBM, el factor de colas fue 0,80, no >1 como se esperaba. Se conserv? el resultado emp?rico y no se ajust? el modelo para forzar el valor. La validaci?n de colas pesadas no est? satisfecha.
 - 43c-10: el runner conecta y persiste m?tricas de ruptura, r?gimen y direcci?n; la correlaci?n mensual se alinea por timestamp y queda en summary_json. No se prob? todav?a matriz completa 21?21 en una corrida de 3 monedas ? 200 d?as.
 - 43c-10: falta la prueba OU frente a tendencia exigida para comparar ER/ciclos. Las pruebas actuales cubren el ciclo unitario y el contrato de correlaci?n.
+
+- C43-12 resuelve la ausencia del job semanal: ya se registra con comprobaci?n din?mica de la opci?n GLOBAL apagada por defecto y evento con actor. La primera corrida manual validada sigue siendo requisito operativo antes de encenderlo.
+- C43-9 conserva una discrepancia experimental: Student-t(3) de igual varianza produjo factor de colas 0,80; no se confirm? la expectativa >1. Ver la secci?n 43c-9 del reporte.
+- No se midi? el runner completo con dos a?os y 21 monedas. El benchmark de 218.000 velas mide solo `walk_forward` (24/72 h); la corrida integrada medida cubre tres monedas sint?ticas de 200 d?as y horizonte 24 h.
