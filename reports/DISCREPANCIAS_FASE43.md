@@ -13,18 +13,18 @@
 - 43c-4: el cálculo actual persiste métricas de volatilidad (simple/EWMA/HAR) y factores de calibración; la entrada viva opcional se omite. No se midió el rendimiento de una moneda con dos años en esta entrega y no se ejecutó con `market_data.db` de despliegue.
 - 43c-5: se entrega el panel y endpoint de lectura. El job semanal y su interruptor global no se habilitan en este alcance parcial; no se registra ningún job automático ni se cambia la configuración global.
 
-- 43c parcial: a?n no se implementan los objetivos completos de ruptura, direcci?n, correlaci?n mensual ni evaluaci?n de r?gimen con intervalos por bloques. Los veredictos guardados se limitan a volatilidad.
-- 43c-5: el panel de lectura s? est? disponible, pero faltan el job semanal apagado por defecto y su interruptor global. No hay tarea semanal registrada.
-- HAR es una aproximaci?n funcional de regresi?n expansible; falta su validaci?n con series sint?ticas de volatilidad constante y cambiante. La cobertura del 80 % actual no est? validada fuera de muestra.
-- No se ejecutaron estudios reales ni benchmarks en S1; no se conoce el tiempo por moneda con dos a?os de velas.
+- 43c parcial: aún no se implementan los objetivos completos de ruptura, dirección, correlación mensual ni evaluación de régimen con intervalos por bloques. Los veredictos guardados se limitan a volatilidad.
+- 43c-5: el panel de lectura sí está disponible, pero faltan el job semanal apagado por defecto y su interruptor global. No hay tarea semanal registrada.
+- HAR es una aproximación funcional de regresión expansible; falta su validación con series sintéticas de volatilidad constante y cambiante. La cobertura del 80 % actual no está validada fuera de muestra.
+- No se ejecutaron estudios reales ni benchmarks en S1; no se conoce el tiempo por moneda con dos años de velas.
 
-- 43c-9: con trayectoria sint?tica Student-t(3), varianza igual a GBM, el factor de colas fue 0,80, no >1 como se esperaba. Se conserv? el resultado emp?rico y no se ajust? el modelo para forzar el valor. La validaci?n de colas pesadas no est? satisfecha.
-- 43c-10: el runner conecta y persiste m?tricas de ruptura, r?gimen y direcci?n; la correlaci?n mensual se alinea por timestamp y queda en summary_json. No se prob? todav?a matriz completa 21?21 en una corrida de 3 monedas ? 200 d?as.
-- 43c-10: falta la prueba OU frente a tendencia exigida para comparar ER/ciclos. Las pruebas actuales cubren el ciclo unitario y el contrato de correlaci?n.
+- 43c-9: con trayectoria sintética Student-t(3), varianza igual a GBM, el factor de colas fue 0,80, no >1 como se esperaba. Se conservó el resultado empírico y no se ajustó el modelo para forzar el valor. La validación de colas pesadas no está satisfecha.
+- 43c-10: el runner conecta y persiste métricas de ruptura, régimen y dirección; la correlación mensual se alinea por timestamp y queda en summary_json. No se probó todavía matriz completa 21×21 en una corrida de 3 monedas × 200 días.
+- 43c-10: falta la prueba OU frente a tendencia exigida para comparar ER/ciclos. Las pruebas actuales cubren el ciclo unitario y el contrato de correlación.
 
-- C43-12 resuelve la ausencia del job semanal: ya se registra con comprobaci?n din?mica de la opci?n GLOBAL apagada por defecto y evento con actor. La primera corrida manual validada sigue siendo requisito operativo antes de encenderlo.
-- C43-9 conserva una discrepancia experimental: Student-t(3) de igual varianza produjo factor de colas 0,80; no se confirm? la expectativa >1. Ver la secci?n 43c-9 del reporte.
-- No se midi? el runner completo con dos a?os y 21 monedas. El benchmark de 218.000 velas mide solo `walk_forward` (24/72 h); la corrida integrada medida cubre tres monedas sint?ticas de 200 d?as y horizonte 24 h.
+- C43-12 resuelve la ausencia del job semanal: ya se registra con comprobación dinámica de la opción GLOBAL apagada por defecto y evento con actor. La primera corrida manual validada sigue siendo requisito operativo antes de encenderlo.
+- C43-9 conserva una discrepancia experimental: Student-t(3) de igual varianza produjo factor de colas 0,80; no se confirmó la expectativa >1. Ver la sección 43c-9 del reporte.
+- No se midió el runner completo con dos años y 21 monedas. El benchmark de 218.000 velas mide solo `walk_forward` (24/72 h); la corrida integrada medida cubre tres monedas sintéticas de 200 días y horizonte 24 h.
 
 ## Fase 43e-0
 
@@ -37,3 +37,8 @@ HAR se mantiene como regresión sobre RV y se aplica un piso `max(HAR, 0,25 × s
 ## 43e parcial
 
 Solo están completas las correcciones del marcador, la biblioteca histórica y el generador por lotes (43e-0 a 43e-2). 43e-3 no implementa el simulador numpy ni la paridad obligatoria; 43e-4 a 43e-8 no se iniciaron. No se debe desplegar como motor v2 ni interpretar como validación de estrategia.
+
+
+## Fase 43e-2b
+
+Se elevó la versión de biblioteca a `scenario_fhs_v2`. Los valores estandarizados quedan sin centrar en disco; `load_library(before=...)` calcula y resta la media solo sobre los días seleccionados. Los primeros 30 días no se publican como escenarios; días parciales quedan excluidos pero sus retornos válidos actualizan EWMA. La reconstrucción de precio y sigma usa float64. La primera prueba de precisión falló por reducción prematura de sigma a float32; tras corregirla, 5 pruebas pasan.

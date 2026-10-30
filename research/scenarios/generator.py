@@ -40,7 +40,7 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
     if not common_starts:
         raise ValueError("no hay bloques de fechas comunes completos para las monedas")
     batch_size = int(batch_size or max(1, min(n_scenarios,
-        (100 * 1024 * 1024) // max(1, len(symbols) * horizon_days * 288 * 4 * 4))))
+        (100 * 1024 * 1024) // max(1, len(symbols) * horizon_days * 288 * 8 * 4))))
     if batch_size < 1:
         raise ValueError("batch_size debe ser positivo")
     rng = np.random.default_rng(seed)
@@ -62,15 +62,15 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
             date_to_index = date_maps[symbol]
             z = np.stack([values[[date_to_index[int(day)] for day in day_origin[:, d]], :, :]
                 for d in range(days_needed)], axis=1).reshape(count, days_needed * 288, 3)
-            sigma_path = np.broadcast_to(sigma_paths[symbol], (count, days_needed)).copy().astype(np.float32)
+            sigma_path = np.broadcast_to(sigma_paths[symbol], (count, days_needed)).copy().astype(np.float64)
             candle_scale = (sigma_path[:, :, None] / np.sqrt(288)).repeat(288, axis=2).reshape(count, -1)
-            scaled = z * candle_scale[:, :, None]
-            close = (np.float32(price_map[symbol]) * np.exp(
-                np.cumsum(scaled[:, :, 0], axis=1, dtype=np.float32))).astype(np.float32)
-            previous = np.concatenate((np.full((count, 1), price_map[symbol], np.float32),
+            scaled = z.astype(np.float64) * candle_scale[:, :, None].astype(np.float64)
+            close = (np.float64(price_map[symbol]) * np.exp(
+                np.cumsum(scaled[:, :, 0], axis=1, dtype=np.float64))).astype(np.float64)
+            previous = np.concatenate((np.full((count, 1), price_map[symbol], np.float64),
                 close[:, :-1]), axis=1)
-            high = previous * np.exp(scaled[:, :, 1]).astype(np.float32)
-            low = previous * np.exp(scaled[:, :, 2]).astype(np.float32)
+            high = previous * np.exp(scaled[:, :, 1])
+            low = previous * np.exp(scaled[:, :, 2])
             high = np.maximum(high, np.maximum(previous, close))
             low = np.minimum(low, np.minimum(previous, close))
             open_prices = previous.copy()

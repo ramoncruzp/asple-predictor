@@ -431,11 +431,11 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 
 
 
-## Fase 43c, continuaci?n ? estado del marcador
+## Fase 43c, continuación ? estado del marcador
 
-- C43-7 optimiza el c?lculo causal; benchmark de 218.000 velas: 0,184 s para 24 h y 0,212 s para 72 h.
-- C43-8 guarda cobertura causal, IC de factores, pron?stico vivo con escala ra?z de H cuando hay SQLite expl?cita, veredictos por s?mbolo y agregados.
-- C43-9/10 conectan al runner los objetivos de ruptura, r?gimen, direcci?n y correlaci?n mensual. Los resultados son m?tricas de investigaci?n; no se conectan al motor v1.
+- C43-7 optimiza el cálculo causal; benchmark de 218.000 velas: 0,184 s para 24 h y 0,212 s para 72 h.
+- C43-8 guarda cobertura causal, IC de factores, pronóstico vivo con escala raíz de H cuando hay SQLite explícita, veredictos por símbolo y agregados.
+- C43-9/10 conectan al runner los objetivos de ruptura, régimen, dirección y correlación mensual. Los resultados son métricas de investigación; no se conectan al motor v1.
 - El panel muestra veredictos agregados y detalle por moneda. El job semanal C43-12 se registra al arranque, comprueba el interruptor GLOBAL al disparar y permanece apagado por defecto hasta validar una corrida manual.
 
 
@@ -448,3 +448,8 @@ El marcador mantiene correlaciones ausentes como NaN internamente y null al seri
 ### Fase 43e — límite de esta entrega
 
 43e-0 a 43e-2 son herramientas de investigación offline. El simulador de escenarios, su paridad, Smart, métricas de cartera, backtest, integración y cierre de 43e aún están pendientes. El motor v2 sigue no disponible y ninguna decisión real cambia.
+
+
+### Fase 43e-2b ? método de biblioteca
+
+La biblioteca causal usa `scenario_fhs_v2`: almacena z sin centrar y aplica tendencia cero solo al historial visible antes del origen; la reconstrucción de OHLC es float64 para respetar ticks pequeños.

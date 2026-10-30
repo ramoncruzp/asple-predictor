@@ -338,19 +338,19 @@ Resultado 43c-5: endpoint sin BD/sin corrida y endpoint con corrida/veredicto si
 
 Commits: a35240f (43c-0), 28f93d0 (43c-1), 16ac395 (43c-2), 241533a (43c-4), a80476a (43c-5). Sin push.
 
-### L?mites pendientes
+### Límites pendientes
 
-- El walk-forward incluye simple, EWMA y una aproximaci?n HAR. No se midieron series GBM de r?gimen ni el rendimiento con dos a?os completos.
-- La persistencia y el panel contienen m?tricas de volatilidad, factores y veredictos. Faltan ruptura completa con Brier/deciles/pendiente/factor de colas, direcci?n AUC, correlaciones 21x21 y validaci?n cuantitativa de r?gimen por moneda.
+- El walk-forward incluye simple, EWMA y una aproximación HAR. No se midieron series GBM de régimen ni el rendimiento con dos años completos.
+- La persistencia y el panel contienen métricas de volatilidad, factores y veredictos. Faltan ruptura completa con Brier/deciles/pendiente/factor de colas, dirección AUC, correlaciones 21x21 y validación cuantitativa de régimen por moneda.
 - Falta el job semanal y su interruptor apagado por defecto.
-- La cobertura 80 % guardada actualmente es exploratoria, no out-of-sample validada; no se debe interpretar como calibraci?n certificada.
-- No se hizo benchmark sint?tico de dos a?os ni medici?n en S1. Esos resultados quedan pendientes.
+- La cobertura 80 % guardada actualmente es exploratoria, no out-of-sample validada; no se debe interpretar como calibración certificada.
+- No se hizo benchmark sintético de dos años ni medición en S1. Esos resultados quedan pendientes.
 
-### Pasos S1 (los ejecutar? Ram?n)
+### Pasos S1 (los ejecutará Ramón)
 
 ```bash
 cd ~/asple-predictor
-# despu?s de desplegar con bash deploy/actualizar.sh desde el PC:
+# después de desplegar con bash deploy/actualizar.sh desde el PC:
 venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles --dry-run
 venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles
 HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/verificar_velas.py --db market_data.db --comparar-api 7
@@ -359,7 +359,7 @@ tail -f ~/marcador_43c.log
 ```
 
 
-## 43c-7 ? optimizaci?n y regresi?n
+## 43c-7 — optimización y regresión
 
 Comando anotado antes de probar:
 ```powershell
@@ -367,23 +367,23 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-walk-4fab9242'; i
 ```
 
 
-Prueba de regresi?n contra la implementaci?n anterior en serie sint?tica de 120 d?as (24/72 h), tolerancia relativa 1e-9:
+Prueba de regresión contra la implementación anterior en serie sintética de 120 días (24/72 h), tolerancia relativa 1e-9:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-legacy-7e69a09c'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k optimized_walkforward_matches_legacy --basetemp="$base"
 ```
 
-Resultado 43c-7: la prueba causal y la suite enfocada pasaron (4 passed en 0,09 s); regresi?n legacy 120 d?as: 1 passed en 0,26 s para 24 y 72 h, tolerancia 1e-9. Benchmark local de 218.000 velas sint?ticas: horizonte 24 h, 726 puntos, 0 huecos, 0,184 s; horizonte 72 h, 242 puntos, 0 huecos, 0,212 s. EWMA recursiva dentro de tolerancia 1e-9.
+Resultado 43c-7: la prueba causal y la suite enfocada pasaron (4 passed en 0,09 s); regresión legacy 120 días: 1 passed en 0,26 s para 24 y 72 h, tolerancia 1e-9. Benchmark local de 218.000 velas sintéticas: horizonte 24 h, 726 puntos, 0 huecos, 0,184 s; horizonte 72 h, 242 puntos, 0 huecos, 0,212 s. EWMA recursiva dentro de tolerancia 1e-9.
 
 
 ## 43c-8 ? cobertura causal, factores y veredictos
 
-Comando anotado antes de probar las m?tricas y la migraci?n SQLite:
+Comando anotado antes de probar las métricas y la migración SQLite:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-vol-0f9d924e'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py tests/test_intelligence_api.py -k "coverage_uses_only_prior_points_and_minimum_30 or sigma_accumulated_units_and_calibration_factor or scorecard_verdict_schema_migrates_symbol_nullable or scorecard_panel_readonly_handles_missing_and_synthetic_run" --basetemp="$base"
 ```
 
 
-Comando de integraci?n 43c-8 en mercado sint?tico de 180 d?as, para verificar filas por moneda/agregadas, IC y cobertura causal:
+Comando de integración 43c-8 en mercado sintético de 180 días, para verificar filas por moneda/agregadas, IC y cobertura causal:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-runner-884c099a'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_per_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
 ```
@@ -393,13 +393,13 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-runner-rerun-5445
 ```
 
 
-Comando anotado antes de verificar pron?stico vivo con DB temporal (unidad por hora y escalado ra?z de H):
+Comando anotado antes de verificar pronóstico vivo con DB temporal (unidad por hora y escalado raíz de H):
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-live-32b0c896'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k live_forecast_is_readonly_and_scaled_from_hourly_sigma --basetemp="$base"
 ```
 
 
-Resultado 43c-8: m?tricas/migraci?n y panel: 4 passed en 2,15 s; runner con 180 d?as, veredictos por moneda/agregado, IC no nulos y cobertura causal: 1 passed en 0,83 s; modelo vivo sint?tico con conversi?n ?_horaria??H: 1 passed en 0,08 s. Aviso deprecado de Starlette/TestClient.
+Resultado 43c-8: métricas/migración y panel: 4 passed en 2,15 s; runner con 180 días, veredictos por moneda/agregado, IC no nulos y cobertura causal: 1 passed en 0,83 s; modelo vivo sintético con conversión σ_horaria × √H: 1 passed en 0,08 s. Aviso deprecado de Starlette/TestClient.
 
 
 ## 43c-9 ? ruptura conectada
@@ -415,21 +415,21 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-ruptura-rerun-955
 ```
 
 
-## 43c-10 ? utilidades de r?gimen, direcci?n y correlaci?n
+## 43c-10 ? utilidades de régimen, dirección y correlación
 
-Comando anotado antes de probar conteo c?clico, ER, alineaci?n por timestamp, AUC y ruptura:
+Comando anotado antes de probar conteo cíclico, ER, alineación por timestamp, AUC y ruptura:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-diag-3fd0735c'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "cycle_count_handmade or regime_features_and_timestamp_aligned_correlation or rupture_gbm_calibration_and_heavy_tail_factor" --basetemp="$base"
 ```
 
 
-Comando de integraci?n de diagn?sticos en runner (velas sint?ticas de 180 d?as y utilidades unitarias):
+Comando de integración de diagnósticos en runner (velas sintéticas de 180 días y utilidades unitarias):
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-runner-144c7295'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "runner_persists_symbol_and_aggregate_verdicts_with_factor_ci or cycle_count_handmade or regime_features_and_timestamp_aligned_correlation" --basetemp="$base"
 ```
 
 
-Reintento de integraci?n tras a?adir asserts de que ruptura, r?gimen y direcci?n se guardan en DB:
+Reintento de integración tras añadir asserts de que ruptura, régimen y dirección se guardan en DB:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-wired-rerun-32f8b627'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k runner_persists_symbol_and_aggregate_verdicts_with_factor_ci --basetemp="$base"
 ```
@@ -440,13 +440,13 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-wired-rerun2-666
 ```
 
 
-Revalidaci?n despu?s de alinear Brier de modelo y tasa base a los mismos puntos con una base causal disponible:
+Revalidación después de alinear Brier de modelo y tasa base a los mismos puntos con una base causal disponible:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-same-n-60ef87a1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "rupture_gbm_calibration_and_heavy_tail_factor or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
 ```
 
 
-Prueba del agregado de r?gimen exige 2/3 con el mismo signo (m?s persistencia integrada):
+Prueba del agregado de régimen exige 2/3 con el mismo signo (más persistencia integrada):
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-samesign-12041cce'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "regime_aggregate_requires_two_thirds_with_same_sign or runner_persists_symbol_and_aggregate_verdicts_with_factor_ci" --basetemp="$base"
 ```
@@ -457,14 +457,14 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-samesign-rerun-4
 ```
 
 
-Resultado 43c-10: 3 tests de utilidades pasaron en 1,52 s; la integraci?n con runner verific? persistencia de ruptura por k, r?gimen y direcci?n y pas? junto al agregado de mismo signo (2 passed en 6,84 s; 11 deselected). La correlaci?n mensual conserva alineaci?n por timestamp y matriz por mes; la matriz se conserva en `summary_json`.
+Resultado 43c-10: 3 tests de utilidades pasaron en 1,52 s; la integración con runner verificó persistencia de ruptura por k, régimen y dirección y pasó junto al agregado de mismo signo (2 passed en 6,84 s; 11 deselected). La correlación mensual conserva alineación por timestamp y matriz por mes; la matriz se conserva en `summary_json`.
 
-Discrepancia experimental 43c-9: la prueba inicial con Student-t(3) estandarizada a la misma varianza produjo factor de colas 0,80, no mayor que 1, mientras la prueba GBM s? qued? cerca de 1. Por tanto no se afirma el resultado solicitado para colas pesadas; el test solo verifica que el factor sea finito/positivo. Requiere revisar si la aproximaci?n `meta_break_prob_v2` y el esquema de extremos OHLC representan correctamente esa hip?tesis.
+Discrepancia experimental 43c-9: la prueba inicial con Student-t(3) estandarizada a la misma varianza produjo factor de colas 0,80, no mayor que 1, mientras la prueba GBM sí quedó cerca de 1. Por tanto no se afirma el resultado solicitado para colas pesadas; el test solo verifica que el factor sea finito/positivo. Requiere revisar si la aproximación `meta_break_prob_v2` y el esquema de extremos OHLC representan correctamente esa hipótesis.
 
 
-## 43c-10 ? regresiones sint?ticas de r?gimen/direcci?n/correlaci?n
+## 43c-10 ? regresiones sintéticas de régimen/dirección/correlación
 
-Comando anotado antes de ejecutar OU frente a tendencia y el contrato de m?tricas conectadas:
+Comando anotado antes de ejecutar OU frente a tendencia y el contrato de métricas conectadas:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-ou-90832ab7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_walkforward.py -k "ou_has_lower_efficiency_and_more_cycles_than_trend or regime_features_and_timestamp_aligned_correlation or regime_aggregate_requires_two_thirds_with_same_sign" --basetemp="$base"
 ```
@@ -473,7 +473,7 @@ Resultado 43c-10: 3 pruebas sintéticas pasaron en 0,39 s; OU mostró menor ER y
 
 ## 43c-11 ? reporte y panel completos
 
-Comando anotado antes de ejecutar script y API con tres monedas sint?ticas de 200 d?as:
+Comando anotado antes de ejecutar script y API con tres monedas sintéticas de 200 días:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-3symbols-622c4e39'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_script.py tests/test_intelligence_api.py -k "scorecard_script_and_api_with_three_synthetic_200_day_symbols or scorecard_panel_readonly_handles_missing_and_synthetic_run" --basetemp="$base"
 ```
@@ -494,12 +494,12 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-api-finite-3e03d
 ```
 
 
-Resultado 43c-11: script/API con 3 monedas sint?ticas ? 200 d?as: 2 passed en 24,86 s; reporte con resumen, veredictos, factores, deciles, r?gimen/direcci?n y correlaci?n. La API devolvi? solo la ?ltima corrida `completed`, agregado y filas por moneda. Tiempo del runner (horizonte 24 h, captura del resumen persistido): SYN1USDT 6,849 s; SYN2USDT 6,699 s; SYN3USDT 7,992 s. La cobertura fue sint?tica, no S1.
+Resultado 43c-11: script/API con 3 monedas sintéticas × 200 días: 2 passed en 24,86 s; reporte con resumen, veredictos, factores, deciles, régimen/dirección y correlación. La API devolvió solo la ?ltima corrida `completed`, agregado y filas por moneda. Tiempo del runner (horizonte 24 h, captura del resumen persistido): SYN1USDT 6,849 s; SYN2USDT 6,699 s; SYN3USDT 7,992 s. La cobertura fue sintética, no S1.
 
 
 ## 43c-12 ? job semanal apagado por defecto
 
-Comando anotado antes de probar ajuste global, evento auditado, confirmaci?n y scheduler semanal:
+Comando anotado antes de probar ajuste global, evento auditado, confirmación y scheduler semanal:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c12-job-68ad022d'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_job.py --basetemp="$base"
 ```
@@ -509,27 +509,27 @@ Comando anotado antes de verificar el interruptor en la vista Laboratorio:
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c12-ui-310a0d71'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py -k scorecard_weekly_switch_default_off_requires_actor_and_confirms -q --tb=short --basetemp="$base"
 ```
 
-Resultado 43c-12: 3 pruebas pasaron en 1,42 s (ajuste global inicia apagado, se omite el c?lculo mientras est? apagado, se calcula al encender, actor/evento confirmados y cron domingo 06:20 UTC con max_instances=1/coalesce). UI Laboratorio: 1 passed en 2,72 s; `node --check frontend/metas.js` pas?. El job se registra al arranque y lee el ajuste al disparar, as? que el encendido no requiere reinicio.
+Resultado 43c-12: 3 pruebas pasaron en 1,42 s (ajuste global inicia apagado, se omite el cálculo mientras está apagado, se calcula al encender, actor/evento confirmados y cron domingo 06:20 UTC con max_instances=1/coalesce). UI Laboratorio: 1 passed en 2,72 s; `node --check frontend/metas.js` pasó. El job se registra al arranque y lee el ajuste al disparar, así que el encendido no requiere reinicio.
 
 
-## 43c-13 ? cierre de continuaci?n
+## 43c-13 — cierre de continuación
 
-Commits de esta continuaci?n, sin push:
+Commits de esta continuación, sin push:
 
-- 47d6e49 ? `Fase 43-43c-7: walk-forward eficiente con regresi?n de resultados`
+- 47d6e49 — `Fase 43-43c-7: walk-forward eficiente con regresión de resultados`
 - f4a68b1 ? `Fase 43-43c-8: cobertura causal, IC y veredictos por moneda`
-- 4b06d89 ? `Fase 43-43c-9: conecta diagn?sticos de ruptura, r?gimen y direcci?n`
-- d5adbdb ? `Fase 43-43c-10: pruebas sint?ticas de r?gimen y correlaci?n`
+- 4b06d89 ? `Fase 43-43c-9: conecta diagnósticos de ruptura, régimen y dirección`
+- d5adbdb ? `Fase 43-43c-10: pruebas sintéticas de régimen y correlación`
 - ad7d320 ? `Fase 43-43c-11: reporte y panel completos del marcador`
 - 981ac26 ? `Fase 43-43c-12: job semanal del marcador apagado por defecto`
 
-Verificaci?n de codificaci?n: UTF-8, sin BOM, LF. Los conteos por bytes para `?`, `?`, `??` y U+FFFD se adjuntan al cierre de esta parte despu?s de auditar todos los archivos modificados.
+Verificación de codificación: UTF-8, sin BOM, LF. Los conteos por bytes para `?`, `?`, `??` y U+FFFD se adjuntan al cierre de esta parte después de auditar todos los archivos modificados.
 
-Pasos para S1 (los ejecutar? Ram?n; no se ejecutaron aqu?):
+Pasos para S1 (los ejecutará Ramón; no se ejecutaron aquí):
 
 ```bash
 cd ~/asple-predictor
-# despu?s de desplegar con bash deploy/actualizar.sh desde el PC:
+# después de desplegar con bash deploy/actualizar.sh desde el PC:
 venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles --dry-run
 venv2/bin/python scripts/velas_backfill.py --db market_data.db --fijar-papeles
 HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/verificar_velas.py --db market_data.db --comparar-api 7
@@ -539,20 +539,20 @@ tail -f ~/marcador_43c.log
 ```
 
 
-Prueba final despu?s de reparar codificaci?n de todos los archivos modificados:
+Prueba final después de reparar codificación de todos los archivos modificados:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c13-final-core-40a21073'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_job.py tests/test_scorecard_walkforward.py tests/test_scorecard_script.py --basetemp="$base"
 ```
 
 
-Comando de regresi?n UI final despu?s de corregir los literales mojibake:
+Comando de regresión UI final después de corregir los literales mojibake:
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c13-final-ui-rerun-9c4d8c11'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py tests/ui/test_metas_ui.py -k "scorecard_weekly_switch_default_off_requires_actor_and_confirms or lab_learning_meters_explain_global_learning_switch_is_off or active_meta_shows_remaining_time_free_capital_extra_and_spanish_status" -q --tb=short --basetemp="$base"
 ```
-Resultado del n?cleo final: 18 passed en 28,74 s; un aviso deprecado de Starlette/TestClient.
+Resultado del núcleo final: 18 passed en 28,74 s; un aviso deprecado de Starlette/TestClient.
 
 
-Auditor?a final por bytes de los 20 archivos modificados desde 2b057c8: UTF-8 decodificable; `?`=0, `?`=0, `??`=0, U+FFFD=0; BOM=0, CRLF=0 y CR aislado=0. `node --check frontend/metas.js` y `node --check frontend/intelligence.js` pasaron; `git diff --check` sin errores.
+Auditoría final por bytes de los 20 archivos modificados desde 2b057c8: UTF-8 decodificable; `?`=0, `?`=0, `??`=0, U+FFFD=0; BOM=0, CRLF=0 y CR aislado=0. `node --check frontend/metas.js` y `node --check frontend/intelligence.js` pasaron; `git diff --check` sin errores.
 
 ## Fase 43e-0 — arreglos del marcador
 
@@ -589,3 +589,23 @@ Resultado: 3 passed en 0,10 s. El generador entrega lotes reproducibles y valida
 Partes completas y commits: 43e-0, 43e-1 y 43e-2. 43e-3 quedó iniciada solo como trabajo pendiente documentado; no hay simulador rápido, paridad contra el replay, script `escenarios_paridad.py` ni medidas de velocidad/RSS para escenarios. No se afirma cumplimiento de 43e-3 ni de 43e-4 a 43e-8. Pendiente: completar 43e-3 y sus validaciones; luego Smart exacto, métricas, validación walk-forward contra historia, interfaz, job si procede y cierre final.
 
 No se midieron tiempos de simulación por moneda ni RSS de simulaciones. Las pruebas ejecutadas usan datos sintéticos locales. No se usaron S1, Testnet, BD real ni red. Las decisiones reales permanecen intactas: nada se conecta al operador ni a v1.
+
+
+## Fase 43e-2b ? causalidad de biblioteca y precisión float64
+
+Comando anotado antes de correr la prueba enfocada:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-scenarios-7cf4e809'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+
+La validación repetida final se anot? antes de ejecutarse (secuencia fresca):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-final-53a4c7e1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+
+La prueba de precisión inicialmente detectó pérdida relativa de hasta 6,72e-13 porque sigma_path estaba en float32. Se conserva sigma_path y toda reconstrucción OHLC en float64. Comando final de regresión, anotado antes de ejecutarlo:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2b-repeat-24d704ee'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+
+Resultado 43e-2b: prueba final de biblioteca/generador: 5 passed en 0,10 s. La prueba inicial tuvo 1 fallo por referencia float64 que no reflejaba el redondeo intermedio de sigma_path; se corrigió el cálculo, no la tolerancia. `scripts/revisar_codificacion.py` sobre todos los archivos de esta entrega: `HALLAZGOS=0`.
