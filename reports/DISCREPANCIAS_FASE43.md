@@ -158,3 +158,12 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5e-pareo-20261030-r
 ```
 
 Resultado: **6 pasaron en 6,57 s**. Se verificó la diferencia intencional de 4 USDT en los mismos tres índices, la igualdad devuelve 0, y el CLI imprime n y la media Simple del pareo.
+## 43e-6a - objetivo de selección v2
+
+Se añadió el objetivo informativo de v2: maximiza P(meta) sujeto a piso de ganancia, cota superior del IC de P(pérdida) y CVaR 5 %. El desempate usa días a meta y ganancia media; si ninguna candidata cumple, ordena `USDT quieto` primero. Ajustes `meta_profile_settings` se leen en modo SQLite `ro` cuando se pasa `--settings-db`; los defaults D2/perfil se aplican ante tabla, fila o ajuste ausente.
+
+Comando enfocado anotado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6a-objetivo-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_objective.py --basetemp="$base"
+```

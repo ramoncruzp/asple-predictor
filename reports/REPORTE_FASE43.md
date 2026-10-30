@@ -780,3 +780,7 @@ Resultado de pruebas enfocadas: **6 pasaron en 4,57 s** y la corrida final del e
 La comparación en modo alternativas conserva las curvas bajo su índice global de escenario y calcula medias y diferencias sobre la intersección de índices, no sobre posiciones asumidas entre listas de tamaños distintos. La salida CLI incluye `n` y las medias de Simple pareada y de la alternativa. Pruebas enfocadas y su comando se anotan en `reports/DISCREPANCIAS_FASE43.md`.
 
 Resultado: **6 pruebas pasaron en 6,57 s**. La media pareada deliberadamente distinta fue 4 USDT; las curvas idénticas dieron 0.
+
+# 43e-6a - objetivo de selección v2
+
+Implementada la clasificación informativa por P(meta) con restricciones de ganancia esperada, cota superior del IC de P(límite) y CVaR. El ranking no se conecta al motor v1 ni cambia decisiones reales. Pruebas enfocadas: **4 pasaron en 0,15 s**; comando exacto en `reports/DISCREPANCIAS_FASE43.md`.

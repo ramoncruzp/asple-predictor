@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from research.scenarios.evaluate import evaluate_pieces
+from research.scenarios.objective import objective_limits, rank_alternatives_v2
 from scripts.escenarios_velocidad import _rss_mb
 
 
@@ -50,6 +51,7 @@ def main(argv=None):
     parser.add_argument("--n-smart", type=int, default=200)
     parser.add_argument("--semilla", type=int, default=43)
     parser.add_argument("--library-dir", default="data/derived/scenario_lib")
+    parser.add_argument("--settings-db", help="SQLite de perfiles; solo se abre en lectura")
     args = parser.parse_args(argv)
     started = time.perf_counter()
     result = evaluate_pieces([_parse_piece(item) for item in args.pieza],
@@ -79,6 +81,18 @@ def main(argv=None):
                 f"{alternative_mean:.4f} | {pnl['mean']:.4f} "
                 f"[{pnl['ci_low']:.4f}, {pnl['ci_high']:.4f}] | "
                 f"{loss['mean']:.4f} | {target['mean']:.4f}")
+        limits = objective_limits(args.perfil,
+            settings_db=args.settings_db or args.db)
+        ranked = rank_alternatives_v2(result["pieces"], perfil=args.perfil,
+            capital_meta=args.capital, max_loss_pct=limits["max_loss_pct"],
+            p_limit_cap=limits["p_limit_cap"], ev_floor_pct=limits["ev_floor_pct"])
+        print("OBJETIVO_V2 | posición | pieza | estado | P(meta) | motivos")
+        for position, row in enumerate(ranked, 1):
+            name = (row.get("piece") or {}).get("label") or (row.get("piece") or {}).get("symbol") or "USDT quieto"
+            status = "factible" if row["objetivo"]["factible"] else "no factible"
+            print(f"{position} | {name} | {status} | "
+                f"{float((row.get('metrics') or {}).get('p_target', 0)):.4f} | "
+                f"{'; '.join(row['objetivo']['motivos']) or 'cumple los límites'}")
     print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
     return 0
 
