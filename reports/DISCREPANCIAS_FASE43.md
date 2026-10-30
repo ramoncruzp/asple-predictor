@@ -99,3 +99,51 @@ Después de añadir la cobertura de capital quieto y el pareo de alternativas si
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5c-scripts-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_parity_script.py tests/test_scenarios_speed.py tests/test_scenarios_evaluate.py --basetemp="$base"
 ```
+
+Para verificar la unidad de sigma diaria, los llenados sobre escenarios de 20 días y el aviso por geometría sin contacto, se anotó esta corrida enfocada:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py tests/test_scenarios_speed.py --basetemp="$base"
+```
+
+La primera corrida señaló una aserción heredada que esperaba que Simple se truncara a `n_smart`; se corrigió para comprobar Simple=2 y Smart=1. Comando de repetición anotado antes de correrlo:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py tests/test_scenarios_speed.py --basetemp="$base"
+```
+
+La repetición confirmó Simple=2 y Smart=1, pero la biblioteca sintética de wicks moderados promedió solo 2,71 llenados y no cumplió el umbral de sensibilidad solicitado. Se amplió el rango intravela sintético, manteniendo σ de cierre diaria conocida en 4 %. Comando de validación actualizado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py tests/test_scenarios_speed.py --basetemp="$base"
+```
+
+Resultado de la corrida r3: **5 pasaron en 4,27 s**; el ancho y el umbral de llenados pasaron.
+
+Para comprobar además que Simple usa los 1.000 escenarios completos mientras Smart solo usa los primeros 200, se anotó esta corrida:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+La corrida r4 pasó **4/4 en 2,93 s**. Para cubrir también el ancho de la medición de velocidad a 20 y 45 días, comando final anotado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py tests/test_scenarios_speed.py --basetemp="$base"
+```
+
+El r5 pasó **6/6 en 4,57 s**. Se reforzó la prueba por lotes para comprobar que los 200 Smart se parean con los primeros 200 de Simple, aunque Simple continúa con los 800 escenarios restantes. Comando de repetición anotado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+El r6 detectó solo diferencia de redondeo binario al comprobar los índices de escenarios; se cambió esa aserción a tolerancia absoluta `1e-12` (la prueba compara los 200 índices). Comando de repetición anotado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-20261030-r7'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+Resultado r7: **4 pasaron en 2,90 s**.
+
+Resultado r5: **6 pasaron en 4,57 s**. La búsqueda en Python bajo `research/` y `scripts/` no encontró más usos de `sqrt(... * 24)` para construir anchos a partir de sigma diaria; el diagnóstico documental de `break_prob` expresa el horizonte en horas y no es un ancho de grid.

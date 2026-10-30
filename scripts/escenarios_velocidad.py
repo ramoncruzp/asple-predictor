@@ -21,7 +21,7 @@ from research.scenarios.generator import generate
 
 
 def _volatility_estimates(data):
-    """Estima sigma actual y mediana diaria con retornos alineados a sus velas."""
+    """Estima sigma acumulada de 24 h y mediana de RV diaria con retornos alineados."""
     returns = np.diff(np.log(np.asarray(data.close, dtype=np.float64)))
     lam = .97 ** (1 / 12)
     variance = float(np.mean(returns[:30 * 288] ** 2))
@@ -73,12 +73,13 @@ def _rss_mb():
 
 def benchmark(*, library_directory, symbol, price, sigma_today, sigma_long,
         n_scenarios=1000, batch_size=None, filters=None):
+    """Mide FastSim; sigma_today es sigma logarítmica acumulada de 24 horas."""
     results = []
     for days in (20, 45):
         started = time.perf_counter()
         fills = 0
         count = 0
-        width = max(float(sigma_today), 1e-4) * np.sqrt(days * 24) * 2
+        width = max(float(sigma_today), 1e-4) * np.sqrt(days) * 2
         low, high = price * np.exp(-width), price * np.exp(width)
         for batch in generate([symbol], horizon_days=days, n_scenarios=n_scenarios,
                 seed=43, price_now=price, sigma_today_24h=sigma_today,

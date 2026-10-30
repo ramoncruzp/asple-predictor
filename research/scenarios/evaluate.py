@@ -13,6 +13,11 @@ from research.scenarios.metrics import summarize, summarize_portfolio
 from research.scenarios.smart_exact import START_TS, evaluate_smart_scenarios, paired_smart_simple
 
 
+def _log_width_from_sigma_24h(sigma_24h, horizon_days, multiplier):
+    """Convierte sigma logarítmica acumulada de 24 h a un horizonte en días."""
+    return float(multiplier) * float(sigma_24h) * np.sqrt(float(horizon_days))
+
+
 def _sigma_estimates(data):
     returns = np.diff(np.log(np.asarray(data.close, dtype=np.float64)))
     if len(returns) < 12 * 24 * 30:
@@ -55,7 +60,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
-    bot usa `buy_price`/`sell_price`. Si indica `width_sigma`, arma ancho
+    `sigma_24h` es sigma logarítmica acumulada de 24 horas. Bot usa
+    `buy_price`/`sell_price`; `width_sigma` define ancho
     log-simétrico en unidades de sigma del horizonte del perfil. En modo
     `alternativas`, cada candidata se evalúa sola contra el capital total de la
     meta (su capital no asignado queda quieto); `cartera` suma piezas.
@@ -83,10 +89,13 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     calibration = _calibration_factors(db_path, symbols)
     today = {symbol: sigma[symbol][0] for symbol in symbols}
     long = {symbol: sigma[symbol][1] for symbol in symbols}
-    target_count = min(int(n_scenarios), int(n_smart)) if any(
-        str(piece["strategy"]).lower() == "smart" for piece in pieces) else int(n_scenarios)
+    target_count = int(n_scenarios)
+    has_smart = any(str(piece["strategy"]).lower() == "smart" for piece in pieces)
+    if has_smart and n_smart <= 0:
+        raise ValueError("n_smart debe ser positivo cuando se evalúa Smart")
     piece_curves = [[] for _ in pieces]
-    raw = [{"cycles": [], "inventory_qty": [], "inventory_value": []} for _ in pieces]
+    raw = [{"cycles": [], "inventory_qty": [], "inventory_value": [], "fills": []}
+        for _ in pieces]
     paired = {}
     batches = generate(symbols, horizon_days=horizon, n_scenarios=target_count,
         seed=seed, price_now=price, sigma_today_24h=today, sigma_long_24h=long,
@@ -100,7 +109,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             market = batch["symbols"][symbol]
             low, high = piece.get("low"), piece.get("high")
             if piece.get("width_sigma") is not None:
-                width = float(piece["width_sigma"]) * today[symbol] * np.sqrt(horizon * 24)
+                width = _log_width_from_sigma_24h(today[symbol], horizon,
+                    piece["width_sigma"])
                 low, high = price[symbol] * np.exp(-width), price[symbol] * np.exp(width)
             if strategy == "bot" and piece.get("buy_offset_pct") is not None:
                 low = price[symbol] * (1 + float(piece["buy_offset_pct"]) / 100)
@@ -113,15 +123,21 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             geometry[index] = (low, high)
             common = {key: market[key] for key in ("open", "high", "low", "close")}
             if strategy == "smart":
+                smart_count = max(0, min(len(market["close"]),
+                    int(n_smart) - int(batch["scenario_start"])))
+                if smart_count <= 0:
+                    continue
                 results = evaluate_smart_scenarios(common, n_levels=int(piece.get("n", 6)),
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), sigma_path=market["sigma_path"],
-                    n_smart=len(market["close"]), workers=workers, max_loss_pct=loss_pct)
+                    n_smart=smart_count, workers=workers, max_loss_pct=loss_pct)
                 for offset, result in enumerate(results):
                     piece_curves[index].append(result["curve"])
                     raw[index]["cycles"].append(result["metrics"]["cycles_completed"])
                     raw[index]["inventory_qty"].append(result["inventory_qty"])
                     raw[index]["inventory_value"].append(result["inventory_value"])
+                    raw[index]["fills"].append(sum(event.get("type") in
+                        {"BUY_FILLED", "SELL_FILLED"} for event in result.get("events", [])))
                     per_index[offset][index] = ("smart", result)
             elif strategy == "bot":
                 fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
@@ -131,6 +147,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 raw[index]["cycles"].extend(fast["cycles"].tolist())
                 raw[index]["inventory_qty"].extend(fast["inventory_qty"].tolist())
                 raw[index]["inventory_value"].extend(fast["inventory_value"].tolist())
+                raw[index]["fills"].extend((fast["buys"] + fast["sells"]).tolist())
                 for offset, curve in enumerate(fast["curves"]): per_index[offset][index] = ("bot", curve)
             elif strategy == "simple":
                 fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
@@ -141,6 +158,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 raw[index]["cycles"].extend(fast["cycles"].tolist())
                 raw[index]["inventory_qty"].extend(fast["inventory_qty"].tolist())
                 raw[index]["inventory_value"].extend(fast["inventory_value"].tolist())
+                raw[index]["fills"].extend((fast["buys"] + fast["sells"]).tolist())
                 for offset, curve in enumerate(fast["curves"]): per_index[offset][index] = ("simple", curve)
             else:
                 raise ValueError(f"estrategia no reconocida: {strategy}")
@@ -158,11 +176,17 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     piece_results = []
     for index, piece in enumerate(pieces):
         values = raw[index]
-        piece_results.append({"piece": piece, "metrics": summarize(piece_curves[index],
+        metrics = summarize(piece_curves[index],
             capital_initial=(float(capital) if mode == "alternativas" else float(piece["capital"])),
             target_usdt=meta, max_loss_pct=loss_pct,
             horizon_days=horizon, cycles=values["cycles"], inventory_qty=values["inventory_qty"],
-            inventory_value=values["inventory_value"], seed=seed)})
+            inventory_value=values["inventory_value"], seed=seed)
+        zero_fill_fraction = (float(np.mean(np.asarray(values["fills"]) == 0))
+            if values["fills"] else 1.0)
+        warning = "la geometría casi nunca se toca" if zero_fill_fraction > .95 else None
+        piece_results.append({"piece": piece, "metrics": metrics,
+            "fills_mean": float(np.mean(values["fills"])) if values["fills"] else 0.0,
+            "aviso": warning, "zero_fill_fraction": zero_fill_fraction})
     portfolio = (summarize_portfolio(piece_curves, capital_initial=capital, target_usdt=meta,
         max_loss_pct=loss_pct, horizon_days=horizon, seed=seed) if mode == "cartera" else None)
     comparisons = []

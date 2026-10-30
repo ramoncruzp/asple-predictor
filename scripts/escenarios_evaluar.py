@@ -57,7 +57,8 @@ def main(argv=None):
         n_scenarios=args.escenarios, n_smart=args.n_smart, seed=args.semilla,
         db_path=args.db, library_dir=args.library_dir, mode=args.modo)
     for index, row in enumerate(result["pieces"], 1):
-        print(f"PIEZA {index} {row['piece']} {json.dumps(row['metrics'], ensure_ascii=False)}")
+        print(f"PIEZA {index} {row['piece']} {json.dumps(row['metrics'], ensure_ascii=False)}"
+            f" fills_promedio={row['fills_mean']:.3f} aviso={row.get('aviso') or 'ninguno'}")
     if args.modo == "cartera":
         print(f"CARTERA {json.dumps(result['portfolio'], ensure_ascii=False)}")
     else:

@@ -1,12 +1,14 @@
 import numpy as np
+import math
 from decimal import Decimal
 
 from data.exchange_filters import SymbolFilters
 from data.market_store import CandleStore
+import scripts.escenarios_velocidad as speed_module
 from scripts.escenarios_velocidad import benchmark, _volatility_estimates
 
 
-def test_speed_benchmark_runs_both_horizons_with_synthetic_library(tmp_path):
+def test_speed_benchmark_runs_both_horizons_with_synthetic_library(tmp_path, monkeypatch):
     library = tmp_path / "library"
     library.mkdir()
     rng = np.random.default_rng(43)
@@ -19,6 +21,12 @@ def test_speed_benchmark_runs_both_horizons_with_synthetic_library(tmp_path):
         dtype=np.int64) * 86400
     np.savez_compressed(library / "SYNTHUSDT.npz", values=values, dates=dates,
         daily_z_return_sum=returns.sum(axis=1), mean_z_return=np.float32(0))
+    original = speed_module.simulate_simple
+    geometries = []
+    def capture_geometry(scenarios, *, low, high, **kwargs):
+        geometries.append((float(low), float(high)))
+        return original(scenarios, low=low, high=high, **kwargs)
+    monkeypatch.setattr(speed_module, "simulate_simple", capture_geometry)
     result = benchmark(library_directory=library, symbol="SYNTHUSDT", price=100,
         sigma_today=.005, sigma_long=.005, n_scenarios=1, batch_size=1,
         filters=SymbolFilters(Decimal("0.0001"), Decimal("0.0001"), Decimal("100000"),
@@ -26,6 +34,10 @@ def test_speed_benchmark_runs_both_horizons_with_synthetic_library(tmp_path):
             Decimal("0.01"), True, 200))
     assert [row["days"] for row in result] == [20, 45]
     assert all(row["scenarios"] == 1 and row["seconds"] >= 0 for row in result)
+    assert len(geometries) == 2
+    for (low, high), days in zip(geometries, (20, 45)):
+        assert math.isclose(math.log(high / low) / 2, .005 * math.sqrt(days) * 2,
+            rel_tol=1e-9)
 
 
 def test_daily_volatility_estimates_align_returns_to_synthetic_store_days(tmp_path):

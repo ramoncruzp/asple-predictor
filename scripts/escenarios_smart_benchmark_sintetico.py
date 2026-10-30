@@ -39,7 +39,8 @@ def main():
             for batch in batches]) for key in ("open", "high", "low", "close")}
         sigmas = np.concatenate([batch["symbols"]["SYNTHUSDT"]["sigma_path"]
             for batch in batches])
-        width = .01 * np.sqrt(20 * 24) * 2
+        # sigma_24h es la sigma logarítmica acumulada de un día.
+        width = .01 * np.sqrt(20) * 2
         result = evaluate_smart_scenarios(scenarios, n_levels=6, capital=1000,
             low=100 * np.exp(-width), high=100 * np.exp(width), sigma_path=sigmas,
             n_smart=200, workers=2)
