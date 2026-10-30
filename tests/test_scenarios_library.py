@@ -2,6 +2,7 @@ import numpy as np
 
 from grid.sim.data import CandleData
 from research.scenarios.library import load_library, standardized_library
+from research.scenarios.generator import generate
 
 
 def _candles(days=34):
@@ -33,3 +34,23 @@ def test_load_library_before_excludes_boundary_and_future(tmp_path):
     loaded, selected = load_library("XRPUSDT", before=250, directory=tmp_path)
     assert selected.tolist() == [100, 200]
     assert loaded.shape == (2, 288, 3)
+
+
+def test_generator_is_reproducible_batched_and_ohlc_ordered(tmp_path):
+    values, dates, mean = standardized_library(_candles())
+    for symbol in ("AUSDT", "BUSDT"):
+        np.savez_compressed(tmp_path / f"{symbol}.npz", values=values,
+            dates=dates, mean_z_return=np.float32(mean))
+    args = dict(symbols=["AUSDT", "BUSDT"], horizon_days=2, n_scenarios=3,
+        seed=43, price_now={"AUSDT": 1., "BUSDT": 2.}, sigma_today_24h=.02,
+        sigma_long_24h=.02, library_directory=tmp_path, batch_size=2)
+    first = list(generate(**args))
+    second = list(generate(**args))
+    assert [b["scenario_start"] for b in first] == [0, 2]
+    for batch_a, batch_b in zip(first, second):
+        a = batch_a["symbols"]["AUSDT"]
+        b = batch_b["symbols"]["AUSDT"]
+        np.testing.assert_array_equal(a["close"], b["close"])
+        assert np.all(a["low"] <= np.minimum(a["open"], a["close"]))
+        assert np.all(a["high"] >= np.maximum(a["open"], a["close"]))
+        assert a["close"].shape[1] == 576

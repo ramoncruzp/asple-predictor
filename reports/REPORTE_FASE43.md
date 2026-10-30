@@ -575,3 +575,11 @@ Repetición corregida tras hacer explícito que `mean` conserva la media previa 
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e1-library-rerun-00a2fbc9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
 ```
 Resultado final de la parte: 2 passed en 0,07 s. La primera ejecución detectó una aserción incorrecta del test sobre la media ya centrada; se corrigió para comprobar que el metadato conserva la media precentrado y el rerun pasó.
+
+## Fase 43e-2 — generador por lotes
+
+Comando de prueba enfocado (anotado antes de correr):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2-generator-d7d02cba'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
+```
+Resultado: 3 passed en 0,10 s. El generador entrega lotes reproducibles y valida OHLC; no se midió aún la convergencia de volatilidad/correlación con múltiples escenarios.

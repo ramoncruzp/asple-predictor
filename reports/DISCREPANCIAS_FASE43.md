@@ -31,3 +31,5 @@
 HAR se mantiene como regresión sobre RV y se aplica un piso `max(HAR, 0,25 × simple, 1e-12)`. Se conserva el método existente y se evita que predicciones degeneradas contaminen QLIKE. Las correlaciones ausentes se conservan como no disponibles en JSON (`null`), y se excluyen de los resúmenes numéricos.
 
 43e-1: se fija `scenario_fhs_v1`; la construcción local exige al menos 365 días válidos y omite fechas con huecos, pero no se ejecutó sobre `market_data.db` real. El centrado se hace con la media z_r total por moneda, desplazando también z_u/z_d para conservar orden.
+
+43e-2: `generate` entrega un iterador de lotes, con fechas comunes y fallback de calibración 1. No se lee automáticamente `calibration_factors` todavía; el caller debe pasar el factor mediante `calibration_factors` o sigma calibrada. No se ha completado la validación estadística pedida para correlación y relajación de sigma.
