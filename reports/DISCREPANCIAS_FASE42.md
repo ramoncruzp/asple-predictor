@@ -1,0 +1,14 @@
+# Discrepancias y decisiones conservadoras — Fase 42 C40
+
+Fecha: 2026-10-29.
+
+Celda con precio de entrada ausente: si `held_qty > 0` y `entry_price` no es positivo, la evaluación se cierra como parcial con error de base faltante. No se sustituye por el precio planificado porque podría no ser el precio real de ejecución.
+
+Se agrupó C40a/C40b en un commit porque la curva compacta se consume en el mismo paso que construye y valora los lotes de inventario; publicar el cambio en dos estados intermedios habría dejado referencias incompatibles o métricas contables incompletas.
+
+1. **Comisión de inventario.** El esquema expone `fee_paid` a nivel de celda y no expone una comisión de compra separada. Se usa `fee_paid` si es positivo, tal como indica el contrato disponible; si vale cero, se estima comisión de compra al 0,1 % del costo. Como `fee_paid` puede contener comisiones acumuladas de ciclos previos, su interpretación como costo de entrada de la posición actual debe contrastarse con datos de S1 antes de usar las recomendaciones v3 para decisiones operativas.
+2. **Capital afectado.** Se considera efectivo libre solo el capital de celdas sin inventario, en estado `IDLE`/`DONE` y sin `order_id`. Las celdas vacías con orden abierta quedan fuera del monto simulado.
+3. **Resolución de la curva.** La solicitud permite equity a 15 minutos `float32` o un mínimo equivalente. Para conservar exactamente los máximos de drawdown, los resultados de cada vela y la paridad numérica de las decisiones en sombra, se conserva la curva completa a frecuencia de 5 minutos con equity `float64` y timestamps `int64`; elimina los diccionarios `trace` y reduce considerablemente la retención sin downsample ni pérdida de precisión.
+4. **Límite conjunto.** El tope de 200 MiB se aplica a las cachés replay/velas del singleton `GridIntelligenceJob`; se estima con buffers, claves y sobrecarga de entradas. No incluye otras áreas de memoria Python, pandas, simuladores activos ni cachés de otros subsistemas. El RSS del proceso se publica por separado.
+5. **Prioridad baja.** APScheduler no expone prioridad de ejecución portable en la interfaz usada. El job sigue ejecutándose al minuto 7 UTC y el hilo aplica prioridad inferior (`below normal` en Windows, nice 5 en POSIX). Si el sistema operativo rechaza el cambio, la prioridad permanece normal; el resultado se mantiene como incertidumbre de despliegue.
+6. **Evidencia S1 y regresión real.** No se accedió a S1, Testnet ni a una BD real. Por tanto, RSS posterior al despliegue, recomendaciones reales v3 y comparación pareada en producción siguen pendientes. La equivalencia comprobada localmente se limita al cálculo antes/después de compactar la misma curva sintética; las decisiones sombra cambian de versión y corrigen la base contable, por lo que las filas históricas no son comparables sin etiqueta de versión.
