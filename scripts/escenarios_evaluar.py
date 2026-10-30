@@ -62,13 +62,22 @@ def main(argv=None):
     if args.modo == "cartera":
         print(f"CARTERA {json.dumps(result['portfolio'], ensure_ascii=False)}")
     else:
-        print("COMPARACIÓN PAREADA | tipo | pieza base | alternativa | Δ ganancia media [IC 95 %] | Δ P(límite) | Δ P(meta)")
+        print("COMPARACIÓN PAREADA | tipo | n | pieza base | alternativa | "
+            "media Simple pareada/base | media alternativa pareada | Δ ganancia [IC 95 %] | "
+            "Δ P(límite) | Δ P(meta)")
         for item in result["smart_paired"]:
             pnl = item["pnl_usdt"]
             loss = item["loss_probability"]
             target = item["target_probability"]
-            print(f"{item['label']} | {item['from_index'] + 1} | {item['to_index'] + 1} | "
-                f"{pnl['mean']:.4f} [{pnl['ci_low']:.4f}, {pnl['ci_high']:.4f}] | "
+            simple_mean = item.get("simple_mean_pnl_usdt")
+            base_mean = item["from_mean_pnl_usdt"]
+            alternative_mean = item["to_mean_pnl_usdt"]
+            base_display = f"{(simple_mean if simple_mean is not None else base_mean):.4f}"
+            print(f"{item['label']} | {item['n']} | {item['from_index'] + 1} | "
+                f"{item['to_index'] + 1} | "
+                f"{base_display} | "
+                f"{alternative_mean:.4f} | {pnl['mean']:.4f} "
+                f"[{pnl['ci_low']:.4f}, {pnl['ci_high']:.4f}] | "
                 f"{loss['mean']:.4f} | {target['mean']:.4f}")
     print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
     return 0

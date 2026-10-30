@@ -774,3 +774,9 @@ Se corrigió el ancho de horizonte a `K * sigma_24h * sqrt(horizon_days)`: sigma
 Se añade el aviso `la geometría casi nunca se toca` cuando más del 95 % de escenarios no registra llenados, tanto al resultado de cada pieza como a la salida CLI. La prueba sintética fija sigma diaria en 4 %, verifica el semiancho logarítmico de 35,8 % y exige más de cinco llenados promedio. Comandos y resultados finales se registran en `reports/DISCREPANCIAS_FASE43.md`.
 
 Resultado de pruebas enfocadas: **6 pasaron en 4,57 s** y la corrida final del evaluador pasó **4/4 en 2,90 s**. Las pruebas usan biblioteca/BD temporales y confirman ancho ±35,8 % log, más de cinco llenados promedio, aviso para >95 % sin llenados, 1.000 resultados Simple y 200 Smart sobre sus primeros índices pareados.
+
+# 43e-5e - comparación pareada por índice global
+
+La comparación en modo alternativas conserva las curvas bajo su índice global de escenario y calcula medias y diferencias sobre la intersección de índices, no sobre posiciones asumidas entre listas de tamaños distintos. La salida CLI incluye `n` y las medias de Simple pareada y de la alternativa. Pruebas enfocadas y su comando se anotan en `reports/DISCREPANCIAS_FASE43.md`.
+
+Resultado: **6 pruebas pasaron en 6,57 s**. La media pareada deliberadamente distinta fue 4 USDT; las curvas idénticas dieron 0.

@@ -94,6 +94,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     if has_smart and n_smart <= 0:
         raise ValueError("n_smart debe ser positivo cuando se evalúa Smart")
     piece_curves = [[] for _ in pieces]
+    piece_scenario_curves = [{} for _ in pieces]
     raw = [{"cycles": [], "inventory_qty": [], "inventory_value": [], "fills": []}
         for _ in pieces]
     paired = {}
@@ -133,6 +134,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     n_smart=smart_count, workers=workers, max_loss_pct=loss_pct)
                 for offset, result in enumerate(results):
                     piece_curves[index].append(result["curve"])
+                    scenario_index = int(batch["scenario_start"]) + offset
+                    piece_scenario_curves[index][scenario_index] = result["curve"]
                     raw[index]["cycles"].append(result["metrics"]["cycles_completed"])
                     raw[index]["inventory_qty"].append(result["inventory_qty"])
                     raw[index]["inventory_value"].append(result["inventory_value"])
@@ -144,6 +147,9 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
                     target_usdt=meta, initial_timestamp=START_TS, pack_curves=True)
                 piece_curves[index].extend(fast["curves"])
+                start_index = int(batch["scenario_start"])
+                piece_scenario_curves[index].update({start_index + offset: curve
+                    for offset, curve in enumerate(fast["curves"])})
                 raw[index]["cycles"].extend(fast["cycles"].tolist())
                 raw[index]["inventory_qty"].extend(fast["inventory_qty"].tolist())
                 raw[index]["inventory_value"].extend(fast["inventory_value"].tolist())
@@ -155,6 +161,9 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
                     initial_timestamp=START_TS, pack_curves=True)
                 piece_curves[index].extend(fast["curves"])
+                start_index = int(batch["scenario_start"])
+                piece_scenario_curves[index].update({start_index + offset: curve
+                    for offset, curve in enumerate(fast["curves"])})
                 raw[index]["cycles"].extend(fast["cycles"].tolist())
                 raw[index]["inventory_qty"].extend(fast["inventory_qty"].tolist())
                 raw[index]["inventory_value"].extend(fast["inventory_value"].tolist())
@@ -196,7 +205,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 capital_initial=float(pieces[smart_index]["capital"]), target_usdt=meta, max_loss_pct=loss_pct,
                 replicas=1000, seed=seed)})
     if mode == "alternativas":
-        comparisons = _paired_alternatives(pieces, piece_curves, capital=capital,
+        comparisons = _paired_alternatives(pieces, piece_scenario_curves, capital=capital,
             target=meta, loss_pct=loss_pct, seed=seed)
     return {"profile": str(perfil).upper(), "mode": mode, "horizon_days": horizon,
         "n_scenarios": target_count, "pieces": piece_results, "portfolio": portfolio,
@@ -204,7 +213,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
 
 
 def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):
-    """Compara resultados por escenario, priorizando pares Smart-Simple geométricos."""
+    """Compara curvas por índice global, priorizando pares Smart-Simple geométricos."""
     from grid.sim.meta_portfolio import evaluate_portfolio
     pairs = []
     used = set()
@@ -225,13 +234,20 @@ def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):
             pairs.append((0, index, "pieza_menos_primera"))
     output = []
     for left_index, right_index, label in pairs:
-        count = min(len(curves[left_index]), len(curves[right_index]))
+        left_map = curves[left_index] if isinstance(curves[left_index], dict) else dict(
+            enumerate(curves[left_index]))
+        right_map = curves[right_index] if isinstance(curves[right_index], dict) else dict(
+            enumerate(curves[right_index]))
+        scenario_ids = sorted(set(left_map).intersection(right_map))
+        count = len(scenario_ids)
         if count < 1:
             continue
         left = [evaluate_portfolio([curve], capital_initial=capital,
-            target_usdt=target, max_loss_pct=loss_pct) for curve in curves[left_index][:count]]
+            target_usdt=target, max_loss_pct=loss_pct) for curve in
+            (left_map[scenario_id] for scenario_id in scenario_ids)]
         right = [evaluate_portfolio([curve], capital_initial=capital,
-            target_usdt=target, max_loss_pct=loss_pct) for curve in curves[right_index][:count]]
+            target_usdt=target, max_loss_pct=loss_pct) for curve in
+            (right_map[scenario_id] for scenario_id in scenario_ids)]
         deltas = {
             "pnl_usdt": np.asarray([b["pnl_usdt"] - a["pnl_usdt"] for a, b in zip(left, right)]),
             "loss_probability": np.asarray([float(b["loss_cut"]) - float(a["loss_cut"])
@@ -241,7 +257,12 @@ def _paired_alternatives(pieces, curves, *, capital, target, loss_pct, seed):
         }
         rng = np.random.default_rng(seed + left_index * 101 + right_index)
         comparison = {"n": count, "from_index": left_index, "to_index": right_index,
-            "label": label}
+            "scenario_indices": scenario_ids, "label": label,
+            "from_mean_pnl_usdt": float(np.mean([row["pnl_usdt"] for row in left])),
+            "to_mean_pnl_usdt": float(np.mean([row["pnl_usdt"] for row in right]))}
+        if label == "smart_menos_simple":
+            comparison["simple_mean_pnl_usdt"] = comparison["from_mean_pnl_usdt"]
+            comparison["smart_mean_pnl_usdt"] = comparison["to_mean_pnl_usdt"]
         for name, values in deltas.items():
             samples = values[rng.integers(0, count, size=(1000, count))].mean(axis=1)
             comparison[name] = {"mean": float(values.mean()),

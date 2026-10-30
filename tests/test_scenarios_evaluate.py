@@ -111,6 +111,54 @@ def test_alternative_without_smart_simple_geometry_pairs_against_first():
     assert (result[0]["from_index"], result[0]["to_index"]) == (0, 1)
 
 
+def test_smart_simple_pair_uses_same_global_ids_and_reports_both_means():
+    def curve(pnl):
+        return pack_curve([0, 900], [100, 100 + pnl], [100, 100 + pnl], 100)
+
+    pieces = [
+        {"symbol": "JUPUSDT", "strategy": "simple", "capital": 100, "n": 6,
+            "low": 70, "high": 130},
+        {"symbol": "JUPUSDT", "strategy": "smart", "capital": 100, "n": 6,
+            "low": 70, "high": 130},
+    ]
+    simple = {0: curve(1), 1: curve(2), 2: curve(3), 3: curve(-100)}
+    smart = {0: curve(4), 1: curve(6), 2: curve(8)}
+    result = _paired_alternatives(pieces, [simple, smart], capital=100,
+        target=1000, loss_pct=18, seed=43)[0]
+
+    assert result["n"] == 3
+    assert result["scenario_indices"] == [0, 1, 2]
+    assert result["simple_mean_pnl_usdt"] == 2
+    assert result["smart_mean_pnl_usdt"] == 6
+    assert result["pnl_usdt"]["mean"] == 4
+    assert result["pnl_usdt"]["mean"] == result["smart_mean_pnl_usdt"] - result["simple_mean_pnl_usdt"]
+
+    identical = _paired_alternatives(pieces, [simple, {i: simple[i] for i in range(3)}],
+        capital=100, target=1000, loss_pct=18, seed=43)[0]
+    assert identical["pnl_usdt"]["mean"] == 0
+
+
+def test_evaluation_script_prints_paired_simple_mean_and_pair_count(monkeypatch, capsys):
+    import scripts.escenarios_evaluar as cli
+
+    monkeypatch.setattr(cli, "evaluate_pieces", lambda *_args, **_kwargs: {
+        "pieces": [{"piece": {"symbol": "JUPUSDT", "strategy": "simple"},
+            "metrics": {"n": 1000}, "fills_mean": 4.0, "aviso": None}],
+        "portfolio": None,
+        "smart_paired": [{"label": "smart_menos_simple", "n": 200,
+            "from_index": 0, "to_index": 1, "simple_mean_pnl_usdt": -.4,
+            "from_mean_pnl_usdt": -.4, "to_mean_pnl_usdt": -.2,
+            "pnl_usdt": {"mean": .2, "ci_low": .1, "ci_high": .3},
+            "loss_probability": {"mean": 0}, "target_probability": {"mean": 0}}]})
+    monkeypatch.setattr(cli, "_rss_mb", lambda: 1.0)
+    assert cli.main(["--db", "synthetic.sqlite", "--perfil", "RAPIDO", "--capital", "100",
+        "--meta", "3", "--pieza", "JUPUSDT:simple:70", "--pieza", "JUPUSDT:smart:70"]) == 0
+    output = capsys.readouterr().out
+    assert "n | pieza base" in output
+    assert "media Simple pareada" in output
+    assert "smart_menos_simple | 200 | 1 | 2 | -0.4000 | -0.2000 | 0.2000" in output
+
+
 def test_simple_uses_all_scenarios_when_smart_uses_n_smart(tmp_path, monkeypatch):
     import research.scenarios.evaluate as evaluate_module
 

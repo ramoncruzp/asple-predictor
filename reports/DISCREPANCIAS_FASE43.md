@@ -147,3 +147,14 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5d-unidades-sigma-2
 Resultado r7: **4 pasaron en 2,90 s**.
 
 Resultado r5: **6 pasaron en 4,57 s**. La búsqueda en Python bajo `research/` y `scripts/` no encontró más usos de `sqrt(... * 24)` para construir anchos a partir de sigma diaria; el diagnóstico documental de `break_prob` expresa el horizonte en horas y no es un ancho de grid.
+## 43e-5e - comparación pareada en alternativas
+
+El resumen anterior comparaba una lista Simple con más escenarios que la lista Smart, dependiendo solo de la posición implícita. En alternativas, las curvas ahora se conservan también con su índice global de escenario; el pareo usa la intersección ordenada de esos índices, por lo que Smart se compara contra Simple en los mismos primeros `n_smart` escenarios incluso con lotes múltiples. El resultado reporta `n`, media de Simple dentro del pareo, media Smart y Δ pareada. El cero de la corrida S1 no permite identificar si las curvas pareadas eran iguales porque no se guardaron; las estadísticas agregadas de n=1000 y n=200 no demuestran por sí mismas una diferencia pareada.
+
+Prueba anotada antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5e-pareo-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+
+Resultado: **6 pasaron en 6,57 s**. Se verificó la diferencia intencional de 4 USDT en los mismos tres índices, la igualdad devuelve 0, y el CLI imprime n y la media Simple del pareo.
