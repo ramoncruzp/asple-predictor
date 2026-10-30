@@ -444,3 +444,7 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 ### Fase 43e — decisiones de escenarios
 
 El marcador mantiene correlaciones ausentes como NaN internamente y null al serializar; HAR usa un piso conservador del 25 % del pronóstico simple para evitar degeneración. Estas correcciones de investigación no alteran decisiones reales.
+
+### Fase 43e — límite de esta entrega
+
+43e-0 a 43e-2 son herramientas de investigación offline. El simulador de escenarios, su paridad, Smart, métricas de cartera, backtest, integración y cierre de 43e aún están pendientes. El motor v2 sigue no disponible y ninguna decisión real cambia.

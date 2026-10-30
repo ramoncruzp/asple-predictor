@@ -583,3 +583,9 @@ Comando de prueba enfocado (anotado antes de correr):
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e2-generator-d7d02cba'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_library.py --basetemp="$base"
 ```
 Resultado: 3 passed en 0,10 s. El generador entrega lotes reproducibles y valida OHLC; no se midió aún la convergencia de volatilidad/correlación con múltiples escenarios.
+
+## Fase 43e — estado al cierre de esta iteración
+
+Partes completas y commits: 43e-0, 43e-1 y 43e-2. 43e-3 quedó iniciada solo como trabajo pendiente documentado; no hay simulador rápido, paridad contra el replay, script `escenarios_paridad.py` ni medidas de velocidad/RSS para escenarios. No se afirma cumplimiento de 43e-3 ni de 43e-4 a 43e-8. Pendiente: completar 43e-3 y sus validaciones; luego Smart exacto, métricas, validación walk-forward contra historia, interfaz, job si procede y cierre final.
+
+No se midieron tiempos de simulación por moneda ni RSS de simulaciones. Las pruebas ejecutadas usan datos sintéticos locales. No se usaron S1, Testnet, BD real ni red. Las decisiones reales permanecen intactas: nada se conecta al operador ni a v1.

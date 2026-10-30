@@ -33,3 +33,7 @@ HAR se mantiene como regresión sobre RV y se aplica un piso `max(HAR, 0,25 × s
 43e-1: se fija `scenario_fhs_v1`; la construcción local exige al menos 365 días válidos y omite fechas con huecos, pero no se ejecutó sobre `market_data.db` real. El centrado se hace con la media z_r total por moneda, desplazando también z_u/z_d para conservar orden.
 
 43e-2: `generate` entrega un iterador de lotes, con fechas comunes y fallback de calibración 1. No se lee automáticamente `calibration_factors` todavía; el caller debe pasar el factor mediante `calibration_factors` o sigma calibrada. No se ha completado la validación estadística pedida para correlación y relajación de sigma.
+
+## 43e parcial
+
+Solo están completas las correcciones del marcador, la biblioteca histórica y el generador por lotes (43e-0 a 43e-2). 43e-3 no implementa el simulador numpy ni la paridad obligatoria; 43e-4 a 43e-8 no se iniciaron. No se debe desplegar como motor v2 ni interpretar como validación de estrategia.
