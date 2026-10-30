@@ -710,13 +710,37 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3e-speed-81d2f05c-r
 ```
 
 
-## 43e-4 ? Smart exacto (en curso)
+## 43e-4 - Smart exacto y comparación pareada
 
-`smart_exact` ejecuta los primeros escenarios con `simulate_piece_curve` y el replay Smart de producci?n. Usa dos workers por defecto y fija pr?stamos/compound/ADJUST/reespaciado/niveles ociosos/stop-loss/filtro direccional apagados; mantiene `out_of_range_mode=wait`. Comando enfocado previsto:
+`smart_exact` usa `simulate_piece_curve` con el replay Smart de producción. Por escenario genera timestamps sintéticos de cinco minutos y expande sigma diaria a sigma por vela. El mapeo restrictivo apaga préstamos/compound, ADJUST, reespaciado, niveles ociosos, stop-loss por celda y filtro direccional; conserva `out_of_range_mode=wait`. Dos workers son el valor por defecto.
+
+El resultado de la vía Smart coincide con el runner directo; las pruebas inspeccionan `effective_params`. `paired_smart_simple` informa IC bootstrap deltas para ganancia, probabilidad de límite y meta en escenarios coincidentes. Comando ejecutado:
 
 ```powershell
-$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e4-smart-exact-6e72b4a1-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e4-smart-exact-6e72b4a1-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py --basetemp="$base"
 ```
 
+Resultado: **1 passed en 0,28 s**, usando dos workers. Benchmark local con biblioteca sintética, 200 escenarios x 20 días: **15,453 s y 166,4 MB de RSS pico** (menos de 120 s).
 
-El comparador `paired_smart_simple` resume Smart menos Simple en los mismos escenarios con IC bootstrap reproducible para ganancia, P(límite) y P(meta). La primera corrida unitaria halló una diferencia en el cómputo de la longitud de OHLC 1D; se corrigió. Resultado final del comando abajo: 1 passed. No se midió todavía el tiempo de 200 escenarios Smart, por lo que el requisito de rendimiento por geometría queda pendiente.
+## 43e-5 - métricas y evaluación
+
+`research/scenarios/metrics.py` resume ganancia neta media y diaria, P10/P50/P90, probabilidad de límite, CVaR 5 %, probabilidad de meta, días hasta meta, ciclos, inventario final e IC bootstrap del promedio y P(límite). `summarize_portfolio` evalúa curvas por el mismo índice de escenario y deja como efectivo quieto el capital no asignado. `evaluate_pieces` arma sigma EWMA 24 h, sigma larga de 180 días, factor del marcador más reciente, escenarios comunes y FastSim Simple/bot o replay Smart exacto. El CLI acepta `ancho=Ksigma`, `low`/`high` y bot `compra=<porcentaje>`.
+
+Comando ejecutado (anotado antes):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5-metrics-evaluate-c321c6d4-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_evaluate.py tests/test_smart_exact.py --basetemp="$base"
+```
+
+Resultado: **3 passed en 1,23 s**. Incluye SQLite temporal, biblioteca FHS sintética, cartera con capital ocioso y comparación Smart-Simple pareada. `scripts/escenarios_evaluar.py --help` también se ejecutó correctamente. No se usaron base de datos real, red, S1 ni Testnet.
+
+
+Pasos para S1 para esta continuación (ejecutar solo tras despliegue; no se ejecutaron localmente):
+
+```bash
+cd ~/asple-predictor
+HTTPS_PROXY=http://127.0.0.1:3128 venv2/bin/python scripts/velas_filtros.py --db market_data.db
+nohup nice -n 10 venv2/bin/python scripts/escenarios_paridad.py --db market_data.db --casos 200 > ~/paridad_43e_v2.log 2>&1 &
+nice -n 10 venv2/bin/python scripts/escenarios_velocidad.py --db market_data.db --symbol XRPUSDT
+nice -n 10 venv2/bin/python scripts/escenarios_evaluar.py --db market_data.db --perfil RAPIDO --capital 100 --meta 3 --pieza "JUPUSDT:simple:70:n=6:ancho=2sigma" --pieza "JUPUSDT:smart:70:n=6:ancho=2sigma"
+```

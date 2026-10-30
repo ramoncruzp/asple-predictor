@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Evalúa piezas de grid sobre escenarios FHS sin conectarse al operador."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from research.scenarios.evaluate import evaluate_pieces
+from scripts.escenarios_velocidad import _rss_mb
+
+
+def _parse_piece(value):
+    parts = str(value).split(":")
+    if len(parts) < 3:
+        raise ValueError("pieza debe ser SÍMBOLO:estrategia:capital[:opciones]")
+    piece = {"symbol": parts[0].upper(), "strategy": parts[1].lower(),
+        "capital": float(parts[2]), "n": 6}
+    for option in parts[3:]:
+        key, separator, raw = option.partition("=")
+        if not separator:
+            raise ValueError(f"opción de pieza inválida: {option}")
+        if key == "ancho":
+            piece["width_sigma"] = float(raw.lower().removesuffix("sigma"))
+        elif key == "n": piece["n"] = int(raw)
+        elif key in {"low", "high"}: piece[key] = float(raw)
+        elif key == "compra": piece["buy_offset_pct"] = float(raw)
+        elif key == "venta": piece["sell_offset_pct"] = float(raw)
+        else: raise ValueError(f"opción no reconocida: {key}")
+    if piece["strategy"] == "bot" and "buy_offset_pct" not in piece:
+        raise ValueError("pieza bot requiere compra=<porcentaje>")
+    return piece
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", required=True)
+    parser.add_argument("--perfil", required=True, choices=("RAPIDO", "PRUDENTE"))
+    parser.add_argument("--capital", required=True, type=float)
+    parser.add_argument("--meta", required=True, type=float)
+    parser.add_argument("--pieza", action="append", required=True)
+    parser.add_argument("--escenarios", type=int, default=1000)
+    parser.add_argument("--n-smart", type=int, default=200)
+    parser.add_argument("--semilla", type=int, default=43)
+    parser.add_argument("--library-dir", default="data/derived/scenario_lib")
+    args = parser.parse_args(argv)
+    started = time.perf_counter()
+    result = evaluate_pieces([_parse_piece(item) for item in args.pieza],
+        perfil=args.perfil, capital=args.capital, meta=args.meta,
+        n_scenarios=args.escenarios, n_smart=args.n_smart, seed=args.semilla,
+        db_path=args.db, library_dir=args.library_dir)
+    for index, row in enumerate(result["pieces"], 1):
+        print(f"PIEZA {index} {row['piece']} {json.dumps(row['metrics'], ensure_ascii=False)}")
+    print(f"CARTERA {json.dumps(result['portfolio'], ensure_ascii=False)}")
+    print(f"SMART_MENOS_SIMPLE {json.dumps(result['smart_paired'], ensure_ascii=False)}")
+    print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

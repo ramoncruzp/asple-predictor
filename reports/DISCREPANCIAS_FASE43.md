@@ -34,10 +34,9 @@ HAR se mantiene como regresión sobre RV y se aplica un piso `max(HAR, 0,25 × s
 
 43e-2: `generate` entrega un iterador de lotes, con fechas comunes y fallback de calibración 1. No se lee automáticamente `calibration_factors` todavía; el caller debe pasar el factor mediante `calibration_factors` o sigma calibrada. No se ha completado la validación estadística pedida para correlación y relajación de sigma.
 
-## 43e parcial
+## Estado inicial de 43e-3c
 
-Solo están completas las correcciones del marcador, la biblioteca histórica y el generador por lotes (43e-0 a 43e-2). 43e-3 no implementa el simulador numpy ni la paridad obligatoria; 43e-4 a 43e-8 no se iniciaron. No se debe desplegar como motor v2 ni interpretar como validación de estrategia.
-
+Esta anotación describe el alcance registrado antes de las continuaciones 43e-3d a 43e-5; no representa el estado actual.
 
 ## Fase 43e-2b
 
@@ -57,3 +56,10 @@ FastSim se vectoriza por escenarios y celdas y conserva bucle temporal/resincron
 ## Fase 43e-3c
 
 El runner histórico se verificó con una SQLite temporal sintética (20 días), no con `market_data.db` real. Para conservar el contrato de replay usa `FILTERS` por defecto de `grid.sim.runner`; el almacén público no persiste filtros de exchange por símbolo y no se consultó red. En S1 se requiere revisar símbolos cuyo precio/filtros no sean compatibles con ese filtro; el script omite geometrías inválidas y falla si no completa todos los casos.
+
+
+## 43e-3d a 43e-5 - alcance y pendientes
+
+Se corrigieron los cortes por pérdida para comparar velas relativas, y el script de paridad muestra el control discrepante y separa ventanas/geometrías inválidas. Los filtros de exchange se obtienen desde Binance solo cuando se ejecuta `scripts/velas_filtros.py`; esta sesión no tuvo red y las pruebas usaron filtros sintéticos. En S1 se debe poblar `symbol_filters` antes de la paridad para que el comparador no use el fallback `FILTERS`.
+
+La prueba sintética ampliada no cubre cada combinación posible de capital, filtro y bot; la corrida de 200 ventanas reales queda a cargo de S1. En local sintético: 20 días tomaron 1,815 s y 426,5 MB de pico; 45 días, 5,926 s y 483,1 MB. Smart con 200 escenarios x 20 días tomó 15,453 s y 166,4 MB de pico, bajo el umbral de 120 s. No se probaron filtros reales de Binance ni ventanas reales; el marcador y v2 siguen desconectados del operador.

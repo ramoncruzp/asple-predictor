@@ -445,26 +445,10 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 
 El marcador mantiene correlaciones ausentes como NaN internamente y null al serializar; HAR usa un piso conservador del 25 % del pronóstico simple para evitar degeneración. Estas correcciones de investigación no alteran decisiones reales.
 
-### Fase 43e — límite de esta entrega
+### Fase 43e - decisiones experimentales y estado
 
-43e-0 a 43e-2 son herramientas de investigación offline. El simulador de escenarios, su paridad, Smart, métricas de cartera, backtest, integración y cierre de 43e aún están pendientes. El motor v2 sigue no disponible y ninguna decisión real cambia.
+E1: evaluar Simple, bots individuales y Smart. E2: tendencia cero en escenarios. E3: cada moneda conserva sus propios bloques históricos, con fechas sincronizadas entre monedas de la cartera. E4: cálculos fuera del proceso de servicio. E5: 1.000 escenarios y plazo según perfil; Smart exacto sobre un subconjunto de hasta 200. E6: sin préstamos ni interés compuesto.
 
+El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, niveles ociosos, stop-loss por celda y filtro direccional; mantiene esperar fuera de rango. Los resultados de FHS, FastSim y Smart se usan solo para investigación. La prueba sintética local midió 15,453 s y 166,4 MB para 200 escenarios Smart de 20 días. Nada cambia decisiones reales; v2 permanece `available=False`.
 
-### Fase 43e-2b ? método de biblioteca
-
-La biblioteca causal usa `scenario_fhs_v2`: almacena z sin centrar y aplica tendencia cero solo al historial visible antes del origen; la reconstrucción de OHLC es float64 para respetar ticks pequeños.
-
-
-### Fase 43e-3a ? semántica de referencia
-
-FastSim deberá conservar la diferencia entre el replay de grid, el bot individual y el evaluador de cartera documentada en `research/scenarios/FASTSIM_SPEC.md`. Esta especificación no habilita v2 ni altera decisiones reales.
-
-
-### Fase 43e-3b ? FastSim
-
-FastSim usa lotes de matrices OHLC float64, curva muestreada float32 y reglas del replay documentadas. La paridad local no cambia decisiones ni conecta el motor v2; sus resultados siguen siendo experimentales.
-
-
-### Fase 43e-3c ? paridad offline
-
-El script de paridad abre el almacén de mercado en solo lectura y solo usa símbolos `role=operar`. Los datos de referencia no cambian decisiones: v2 sigue `available=False`; la corrida con historia real queda a cargo de S1.
+43e-6 (validación contra historia), 43e-7 (API integrada a 43f) y 43e-8 (cierre general) siguen pendientes y no se certifican en esta entrega.
