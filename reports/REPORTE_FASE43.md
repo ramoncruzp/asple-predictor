@@ -239,3 +239,33 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a4-final3-78d4d1ee';
 ```
 
 Resultado: 4 passed en 1,17 s; un aviso deprecado de Starlette/TestClient.
+
+## 43c-0 — arreglos C43-1 a C43-5
+
+Comando anotado antes de probar los papeles, el orden de backfill, la reanudación y el límite de comparación guardado/API:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-market-59576b2d'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_market_store.py tests/test_market_sync.py tests/test_velas_backfill.py tests/test_verificar_velas.py --basetemp="$base"
+```
+
+Comando anotado antes de validar la representación de revisión y los medidores apagados en UI:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-ui-b6a1383e'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_metas_ui.py tests/ui/test_laboratorio.py -k "active_meta_shows_remaining_time_free_capital_extra_and_spanish_status or lab_learning_meters_explain_global_learning_switch_is_off" --basetemp="$base"
+```
+
+Reintento acotado por salida de terminal truncada (sin código de salida visible):
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-ui-lab-0c729ac4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py -k lab_learning_meters_explain_global_learning_switch_is_off -q --tb=short --basetemp="$base"
+```
+
+Ajuste de alcance de aserción tras fallo inicial: el texto de confirmación oculto conserva la recomendación "Recolectando datos" para cuando se vuelva a encender; las aserciones ahora comprueban exclusivamente el medidor visible.
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-ui-lab-rerun-45df0d77'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py -k lab_learning_meters_explain_global_learning_switch_is_off -q --tb=short --basetemp="$base"
+```
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c0-ui-meta-2b9c882c'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_metas_ui.py -k active_meta_shows_remaining_time_free_capital_extra_and_spanish_status -q --tb=short --basetemp="$base"
+```
+
+Resultados 43c-0: pruebas de almacén/backfill/verificación: 15 passed en 2,36 s. Prueba UI del medidor: 1 passed en 1,40 s; revisión de bitácora: 1 passed en 1,50 s. Un primer intento de UI falló porque la aserción abarcaba el texto de confirmación oculto; se limitó al medidor mostrado y pasó. `node --check frontend/metas.js` y `git diff --check` pasaron.

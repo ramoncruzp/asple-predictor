@@ -31,6 +31,16 @@ def test_upsert_validates_ohlc_and_replaces_idempotently(tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
 
 
+def test_upsert_y_registro_sin_papel_conservan_role_explicito(tmp_path):
+    store = CandleStore(tmp_path / "roles.sqlite")
+    store.upsert("XRPUSDT", "5m", [candle(0)], "fixture", role="datos")
+    store.upsert("XRPUSDT", "5m", [candle(300)], "sync")
+    store.register_symbol("XRPUSDT")
+    assert store.symbol_role("XRPUSDT") == "datos"
+    store.register_symbol("XRPUSDT", role="operar")
+    assert store.symbol_role("XRPUSDT") == "operar"
+
+
 def test_load_returns_simulator_candledata_and_counts_missing_bars(tmp_path):
     store = CandleStore(tmp_path / "market.db")
     store.upsert("AAAUSDT", "5m", [candle(0), candle(300, 101, 103, 100, 102),

@@ -29,6 +29,28 @@ LISTA_INICIAL_DATOS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT",
     "ARBUSDT", "NEARUSDT", "APTUSDT", "SHIBUSDT")
 
 
+def initial_symbol_roles(operating_symbols):
+    operating = list(dict.fromkeys(str(symbol).upper().replace("/", "")
+        for symbol in operating_symbols))
+    operating_set = set(operating)
+    return ([(symbol, "operar") for symbol in operating] +
+        [(symbol, "datos") for symbol in LISTA_INICIAL_DATOS if symbol not in operating_set])
+
+
+def role_fix_plan(operating_symbols, current_roles):
+    desired = {str(symbol).upper().replace("/", ""): "operar" for symbol in operating_symbols}
+    for symbol in LISTA_INICIAL_DATOS:
+        desired.setdefault(symbol, "datos")
+    return [(symbol, current_roles[symbol], role) for symbol, role in sorted(desired.items())
+        if symbol in current_roles and current_roles[symbol] != role]
+
+
+def apply_role_fix_plan(store, changes, *, dry_run=False):
+    if dry_run:
+        return 0
+    return sum(bool(store.set_symbol_role(symbol, role)) for symbol, _previous, role in changes)
+
+
 class ChecksumError(ValueError):
     pass
 
@@ -208,6 +230,8 @@ def parse_args(argv=None):
     selection.add_argument("--registro", action="store_true", help="Monedas activas del Coin Registry (solo lectura)")
     selection.add_argument("--lista-inicial", action="store_true",
         help="Usa las monedas de datos de la decisión B3, sin duplicar operar")
+    selection.add_argument("--fijar-papeles", action="store_true",
+        help="Alinea roles con Coin Registry y la lista inicial de datos")
     parser.add_argument("--role", choices=("operar", "datos"), default="operar")
     parser.add_argument("--months", type=int, default=24)
     parser.add_argument("--interval", default="5m")
@@ -220,17 +244,39 @@ def main(argv=None, *, client=None, sleep=time.sleep, now=None):
     if args.months <= 0:
         raise SystemExit("--months debe ser mayor que cero")
     registry_path = Path(__file__).resolve().parents[1] / "asple_predictor.db"
-    operating = active_registry_symbols(registry_path) if args.registro else (
-        active_registry_symbols(registry_path) if args.lista_inicial and registry_path.is_file() else [])
+    operating = active_registry_symbols(registry_path) if (args.registro or args.lista_inicial or args.fijar_papeles) and registry_path.is_file() else []
+    if args.registro and not registry_path.is_file():
+        raise FileNotFoundError(f"No existe el Coin Registry: {registry_path}")
+    if args.fijar_papeles:
+        db_path = Path(args.db).expanduser().resolve()
+        if not db_path.is_file():
+            raise FileNotFoundError(f"No existe el almacén para fijar papeles: {db_path}")
+        if args.dry_run:
+            import sqlite3
+            conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
+            try:
+                current = dict(conn.execute("SELECT symbol,role FROM symbols"))
+            finally:
+                conn.close()
+            changes = role_fix_plan(operating, current)
+            for symbol, previous, role in changes:
+                print(f"ROLE_CHANGE symbol={symbol} from={previous} to={role} dry_run=1")
+        else:
+            store = CandleStore(db_path)
+            current = store.symbol_roles()
+            changes = role_fix_plan(operating, current)
+            apply_role_fix_plan(store, changes)
+            for symbol, previous, role in changes:
+                print(f"ROLE_CHANGE symbol={symbol} from={previous} to={role} dry_run=0")
+        return 0
     if args.lista_inicial:
-        symbols = [symbol for symbol in LISTA_INICIAL_DATOS if symbol not in set(operating)]
-        role = "datos"
+        symbols_with_roles = initial_symbol_roles(operating)
     else:
         symbols = operating if args.registro else [symbol.upper().replace("/", "") for symbol in args.symbols]
-        role = args.role
+        symbols_with_roles = [(symbol, args.role) for symbol in symbols]
     store = None if args.dry_run else CandleStore(args.db)
     runner = BackfillRunner(store, client, sleep=sleep, now=now)
-    for symbol in symbols:
+    for symbol, role in symbols_with_roles:
         summary = runner.run_symbol(symbol, role=role, months=args.months,
             interval=args.interval, dry_run=args.dry_run)
         print("BACKFILL " + " ".join(f"{key}={value}" for key, value in summary.items()))

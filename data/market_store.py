@@ -100,19 +100,33 @@ class CandleStore:
             return int(stamp.timestamp())
         return int(value)
 
-    def register_symbol(self, symbol, role="operar", active=True):
+    def register_symbol(self, symbol, role=None, active=True):
         symbol = str(symbol).strip().upper().replace("/", "")
-        role = str(role).strip().lower()
-        if not symbol or role not in {"operar", "datos"}:
+        role = None if role is None else str(role).strip().lower()
+        if not symbol or (role is not None and role not in {"operar", "datos"}):
             raise ValueError("símbolo o papel inválido")
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute("INSERT INTO symbols(symbol,role,active,added_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(symbol) DO UPDATE SET role=CASE WHEN excluded.role='operar' "
-                "THEN 'operar' ELSE symbols.role END,active=excluded.active",
-                (symbol, role, int(bool(active)), now))
+                "ON CONFLICT(symbol) DO UPDATE SET role=COALESCE(?,symbols.role),active=excluded.active",
+                (symbol, role or "operar", int(bool(active)), now, role))
             row = conn.execute("SELECT id FROM symbols WHERE symbol=?", (symbol,)).fetchone()
         return int(row[0])
+
+    def set_symbol_role(self, symbol, role):
+        symbol = str(symbol).strip().upper().replace("/", "")
+        role = str(role).strip().lower()
+        if role not in {"operar", "datos"}:
+            raise ValueError("papel debe ser operar o datos")
+        with self._connect() as conn:
+            cursor = conn.execute("UPDATE symbols SET role=? WHERE symbol=?", (role, symbol))
+        return cursor.rowcount == 1
+
+    def symbol_role(self, symbol):
+        key = str(symbol).strip().upper().replace("/", "")
+        with self._connect() as conn:
+            row = conn.execute("SELECT role FROM symbols WHERE symbol=?", (key,)).fetchone()
+        return None if row is None else str(row[0])
 
     @staticmethod
     def _row_values(row):
@@ -149,7 +163,7 @@ class CandleStore:
                 rejected += 1
         return accepted, rejected
 
-    def upsert(self, symbol, interval, rows, source, *, role="operar", active=True):
+    def upsert(self, symbol, interval, rows, source, *, role=None, active=True):
         step = self._step(interval)
         symbol_id = self.register_symbol(symbol, role=role, active=active)
         valid_rows, rejected = self.validate_rows(interval, rows)
@@ -198,6 +212,10 @@ class CandleStore:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT symbol,role FROM symbols WHERE active=1 ORDER BY symbol")]
+
+    def symbol_roles(self):
+        with self._connect() as conn:
+            return dict(conn.execute("SELECT symbol,role FROM symbols"))
 
     def sync_position(self, symbol, interval="5m"):
         with self._connect() as conn:

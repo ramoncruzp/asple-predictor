@@ -429,15 +429,22 @@
     const capital = details.capital_usdt ?? details.piece?.capital_usdt;
     const range = details.piece?.floor != null
       ? ` · rango ${fmtPrice(details.piece.floor)}–${fmtPrice(details.piece.ceiling)}` : '';
-    const decision = actionLabels[details.decision] || details.decision;
+    const review = event.event_type === 'META_OPERATOR_REVIEW_DECISION' &&
+      details.decision && typeof details.decision === 'object' ? details.decision : null;
+    const rawDecision = review ? review.decision : details.decision;
+    const decision = actionLabels[rawDecision] || rawDecision;
     const reasonLabels = { price_near_edge: 'Precio cerca del límite del rango', outside_range: 'Precio fuera del rango',
       insufficient_improvement: 'La mejora estimada no compensa el coste', no_free_capital: 'No hay efectivo libre',
       profile_limit: 'Límite del perfil alcanzado', blocked_75_pct: 'Bloqueada por el aviso del 75 %',
       valuation_unknown: 'Valoración desconocida', out_of_range: 'Precio fuera del rango',
       pause_max_h: 'Pausa Smart alcanzó el tiempo máximo', max_loss_pct: 'Límite de pérdida del grid',
       break_prob: 'Probabilidad de ruptura elevada', trapped_capital_pct: 'Capital atrapado elevado' };
-    const reasonText = String(details.reason || '').split(',').map(value =>
+    const reasonText = String(review?.reason || details.reason || '').split(',').map(value =>
       reasonLabels[value.trim()] || value.trim()).filter(Boolean).join(', ');
+    const engineText = event.event_type === 'META_OPERATOR_REVIEW_DECISION' && details.engine?.name
+      ? `Motor: ${details.engine.name}` : '';
+    const shadowText = event.event_type === 'META_OPERATOR_REVIEW_DECISION' && details.engine_shadow?.decision
+      ? `Sombra del otro motor: ${details.engine_shadow.decision}` : '';
     const oldNew = details.old && details.new
       ? ` · antes ${fmtPrice(details.old.floor)}–${fmtPrice(details.old.ceiling)} (${details.old.n_levels ?? '—'} niveles); ahora ${fmtPrice(details.new.floor)}–${fmtPrice(details.new.ceiling)} (${details.new.n_levels ?? '—'} niveles)` : '';
     const improvement = details.estimated_probability_improvement_pp == null ? ''
@@ -449,8 +456,9 @@
     })() : '';
     const allocationLine = event.event_type === 'META_OPERATOR_ALLOCATION_SHADOW'
       ? `Capital_usage es de la mejor cartera propuesta desde cero · efectivo libre REAL de la Meta ${fmtMoney(details.real_free_cash_usdt)} USDT` : '';
+    const decisionText = [decision || '', reasonText].filter(Boolean).join(' · ');
     const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
-      oldNew, decision || reasonText || '', improvement, currentPieceLine, allocationLine].filter(Boolean).join(' · ');
+      oldNew, decisionText, engineText, shadowText, improvement, currentPieceLine, allocationLine].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
       <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
@@ -577,7 +585,8 @@
     return `<aside class="meta-learning-readiness ${esc(status)}"><b>${esc(readiness.label || 'Recolectando datos')}</b> &middot; ${esc(readiness.best_effective_samples || 0)} de 30; faltan ${esc(readiness.remaining || 0)}.<progress max="30" value="${Math.min(30, Number(readiness.best_effective_samples || 0))}"></progress>${reasons.length ? ` <span>${esc(reasons.join('; '))}</span>` : ''}${enabled && status !== 'verde' ? '<p>Aviso: interruptor encendido sin evidencia vigente.</p>' : ''}</aside>`;
   }
 
-  function switchReadinessMarkup(readiness) {
+  function switchReadinessMarkup(readiness, pausedMessage = null) {
+    if (pausedMessage) return `<aside class="meta-learning-readiness gris"><b>${esc(pausedMessage)}</b></aside>`;
     if (!readiness) return '<p class="muted">Medidor no disponible.</p>';
     const state = readiness.state || 'Recolectando datos';
     const color = state === 'Listo para encender' ? 'verde' : state === 'No conviene' ? 'rojo' : state === 'Evaluando' ? 'amarillo' : 'gris';
@@ -637,6 +646,8 @@
         Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`))),
         apiGet('/api/intelligence'), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1')]);
       const profileConfigs = config.profiles || {};
+      const learningPausedMessage = learningV1.enabled ? null
+        : `${learningV1.label}; este medidor no avanza`;
       const profileRows = data.map((item, index) => {
         const profile = profiles[index], label = profile === 'RAPIDO' ? 'Meta R\u00e1pido' : 'Meta Prudente';
         const readinessItems = intelligence.readiness_switches?.[profile] || {};
@@ -652,7 +663,7 @@
         const learningRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="learning"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
           <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al (Toque compra\u2192venta: 0) y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
-          ${switchReadinessMarkup(readinessItems.learned_weights)}
+          ${switchReadinessMarkup(readinessItems.learned_weights, learningPausedMessage)}
           ${!evidence ? '<p class="muted">Sin evidencia todav\u00eda: activarlo no cambia nada (las se\u00f1ales conservan sus pesos base: 0,25; Toque compra\u2192venta: 0)</p>' : ''}
           <div data-switch-confirm hidden>${!enabled && readinessItems.learned_weights?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(readinessItems.learned_weights?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
@@ -660,7 +671,7 @@
         const allocationRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="allocation"><div class="global-flag-copy"><h3>${label}: asignaci\u00f3n de capital ampliada</h3>
           <p>Encendido: el operador elige piezas para el efectivo libre con replay de cartera. Apagado: se conserva el m\u00e9todo actual para usar efectivo; esta selecci\u00f3n queda solo en sombra.</p>
           <small class="muted">Estado: <b>${allocationEnabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${allocationChange}</small>
-          ${switchReadinessMarkup(readinessItems.extended_allocation)}
+          ${switchReadinessMarkup(readinessItems.extended_allocation, learningPausedMessage)}
           <div data-switch-confirm hidden>${!allocationEnabled && readinessItems.extended_allocation?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(readinessItems.extended_allocation?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<label>Qui\u00e9n confirma <input data-switch-actor maxlength="80" required></label>
             <button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div>
           <button class="button secondary" type="button" data-switch-open>${allocationEnabled ? 'Apagar' : 'Encender'}</button></article>`;

@@ -29,7 +29,7 @@ def test_sync_recupera_hueco_y_omite_vela_actual_y_continua_errores(tmp_path):
     now = datetime(2026, 1, 1, 3, 3, tzinfo=timezone.utc)
     end = int(now.timestamp()) // 300 * 300 - 300
     begin = end - 3 * 3600 + 300
-    store.upsert("GOODUSDT", "5m", [{"open_ts": begin - 300, "open":100,"high":101,"low":99,"close":100}], "fixture")
+    store.upsert("GOODUSDT", "5m", [{"open_ts": begin - 300, "open":100,"high":101,"low":99,"close":100}], "fixture", role="datos")
     store.upsert("BADUSDT", "5m", [{"open_ts": begin - 300, "open":100,"high":101,"low":99,"close":100}], "fixture")
     good = [begin + i*300 for i in range(37)]
     client = FakeClient({"GOODUSDT": _frame(good)})
@@ -39,6 +39,7 @@ def test_sync_recupera_hueco_y_omite_vela_actual_y_continua_errores(tmp_path):
     assert result["errors"] == 1
     assert store.sync_position("GOODUSDT") == good[-2]
     assert store.sync_position("GOODUSDT") <= end
+    assert store.coverage("GOODUSDT")["role"] == "datos"
     assert "offline fixture" in store.coverage("BADUSDT")["sync_state"]["last_error"]
 
 

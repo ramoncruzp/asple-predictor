@@ -4,7 +4,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 
 
-def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
+def _mock_lab_api(ui_page, live_server, *, fail_apply=False, learning_v1_enabled=True):
     calls = []
     flags = [
         {"key": "adjust_idle_shrink_enabled", "label": "Reducción de niveles ociosos", "description": "Regla de prueba.",
@@ -55,6 +55,9 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
             route.fulfill(json={"profile": body["profile"], "settings": profiles[body["profile"]]})
         elif path == "/api/intelligence" and req.method == "GET":
             route.fulfill(json={"readiness_switches": readiness})
+        elif path == "/api/metas/learning-v1" and req.method == "GET":
+            route.fulfill(json={"enabled": learning_v1_enabled,
+                "label": "Aprendizaje v1 apagado desde 2026-10-30T08:30:00+00:00" if not learning_v1_enabled else "Encendido"})
         elif path == "/api/grids":
             route.fulfill(json={"grids": [{"id": 17}]})
         elif path == "/api/grids/17/events":
@@ -70,6 +73,17 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False):
 
     ui_page.route("**/api/**", api)
     return calls
+
+
+def test_lab_learning_meters_explain_global_learning_switch_is_off(ui_page, live_server):
+    _mock_lab_api(ui_page, live_server, learning_v1_enabled=False)
+    ui_page.goto(f"{live_server.url}/#lab")
+    learned = ui_page.locator('[data-meta-learning-switch="RAPIDO"][data-switch-kind="learning"]')
+    allocation = ui_page.locator('[data-meta-learning-switch="RAPIDO"][data-switch-kind="allocation"]')
+    expect(learned).to_contain_text("Aprendizaje v1 apagado desde 2026-10-30T08:30:00+00:00; este medidor no avanza")
+    expect(allocation).to_contain_text("Aprendizaje v1 apagado desde 2026-10-30T08:30:00+00:00; este medidor no avanza")
+    expect(learned.locator(".meta-learning-readiness")).not_to_contain_text("Recolectando datos")
+    expect(allocation.locator(".meta-learning-readiness")).not_to_contain_text("Recolectando datos")
 
 
 def test_lab_route_dynamic_flags_badges_stats_and_enable_disable_flow(ui_page, live_server):

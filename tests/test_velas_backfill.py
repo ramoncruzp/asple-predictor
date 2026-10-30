@@ -8,7 +8,8 @@ import pytest
 
 from data.market_store import CandleStore
 from scripts.velas_backfill import (BackfillRunner, ChecksumError, VisionClient,
-    LISTA_INICIAL_DATOS, archive_specs, normalize_open_timestamp, parse_vision_zip, parse_args)
+    LISTA_INICIAL_DATOS, archive_specs, initial_symbol_roles, normalize_open_timestamp,
+    parse_vision_zip, parse_args, role_fix_plan, apply_role_fix_plan)
 
 
 def _zip(rows):
@@ -111,3 +112,23 @@ def test_lista_inicial_es_constante_de_datos_y_seleccion_exclusiva():
     assert len(LISTA_INICIAL_DATOS) == 15
     assert "BTCUSDT" in LISTA_INICIAL_DATOS and "SHIBUSDT" in LISTA_INICIAL_DATOS
     assert parse_args(["--db", "market_data.db", "--lista-inicial"]).lista_inicial
+
+
+def test_lista_inicial_ordena_operar_antes_de_datos_y_fijar_papeles():
+    roles = initial_symbol_roles(["XRPUSDT", "BTCUSDT", "XRPUSDT"])
+    assert roles[:2] == [("XRPUSDT", "operar"), ("BTCUSDT", "operar")]
+    assert roles[2] == ("ETHUSDT", "datos")
+    changes = role_fix_plan(["XRPUSDT", "BTCUSDT"], {
+        "XRPUSDT": "datos", "BTCUSDT": "operar", "ETHUSDT": "operar"})
+    assert changes == [("ETHUSDT", "operar", "datos"), ("XRPUSDT", "datos", "operar")]
+    assert parse_args(["--db", "market_data.db", "--fijar-papeles", "--dry-run"]).fijar_papeles
+
+
+def test_fijar_papeles_dry_run_no_escribe(tmp_path):
+    store = CandleStore(tmp_path / "roles.sqlite")
+    store.register_symbol("XRPUSDT", role="datos")
+    before = store.path.read_bytes()
+    plan = role_fix_plan(["XRPUSDT"], store.symbol_roles())
+    assert apply_role_fix_plan(store, plan, dry_run=True) == 0
+    assert store.path.read_bytes() == before
+    assert store.symbol_role("XRPUSDT") == "datos"

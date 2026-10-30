@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from data.binance_client import BinanceClient
 
@@ -49,9 +54,17 @@ def compare_api(path, days, client=None):
     try:
         symbols = conn.execute("SELECT id,symbol FROM symbols WHERE active=1 ORDER BY symbol").fetchall()
         for item in symbols:
+            state = conn.execute("SELECT last_closed_ts FROM sync_state WHERE symbol_id=? AND interval='5m'",
+                (item["id"],)).fetchone()
+            stored_last = (int(state[0]) if state and state[0] is not None else conn.execute(
+                "SELECT MAX(open_ts) FROM candles WHERE symbol_id=? AND interval='5m'", (item["id"],)).fetchone()[0])
+            if stored_last is None:
+                differences[item["symbol"]] = {"differences": 0, "pending": 0}
+                continue
+            stored_last = int(stored_last)
             rows = conn.execute("SELECT open_ts,open,high,low,close,volume,quote_volume,trades FROM candles "
                 "WHERE symbol_id=? AND interval='5m' AND open_ts BETWEEN ? AND ? ORDER BY open_ts",
-                (item["id"], start, last_closed)).fetchall()
+                (item["id"], start, stored_last)).fetchall()
             local = {int(r[0]): tuple(r[1:]) for r in rows}
             frame = client.get_historical_klines(item["symbol"], "5m", days,
                 start_time=datetime.fromtimestamp(start, timezone.utc))
@@ -63,10 +76,13 @@ def compare_api(path, days, client=None):
                     continue
                 values = tuple(row[k] for k in ("open", "high", "low", "close", "volume", "quote_volume", "trades"))
                 remote[stamp] = values
-            differences[item["symbol"]] = sum(
+            mismatch_count = sum(
                 1 for stamp in local.keys() | remote.keys()
-                if stamp not in local or stamp not in remote or
+                if stamp <= stored_last and (stamp not in local or stamp not in remote or
                 any(float(a) != float(b) for a, b in zip(local[stamp], remote[stamp])))
+            )
+            pending = sum(1 for stamp in remote if stored_last < stamp <= last_closed)
+            differences[item["symbol"]] = {"differences": mismatch_count, "pending": pending}
     finally:
         conn.close()
     return differences
@@ -81,8 +97,8 @@ def main(argv=None, *, client=None):
         print("VELAS " + " ".join(f"{key}={value}" for key,value in row.items()))
     print(f"TAMAÑO archivo_bytes={Path(args.db).stat().st_size}")
     if args.comparar_api:
-        for symbol, differences in compare_api(args.db, args.comparar_api, client).items():
-            print(f"COMPARACION_API símbolo={symbol} diferencias={differences}")
+        for symbol, counts in compare_api(args.db, args.comparar_api, client).items():
+            print(f"COMPARACION_API símbolo={symbol} diferencias={counts['differences']} posteriores_a_ultima_guardada={counts['pending']}")
     return 0
 
 

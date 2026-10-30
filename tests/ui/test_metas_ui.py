@@ -260,6 +260,9 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     server.core.link_grid(goal["id"], grid["id"])
     server.core._ledger(goal["id"], None, "META_OPERATOR_NOOP", {"decision": "no_hacer_nada"})
     server.core._ledger(goal["id"], None, "META_OPERATOR_REVIEW_DECISION", {
+        "decision": {"decision": "no_hacer_nada", "reason": "evidencia independiente insuficiente"},
+        "engine": {"name": "v1", "version": "1"},
+        "engine_shadow": {"decision": "mantener", "reason": "contrafactual"},
         "decision_choices": {"current_piece_estimate": {"grid_id": grid["id"],
             "piece": {"symbol": "XRPUSDT", "capital_usdt": 100, "floor": 90,
                 "ceiling": 110, "n_levels": 4},
@@ -276,6 +279,10 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     page.check("[data-ledger-valuation]")
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
     assert "Pieza actual: XRPUSDT" in page.locator("[data-ledger-slot]").inner_text()
+    ledger_text = page.locator("[data-ledger-slot]").inner_text()
+    assert "No hacer nada" in ledger_text and "evidencia independiente insuficiente" in ledger_text
+    assert "Motor: v1" in ledger_text and "Sombra del otro motor: mantener" in ledger_text
+    assert "[object Object]" not in ledger_text
 
 
 def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):
