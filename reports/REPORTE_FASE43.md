@@ -754,3 +754,10 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3d-followup-fake-ju
 
 La primera aserción JUP mezcló PnL antes de liquidación con equity final luego de liquidar. Se alineó al campo de paridad usado por el resto de las pruebas (`equity_final_after_repository_liquidation`), conservando el umbral existente de 0,02 USDT.
 Resultado del follow-up 43e-3d: **93 passed en 2,22 s**.
+# 43e-5b - resolución de las curvas de v1
+
+Se restauró en `simulate_piece_curve` el filtro de traza legado por defecto; los cálculos de investigación pueden pedir explícitamente muestreo de 15 minutos. Se compararon las curvas empaquetadas de `simple`, `smart` e `individual_bot` con una copia de referencia de `6d565d9`, y el replay sintético de `MetaOperator._replay_window` coincide exactamente. Se verificó que los argumentos nuevos conservan sus valores predeterminados y que Smart exacto opta explícitamente por la curva de 15 minutos.
+
+La inspección de `runner.py` en `6d565d9` determinó que los grids ya enviaban trazas cada 15 minutos cuando `meta_portfolio_piece=True`; por eso la salida efectiva observada de v1 permanece byte a byte igual. La condición antigua del envoltorio se restauró sin ampliar las llamadas del runner. La versión de caché/replay subió a `rolling_7d_v4_equity`; las filas anteriores se conservan y se marcan para recalcular.
+
+Pruebas enfocadas: 14 pasaron en el comando anotado en `DISCREPANCIAS_FASE43.md`; la prueba adicional de Smart exacto también pasó (1/1) con el comando separado anotado allí.

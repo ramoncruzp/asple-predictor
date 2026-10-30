@@ -97,14 +97,18 @@ def evaluate_portfolio(curves, *, capital_initial, target_usdt, max_loss_pct=Non
 
 def simulate_piece_curve(candles, *, strategy, n, capital, low, high, filters=None,
         min_margin_pct=.3, sigma_values=None, meta_max_loss_pct=None,
-        include_replay=False):
-    """Sin objetivo ni corte de pérdida por pieza; resolución de quince minutos."""
+        include_replay=False, curve_every_candle=None):
+    """Sin objetivo por pieza; conserva por defecto la resolución histórica de v1."""
     times, cash, equity = [], [], []
     count = 0
     def trace(row):
         nonlocal count
-        include = (int(row["timestamp"]) % 900 == 0 or count == 0
-            or row["timestamp"] == int(candles.timestamp[-1]))
+        if curve_every_candle is None:
+            include = (strategy != "individual_bot" or int(row["timestamp"]) % 900 == 0
+                or count == 0 or row["timestamp"] == int(candles.timestamp[-1]))
+        else:
+            include = (bool(curve_every_candle) or int(row["timestamp"]) % 900 == 0
+                or count == 0 or row["timestamp"] == int(candles.timestamp[-1]))
         count += 1
         if include:
             times.append(int(row["timestamp"]))

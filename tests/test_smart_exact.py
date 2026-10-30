@@ -19,9 +19,12 @@ def test_smart_exact_matches_direct_runner_and_keeps_restrictions_off():
         low=80, high=120, sigma_path=sigma, n_smart=2)[0]
     candles = CandleData(START_TS + np.arange(len(close), dtype=np.int64) * 300,
         open_, high, low, close, 0)
-    direct = simulate_piece_curve(candles, strategy="smart", n=6, capital=1000,
-        low=80, high=120, sigma_values=np.full(len(close), .04), include_replay=True)["replay"]
+    direct_piece = simulate_piece_curve(candles, strategy="smart", n=6, capital=1000,
+        low=80, high=120, sigma_values=np.full(len(close), .04), include_replay=True,
+        curve_every_candle=False)
+    direct = direct_piece["replay"]
     assert result["metrics"]["pnl_total_net_usdt"] == direct["metrics"]["pnl_total_net_usdt"]
+    assert result["curve"] == direct_piece["curve"]
     assert result["effective"] == direct["effective_params"]
     assert result["effective"]["loans_enabled"] is False
     assert result["effective"]["compound_enabled"] is False

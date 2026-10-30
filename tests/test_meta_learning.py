@@ -18,6 +18,7 @@ from grid.meta_learning import (
     holm_adjust,
     make_learning_label,
     non_overlapping_72h_starts,
+    REPLAY_METHOD_VERSION,
     point_in_time_signals,
     replay_alternative_labels,
     replay_allocation_counterfactual,
@@ -175,7 +176,7 @@ def test_allocation_counterfactual_labels_base_and_added_piece_on_same_synthetic
     assert label["status"] == "labeled"
     assert label["advance_delta_usdt"] == pytest.approx(
         label["with_piece_advance_usdt"] - label["base_advance_usdt"])
-    assert label["base_method_version"] == "rolling_7d_v3_equity"
+    assert label["base_method_version"] == REPLAY_METHOD_VERSION
 
 
 def test_low_price_learning_grid_uses_symbol_tick_instead_of_generic_tick():
@@ -283,7 +284,7 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
             symbol="XRPUSDT", profile="RAPIDO",
             sample_at=datetime.fromtimestamp(start_s, timezone.utc),
             source_kind="historical_reconstructed", base_probability=.5,
-            base_method_version="rolling_7d_v3_equity", recalculate_base=False,
+            base_method_version=REPLAY_METHOD_VERSION, recalculate_base=False,
             parameters_json=json.dumps(invalid_params), signals_json="{}", provenance_json="{}",
             created_at=datetime.now(timezone.utc)))
 
@@ -331,7 +332,7 @@ def test_daily_label_job_persists_72h_result_and_step_timings_without_exchange_c
             db.meta_learning_samples.c.sample_key == "job-sample"
         )).mappings().one()
         versions = conn.execute(select(db.meta_learning_weight_versions)).mappings().all()
-    assert sample["base_method_version"] == "rolling_7d_v3_equity"
+    assert sample["base_method_version"] == REPLAY_METHOD_VERSION
     assert sample["recalculate_base"] is False
     assert {row["source_kind"] for row in versions} == {"live", "historical_reconstructed"}
     assert all(row["status"] == "insufficient" for row in versions)
@@ -353,7 +354,7 @@ def test_causal_replay_uses_seven_day_stride_and_only_windows_before_cut(monkeyp
     assert all(start + 20 * 86400 < at for start in seen)
     assert result["step_days"] == 7
     assert result["window_count"] == len(seen)
-    assert result["method_version"] == "rolling_7d_v3_equity"
+    assert result["method_version"] == REPLAY_METHOD_VERSION
 
 
 def test_replay_probability_smoothing_handles_zero_and_one_windows(monkeypatch):

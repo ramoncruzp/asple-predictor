@@ -550,6 +550,8 @@ class DBManager:
 
     def _migrate_meta_learning_columns(self) -> None:
         """Conserva muestras previas y las marca para recalcular su base causal."""
+        from grid.meta_learning import REPLAY_METHOD_VERSION
+
         additions = {"base_probability_smoothed": "FLOAT", "base_window_count": "INTEGER NOT NULL DEFAULT 0",
             "base_independent_windows": "INTEGER NOT NULL DEFAULT 0",
             "base_method_version": "TEXT", "recalculate_base": "BOOLEAN NOT NULL DEFAULT 1",
@@ -560,11 +562,17 @@ class DBManager:
                 for name, sql_type in additions.items():
                     if name not in present:
                         conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN {name} {sql_type}")
-                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=1 WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v3_equity')")
+                conn.execute(text("UPDATE meta_learning_samples SET recalculate_base=1 WHERE "
+                    "source_kind='historical_reconstructed' AND (base_method_version IS NULL OR "
+                    "base_method_version <> :method_version)"),
+                    {"method_version": REPLAY_METHOD_VERSION})
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_learning_samples ADD COLUMN IF NOT EXISTS {name} {sql_type}")
-                conn.exec_driver_sql("UPDATE meta_learning_samples SET recalculate_base=TRUE WHERE source_kind='historical_reconstructed' AND (base_method_version IS NULL OR base_method_version <> 'rolling_7d_v3_equity')")
+                conn.execute(text("UPDATE meta_learning_samples SET recalculate_base=TRUE WHERE "
+                    "source_kind='historical_reconstructed' AND (base_method_version IS NULL OR "
+                    "base_method_version <> :method_version)"),
+                    {"method_version": REPLAY_METHOD_VERSION})
 
     def _migrate_widen_columns(self) -> None:
         """Add missing declared widen suggestion columns without changing rows."""

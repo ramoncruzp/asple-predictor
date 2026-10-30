@@ -1710,7 +1710,7 @@ class MetaOperator:
             self._end_process_cache_plan()
 
     def _build_plan_impl(self, goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
-        from grid.meta_learning import LEARNING_SIGNALS
+        from grid.meta_learning import LEARNING_SIGNALS, REPLAY_METHOD_VERSION
         timing_started = time.perf_counter()
         decision_id = uuid.uuid4().hex
         self._analysis_timing = {"advisor_s": 0.0, "replay_s": 0.0,
@@ -1891,7 +1891,7 @@ class MetaOperator:
                     "probability_replay": estimate_row["estimate"].get("probability_replay"),
                     "probability_adjusted": estimate_row["estimate"].get("probability"),
                     "signals_used": estimate_row.get("signals_used", []),
-                    "replay_method": "rolling_7d_v3_equity"}
+                    "replay_method": REPLAY_METHOD_VERSION}
             except Exception as exc:
                 current_pieces[str(int(own_grid["id"]))] = {"grid_id": int(own_grid["id"]),
                     "piece": {"symbol": symbol, "strategy": own_grid.get("strategy"),
@@ -1900,7 +1900,7 @@ class MetaOperator:
                         "n_levels": int(own_grid.get("n_levels") or 1),
                         "floor": own_grid.get("range_low"), "ceiling": own_grid.get("range_high")},
                     "estimate": None, "error": f"{type(exc).__name__}: {exc}",
-                    "replay_method": "rolling_7d_v3_equity"}
+                    "replay_method": REPLAY_METHOD_VERSION}
         combination_started = time.perf_counter()
         max_pieces = max(1, min(3, int(cfg.get("max_grids", 1)) + int(cfg.get("max_bots", 0))))
         for piece_count in range(1, max_pieces + 1):

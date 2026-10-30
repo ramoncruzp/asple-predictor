@@ -63,3 +63,22 @@ El runner histórico se verificó con una SQLite temporal sintética (20 días),
 Se corrigieron los cortes por pérdida para comparar velas relativas, y el script de paridad muestra el control discrepante y separa ventanas/geometrías inválidas. Los filtros de exchange se obtienen desde Binance solo cuando se ejecuta `scripts/velas_filtros.py`; esta sesión no tuvo red y las pruebas usaron filtros sintéticos. En S1 se debe poblar `symbol_filters` antes de la paridad para que el comparador no use el fallback `FILTERS`.
 
 La prueba sintética ampliada no cubre cada combinación posible de capital, filtro y bot; la corrida de 200 ventanas reales queda a cargo de S1. En local sintético: 20 días tomaron 1,815 s y 426,5 MB de pico; 45 días, 5,926 s y 483,1 MB. Smart con 200 escenarios x 20 días tomó 15,453 s y 166,4 MB de pico, bajo el umbral de 120 s. No se probaron filtros reales de Binance ni ventanas reales; el marcador y v2 siguen desconectados del operador.
+## 43e-5b - resolución del replay Meta
+
+`simulate_piece_curve` había reducido a 15 minutos todas las curvas, incluidas las llamadas de `grid/meta_operator.py` y `grid/meta_learning.py` usadas por v1. Se restauró por defecto la condición histórica del envoltorio de `6d565d9`: grids aceptan cada fila trazada por el runner y bots individuales cada 15 minutos, conservando primera y última fila. Solo `research/scenarios/smart_exact.py` solicita explícitamente 15 minutos.
+
+La inspección de `grid/sim/runner.py` en el propio `6d565d9` mostró que, con `meta_portfolio_piece=True`, el runner ya limita las llamadas a `trace_callback` a cada 15 minutos para grids; por tanto la salida empaquetada de v1 en ese commit tiene esa resolución, aunque el filtro del envoltorio permitía cada fila recibida. La regresión compara contra esa salida observada, sin cambiar el runner ni forzar trazas adicionales.
+
+Se cambió `REPLAY_METHOD_VERSION` de `rolling_7d_v3_equity` a `rolling_7d_v4_equity` para que cachés persistidas y etiquetas queden inequívocamente separadas después de corregir el contrato de muestreo; no se borran filas. Los comprobadores consideran v3 obsoleto y recalculan.
+
+Comando de regresión anotado antes de ejecutarlo (14 pasaron, 125 fueron deseleccionadas):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5b-resolution-6d565d9-c3e6b128-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_portfolio_resolution.py tests/test_meta_portfolio_equity.py tests/test_meta_operator.py tests/test_meta_learning.py -k "curve_bytes_match_6d565d9 or meta_operator_replay_window_matches_6d565d9_outcome or explicit_research_sampling or real_grid_curve_keeps_runner_resolution_and_research_opt_in or old_process_or_persistent_replay_is_rejected or replay_window_cache_is_shared_without_changing_result or touch_bot_shadow_chooses_best_causal_distance_without_opening_grid or 72h_labels_use_proportional_target_and_keep_profile_horizon_separate or allocation_counterfactual_labels_base_and_added_piece_on_same_synthetic_candles or learning_invalid_geometry_is_terminal_and_has_diagnostics or daily_label_job_persists_72h_result_and_step_timings_without_exchange_calls or learning_migration_recalculates_old_base_but_not_current_base" --basetemp="$base"
+```
+
+Comprobación adicional del adaptador Smart exacto (1 pasada):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e5b-smart-exact-6d565d9-c3e6b128-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_smart_exact.py -k "smart_exact_matches_direct_runner_and_keeps_restrictions_off" --basetemp="$base"
+```

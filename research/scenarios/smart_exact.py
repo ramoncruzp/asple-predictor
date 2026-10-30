@@ -19,7 +19,7 @@ def _one_smart(task):
         bars["open"], bars["high"], bars["low"], bars["close"], 0)
     result = simulate_piece_curve(candles, strategy="smart", n=n, capital=capital,
         low=low, high=high, filters=filters, sigma_values=sigma,
-        meta_max_loss_pct=max_loss_pct, include_replay=True)
+        meta_max_loss_pct=max_loss_pct, include_replay=True, curve_every_candle=False)
     replay = result["replay"]
     cells = (replay.get("details") or {}).get("cells", [])
     inventory_qty = sum(float(cell.get("held_qty") or 0) for cell in cells)

@@ -97,7 +97,7 @@ def test_v3_allocation_shadow_matches_v2_with_realistic_180_day_cache_entry():
         curve_bytes += len(json.dumps(packed, separators=(",", ":")))
         rows.append({"window_start": f"w{idx}", "curve": packed, "pnl_usdt": 0.2,
             "days": None, "drawdown_pct": 2.1, "max_advance_usdt": 3.2})
-    full = {"method_version": "rolling_7d_v3_equity", "summary": {"probability": .3, "windows": 11},
+    full = {"method_version": REPLAY_METHOD_VERSION, "summary": {"probability": .3, "windows": 11},
         "window_results": rows}
     full_bytes = len(json.dumps(full, separators=(",", ":")))
     metric_only = {**full, "window_results": [{k: v for k, v in row.items() if k != "curve"}
@@ -184,7 +184,7 @@ def test_real_bot_curve_keeps_cash_after_sale_without_rebuying_or_target_stop():
     assert stamps[-1] == times[-1]
 
 
-def test_real_grid_curve_is_stored_every_fifteen_minutes():
+def test_real_grid_curve_keeps_runner_resolution_and_research_opt_in():
     times = np.arange(0, 3 * 3600 + 300, 300)
     prices = np.full(len(times), 100.)
     candles = CandleData(timestamp=times, open=prices, high=prices + .1,
@@ -195,6 +195,10 @@ def test_real_grid_curve_is_stored_every_fifteen_minutes():
     assert stamps[0] == times[0] and stamps[-1] == times[-1]
     assert np.all(np.diff(stamps) == 900)
     assert len(cash) == len(equity) == len(stamps)
+    sampled = simulate_piece_curve(candles, strategy="simple", n=4, capital=100,
+        low=90, high=110, curve_every_candle=False)
+    sampled_stamps, _, _ = unpack_curve(sampled["curve"])
+    assert np.all(np.diff(sampled_stamps) == 900)
 
 
 def test_old_process_or_persistent_replay_is_rejected(monkeypatch):
@@ -205,7 +209,7 @@ def test_old_process_or_persistent_replay_is_rejected(monkeypatch):
     operator._load_candles = lambda _symbol: sample
     operator._symbol_filters = lambda _symbol: None
     operator._touch_signal_for = lambda *_args, **_kwargs: ({}, [])
-    operator._persistent_cache_get = lambda *_args: {"method_version": "rolling_7d_v2",
+    operator._persistent_cache_get = lambda *_args: {"method_version": "rolling_7d_v3_equity",
         "summary": {"probability": .99}, "window_results": []}
     operator._persistent_cache_set = lambda *_args: None
     called = []

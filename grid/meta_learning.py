@@ -12,7 +12,7 @@ import numpy as np
 HOURS_72 = 72
 VOL_FORECAST_HORIZON_H = 24
 BACKFILL_DAYS = 180
-REPLAY_METHOD_VERSION = "rolling_7d_v3_equity"
+REPLAY_METHOD_VERSION = "rolling_7d_v4_equity"
 LEARNING_SIGNALS = ("volatility", "break_prob", "direction", "scanner", "advisor",
                     "touch_buy_to_sell")
 DEFAULT_SIGNAL_WEIGHTS = {name: .25 for name in LEARNING_SIGNALS}

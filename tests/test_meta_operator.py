@@ -2538,6 +2538,7 @@ def test_centered_signal_shadow_does_not_change_real_signals_or_probability():
 
 def test_touch_bot_shadow_chooses_best_causal_distance_without_opening_grid(monkeypatch):
     from grid.meta_operator import MetaOperator
+    from grid.meta_learning import REPLAY_METHOD_VERSION
     import grid.meta_learning as learning
     operator = MetaOperator.__new__(MetaOperator)
     operator.clock = lambda: 1_800_000_000
@@ -2553,7 +2554,7 @@ def test_touch_bot_shadow_chooses_best_causal_distance_without_opening_grid(monk
     assert rows[0]["expected_sell_rate"] == .9
     assert rows[0]["expected_sell_rate_24h"] == .9
     assert rows[0]["expected_sell_rate_72h"] == .25
-    assert rows[0]["method_version"] == "rolling_7d_v3_equity"
+    assert rows[0]["method_version"] == REPLAY_METHOD_VERSION
     assert rows[0]["sell_price"] / rows[0]["buy_price"] * (.999 ** 2) - 1 == pytest.approx(.0095)
     assert rows[0]["labels_due_hours"] == [24, 72]
 
