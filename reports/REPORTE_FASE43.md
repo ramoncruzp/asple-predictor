@@ -143,3 +143,23 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b5-rerun-711e0eab'; 
 ```
 
 Resultado: 1 passed en 0,94 s.
+
+## 43b-6 — cierre y pasos de despliegue en S1
+
+La base separada se crea únicamente al ejecutar el backfill o al arrancar el job cuando el archivo ya existe. No se desplegó ni se consultó S1.
+
+Comandos que Ramón ejecutará en S1 después del despliegue:
+
+```bash
+cd ~/asple-predictor
+# 1) después de desplegar con bash deploy/actualizar.sh desde el PC:
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --lista-inicial --months 24 --dry-run
+venv2/bin/python scripts/velas_backfill.py --db market_data.db --lista-inicial --months 24
+# 2) reiniciar para que se registre el job horario
+sudo systemctl restart asple-predictor
+# 3) verificar
+venv2/bin/python scripts/verificar_velas.py --db market_data.db --comparar-api 7
+journalctl -u asple-predictor --since "1 hour ago" --no-pager | grep MARKET_SYNC
+```
+
+No se observó diferencia intencional en las decisiones v1; la regresión enfocada fue 11 passed para los motores y la ruta histórica del operador. La lista completa de commits de esta entrega se presenta en la respuesta de cierre.

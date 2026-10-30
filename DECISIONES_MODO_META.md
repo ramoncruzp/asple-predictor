@@ -113,6 +113,14 @@ Los números son punto de partida y se ajustan con los resultados.
 | 40d-3C | Interruptores por perfil en Laboratorio, aprendizaje global en Metas y recarga parcial | Implementada y verificada offline; sin despliegue |
 | 40d-4A | Comparación con ranking compartido y versión de contrato explícita | Cerrada en 40d-6: política contrafactual v2 con persistencia y cooldown propios |
 | 40d-4B | Pantalla de solo lectura Inteligencia y medidor de evidencia | Cerrada en 40d-6: inventario de velas, calibración y conteos persistidos |
+
+## Fase 43 — motor v2 (partes A y B)
+
+El motor queda fijo en el `config_snapshot` de cada meta: las metas existentes sin campo usan v1. El motor v1 conserva el operador actual; v2 permanece no disponible. Una falla del motor activo produce no hacer nada y alerta, sin cambiar de motor. El motor contrario se evalúa en sombra con un límite de 30 s, fuera del candado de operación, y no puede ejecutar acciones.
+
+Las velas públicas de 5 min se guardan en `market_data.db`, separada de la BD de trading, excluida de respaldos de despliegue y git. El backfill cubre 24 meses cerrados y los días cerrados del mes actual; la actualización horaria usa la API pública existente y no guarda velas en curso. La lista B3 de monedas de datos es editable en `scripts/velas_backfill.py`; se excluyen las monedas activas de operar cuando el Coin Registry está disponible. Ningún componente de Meta ni Fase 42 consume todavía este almacén. La entrega no altera decisiones reales.
+
+| 43 | Interfaz de motor v1/v2 en sombra y almacén separado de velas públicas | Hecha y verificada offline; v2 no disponible, datos sin consumidores, sin red ni BD real |
 | 40d-5 | Señal toque compra a venta como sexta variable | Hecha y verificada offline |
 | 40d-6 | Política contrafactual v2, inventario de velas, deciles de validación y conteos por corrida | Hecha; 40d-6B restaura los frenos de reajuste real previos al refactor |
 | 40d-7A | Diagnóstico de saturación de señales | Correcciones de unidades, signo, cobertura y trazabilidad aplicadas directamente en Fase 41a |
