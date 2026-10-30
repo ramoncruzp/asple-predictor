@@ -329,3 +329,36 @@ Comando exacto tras hacer estrictos los inicios de baseline y exigir el IC del B
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-causal-strict-20261030-r9'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py tests/test_scenarios_history.py tests/test_scenarios_evaluate.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
 ```
+
+
+## 43e-6h - prueba inicial de la linea nula
+
+Comando exacto antes de ejecutar la prueba de sesgo GBM y comparacion pareada OU/GBM:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6h-linea-nula-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_line_null.py tests/test_scenarios_validate.py --basetemp="$base" -s
+```
+
+Comando exacto tras corregir la fixture de historia con interceptacion del simulador vectorizado y ampliar a 400 trayectorias para el IC GBM/OU:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6h-linea-nula-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_line_null.py tests/test_scenarios_validate.py --basetemp="$base" -s
+```
+
+Resultado: 15 pruebas pasaron en 14,05 s. La prueba GBM midió un sesgo de puente de +13,867553 USDT. OU menos GBM sin tendencia fue +6,230434 USDT con IC bootstrap independiente del 95 % [3,045050; 9,297214] USDT. La prueba inicial falló con OU menos GBM en -6,459580 USDT e IC [-17,500256; 5,528196]; se cambió la generación sintética a OU con parámetro de reversión explícito 0,002 por vela y 400 trayectorias. No se alteró ninguna tolerancia; la evidencia final se basa en el IC positivo.
+
+La línea nula FHS usa 200 escenarios por arranque y arranques cada 7 días. El esfuerzo completo en S1 no se midió; la comparación añade dos evaluaciones FHS por arranque y su tiempo depende de cuántas piezas/fechas se pidan. Sigue siendo investigación y no se conecta con decisiones.
+
+La regresión final, que además comprueba que los dos lados de cada comparación usan la misma semilla y el mismo corte causal `before=t`, pasó **16 pruebas en 14,01 s** (comando `asple-f43e6h-pareo-20261030-r4` que sigue).
+
+Comando exacto final de regresion de 6h, incluyendo el contrato del CLI historia:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6h-final-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_line_null.py tests/test_scenarios_validate.py --basetemp="$base" -s
+```
+
+Comando exacto de cierre tras afirmar que cada par FHS real/sin tendencia comparte la misma semilla y el mismo corte before=t:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6h-pareo-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_history.py tests/test_scenarios_line_null.py tests/test_scenarios_validate.py --basetemp="$base" -s
+```

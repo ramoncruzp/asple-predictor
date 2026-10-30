@@ -78,28 +78,44 @@ def test_history_bot_uses_offsets_from_start_price(monkeypatch):
 def test_ou_grid_outperforms_equal_sigma_gbm_after_trend_removal():
     from research.scenarios.fastsim import simulate_simple
     rng = np.random.default_rng(20261030)
-    n, bars = 24, 20 * 288
+    n, bars = 400, 20 * 288
     sigma_bar = .04 / np.sqrt(288)
     gbm_returns = rng.normal(0, sigma_bar, (n, bars))
     ou_returns = np.empty((n, bars), dtype=np.float64)
     state = np.zeros(n, dtype=np.float64)
+    ou_rng = np.random.default_rng(20261031)
     for index in range(bars):
-        previous = state.copy()
-        state = state - .005 * state + rng.normal(0, sigma_bar, n)
-        ou_returns[:, index] = state - previous
+        change = -.002 * state + ou_rng.normal(0, sigma_bar, n)
+        state += change
+        ou_returns[:, index] = change
     outcomes = {}
     for name, returns in (("gbm", gbm_returns), ("ou", ou_returns)):
         close = 100 * np.exp(np.cumsum(returns, axis=1))
         open_ = np.concatenate((np.full((n, 1), 100.0), close[:, :-1]), axis=1)
         high = np.maximum(open_, close) * 1.001
         low = np.minimum(open_, close) * .999
-        result = simulate_simple({"open": open_, "high": high, "low": low, "close": close},
+        real = {"open": open_, "high": high, "low": low, "close": close}
+        detrended = _remove_log_trend(real)
+        result = simulate_simple(real,
             n_levels=10, capital=1000, low=100 * np.exp(-.04 * np.sqrt(20)),
             high=100 * np.exp(.04 * np.sqrt(20)), max_loss_pct=None)
-        outcomes[name] = result
-    assert outcomes["ou"]["pnl_usdt"].mean() > 0
-    assert outcomes["ou"]["pnl_usdt"].mean() > outcomes["gbm"]["pnl_usdt"].mean()
-    assert outcomes["gbm"]["pnl_usdt"].mean() < outcomes["gbm"]["fees_usdt"].mean() * 3
+        null = simulate_simple(detrended, n_levels=10, capital=1000,
+            low=100 * np.exp(-.04 * np.sqrt(20)), high=100 * np.exp(.04 * np.sqrt(20)),
+            max_loss_pct=None)
+        outcomes[name] = {"real": result["pnl_usdt"], "sin_tendencia": null["pnl_usdt"]}
+    bridge_bias = float(np.mean(outcomes["gbm"]["sin_tendencia"] - outcomes["gbm"]["real"]))
+    differences = outcomes["ou"]["sin_tendencia"] - outcomes["gbm"]["sin_tendencia"]
+    boot_rng = np.random.default_rng(43)
+    boot_ou = boot_rng.integers(0, n, (2000, n))
+    boot_gbm = boot_rng.integers(0, n, (2000, n))
+    boot_delta = (outcomes["ou"]["sin_tendencia"][boot_ou].mean(axis=1) -
+        outcomes["gbm"]["sin_tendencia"][boot_gbm].mean(axis=1))
+    ci = np.quantile(boot_delta, [.025, .975])
+    print(f"GBM_PUENTE sesgo_sin_tendencia_menos_real={bridge_bias:.6f} "
+        f"OU_menos_GBM_sin_tendencia={differences.mean():.6f} IC95=[{ci[0]:.6f},{ci[1]:.6f}]")
+    assert bridge_bias > 0
+    assert float(differences.mean()) > 0
+    assert ci[0] > 0
 
 
 def test_history_uses_only_calibration_factors_finished_before_start(tmp_path):

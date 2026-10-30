@@ -127,10 +127,42 @@ def _remove_log_trend(bars):
     return {name: values * initial_factor for name, values in result.items()}
 
 
+def _summarize_null_comparison(rows, *, seed=43, replicas=1000,
+        scenarios_per_start=200, step_days=7):
+    """Compara efectos de tendencia y puente con bootstrap pareado por fecha."""
+    if not rows:
+        return {"n_arranques": 0, "estado": "sin_pares"}
+    metrics = {
+        "historia_sin_tendencia_menos_escenarios_sin_tendencia":
+            [row["null_history"] - row["scenario_null"] for row in rows],
+        "historia_real_menos_escenarios":
+            [row["real_history"] - row["scenario_real"] for row in rows],
+    }
+    dates = np.asarray([row["timestamp"] // 86400 for row in rows], dtype=np.int64)
+    unique = np.unique(dates)
+    rng = np.random.default_rng(seed)
+    output = {"n_arranques": len(rows), "paso_dias": int(step_days),
+        "escenarios_por_arranque": int(scenarios_per_start)}
+    for name, values in metrics.items():
+        values = np.asarray(values, dtype=np.float64)
+        by_date = {day: values[dates == day] for day in unique}
+        bootstrap = np.empty(int(replicas), dtype=np.float64)
+        for sample_index in range(int(replicas)):
+            picked_days = rng.choice(unique, size=len(unique), replace=True)
+            picked = np.concatenate([by_date[day] for day in picked_days])
+            bootstrap[sample_index] = float(np.mean(picked))
+        low, high = np.quantile(bootstrap, [.025, .975])
+        output[name] = {"media_usdt": float(values.mean()),
+            "ic95_usdt": [float(low), float(high)]}
+    interval = output["historia_sin_tendencia_menos_escenarios_sin_tendencia"]["ic95_usdt"]
+    output["evidencia_rebote_real"] = bool(interval[0] > 0)
+    return output
+
+
 def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
         library_dir="data/derived/scenario_lib", workers=2, mode="alternativas",
-        fee_pct=.1):
+        fee_pct=.1, detrend_scenarios=False):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
@@ -210,6 +242,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             high = float(piece.get("sell_price", high)) if strategy == "bot" else float(high)
             geometry[index] = (low, high)
             common = {key: market[key] for key in ("open", "high", "low", "close")}
+            if detrend_scenarios:
+                common = _remove_log_trend(common)
             if strategy == "smart":
                 smart_count = max(0, min(len(market["close"]),
                     int(n_smart) - int(batch["scenario_start"])))
@@ -347,7 +381,9 @@ def paired_fee_sensitivity(base_result, comparison_result, *, seed=43, replicas=
 def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
         months=24, step_days=7, since=None, symbols=None, fee_pct=.1,
         library_dir="data/derived/scenario_lib", seed=43, replicas=1000,
-        n_smart=200, workers=2, required_starts=None, until=None):
+        n_smart=200, workers=2, required_starts=None, until=None,
+        scenario_null=False, null_scenarios=200, null_step_days=7,
+        null_replicas=1000):
     """Evalua historia real causal por lotes y una variante sin tendencia lineal."""
     from research.scenarios.fastsim import simulate_simple, simulate_bot
     from research.scenarios.metrics import summarize
@@ -386,6 +422,9 @@ def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
             if strategy not in {"simple", "bot", "smart"}:
                 raise ValueError("historia solo admite simple, bot y smart")
             chosen = starts.copy()
+            null_stride = max(1, int(np.ceil(float(null_step_days) / float(step_days))))
+            if strategy == "smart" and scenario_null:
+                chosen = starts[::null_stride]
             if strategy == "smart" and len(chosen) > int(n_smart):
                 required = (required_starts.get(symbol, []) if isinstance(required_starts, dict)
                     else (required_starts or []))
@@ -490,9 +529,49 @@ def evaluate_history(pieces, *, perfil, capital, meta, db_path="market_data.db",
                         "pnl_usdt": float(row["pnl_usdt"]), "reached": bool(row["reached"]),
                         "loss_cut": bool(row["loss_cut"])}
                         for i, sigma, row in zip(chosen, sigmas, rows)]}
+            null_comparison = None
+            if scenario_null:
+                real_by_ts = {row["timestamp"]: row for row in
+                    variant_results["real"]["starts"]}
+                detrended_by_ts = {row["timestamp"]: row for row in
+                    variant_results["sin_tendencia"]["starts"]}
+                null_chosen = (chosen if strategy == "smart" else chosen[::null_stride])
+                paired_rows = []
+                for index in null_chosen:
+                    stamp = int(ts[index])
+                    if stamp not in real_by_ts or stamp not in detrended_by_ts:
+                        continue
+                    scenario_real = evaluate_pieces([piece], perfil=perfil, capital=capital,
+                        meta=meta, n_scenarios=int(null_scenarios), n_smart=min(200, int(null_scenarios)),
+                        seed=seed + stamp, before=stamp, db_path=db_path,
+                        library_dir=library_dir, workers=workers, mode="alternativas",
+                        fee_pct=fee_pct)
+                    scenario_null_result = evaluate_pieces([piece], perfil=perfil,
+                        capital=capital, meta=meta, n_scenarios=int(null_scenarios),
+                        n_smart=min(200, int(null_scenarios)), seed=seed + stamp,
+                        before=stamp, db_path=db_path, library_dir=library_dir,
+                        workers=workers, mode="alternativas", fee_pct=fee_pct,
+                        detrend_scenarios=True)
+                    raw_samples = [row["pnl_usdt"] for row in
+                        scenario_real["pieces"][0]["scenario_results"]]
+                    null_samples = [row["pnl_usdt"] for row in
+                        scenario_null_result["pieces"][0]["scenario_results"]]
+                    if not raw_samples or not null_samples:
+                        continue
+                    paired_rows.append({"timestamp": stamp,
+                        "real_history": real_by_ts[stamp]["pnl_usdt"],
+                        "null_history": detrended_by_ts[stamp]["pnl_usdt"],
+                        "scenario_real": float(np.mean(raw_samples)),
+                        "scenario_null": float(np.mean(null_samples))})
+                    del scenario_real, scenario_null_result, raw_samples, null_samples
+                null_comparison = _summarize_null_comparison(paired_rows,
+                    seed=seed + piece_index, replicas=null_replicas,
+                    scenarios_per_start=null_scenarios, step_days=null_step_days)
             del starts_bars, variants, bars
             pieces_result.append({"piece": piece, "n": len(chosen), "variantes": variant_results})
             pieces_result[-1]["geometrias"] = geometry_rows
+            if scenario_null:
+                pieces_result[-1]["linea_nula_fhs"] = null_comparison
         result["symbols"][symbol] = {"ventanas_candidatas": len(starts), "pieces": pieces_result}
     return result
 

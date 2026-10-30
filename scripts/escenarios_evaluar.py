@@ -69,8 +69,24 @@ def main(argv=None):
         history = evaluate_history([_parse_piece(item) for item in args.pieza],
             perfil=args.perfil, capital=args.capital, meta=args.meta, db_path=args.db,
             months=args.meses, step_days=args.paso_dias, since=args.desde,
-            fee_pct=args.comision, library_dir=args.library_dir, seed=args.semilla)
+            fee_pct=args.comision, library_dir=args.library_dir, seed=args.semilla,
+            scenario_null=True, null_scenarios=min(200, args.escenarios),
+            null_step_days=7)
         print(json.dumps(history, ensure_ascii=False, indent=2))
+        for symbol, symbol_data in history["symbols"].items():
+            for row in symbol_data.get("pieces", []):
+                null_row = row.get("linea_nula_fhs")
+                if null_row:
+                    null_diff = null_row.get(
+                        "historia_sin_tendencia_menos_escenarios_sin_tendencia", {})
+                    trend_diff = null_row.get("historia_real_menos_escenarios", {})
+                    print(f"LINEA_NULA symbol={symbol} pieza={row['piece']} "
+                        f"n={null_row.get('n_arranques', 0)} "
+                        f"sin_tendencia={null_diff.get('media_usdt')} "
+                        f"ic95={null_diff.get('ic95_usdt')} "
+                        f"rebote={null_row.get('evidencia_rebote_real')} "
+                        f"real_menos_fhs={trend_diff.get('media_usdt')} "
+                        f"ic95_real={trend_diff.get('ic95_usdt')}")
         print(f"EVALUACION segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_mb()}")
         return 0
     result = evaluate_pieces([_parse_piece(item) for item in args.pieza],

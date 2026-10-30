@@ -862,6 +862,14 @@ nohup nice -n 10 venv2/bin/python scripts/escenarios_validar.py --db market_data
 
 La línea base de 6f reusa `evaluate_history` con la geometría relativa por arranque. No se pudo demostrar que cada ventana de la línea base conserve una única geometría absoluta fija; esta limitación debe tenerse presente al interpretar el Brier v2 frente a v1. La validación es experimental y no modifica decisiones; v2 sigue `available=False`.
 
+## 43e-6h — línea nula sin tendencia
+
+La transformación sin tendencia también se aplica a cada escenario FHS por arranque, con el mismo `before=t`, precio, sigma causal, geometría y semilla que la simulación sin transformar. Se informa por pieza `historia_sin_tendencia − escenarios_sin_tendencia` con IC 95 % bootstrap por fecha y `historia_real − escenarios`. Solo se marca evidencia de rebote cuando el límite inferior del primer IC es mayor que cero. En historia, la línea nula usa 200 escenarios por arranque y muestreo de arranques cada 7 días, aunque la historia descriptiva use un paso menor.
+
+La prueba corregida con 400 trayectorias dio para GBM un sesgo de puente de **+13,867553 USDT** (GBM sin tendencia menos GBM real) y para OU menos GBM sin tendencia **+6,230434 USDT**, IC 95 % **[3,045050; 9,297214] USDT**. El resultado confirma que quitar la tendencia ajustada en la propia ventana puede crear ganancias artificiales; no se interpreta la ganancia positiva sin tendencia por sí sola como prueba de reversión.
+
+Pruebas enfocadas finales de 6h: **16 pasaron en 14,01 s**. El comando exacto está anotado en `reports/DISCREPANCIAS_FASE43.md`. No se ejecutó con velas reales ni se midió el costo de la comparación en S1. Nada de 6h cambia decisiones reales; v2 sigue `available=False`.
+
 Comando final de pruebas de 6f:
 
 ```powershell
