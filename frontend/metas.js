@@ -121,6 +121,11 @@
   function closeDialog() { const modal = document.getElementById('meta-action-dialog'); if (modal) modal.hidden = true; }
 
   const PROFILE_LABELS = { PRUDENTE: 'Prudente', RAPIDO: 'Rápido' };
+  function decisionEngineLabel(goal) {
+    let snapshot = goal?.config_snapshot || {};
+    if (typeof snapshot === 'string') { try { snapshot = JSON.parse(snapshot); } catch (_) { snapshot = {}; } }
+    return `Motor: ${snapshot.decision_engine || 'v1'}`;
+  }
   const META_STATUS_LABELS = { DRAFT: 'Borrador', ACTIVE: 'Activa', PIECES_BLOCKED: 'Piezas bloqueadas',
     CLOSING: 'Cierre en curso', TARGET_CLOSING: 'Cierre al cumplir', SURPLUS_WAIT: 'Sobrantes en venta',
     CUMPLIDA: 'Cumplida', CORTADA_POR_PERDIDA: 'Cortada por pérdida', VENCIDA: 'Vencida',
@@ -208,7 +213,7 @@
   function renderDraftCard(goal) {
     return `<div class="card metas-draft" data-meta-id="${goal.id}">
       <div class="metas-draft-head">
-        <h3>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile}</h3>
+        <h3>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${decisionEngineLabel(goal)}</h3>
         <div class="metas-draft-actions">
           <button type="button" class="button primary" data-analyze="${goal.id}">Analizar</button>
           <button type="button" class="button secondary" data-discard="${goal.id}">Descartar</button>
@@ -487,7 +492,7 @@
       ? `<p class="metas-blocked-note">⏸ Piezas bloqueadas: ${valuation.status === 'DESCONOCIDO' ? 'valoración DESCONOCIDO' : 'aviso del 75 % del límite de pérdida'}.</p>` : '';
     return `<div class="card metas-active" data-meta-id="${goal.id}">
       <div class="metas-active-head">
-        <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${META_STATUS_LABELS[goal.status] || esc(goal.status)}</h2>
+        <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${META_STATUS_LABELS[goal.status] || esc(goal.status)} · ${decisionEngineLabel(goal)}</h2>
         <button type="button" class="button secondary" data-cancel-op="${goal.id}">Cancelar operación</button>
       </div>
       ${statusNote}
@@ -516,7 +521,7 @@
 
   function renderSurplusPanel(goal) {
     return `<div class="card metas-active" data-meta-id="${goal.id}">
-      <h2>Meta #${goal.id} · CUMPLIDA; esperando vender sobrantes</h2>
+      <h2>Meta #${goal.id} · CUMPLIDA; esperando vender sobrantes · ${decisionEngineLabel(goal)}</h2>
       <p class="muted">La meta ya llegó al objetivo. Los bots sobrantes solo venden con ganancia, sin plazo; lo que vendan es ganancia extra.</p>
       <p>Ganancia extra realizada hasta ahora: <b>${fmtMoney(goal.realized_extra_usdt)}</b> USDT</p>
       <p class="muted">Como no cuenta como meta activa, puedes crear otra meta mientras tanto.</p>
@@ -640,6 +645,10 @@
         const change = item.last_switch ? `${esc(item.last_switch.actor)} &middot; ${esc(item.last_switch.changed_at)} &middot; versi\u00f3n ${esc(item.last_switch.weight_version_id || 'sin versi\u00f3n')}` : 'Nunca encendido';
         const allocationEnabled = Boolean(item.use_extended_allocation);
         const allocationChange = item.allocation_switch ? `${esc(item.allocation_switch.actor)} &middot; ${esc(item.allocation_switch.changed_at)}` : 'Nunca encendido';
+        const selectedEngine = (profileConfigs[profile] || {}).decision_engine || 'v1';
+        const engineOptions = (config.engines || [{name:'v1',available:true},{name:'v2',available:false}]).map(engine =>
+          `<option value="${esc(engine.name)}" ${engine.name === selectedEngine ? 'selected' : ''} ${engine.available ? '' : 'disabled'}>${esc(engine.name)}${engine.available ? '' : ' (no disponible todavía)'}</option>`).join('');
+        const engineRow = `<article class="global-flag-row" data-meta-engine-switch="${profile}"><div class="global-flag-copy"><h3>${label}: Motor de decisión</h3><p>Cada meta usa el motor que tenía su perfil al crearla.</p><label>Motor <select data-engine-select>${engineOptions}</select></label><div data-engine-confirm hidden><label>¿Quién autoriza? <input data-engine-actor maxlength="80" required></label><button type="button" class="button primary" data-engine-save>Confirmar cambio</button><button type="button" class="button secondary" data-engine-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-engine-open>Cambiar motor</button></article>`;
         const learningRow = `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="learning"><div class="global-flag-copy"><h3>${label}: usar pesos aprendidos</h3>
           <p>Encendido: el operador Meta usa los pesos aprendidos para decidir. Apagado: usa 0,25 por se\u00f1al (Toque compra\u2192venta: 0) y el aprendizaje sigue solo en sombra.</p>
           <small class="muted">Estado: <b>${enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; \u00daltimo cambio: ${change}</small>
@@ -664,7 +673,7 @@
           const evidenceItem = readinessItems[kind];
           return `<article class="global-flag-row" data-meta-learning-switch="${profile}" data-switch-kind="${kind}" data-setting-key="${key}"><div class="global-flag-copy"><h3>${label}: ${title}</h3><p>${description}</p><small class="muted">Estado: <b>${isEnabled ? 'ENCENDIDO' : 'APAGADO'}</b></small>${switchReadinessMarkup(evidenceItem)}<div data-switch-confirm hidden>${!isEnabled && evidenceItem?.state !== 'Listo para encender' ? `<p>La evidencia todavía no lo respalda (${esc(evidenceItem?.state || 'Recolectando datos')}). ¿Encender de todos modos?</p>` : ''}<button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${isEnabled ? 'Apagar' : 'Encender'}</button></article>`;
         }).join('');
-        return learningRow + allocationRow + extraRows;
+        return learningRow + allocationRow + engineRow + extraRows;
       }).join('');
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
@@ -686,6 +695,29 @@
           if (kind === 'allocation') await apiPut('/api/metas/allocation/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'learning') await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else await apiPut('/api/metas/config/profile', {profile, values:{[row.dataset.settingKey]: !currentlyEnabled}});
+          await loadLearningSwitches(host);
+        } catch (error) { status.textContent = error.message; button.disabled = false; }
+      }));
+      host.querySelectorAll('[data-engine-open]').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('[data-meta-engine-switch]');
+        row.querySelector('[data-engine-confirm]').hidden = false;
+        button.disabled = true;
+        row.querySelector('[data-engine-actor]').focus();
+      }));
+      host.querySelectorAll('[data-engine-cancel]').forEach(button => button.addEventListener('click', () => {
+        const row = button.closest('[data-meta-engine-switch]');
+        row.querySelector('[data-engine-confirm]').hidden = true;
+        row.querySelector('[data-engine-open]').disabled = false;
+      }));
+      host.querySelectorAll('[data-engine-save]').forEach(button => button.addEventListener('click', async () => {
+        const row = button.closest('[data-meta-engine-switch]');
+        const actor = row.querySelector('[data-engine-actor]').value.trim();
+        const status = row.querySelector('[role="status"]');
+        if (!actor) { status.textContent = 'Indica quién autoriza el cambio.'; row.querySelector('[data-engine-actor]').focus(); return; }
+        button.disabled = true;
+        try {
+          await apiPut('/api/metas/decision-engine/switch', {profile: row.dataset.metaEngineSwitch,
+            engine: row.querySelector('[data-engine-select]').value, confirm: true, actor});
           await loadLearningSwitches(host);
         } catch (error) { status.textContent = error.message; button.disabled = false; }
       }));
@@ -751,7 +783,7 @@
       ${showDiscarded ? `<label><input type="checkbox" data-show-discarded> Mostrar descartadas</label>` : ''}
       <div class="metas-history-list">${goals.filter(g => g.status !== 'DRAFT').map(g => `
         <div class="metas-history-goal ${g.status === 'DESCARTADA' ? 'metas-discarded hidden' : ''}">
-          <h3>Meta #${g.id} · ${PROFILE_LABELS[g.profile] || g.profile} · ${META_STATUS_LABELS[g.status] || esc(g.status)}</h3>
+          <h3>Meta #${g.id} · ${PROFILE_LABELS[g.profile] || g.profile} · ${META_STATUS_LABELS[g.status] || esc(g.status)} · ${decisionEngineLabel(g)}</h3>
           <div data-history-slot data-goal-id="${g.id}"></div>
         </div>`).join('')}</div>
     </div>`;

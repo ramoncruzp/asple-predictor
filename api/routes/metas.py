@@ -88,6 +88,14 @@ class AllocationSwitch(BaseModel):
     actor: str = Field(min_length=1, max_length=80)
 
 
+class DecisionEngineSwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: str
+    engine: str
+    confirm: StrictBool = False
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -103,7 +111,11 @@ def _operator(request: Request):
 
 @router.get("/config")
 def get_config(request: Request):
-    return _core(request).config()
+    from grid.engines import ENGINES
+    result = _core(request).config()
+    result["engines"] = [{"name": engine.name, "version": engine.version,
+        "available": engine.available} for engine in ENGINES.values()]
+    return result
 
 
 @router.put("/config/profile")
@@ -172,6 +184,12 @@ def update_learning_switch(request: Request, body: LearningSwitch):
 @router.put("/allocation/switch")
 def update_allocation_switch(request: Request, body: AllocationSwitch):
     return _call(_operator(request).set_extended_allocation_switch, body.profile, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
+@router.put("/decision-engine/switch")
+def update_decision_engine(request: Request, body: DecisionEngineSwitch):
+    return _call(_operator(request).set_decision_engine, body.profile, body.engine,
         confirm=body.confirm, actor=body.actor)
 
 

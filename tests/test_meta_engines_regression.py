@@ -82,7 +82,9 @@ def test_engine_missing_from_legacy_goal_defaults_to_v1_and_start_rejects_mismat
 
 
 def test_created_goal_keeps_profile_engine_snapshot_after_profile_setting_changes(tmp_path):
+    import json
     from types import SimpleNamespace
+    from sqlalchemy import select
     from database.db_manager import DBManager
     from grid.meta import MetaCore
 
@@ -94,7 +96,13 @@ def test_created_goal_keeps_profile_engine_snapshot_after_profile_setting_change
         meta_mode_enabled=True, meta_max_active=1, alerts_enabled=False))
     goal = core.create_goal(100, 10, profile="PRUDENTE")
     assert goal["config_snapshot"]["decision_engine"] == "v1"
-    core.set_config("PRUDENTE", {"decision_engine": "v2"})
+    with db.engine.begin() as conn:
+        row = conn.execute(select(db.meta_profile_settings.c.settings).where(
+            db.meta_profile_settings.c.profile == "PRUDENTE")).scalar_one()
+        settings = json.loads(row)
+        settings["decision_engine"] = "v2"
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "PRUDENTE").values(settings=json.dumps(settings)))
     assert core.get_goal(goal["id"])["config_snapshot"]["decision_engine"] == "v1"
 
 

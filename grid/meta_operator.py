@@ -808,6 +808,37 @@ class MetaOperator:
                 enabled=bool(enabled), actor=str(actor).strip()[:80], changed_at=datetime.now(timezone.utc)))
         return {"profile": profile, "enabled": bool(enabled), "actor": str(actor).strip()[:80]}
 
+    def set_decision_engine(self, profile, engine, *, confirm, actor):
+        from sqlalchemy import select
+        from grid.engines import get_engine
+        profile = str(profile or "").upper()
+        if profile not in {"PRUDENTE", "RAPIDO"}:
+            raise ValueError("Perfil Meta no válido.")
+        selected = get_engine(engine)
+        if str(engine or "").strip().lower() != selected.name:
+            raise ValueError("Motor de decisión desconocido.")
+        if not confirm or not str(actor or "").strip():
+            raise ValueError("Confirma el cambio e indica quién lo autoriza.")
+        if not selected.available:
+            raise ValueError("El motor v2 todavía no está disponible.")
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["decision_engine"] = selected.name
+            found = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == profile)).first()
+            if found:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == profile).values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile=profile,
+                    settings=json.dumps(values, sort_keys=True), updated_at=datetime.now(timezone.utc)))
+            conn.execute(self.db.meta_engine_switch_events.insert().values(profile=profile,
+                engine=selected.name, actor=str(actor).strip()[:80], changed_at=datetime.now(timezone.utc)))
+        return {"profile": profile, "engine": selected.name, "actor": str(actor).strip()[:80]}
+
     def learning_status(self, profile):
         from sqlalchemy import select
         profile = str(profile).upper()

@@ -264,6 +264,8 @@ class MetaCore:
         merged = {**DEFAULT_PROFILES[profile], **values}
         if merged.get("decision_engine", "v1") not in {"v1", "v2"}:
             raise ValueError("decision_engine debe ser v1 o v2.")
+        if "decision_engine" in values and values["decision_engine"] != "v1":
+            raise ValueError("El motor v2 todavía no está disponible.")
         if "reconfig_persistence_reviews" in values:
             persistence = values["reconfig_persistence_reviews"]
             if isinstance(persistence, bool) or int(persistence) != float(persistence) or int(persistence) < 1:
