@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 
 def _mock_lab_api(ui_page, live_server, *, fail_apply=False, learning_v1_enabled=True):
     calls = []
+    scorecard_weekly = {"enabled": False, "changed_at": None, "actor": None}
     flags = [
         {"key": "adjust_idle_shrink_enabled", "label": "Reducción de niveles ociosos", "description": "Regla de prueba.",
          "current": False, "default": False, "origin": "default", "requires_restart": False},
@@ -58,6 +59,13 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False, learning_v1_enabled
         elif path == "/api/metas/learning-v1" and req.method == "GET":
             route.fulfill(json={"enabled": learning_v1_enabled,
                 "label": "Aprendizaje v1 apagado desde 2026-10-30T08:30:00+00:00" if not learning_v1_enabled else "Encendido"})
+        elif path == "/api/metas/scorecard-weekly" and req.method == "GET":
+            route.fulfill(json=scorecard_weekly)
+        elif path == "/api/metas/scorecard-weekly/switch" and req.method == "PUT":
+            body = req.post_data_json
+            calls.append(body)
+            scorecard_weekly.update({"enabled": body["enabled"], "actor": body["actor"], "changed_at": now})
+            route.fulfill(json=scorecard_weekly)
         elif path == "/api/grids":
             route.fulfill(json={"grids": [{"id": 17}]})
         elif path == "/api/grids/17/events":
@@ -73,6 +81,19 @@ def _mock_lab_api(ui_page, live_server, *, fail_apply=False, learning_v1_enabled
 
     ui_page.route("**/api/**", api)
     return calls
+
+
+def test_scorecard_weekly_switch_default_off_requires_actor_and_confirms(ui_page, live_server):
+    calls = _mock_lab_api(ui_page, live_server)
+    ui_page.goto(f"{live_server.url}/#lab")
+    row = ui_page.locator('[data-meta-learning-switch="GLOBAL"][data-switch-kind="scorecard-weekly"]')
+    expect(row).to_contain_text("Apagado hasta validar la primera corrida manual. No cambia decisiones.")
+    expect(row.locator("small b")).to_have_text("APAGADO")
+    row.locator("[data-switch-open]").click()
+    row.locator("[data-switch-actor]").fill("Prueba UI")
+    row.locator("[data-switch-save]").click()
+    expect(row.locator("small b")).to_have_text("ENCENDIDO")
+    assert calls[-1] == {"enabled": True, "confirm": True, "actor": "Prueba UI"}
 
 
 def test_lab_learning_meters_explain_global_learning_switch_is_off(ui_page, live_server):

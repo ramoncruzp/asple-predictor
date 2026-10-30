@@ -415,6 +415,10 @@ class DBManager:
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
             Column("changed_at", DateTime(timezone=True), nullable=False))
+        self.scorecard_switch_events = Table("scorecard_switch_events", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
+            Column("changed_at", DateTime(timezone=True), nullable=False))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),
@@ -497,6 +501,7 @@ class DBManager:
                         "learning_max_templates_per_run": 30,
                         "learning_time_budget_minutes": 20,
                         "learning_v1_enabled": True,
+                        "scorecard_weekly_enabled": False,
                         "reconfig_persistence_40d6b_migrated": True}, sort_keys=True), updated_at=now))
             else:
                 row = conn.execute(select(self.meta_profile_settings.c.settings).where(
@@ -506,6 +511,7 @@ class DBManager:
                 global_values.setdefault("learning_max_templates_per_run", 30)
                 global_values.setdefault("learning_time_budget_minutes", 20)
                 global_values.setdefault("learning_v1_enabled", True)
+                global_values.setdefault("scorecard_weekly_enabled", False)
                 if not migration_pending:
                     global_values["reconfig_persistence_40d6b_migrated"] = True
                 conn.execute(self.meta_profile_settings.update().where(

@@ -103,6 +103,13 @@ class LearningV1Switch(BaseModel):
     actor: str = Field(min_length=1, max_length=80)
 
 
+class ScorecardWeeklySwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    confirm: StrictBool = False
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -191,6 +198,17 @@ def update_learning_v1_switch(request: Request, body: LearningV1Switch):
     if service is not None:
         service.request_refresh()
     return result
+
+
+@router.get("/scorecard-weekly")
+def scorecard_weekly_status(request: Request):
+    return _operator(request).scorecard_weekly_status()
+
+
+@router.put("/scorecard-weekly/switch")
+def update_scorecard_weekly_switch(request: Request, body: ScorecardWeeklySwitch):
+    return _call(_operator(request).set_scorecard_weekly_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
 
 
 @router.put("/learning/switch")

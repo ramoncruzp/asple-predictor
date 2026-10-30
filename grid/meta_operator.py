@@ -863,6 +863,45 @@ class MetaOperator:
                 enabled=enabled, actor=str(actor).strip()[:80], changed_at=now))
         return {"enabled": enabled, "actor": str(actor).strip()[:80], "changed_at": now.isoformat()}
 
+    def scorecard_weekly_status(self):
+        from sqlalchemy import select
+        settings_table = getattr(self.db, "meta_profile_settings", None)
+        events = getattr(self.db, "scorecard_switch_events", None)
+        if settings_table is None or getattr(self.db, "engine", None) is None:
+            return {"enabled": False, "changed_at": None, "actor": None}
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(settings_table.c.settings).where(
+                settings_table.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            event = conn.execute(select(events).order_by(events.c.id.desc()).limit(1)
+                ).mappings().first() if events is not None else None
+        return {"enabled": bool(values.get("scorecard_weekly_enabled", False)),
+            "changed_at": str(event["changed_at"]) if event else None,
+            "actor": event["actor"] if event else None}
+
+    def set_scorecard_weekly_enabled(self, enabled, *, confirm, actor):
+        from sqlalchemy import select
+        if not confirm or not str(actor or "").strip():
+            raise ValueError("Confirma el cambio e indica quién lo autoriza.")
+        now = datetime.now(timezone.utc)
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values["scorecard_weekly_enabled"] = bool(enabled)
+            present = conn.execute(select(self.db.meta_profile_settings.c.profile).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).first()
+            if present:
+                conn.execute(self.db.meta_profile_settings.update().where(
+                    self.db.meta_profile_settings.c.profile == "GLOBAL").values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=now))
+            else:
+                conn.execute(self.db.meta_profile_settings.insert().values(profile="GLOBAL",
+                    settings=json.dumps(values, sort_keys=True), updated_at=now))
+            conn.execute(self.db.scorecard_switch_events.insert().values(
+                enabled=bool(enabled), actor=str(actor).strip()[:80], changed_at=now))
+        return {"enabled": bool(enabled), "actor": str(actor).strip()[:80], "changed_at": now.isoformat()}
+
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
         from grid.engines import get_engine

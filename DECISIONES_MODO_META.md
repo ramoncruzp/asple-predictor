@@ -436,4 +436,7 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 - C43-7 optimiza el c?lculo causal; benchmark de 218.000 velas: 0,184 s para 24 h y 0,212 s para 72 h.
 - C43-8 guarda cobertura causal, IC de factores, pron?stico vivo con escala ra?z de H cuando hay SQLite expl?cita, veredictos por s?mbolo y agregados.
 - C43-9/10 conectan al runner los objetivos de ruptura, r?gimen, direcci?n y correlaci?n mensual. Los resultados son m?tricas de investigaci?n; no se conectan al motor v1.
-- El panel muestra veredictos agregados y detalle por moneda. El job semanal queda pendiente de C43-12 y no est? registrado todav?a.
+- El panel muestra veredictos agregados y detalle por moneda. El job semanal C43-12 se registra al arranque, comprueba el interruptor GLOBAL al disparar y permanece apagado por defecto hasta validar una corrida manual.
+
+
+- C43-12: el job semanal queda bajo `scorecard_weekly_enabled=false` por defecto; solo un actor confirmado puede cambiarlo. Cambiarlo en caliente no requiere reiniciar. Evento auditado en `scorecard_switch_events`.

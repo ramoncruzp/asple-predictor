@@ -49,6 +49,7 @@ from grid.grid_intelligence import GridIntelligenceJob
 from grid.intelligence_snapshot import IntelligenceSnapshotService
 from data.market_store import CandleStore, market_db_path
 from data.market_sync import MarketSyncJob
+from scheduler.scorecard_job import ScorecardJob
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -139,6 +140,9 @@ async def lifespan(app: FastAPI):
     market_sync_job = None
     market_path = market_db_path(settings.market_data_db)
     app.state.market_data_path = market_path
+    scorecard_job = ScorecardJob(db, market_path)
+    app.state.scorecard_job = scorecard_job
+    scorecard_job.start()
     if settings.market_sync_enabled and market_path.is_file():
         market_sync_job = MarketSyncJob(CandleStore(market_path), public_market_client)
         market_sync_job.start()
@@ -309,6 +313,7 @@ async def lifespan(app: FastAPI):
         if grid_monitor is not None:
             grid_monitor.stop()
         grid_intelligence_job.stop()
+        scorecard_job.stop()
         if market_sync_job is not None:
             market_sync_job.stop()
         intelligence_snapshot.shutdown()

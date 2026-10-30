@@ -495,3 +495,18 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-api-finite-3e03d
 
 
 Resultado 43c-11: script/API con 3 monedas sint?ticas ? 200 d?as: 2 passed en 24,86 s; reporte con resumen, veredictos, factores, deciles, r?gimen/direcci?n y correlaci?n. La API devolvi? solo la ?ltima corrida `completed`, agregado y filas por moneda. Tiempo del runner (horizonte 24 h, captura del resumen persistido): SYN1USDT 6,849 s; SYN2USDT 6,699 s; SYN3USDT 7,992 s. La cobertura fue sint?tica, no S1.
+
+
+## 43c-12 ? job semanal apagado por defecto
+
+Comando anotado antes de probar ajuste global, evento auditado, confirmaci?n y scheduler semanal:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c12-job-68ad022d'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scorecard_job.py --basetemp="$base"
+```
+
+Comando anotado antes de verificar el interruptor en la vista Laboratorio:
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c12-ui-310a0d71'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/ui/test_laboratorio.py -k scorecard_weekly_switch_default_off_requires_actor_and_confirms -q --tb=short --basetemp="$base"
+```
+
+Resultado 43c-12: 3 pruebas pasaron en 1,42 s (ajuste global inicia apagado, se omite el c?lculo mientras est? apagado, se calcula al encender, actor/evento confirmados y cron domingo 06:20 UTC con max_instances=1/coalesce). UI Laboratorio: 1 passed en 2,72 s; `node --check frontend/metas.js` pas?. El job se registra al arranque y lee el ajuste al disparar, as? que el encendido no requiere reinicio.

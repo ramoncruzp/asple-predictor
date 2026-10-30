@@ -642,9 +642,10 @@
     if (!host) return;
     const profiles = ['RAPIDO', 'PRUDENTE'];
     try {
-      const [data, intelligence, config, learningV1] = await Promise.all([
+      const [data, intelligence, config, learningV1, scorecardWeekly] = await Promise.all([
         Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`))),
-        apiGet('/api/intelligence'), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1')]);
+        apiGet('/api/intelligence'), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1'),
+        apiGet('/api/metas/scorecard-weekly')]);
       const profileConfigs = config.profiles || {};
       const learningPausedMessage = learningV1.enabled ? null
         : `${learningV1.label}; este medidor no avanza`;
@@ -687,7 +688,10 @@
         return learningRow + allocationRow + engineRow + extraRows;
       }).join('');
       const globalLearningRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="learning-v1"><div class="global-flag-copy"><h3>Aprendizaje diario v1 (motor actual)</h3><p>Apagado: no corre el job de las 08:30 ni guarda muestras nuevas. No cambia decisiones. No borra datos.</p><small class="muted">Estado: <b>${learningV1.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; ${esc(learningV1.label)}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${learningV1.enabled ? 'Apagar' : 'Encender'}</button></article>`;
-      const rows = globalLearningRow + profileRows;
+      const scorecardChanged = scorecardWeekly.changed_at
+        ? `${esc(scorecardWeekly.actor || 'operador')} &middot; ${esc(scorecardWeekly.changed_at)}` : 'Sin cambios';
+      const scorecardWeeklyRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="scorecard-weekly"><div class="global-flag-copy"><h3>Marcador semanal</h3><p>Apagado hasta validar la primera corrida manual. No cambia decisiones.</p><small class="muted">Estado: <b>${scorecardWeekly.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; ${scorecardChanged}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${scorecardWeekly.enabled ? 'Apagar' : 'Encender'}</button></article>`;
+      const rows = globalLearningRow + scorecardWeeklyRow + profileRows;
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
       host.querySelectorAll('[data-switch-open]').forEach(button => button.addEventListener('click', () => {
@@ -701,11 +705,12 @@
         const row = button.closest('[data-meta-learning-switch]'), profile = row.dataset.metaLearningSwitch;
         const actor = row.querySelector('[data-switch-actor]')?.value.trim() || '', status = row.querySelector('[role="status"]');
         const kind = row.dataset.switchKind;
-        if (!actor && (kind === 'learning' || kind === 'allocation' || kind === 'learning-v1')) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe quién confirma el cambio.'; return; }
+        if (!actor && (kind === 'learning' || kind === 'allocation' || kind === 'learning-v1' || kind === 'scorecard-weekly')) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe quién confirma el cambio.'; return; }
         button.disabled = true;
         try {
           const currentlyEnabled = row.querySelector('small b').textContent === 'ENCENDIDO';
           if (kind === 'learning-v1') await apiPut('/api/metas/learning-v1/switch', {enabled: !currentlyEnabled, confirm: true, actor});
+          else if (kind === 'scorecard-weekly') await apiPut('/api/metas/scorecard-weekly/switch', {enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'allocation') await apiPut('/api/metas/allocation/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'learning') await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else await apiPut('/api/metas/config/profile', {profile, values:{[row.dataset.settingKey]: !currentlyEnabled}});
