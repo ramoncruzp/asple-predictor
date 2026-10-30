@@ -36,15 +36,7 @@ Comando ejecutado antes de la prueba:
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a3-b7e6240f'; pytest tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
 ```
 
-Resultados iniciales: primera corrida 9 passed, 2 failed por tabla duplicada; se quitó la declaración repetida. Segunda corrida 9 passed, 2 failed por test client sin token y por intentar asignar v2 mediante API de perfil genérica; se ajustaron los dobles y la actualización de perfil para representar un cambio futuro permitido.
-
-Comando de repetición anotado antes de correr:
-
-```powershell
-$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a3-rerun-559d31ac'; pytest tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
-```
-
-Resultado de repetición: pendiente.
+Resultados iniciales: primera corrida 9 passed, 2 failed por tabla duplicada; segunda corrida 9 passed, 2 failed por test client sin token y por intentar asignar v2 mediante la API genérica de perfil. Se corrigieron las pruebas y la tabla.
 
 Comando de tercera corrida anotado antes de correr:
 
@@ -52,4 +44,38 @@ Comando de tercera corrida anotado antes de correr:
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43a3-rerun2-a38c4711'; pytest tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
 ```
 
-Resultado: 11 passed en 1,56 s. `node --check frontend/metas.js` y `git diff --check` pasaron.
+Resultado de tercera corrida: 11 passed en 1,56 s. `node --check frontend/metas.js` y `git diff --check` pasaron.
+
+## 43b-1 — almacén de velas y lector
+
+Comando ejecutado antes de la prueba:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b1-04f17c3a'; pytest tests/test_market_store.py --basetemp="$base"
+```
+
+Resultado inicial: 3 passed, 1 failed por valor esperado incorrecto en el fixture de la vela de 900 s; el valor era 102.
+
+Comando de repetición anotado antes de correr:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b1-rerun-9fa629cd'; pytest tests/test_market_store.py --basetemp="$base"
+```
+
+Resultado de repetición: 4 passed en 0,21 s. Se optimizó el conteo de huecos por upsert.
+
+Comando anotado antes de repetir tras optimizar upsert:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b1-final-64be7f03'; pytest tests/test_market_store.py --basetemp="$base"
+```
+
+Resultado final inicial: 4 passed en 0,20 s.
+
+Comando anotado antes de repetir tras añadir primeras/últimas velas y aserción WAL:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43b1-coverage-f6b82c10'; pytest tests/test_market_store.py --basetemp="$base"
+```
+
+Resultado de verificación: 4 passed en 0,25 s. `market_data.db`, `*.db-wal` y `*.db-shm` ya quedan cubiertos por `.gitignore` (`*.db`, `*.db-wal`, `*.db-shm`). La revisión de `deploy/actualizar_s1.sh` muestra respaldo de `asple_predictor.db` únicamente; el script no se modificó.

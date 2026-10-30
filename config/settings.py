@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     testnet_api_key: str = Field("tu_testnet_api_key_aqui", validation_alias="TESTNET_API_KEY")
     testnet_api_secret: str = Field("tu_testnet_secret_aqui", validation_alias="TESTNET_SECRET")
     database_url: str = Field("sqlite:///./asple_predictor.db", validation_alias="DATABASE_URL")
+    market_data_db: str = Field("market_data.db", validation_alias="MARKET_DATA_DB")
     prediction_interval_minutes: int = Field(240, validation_alias="PREDICTION_INTERVAL_MINUTES")
     verification_delay_candles: int = Field(4, validation_alias="VERIFICATION_DELAY_CANDLES")
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
