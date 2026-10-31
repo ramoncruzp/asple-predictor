@@ -263,3 +263,6 @@ def test_engine_shadow_decision_se_persiste_en_tabla_temporal(engine_databases):
     assert json.loads(row["active_decision_json"])["decision"] == "mantener"
     assert json.loads(row["shadow_decision_json"])["result"]["alternative_id"] == "alt-1"
     assert row["shadow_outcome_json"] is None
+    history = operator.engine_shadow_history(limit=10)
+    assert history["events"][0]["active_decision"]["decision"] == "mantener"
+    assert history["events"][0]["shadow_outcome"] is None

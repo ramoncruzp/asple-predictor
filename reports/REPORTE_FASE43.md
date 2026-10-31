@@ -943,3 +943,8 @@ La prueba ejecuta los métodos `_build_plan` y `_review_allocations` extraídos 
 Las decisiones activas y sombra se insertan de forma append-only en `engine_shadow_decisions` y en la bitácora de la meta. El payload conserva el resultado del motor sombra y el identificador de corrida de caché. Pruebas enfocadas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f4-shadow-20261030-r1"`, **19 pasaron en 1,64 s**.
 
 Pendiente de 43f-4: el job diario que simula la decisión sombra contra velas reales y rellena `shadow_outcome_json`; no se presenta como completado.
+
+
+#### 43f-5 ? panel v1/v2 e interruptores
+
+Laboratorio muestra los interruptores de caché y motor v2 con confirmación/actor, el estado de la última corrida, y una tabla de decisiones activas/sombra por meta. El perfil solo permite seleccionar v2 cuando el endpoint informa disponibilidad; la configuración inicial sigue en v1 y ambos interruptores permanecen apagados. Pruebas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f5-panel-v2-20261030-r3"`, **22 pasaron en 1,86 s**. `node --check` pasó para `frontend/metas.js` y `frontend/lab.js`.

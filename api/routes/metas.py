@@ -237,6 +237,11 @@ def v2_engine_status(request: Request):
     return _operator(request).v2_engine_status()
 
 
+@router.get("/engine-shadow-decisions")
+def engine_shadow_decisions(request: Request, limit: int = 100):
+    return _operator(request).engine_shadow_history(limit=limit)
+
+
 @router.put("/v2-engine/switch")
 def update_v2_engine_switch(request: Request, body: ScenarioCacheSwitch):
     return _call(_operator(request).set_v2_engine_enabled, body.enabled,

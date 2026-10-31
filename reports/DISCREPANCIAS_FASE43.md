@@ -595,3 +595,29 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f4-shadow-20261030-r
 La parte guarda decisiones activas/sombra en `engine_shadow_decisions` y la bitácora existente conserva el detalle. El marcador que simula la alternativa sombra contra velas reales y llena `shadow_outcome_json` no está implementado en este commit; el campo queda nulo.
 
 Resultado r1: **19 pasaron en 1,64 s**. El evento de decisión se persiste y el esquema contiene el campo pendiente `shadow_outcome_json`.
+
+
+## 43f-5 ? panel y controles v2
+
+Comando exacto antes de pytest (PowerShell, offline y basetemp nuevo):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f5-panel-v2-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
+```
+
+Se agregaron dos interruptores globales con actor/confirmación, estado de la última corrida, panel de decisiones sombra y bloqueo de selección de v2 si no está disponible.
+
+
+La corrida r1 de 43f-5 dio **19 pasaron y 3 fallaron en 2,27 s**. Los tres casos conservaban la expectativa antigua de v2 permanentemente no disponible. Se actualizaron para comprobar el bloqueo por falta de interruptor/contexto y el nuevo mensaje; la capacidad del código queda activable solo mediante interruptor global y caché vigente. Repetición r2:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f5-panel-v2-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
+```
+
+La r2 tuvo **21 pasaron y 1 falló** porque la prueba invocaba `review` con `operator=None`, fuera del contrato del motor. Se cambia a un operador sintético válido sin grids y se repetira con r3:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f5-panel-v2-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$base"
+```
+
+Resultado r3: **22 pasaron en 1,86 s**; `node --check frontend/metas.js` y `node --check frontend/lab.js` terminaron correctamente.

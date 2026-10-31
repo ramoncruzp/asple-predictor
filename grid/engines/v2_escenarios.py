@@ -19,6 +19,8 @@ class V2ScenarioEngine(DecisionEngine):
 
     @staticmethod
     def _global_settings(operator):
+        if operator is None or getattr(operator, "db", None) is None:
+            raise EngineUnavailable("el contexto de caché del motor v2 no está disponible")
         table = operator.db.meta_profile_settings
         with operator.db.engine.connect() as conn:
             raw = conn.execute(select(table.c.settings).where(

@@ -471,7 +471,9 @@
     if (!slot) return;
     slot.innerHTML = '<p class="muted">Cargando bitácora…</p>';
     try {
-      const page = await apiGet(`/api/metas/${goalId}/ledger?page=${ledgerState.page}&page_size=${ledgerState.pageSize}&include_valuation=${ledgerState.includeValuation}`);
+      const query = new URLSearchParams({page: String(ledgerState.page),
+        page_size: String(ledgerState.pageSize), include_valuation: String(ledgerState.includeValuation)});
+      const page = await apiGet(`/api/metas/${goalId}/ledger?${query.toString()}`);
       const filterFn = LEDGER_TYPE_FILTERS[ledgerState.type] || LEDGER_TYPE_FILTERS.all;
       const rows = page.events.filter(e => filterFn(e.event_type)).reverse();
       const totalPages = Math.max(1, Math.ceil(page.total / page.page_size));
@@ -619,7 +621,8 @@
     const slot = container.querySelector(`[data-learning-profile="${profile}"]`);
     if (!slot) return;
     try {
-      const data = await apiGet(`/api/metas/learning?profile=${profile}`);
+      const query = new URLSearchParams({profile});
+      const data = await apiGet(`/api/metas/learning?${query.toString()}`);
       slot.innerHTML = learningMarkup(data, profile);
       const stamp = container.querySelector(`[data-learning-updated="${profile}"]`);
       if (stamp) { stamp.dataset.updatedAt = String(Date.now()); stamp.textContent = 'Actualizado hace menos de un minuto'; }
@@ -642,10 +645,11 @@
     if (!host) return;
     const profiles = ['RAPIDO', 'PRUDENTE'];
     try {
-      const [data, intelligence, config, learningV1, scorecardWeekly] = await Promise.all([
-        Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?profile=${profile}`))),
+      const [data, intelligence, config, learningV1, scorecardWeekly, scenarioCache, v2Engine] = await Promise.all([
+        Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?${new URLSearchParams({profile}).toString()}`))),
         apiGet('/api/intelligence'), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1'),
-        apiGet('/api/metas/scorecard-weekly')]);
+        apiGet('/api/metas/scorecard-weekly'), apiGet('/api/metas/scenario-cache'),
+        apiGet('/api/metas/v2-engine')]);
       const profileConfigs = config.profiles || {};
       const learningPausedMessage = learningV1.enabled ? null
         : `${learningV1.label}; este medidor no avanza`;
@@ -691,7 +695,11 @@
       const scorecardChanged = scorecardWeekly.changed_at
         ? `${esc(scorecardWeekly.actor || 'operador')} &middot; ${esc(scorecardWeekly.changed_at)}` : 'Sin cambios';
       const scorecardWeeklyRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="scorecard-weekly"><div class="global-flag-copy"><h3>Marcador semanal</h3><p>Apagado hasta validar la primera corrida manual. No cambia decisiones.</p><small class="muted">Estado: <b>${scorecardWeekly.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; ${scorecardChanged}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${scorecardWeekly.enabled ? 'Apagar' : 'Encender'}</button></article>`;
-      const rows = globalLearningRow + scorecardWeeklyRow + profileRows;
+      const cacheRun = scenarioCache.latest_run;
+      const cacheRunText = cacheRun ? `${esc(cacheRun.status)} &middot; ${esc(cacheRun.as_of)} &middot; ${fmtMoney(cacheRun.seconds, 1)} s &middot; RSS ${fmtMoney(cacheRun.rss_mb, 1)} MB` : 'Sin corridas registradas';
+      const scenarioCacheRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="scenario-cache"><div class="global-flag-copy"><h3>Caché de escenarios v2</h3><p>Calcula candidatos fuera del servicio. No decide ni cambia órdenes.</p><small class="muted">Estado: <b>${scenarioCache.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; Última corrida: ${cacheRunText}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${scenarioCache.enabled ? 'Apagar' : 'Encender'}</button></article>`;
+      const v2EngineRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="v2-engine"><div class="global-flag-copy"><h3>Motor v2 disponible</h3><p>Permite usar v2 solo en metas nuevas del perfil seleccionado. Disponibilidad: ${esc(v2Engine.reason || (v2Engine.available ? 'disponible' : 'no disponible'))}. Mantén apagado hasta revisión y autorización.</p><small class="muted">Estado: <b>${v2Engine.enabled ? 'ENCENDIDO' : 'APAGADO'}</b></small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${v2Engine.enabled ? 'Apagar' : 'Encender'}</button></article>`;
+      const rows = globalLearningRow + scorecardWeeklyRow + scenarioCacheRow + v2EngineRow + profileRows;
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
       host.querySelectorAll('[data-switch-open]').forEach(button => button.addEventListener('click', () => {
@@ -705,12 +713,14 @@
         const row = button.closest('[data-meta-learning-switch]'), profile = row.dataset.metaLearningSwitch;
         const actor = row.querySelector('[data-switch-actor]')?.value.trim() || '', status = row.querySelector('[role="status"]');
         const kind = row.dataset.switchKind;
-        if (!actor && (kind === 'learning' || kind === 'allocation' || kind === 'learning-v1' || kind === 'scorecard-weekly')) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe quién confirma el cambio.'; return; }
+        if (!actor && (kind === 'learning' || kind === 'allocation' || kind === 'learning-v1' || kind === 'scorecard-weekly' || kind === 'scenario-cache' || kind === 'v2-engine')) { row.querySelector('[data-switch-actor]').focus(); status.textContent = 'Escribe quién confirma el cambio.'; return; }
         button.disabled = true;
         try {
           const currentlyEnabled = row.querySelector('small b').textContent === 'ENCENDIDO';
           if (kind === 'learning-v1') await apiPut('/api/metas/learning-v1/switch', {enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'scorecard-weekly') await apiPut('/api/metas/scorecard-weekly/switch', {enabled: !currentlyEnabled, confirm: true, actor});
+          else if (kind === 'scenario-cache') await apiPut('/api/metas/scenario-cache/switch', {enabled: !currentlyEnabled, confirm: true, actor});
+          else if (kind === 'v2-engine') await apiPut('/api/metas/v2-engine/switch', {enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'allocation') await apiPut('/api/metas/allocation/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else if (kind === 'learning') await apiPut('/api/metas/learning/switch', {profile, enabled: !currentlyEnabled, confirm: true, actor});
           else await apiPut('/api/metas/config/profile', {profile, values:{[row.dataset.settingKey]: !currentlyEnabled}});
@@ -749,7 +759,8 @@
     const slot = container.querySelector('[data-recent-adjustments]');
     if (!slot) return;
     try {
-      const page = await apiGet(`/api/metas/${goalId}/ledger?page=1&page_size=100&include_valuation=false`);
+      const query = new URLSearchParams({page: '1', page_size: '100', include_valuation: 'false'});
+      const page = await apiGet(`/api/metas/${goalId}/ledger?${query.toString()}`);
       const rows = page.events.filter(row => row.event_type === 'META_OPERATOR_RECONFIGURE').slice(0, 5);
       const allocation = page.events.find(row => row.event_type === 'META_OPERATOR_ALLOCATION_SHADOW');
       const allocationLine = allocation ? (() => {

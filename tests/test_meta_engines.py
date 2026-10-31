@@ -7,19 +7,19 @@ def test_engine_registry_and_unknown_name_default_to_v1():
     assert DEFAULT_ENGINE == "v1"
     assert set(ENGINES) == {"v1", "v2"}
     assert get_engine("v1").available is True
-    assert get_engine("v2").available is False
+    assert get_engine("v2").available is True
     assert get_engine("desconocido") is get_engine("v1")
     assert get_engine("") is get_engine("v1")
 
 
-def test_v2_plan_and_review_are_unavailable_but_shadow_is_safe():
+def test_v2_plan_and_review_are_blocked_without_context_but_shadow_is_safe():
     engine = get_engine("v2")
-    with pytest.raises(EngineUnavailable, match="motor v2 no disponible todavía"):
+    with pytest.raises(EngineUnavailable, match="contexto de cach"):
         engine.plan(None, {}, plan_kind="revision")
-    with pytest.raises(EngineUnavailable, match="motor v2 no disponible todavía"):
-        engine.review(None, {}, {}, {})
-    assert engine.shadow_review(None, {}, {}, {}) == {
-        "decision": "no_disponible", "reason": "motor v2 no disponible todavía"}
+    operator = type("Operator", (), {"core": type("Core", (), {
+        "_owned_grids": lambda _self, _goal_id: []})()})()
+    assert engine.review(operator, {"id": 1}, {}, {})["decision"] == "no_hacer_nada"
+    assert engine.shadow_review(None, {}, {}, {})["decision"] == "no_disponible"
 
 
 def test_decision_engine_switch_api_validates_and_records_event(tmp_path):
@@ -57,7 +57,7 @@ def test_decision_engine_switch_api_validates_and_records_event(tmp_path):
         unavailable = client.put("/api/metas/decision-engine/switch", json={
             "profile": "PRUDENTE", "engine": "v2", "confirm": True, "actor": "Ramón"})
         assert unavailable.status_code == 409
-        assert unavailable.json()["detail"] == "El motor v2 todavía no está disponible."
+        assert unavailable.json()["detail"].startswith("Activa primero el interruptor global")
         unconfirmed = client.put("/api/metas/decision-engine/switch", json={
             "profile": "PRUDENTE", "engine": "v1", "confirm": False, "actor": "Ramón"})
         assert unconfirmed.status_code == 409

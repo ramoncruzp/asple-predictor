@@ -32,8 +32,20 @@
       renderStats({sold, suspended});
     } catch (_) { renderStats(null); }
   }
+  async function loadEngineShadow() {
+    const host = document.getElementById('lab-engine-shadow-content');
+    if (!host) return;
+    try {
+      const query = new URLSearchParams({limit: '50'});
+      const payload = await get(`/api/metas/engine-shadow-decisions?${query.toString()}`);
+      const rows = payload.events || [];
+      if (!rows.length) { host.innerHTML = '<p class="muted">Sin decisiones v1/v2 todavía.</p>'; return; }
+      const decision = value => value?.result?.decision || value?.decision || 'sin decisión';
+      host.innerHTML = `<div class="metas-learning-scroll"><table class="data-table"><thead><tr><th>Meta</th><th>Fecha</th><th>Motor activo</th><th>Decisión activa</th><th>Motor sombra</th><th>Decisión sombra</th><th>Resultado real</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.goal_id)}</td><td>${esc(row.review_at)}</td><td>${esc(row.active_engine)}</td><td>${esc(decision(row.active_decision))}</td><td>${esc(row.shadow_engine)}</td><td>${esc(decision(row.shadow_decision))}</td><td>${row.shadow_outcome ? esc(JSON.stringify(row.shadow_outcome)) : 'Pendiente de marcador'}</td></tr>`).join('')}</tbody></table></div>`;
+    } catch (error) { host.innerHTML = `<p class="muted">No se pudo leer la bitácora de motores: ${esc(error.message)}</p>`; }
+  }
   window.loadLabPage = async function () {
-    await Promise.all([window.ASPLEGlobalFlags?.load('lab-global-settings-content'), loadStats()]);
+    await Promise.all([window.ASPLEGlobalFlags?.load('lab-global-settings-content'), loadStats(), loadEngineShadow()]);
     const host = document.getElementById('lab-global-settings-content');
     await window.ASPLEMetaLearning?.loadSwitches(host);
   };

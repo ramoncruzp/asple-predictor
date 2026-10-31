@@ -944,7 +944,39 @@ class MetaOperator:
         return {"enabled": value, "actor": actor[:80], "changed_at": now.isoformat()}
 
     def scenario_cache_status(self):
-        return self._global_switch_status("scenario_cache_enabled", "scenario_cache_switch_events")
+        result = self._global_switch_status("scenario_cache_enabled", "scenario_cache_switch_events")
+        try:
+            import sqlite3
+            from data.market_store import market_db_path
+            path = market_db_path()
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+                row = conn.execute("SELECT as_of,status,seconds,rss_mb FROM scenario_eval_runs "
+                    "ORDER BY as_of DESC LIMIT 1").fetchone()
+            result["latest_run"] = ({"as_of": row[0], "status": row[1],
+                "seconds": row[2], "rss_mb": row[3]} if row else None)
+        except Exception:
+            result["latest_run"] = None
+        return result
+
+    def engine_shadow_history(self, limit=100):
+        from sqlalchemy import select
+        table = getattr(self.db, "engine_shadow_decisions", None)
+        if table is None:
+            return {"events": []}
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(select(table).order_by(table.c.id.desc()).limit(
+                max(1, min(500, int(limit))))).mappings().all()
+        output = []
+        for row in rows:
+            item = dict(row)
+            for field in ("active_decision_json", "shadow_decision_json", "shadow_outcome_json"):
+                try:
+                    item[field.removesuffix("_json")] = json.loads(item.pop(field) or "null")
+                except (TypeError, ValueError):
+                    item[field.removesuffix("_json")] = None
+            item["review_at"] = item["review_at"].isoformat() if item.get("review_at") else None
+            output.append(item)
+        return {"events": output}
 
     def set_scenario_cache_enabled(self, enabled, *, confirm, actor):
         return self._set_global_switch("scenario_cache_enabled", "scenario_cache_switch_events",
