@@ -636,6 +636,17 @@ La función vive en `research/scenarios/recommend.py` y no se conecta a grids, F
 La recomendación es una interfaz de investigación reutilizable. No se conecta a la caché Meta, no lee la base de la aplicación ni cambia la disponibilidad del motor. 43f-4 sigue parcial: falta el job diario que mida los resultados de la decisión sombra y complete `shadow_outcome_json`.
 
 
+## 43f-3j — prueba enfocada
+
+Comando exacto ejecutado (offline, basetemp nueva en `%TEMP%`):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43f3j-20261031-a'; python -m pytest tests/test_scenario_cache_job.py tests/test_scenarios_evaluate.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp=$base -q
+```
+
+Resultado: **48 pasaron en 10,43 s**. Incluye grid pausado con inventario, exclusión de `CLOSED` vacío y pieza liberada, persistencia del conteo/IDs/estados y alternativas evaluadas con la pieza viva. La regresión de plan y revisión v1 contra `776eedf` pasó. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+
 ## 43f-7: estado y límites de cierre
 
 La regresión congelada confirma la paridad del plan y revisión operativa de v1 con `776eedf`; el bloque informativo `allocation_shadow` no forma parte del plan operativo. v2 y la caché permanecen apagados por defecto. La recomendación de 43f-6 no se conecta al operador.

@@ -468,6 +468,12 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 - **43f-4b:** el job diario completa `shadow_outcome_json` con simulaci\u00f3n sobre velas reales y est\u00e1 apagado por defecto; Laboratorio muestra el resultado al lado de la decisi\u00f3n real. No se encendi\u00f3 el marcador.
 - 43f-6 exporta la recomendación experimental aislada. No cambia decisiones reales. No habilitar v2 hasta revisión de Nexo y aprobación de Ramón.
 
+### Fase 43f-3j — piezas vivas pausadas
+
+La caché toma como piezas vivas los grids ligados mediante una fila `meta_piece_links` no liberada. Incluye estados no terminales como `PAUSED` y, aunque el estado sea terminal, conserva una pieza si aún tiene inventario u órdenes registradas; un grid `CLOSED` vacío y piezas liberadas quedan fuera. La corrida registra en `scenario_eval_runs.error` el conteo de piezas vivas y cada `grid_id` con su estado.
+
+Un Smart pausado se proyecta desde el precio actual con el simulador exacto y su misma geometría. Es una aproximación hacia adelante: el costo base de la simulación difiere del inventario real. La caché permanece apagada por defecto; v1 continúa como motor predeterminado y no se modifica.
+
 
 ### Fase 43f-3e, 43f-4b y 43f-8
 

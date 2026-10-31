@@ -73,9 +73,11 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
     db, market_path = cache_databases
     current = [
         {"candidate_key": "mantener:X", "symbol": "XUSDT", "strategy": "simple",
-            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True},
+            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True,
+            "grid_id": 11, "grid_status": "PAUSED"},
         {"candidate_key": "mantener:Y", "symbol": "YUSDT", "strategy": "simple",
-            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True},
+            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True,
+            "grid_id": 12, "grid_status": "ACTIVE"},
     ]
     alternatives = [
         {"candidate_key": "alternativa:X", "symbol": "XUSDT", "strategy": "simple",
@@ -94,11 +96,19 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
 
     def evaluate(pieces, **_kwargs):
         calls.extend(piece["candidate_key"] for piece in pieces)
-        return {"pieces": [{"piece": piece, "metrics": {"pnl_mean_usdt": 0,
-            "p_target": .5, "p_loss": 0}} for piece in pieces]}
+        rows = []
+        for piece in pieces:
+            pnl = [-.5] * 3 if piece.get("is_current") else [1.5] * 3
+            rows.append({"piece": piece, "metrics": {"pnl_mean_usdt": 0,
+                "p_target": .5, "p_loss": 0}, "scenario_outcomes": {
+                    "pnl_usdt": pnl, "loss_cut": [False] * 3,
+                    "reached": [False] * 3, "days": [None if piece.get("is_current") else 2] * 3,
+                    "inventory_qty": [1 if piece.get("is_current") else 0] * 3,
+                    "inventory_value": [10 if piece.get("is_current") else 0] * 3}})
+        return {"pieces": rows}
 
-    cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
-        "free_cash": 20, "capital": 20, "target": 1, "horizon": 15,
+    result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
+        "free_cash": 20, "capital": 20, "target": 1.1, "horizon": 15,
         "max_loss_pct": 18, "balance_approximate": False},
         store=CandleStore(market_path), app_db=db.engine.url.database,
         market_path=market_path, library_dir="unused", filters={"XUSDT": object(),
@@ -106,6 +116,103 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
         sigmas={"XUSDT": .01, "YUSDT": .01}, skipped={}, evaluator=evaluate)
 
     assert calls == ["mantener:X", "mantener:Y", "alternativa:X", "alternativa:Y"]
+    assert result["live_piece_count"] == 2
+    assert result["live_pieces"] == [{"grid_id": 11, "status": "PAUSED"},
+        {"grid_id": 12, "status": "ACTIVE"}]
+    alternative = next(row for row in result["results"]
+        if row["candidate_key"] == "alternativa:X")
+    assert alternative["metrics"]["p_target"] == 0
+    assert alternative["metrics"]["metrics_pieza_sola"]["p_target"] == .5
+
+
+def test_piezas_vivas_incluye_pausado_y_excluye_cerrado_o_liberado(cache_databases):
+    db, _market_path = cache_databases
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=3, target_input_type="USDT",
+            target_input_value=3, profile="RAPIDO", status="ACTIVE",
+            environment="testnet", created_at=now, started_at=now,
+            config_snapshot=json.dumps({"max_loss_pct": 18}))).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal_id,
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+    paused = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
+        "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
+        "status": "PAUSED", "environment": "testnet"}, [{"level_idx": 0,
+        "price": .25, "capital": 12.5, "sell_price": .27, "entry_price": .25,
+        "held_qty": 50, "state": "SELL_OPEN", "order_id": 101}])
+    closed = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
+        "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
+        "status": "CLOSED", "environment": "testnet"}, [{"level_idx": 0,
+        "price": .25, "capital": 12.5, "sell_price": None, "entry_price": None,
+        "held_qty": 0, "state": "IDLE"}])
+    released = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
+        "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
+        "status": "PAUSED", "environment": "testnet"}, [{"level_idx": 0,
+        "price": .25, "capital": 12.5, "sell_price": None, "entry_price": None,
+        "held_qty": 0, "state": "IDLE"}])
+    with db.engine.begin() as conn:
+        link_ids = []
+        for grid in (paused, closed, released):
+            link_ids.append(conn.execute(db.meta_piece_links.insert().values(
+                meta_id=goal_id, run_id=run_id, grid_id=grid["id"],
+                piece_type="grid", created_at=now)).inserted_primary_key[0])
+        conn.execute(db.meta_piece_links.update().where(
+            db.meta_piece_links.c.id == link_ids[2]).values(released_at=now))
+
+    pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id)
+
+    assert [piece["grid_id"] for piece in pieces] == [paused["id"]]
+    assert pieces[0]["grid_status"] == "PAUSED"
+    assert "Smart pausado" in pieces[0]["simulation_approximation"]
+
+
+def test_corrida_persiste_ids_y_estado_de_piezas_vivas(cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    context = {"goal_id": 7, "profile": "RAPIDO", "free_cash": 20,
+        "capital": 20, "target": 1.1, "horizon": 15,
+        "max_loss_pct": 18, "balance_approximate": False}
+    current = {"candidate_key": "mantener:7:31", "symbol": "JUPUSDT",
+        "strategy": "smart", "capital": 10, "n": 4, "low": .2, "high": .3,
+        "grid_id": 31, "grid_status": "PAUSED", "is_current": True}
+    alternative = {"candidate_key": "alternativa:jup", "symbol": "JUPUSDT",
+        "strategy": "simple", "capital": 5, "n": 6, "low": .21, "high": .29}
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: [context])
+    monkeypatch.setattr(cache_script, "_read_market_inputs", lambda *_args, **_kwargs:
+        ({"JUPUSDT": object()}, {"JUPUSDT": .25}, {"JUPUSDT": .02}, {}))
+    monkeypatch.setattr(cache_script, "_active_grid_pieces", lambda *_args: [current])
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [alternative, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {"factible": True,
+            "motivos": [], "clave_orden": [0, 0, 0]}} for row in rows])
+
+    def evaluate(pieces, **_kwargs):
+        rows = []
+        for piece in pieces:
+            pnl = [-.5] * 3 if piece.get("is_current") else [1.5] * 3
+            rows.append({"piece": piece, "metrics": {"n": 3, "p_target": .5,
+                "p_loss": 0, "pnl_mean_usdt": 0}, "scenario_outcomes": {
+                    "pnl_usdt": pnl, "loss_cut": [False] * 3,
+                    "reached": [False] * 3, "days": [None] * 3,
+                    "inventory_qty": [1 if piece.get("is_current") else 0] * 3,
+                    "inventory_value": [10 if piece.get("is_current") else 0] * 3}})
+        return {"pieces": rows}
+
+    result = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir="unused", evaluator=evaluate, max_seconds=30)
+
+    assert result["runs"][0]["status"] == "ok"
+    assert result["runs"][0]["live_piece_count"] == 1
+    with sqlite3.connect(market_path) as conn:
+        status, error = conn.execute(
+            "SELECT status,error FROM scenario_eval_runs").fetchone()
+    details = json.loads(error)
+    assert status == "ok"
+    assert details["live_piece_count"] == 1
+    assert details["live_pieces"] == [{"grid_id": 31, "status": "PAUSED"}]
 
 
 def test_cache_omite_smart_si_quedan_menos_de_120_segundos(

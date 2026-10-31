@@ -256,16 +256,27 @@ def _active_grid_pieces(app_db, goal_id):
         return []
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         rows = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
-            "g.n_levels FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
-            "WHERE l.meta_id=? AND l.released_at IS NULL AND g.status='active'", (goal_id,)).fetchall()
+            "g.n_levels,g.status,l.piece_type FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
+            "WHERE l.meta_id=? AND l.released_at IS NULL AND (UPPER(g.status) NOT IN "
+            "('CLOSED','ARCHIVED','CANCELLED','FAILED','ERROR') OR EXISTS ("
+            "SELECT 1 FROM grid_levels gl WHERE gl.grid_id=g.id AND "
+            "(COALESCE(gl.held_qty,0)>0 OR gl.order_id IS NOT NULL "
+            "OR gl.client_order_id IS NOT NULL OR gl.buy_client_order_id IS NOT NULL))) "
+            "ORDER BY g.id", (goal_id,)).fetchall()
     output = []
-    for grid_id, symbol, strategy, capital, low, high, levels in rows:
+    for grid_id, symbol, strategy, capital, low, high, levels, status, piece_type in rows:
         if str(strategy).lower() not in {"simple", "smart", "bot"}:
             continue
-        output.append({"symbol": str(symbol).upper(), "strategy": str(strategy).lower(),
+        piece = {"symbol": str(symbol).upper(), "strategy": str(strategy).lower(),
             "capital": float(capital), "low": float(low), "high": float(high),
-            "n": int(levels), "grid_id": int(grid_id), "is_current": True,
-            "candidate_key": f"mantener:{goal_id}:{grid_id}:{symbol}:{levels}:{low}:{high}"})
+            "n": int(levels), "grid_id": int(grid_id), "grid_status": str(status).upper(),
+            "piece_type": str(piece_type), "is_current": True,
+            "candidate_key": f"mantener:{goal_id}:{grid_id}:{symbol}:{levels}:{low}:{high}"}
+        if piece["strategy"] == "smart" and piece["grid_status"] == "PAUSED":
+            piece["simulation_approximation"] = (
+                "Smart pausado: geometría exacta reiniciada al precio actual; "
+                "el costo base difiere del inventario real, la decisión es hacia adelante")
+        output.append(piece)
     return output
 
 
@@ -293,13 +304,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
         horizon_days=context["horizon"])
     current_pieces = _active_grid_pieces(app_db, context["goal_id"])
+    live_piece_details = [{"grid_id": int(piece["grid_id"]),
+        "status": piece["grid_status"]} for piece in current_pieces]
     candidates = current_pieces + built["candidates"][:-1]
     if symbol_filter:
         candidates = [piece for piece in candidates
             if str(piece.get("symbol", "")).upper() == str(symbol_filter).upper()]
     progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
         "generated_candidates": len(candidates), "evaluated_count": 0,
-        "discarded": dict(built["discarded"]), "candidate_seconds": {}})
+        "discarded": dict(built["discarded"]), "candidate_seconds": {},
+        "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details})
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
@@ -472,6 +486,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     evaluated_count = len(first_rows) + len(second_rows)
     return {"status": "ok" if evaluated_count else "failed", "results": results,
         "evaluated_count": evaluated_count, "discarded": discarded,
+        "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
         "failed_candidates": failed_candidates, "skipped_symbols": skipped,
         "candidate_seconds": candidate_seconds,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
@@ -650,6 +665,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                         _json_dumps({"skipped": evaluated.get("skipped_symbols", skipped),
                             "discarded": evaluated.get("discarded", {}),
                             "evaluated_count": evaluated.get("evaluated_count", 0),
+                            "live_piece_count": evaluated.get("live_piece_count", 0),
+                            "live_pieces": evaluated.get("live_pieces", []),
                             "failed_candidates": evaluated.get("failed_candidates", {}),
                             "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
                             ensure_ascii=False),

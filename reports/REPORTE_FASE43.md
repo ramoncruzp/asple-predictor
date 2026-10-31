@@ -1032,3 +1032,11 @@ $env:ASPLE_OFFLINE='1'; python -m pytest tests\test_scenarios_candidates.py test
 ```
 
 Resultado: **58 pasaron en 10,58 s**. Incluye JUP/PEPE y FastSim, estado/persistencia bajo límites de memoria y tiempo, abandono de corridas antiguas, regresión de plan y revisión v1 contra `776eedf`, y pruebas del motor y marcador. La caché, v2 y el marcador siguen apagados por defecto. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+### 43f-3j — piezas vivas incluye grids pausados
+
+La selección de “mantener” ahora considera los enlaces de Meta no liberados y sigue el criterio de propiedad usado por `MetaCore._owned_grids`. Incluye grids `PAUSED` y otros estados no terminales; un estado terminal se conserva únicamente cuando el grid todavía tiene inventario u órdenes registradas. Así la caché conserva la pieza aunque Smart la haya pausado. Los grids `CLOSED` vacíos y los enlaces liberados se excluyen.
+
+Los grids Smart pausados se proyectan con el simulador exacto desde el precio actual y su geometría guardada. La proyección conserva el comportamiento futuro del simulador, aunque su costo base no representa el costo real del inventario. Cada corrida guarda en `scenario_eval_runs.error` el número de piezas vivas y sus `grid_id`/estados. No se alteran decisiones v1 ni defaults.
+
+Validación offline sintética: **48 pasaron en 10,43 s**, incluida selección `PAUSED`/`CLOSED`/liberada, evaluación pareada con alternativas y regresión del plan/revisión v1 contra `776eedf`. Comando y resultado exactos en `reports/DISCREPANCIAS_FASE43.md`. `scripts/revisar_codificacion.py` reportó `HALLAZGOS=0`. No se usaron S1, Testnet, `.env`, bases reales ni red.
