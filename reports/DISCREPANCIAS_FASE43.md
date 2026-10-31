@@ -545,7 +545,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-
 Resultado r6: **14 pasaron en 1,41 s**. Las pruebas cubren ranking con USDT quieto, plan sin asignación consumible, mantener por umbral/costo, delegación de cooldown al freno existente y timeout de sombra v1. No se comparó todavía la persistencia de todas las tablas antes/después; queda para el commit de regresión de v1.
 
 
-## 43f-3c ? memoria y contexto financiero
+## 43f-3c - memoria y contexto financiero
 
 Antes de las pruebas de 43f-3c, comando exacto (PowerShell; `ASPLE_OFFLINE=1`; `--basetemp` nuevo):
 
@@ -564,7 +564,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3c-memoria-20261030
 Resultado r2: **17 pasaron en 1,78 s**. Las pruebas verifican variables de entorno, ausencia de `preexec_fn`/`RLIMIT_AS`, marcado de estado `memoria`, capital libre + inventario y conservación de pruebas del motor.
 
 
-## 43f-3d ? regresión congelada de v1
+## 43f-3d - regresión congelada de v1
 
 Comando exacto antes de correr las pruebas (PowerShell, carpeta r1 nueva y modo offline):
 
@@ -584,7 +584,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3d-v1-baseline-2026
 Resultado r2: **37 pasaron en 2,27 s**. La regresión confirma que el plan operativo y la acción de revisión de v1 coinciden con los métodos congelados de `776eedf`; solo se excluye `allocation_shadow`, que es informativo.
 
 
-## 43f-4 ? persistencia de decisiones sombra (parcial)
+## 43f-4 - persistencia de decisiones sombra (parcial)
 
 Comando exacto antes de pruebas (modo offline, basetemp r1 nueva):
 
@@ -597,7 +597,7 @@ La parte guarda decisiones activas/sombra en `engine_shadow_decisions` y la bit�
 Resultado r1: **19 pasaron en 1,64 s**. El evento de decisión se persiste y el esquema contiene el campo pendiente `shadow_outcome_json`.
 
 
-## 43f-5 ? panel y controles v2
+## 43f-5 - panel y controles v2
 
 Comando exacto antes de pytest (PowerShell, offline y basetemp nuevo):
 
@@ -640,4 +640,12 @@ La recomendación es una interfaz de investigación reutilizable. No se conecta 
 
 La regresión congelada confirma la paridad del plan y revisión operativa de v1 con `776eedf`; el bloque informativo `allocation_shadow` no forma parte del plan operativo. v2 y la caché permanecen apagados por defecto. La recomendación de 43f-6 no se conecta al operador.
 
-Pendiente explícito: 43f-4 no implementó el job diario que evalúa decisiones sombra sobre velas reales y guarda `shadow_outcome_json`. La prueba sintética de caché persistió resultados con evaluador falso (4 pruebas, 0,94 s), pero no midió RSS del proceso; no se afirma una cifra de memoria sintética. El registro `rss_mb` se verificará en S1 con la consulta SQLite `mode=ro` incluida en el reporte.
+43f-4b completa ese pendiente: el job diario simula decisiones sombra maduras y persiste `shadow_outcome_json`, apagado por defecto. La prueba sintética de caché persistió resultados con evaluador falso (4 pruebas, 0,94 s), pero no midió RSS de una corrida completa; el registro `rss_mb` se verificará en S1 con la consulta SQLite `mode=ro` incluida en el reporte.
+
+
+## 43f-3e, 43f-4b y 43f-8
+
+- 43f-3e: una geometría que falla al reconstruirse en FastSim se aísla y se descarta con clave y motivo. Las pruebas cubren un filtro tipo JUP con venta neta inválida y una biblioteca PEPE; no hubo corrida de caché sobre datos desplegados ni medición de RSS de una corrida completa.
+- 43f-4b: el marcador corre en subproceso diario a las 04:20 UTC y permanece apagado por defecto. Las pruebas usan velas y base temporales; todavía no hay resultados producidos en S1. El resultado de mantener/no hacer nada se reconstruye desde eventos de fills y cierres de vela, por lo que queda pendiente contrastarlo con una ventana madura de producción.
+- 43f-8: las geometrías con P(meta) predicha y observada constantes se muestran como «sin informaci\u00f3n» y salen del agregado. La cobertura 0,88-0,90 y el empate Brier v2/v1 son el resultado consolidado comunicado para esta fase; en esta continuación no se reestimaron con BD real.
+- v1 sigue bajo prueba de regresión contra `776eedf`; el motor v2, la caché y el marcador parten apagados. No se usaron S1, Testnet, `.env`, BD reales ni red.

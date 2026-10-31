@@ -431,7 +431,7 @@ La aplicación requiere opt-in independiente por grid, 30 etiquetas maduras de l
 
 
 
-## Fase 43c, continuación ? estado del marcador
+## Fase 43c, continuación - estado del marcador
 
 - C43-7 optimiza el cálculo causal; benchmark de 218.000 velas: 0,184 s para 24 h y 0,212 s para 72 h.
 - C43-8 guarda cobertura causal, IC de factores, pronóstico vivo con escala raíz de H cuando hay SQLite explícita, veredictos por símbolo y agregados.
@@ -457,13 +457,20 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 
 
 
-### Fase 43f ? decisión de v2 y estado
+### Fase 43f - decisión de v2 y estado
 
-- **F1:** el criterio CVaR 5 % se sustituye por el desliz del corte: media ? 2 % del capital de la meta, configurable por perfil. Se conserva CVaR como métrica informativa.
-- **F2:** el motor queda fijado por meta. En una meta nueva, v2 solo puede operar si el interruptor global ?Motor v2 disponible? está encendido, el perfil ya tiene `decision_engine=v2` y la caché contextual está vigente. La configuración inicial conserva v1 y los dos interruptores globales parten apagados. El motor activo no recurre al otro si falla.
+- **F1:** el criterio CVaR 5 % se sustituye por el desliz del corte: media ≤ 2 % del capital de la meta, configurable por perfil. Se conserva CVaR como métrica informativa.
+- **F2:** el motor queda fijado por meta. En una meta nueva, v2 solo puede operar si el interruptor global **Motor v2 disponible** está encendido, el perfil ya tiene `decision_engine=v2` y la caché contextual está vigente. La configuración inicial conserva v1 y los dos interruptores globales parten apagados. El motor activo no recurre al otro si falla.
 - **F3 / D7:** `recommend_grid` queda como función experimental reutilizable para 43l; no se conecta a grids de Fase 42 en esta entrega.
 - **Mantener:** se aproxima evaluando una pieza nueva con las mismas líneas desde el precio actual; las comisiones de salida de la pieza actual se descuentan al comparar alternativas.
 - La caché horaria corre fuera del servicio, con prioridad baja, límite de 10 minutos y tope de 600 MiB donde el sistema permite imponerlo. Su capital contextual usa fills, reservas y valoración al último cierre con comisión estimada; los casos de atribución incompleta se omiten.
 - La prueba congelada de `_build_plan` y `_review_allocations` contra `776eedf` confirma que plan operativo y decisión v1 permanecen iguales. Las metas actuales siguen en v1.
-- **Pendiente:** 43f-4 persiste las decisiones activa/sombra, pero falta el job diario que simula el resultado sombra en velas reales y completa `shadow_outcome_json`. Por eso todavía no hay marcador de desempeño v1/v2 observado.
+- **43f-4b:** el job diario completa `shadow_outcome_json` con simulaci\u00f3n sobre velas reales y est\u00e1 apagado por defecto; Laboratorio muestra el resultado al lado de la decisi\u00f3n real. No se encendi\u00f3 el marcador.
 - 43f-6 exporta la recomendación experimental aislada. No cambia decisiones reales. No habilitar v2 hasta revisión de Nexo y aprobación de Ramón.
+
+
+### Fase 43f-3e, 43f-4b y 43f-8
+
+La caché cuenta geometrías evaluadas y descartadas con sus motivos, y descarta aisladamente una candidata cuando FastSim detecta filtros inválidos. El marcador registra la alternativa sombra contra velas reales cuando vence su ventana; mantener/no hacer nada se compara con el resultado reconstruido de la meta y USDT quieto tiene ganancia cero. Su job diario y su interruptor de Laboratorio están apagados por defecto.
+
+La validación deja las geometrías sin variación predictiva y observada en su fila con veredicto «sin información» y no las usa en el agregado. El resultado consolidado comunicado es empate de v2 y v1 en Brier de P(meta), con cobertura P10-P90 de 0,88-0,90. La regresión v1 contra `776eedf` conserva plan y revisión; no se habilita v2 aquí.

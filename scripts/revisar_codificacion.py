@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 WORD_QUESTION = re.compile(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]\?[A-Za-zÁÉÍÓÚáéíóúÑñ]")
+ISOLATED_HEADING_QUESTION = re.compile(r"^#+ .* \? ")
 URL = re.compile(r"https?://\S+")
 BAD_TEXT = (chr(0x00c3), chr(0x00c2), chr(0x00e2) + chr(0x20ac), chr(0xfffd), chr(0xfeff))
 
@@ -34,6 +35,8 @@ def inspect(path):
     in_fence = False
     for number, line in enumerate(text.splitlines(), 1):
         visible, in_fence = _visible_text(line, path.suffix.lower() == ".md", in_fence)
+        if path.suffix.lower() == ".md" and ISOLATED_HEADING_QUESTION.search(visible):
+            findings.append((number, "interrogación aislada en título", line[:180]))
         for match in WORD_QUESTION.finditer(visible):
             findings.append((number, "letra-?-letra", line[max(0, match.start()-24):match.end()+24]))
         for pattern in BAD_TEXT:

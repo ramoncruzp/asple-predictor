@@ -137,6 +137,14 @@ def _brier(probability, outcome):
     return float(np.mean((p - y) ** 2)) if len(p) else None
 
 
+def _has_validation_information(rows):
+    if len(rows) < 2:
+        return False
+    predicted = np.asarray([row["v2_p_target"] for row in rows], dtype=float)
+    observed = np.asarray([row["actual_target"] for row in rows], dtype=float)
+    return bool(np.ptp(predicted) > 1e-12 and np.ptp(observed) > 0)
+
+
 def _bootstrap_by_date(rows, value_fn, *, seed=43, replicas=1000):
     dates = sorted({row["date"] for row in rows})
     if not dates:
@@ -224,6 +232,28 @@ def summarize_validation(pairs, *, seed=43, replicas=1000):
         "v1_pairs": len(paired_rows), "v1_excluded_pairs": len(rows) - len(paired_rows),
         "target_calibration_5_bins": calibration,
         "verdict": "pasa" if passes else "no pasa"}
+
+
+def _summarize_geometries(by_geometry, *, seed, replicas):
+    summaries, informative_pairs, excluded_geometries = {}, [], []
+    for key, rows in by_geometry.items():
+        summary = summarize_validation(rows, seed=seed, replicas=replicas)
+        if _has_validation_information(rows):
+            summary["informative"] = True
+            informative_pairs.extend(rows)
+        else:
+            summary.update({"informative": False, "estado": "sin_informacion",
+                "verdict": "sin información"})
+            excluded_geometries.append(key)
+        summaries[key] = summary
+    aggregate = summarize_validation(informative_pairs, seed=seed, replicas=replicas)
+    aggregate["informative_geometries"] = len(by_geometry) - len(excluded_geometries)
+    aggregate["excluded_geometries"] = excluded_geometries
+    if not informative_pairs:
+        aggregate["estado"] = "sin_informacion"
+        aggregate["verdict"] = "sin información"
+    summaries["agregado"] = aggregate
+    return summaries
 
 
 def _prediction_piece(symbol, spec):
@@ -353,8 +383,5 @@ def validate_scenarios(*, db_path="market_data.db", months=12, step_days=7,
                 by_geometry.setdefault(pair["geometry"], []).append(pair)
         if progress and ((date_index + 1) % 10 == 0 or date_index + 1 == len(all_dates)):
             progress(date_index + 1, len(all_dates))
-    output["summary"] = {key: summarize_validation(rows, seed=seed, replicas=replicas)
-        for key, rows in by_geometry.items()}
-    output["summary"]["agregado"] = summarize_validation(
-        output["pairs"], seed=seed, replicas=replicas)
+    output["summary"] = _summarize_geometries(by_geometry, seed=seed, replicas=replicas)
     return output

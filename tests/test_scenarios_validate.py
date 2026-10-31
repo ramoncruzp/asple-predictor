@@ -1,7 +1,8 @@
 import numpy as np
 
 from research.scenarios.validate import (baseline_window_indices, scale_v1_geometry,
-    summarize_validation, v1_reference_price)
+    _has_validation_information, _summarize_geometries, summarize_validation,
+    v1_reference_price)
 from data.market_store import CandleStore
 from grid.sim.data import CandleData
 from research.scenarios.evaluate import evaluate_pieces
@@ -248,4 +249,36 @@ def test_validate_scenarios_wires_causal_forecast_actual_and_23_v1_windows(monke
     assert len(seen_before) == 1
     assert seen_before[0] == int(stamps[220 * 288 - 1])
     assert all(row["v1_windows"] == 23 for row in result["pairs"])
-    assert result["summary"]["agregado"]["n"] == 5
+    assert result["summary"]["agregado"]["n"] == 0
+    assert result["summary"]["agregado"]["informative_geometries"] == 0
+    assert result["summary"]["agregado"]["excluded_geometries"]
+    geometries = [row for key, row in result["summary"].items() if key != "agregado"]
+    assert geometries and all(row["verdict"] == "sin información" for row in geometries)
+
+
+def test_validation_information_requires_variation_in_predicted_and_observed_target():
+    rows = [{"v2_p_target": .4, "actual_target": 0.0} for _ in range(4)]
+    assert not _has_validation_information(rows)
+    rows[0]["v2_p_target"] = .2
+    assert not _has_validation_information(rows)
+    rows[1]["actual_target"] = 1.0
+    assert _has_validation_information(rows)
+
+
+def test_aggregate_keeps_informative_geometry_and_excludes_flat_bot_geometry():
+    def row(index, probability, reached):
+        return {"date": f"2026-10-{index:02d}", "predicted_pnl": 0,
+            "actual_pnl": 0, "actual_target": float(reached),
+            "v2_p_target": probability, "v1_p_target": .3,
+            "v2_p_loss": .1, "v1_p_loss": .1, "actual_loss": 0,
+            "predicted_p10": -1, "predicted_p90": 1,
+            "predicted_samples": [-1, 0, 1]}
+
+    summaries = _summarize_geometries({
+        "bot_n1": [row(1, .4, False), row(2, .4, False)],
+        "simple_n6": [row(3, .2, False), row(4, .8, True)],
+    }, seed=7, replicas=10)
+    assert summaries["bot_n1"]["verdict"] == "sin información"
+    assert summaries["simple_n6"]["informative"] is True
+    assert summaries["agregado"]["n"] == 2
+    assert summaries["agregado"]["excluded_geometries"] == ["bot_n1"]

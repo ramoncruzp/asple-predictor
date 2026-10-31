@@ -334,7 +334,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c5-panel-rerun2-5fc1
 Resultado 43c-5: endpoint sin BD/sin corrida y endpoint con corrida/veredicto sintéticos: 1 passed en 0,97 s. `node --check frontend/intelligence.js` pasó. El endpoint consulta `market_data.db` con `mode=ro` y la pantalla muestra última corrida, veredictos y factores.
 
 
-## 43c ? cierre de entrega parcial
+## 43c - cierre de entrega parcial
 
 Commits: a35240f (43c-0), 28f93d0 (43c-1), 16ac395 (43c-2), 241533a (43c-4), a80476a (43c-5). Sin push.
 
@@ -375,7 +375,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c7-legacy-7e69a09c';
 Resultado 43c-7: la prueba causal y la suite enfocada pasaron (4 passed en 0,09 s); regresión legacy 120 días: 1 passed en 0,26 s para 24 y 72 h, tolerancia 1e-9. Benchmark local de 218.000 velas sintéticas: horizonte 24 h, 726 puntos, 0 huecos, 0,184 s; horizonte 72 h, 242 puntos, 0 huecos, 0,212 s. EWMA recursiva dentro de tolerancia 1e-9.
 
 
-## 43c-8 ? cobertura causal, factores y veredictos
+## 43c-8 - cobertura causal, factores y veredictos
 
 Comando anotado antes de probar las métricas y la migración SQLite:
 ```powershell
@@ -402,7 +402,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c8-live-32b0c896'; i
 Resultado 43c-8: métricas/migración y panel: 4 passed en 2,15 s; runner con 180 días, veredictos por moneda/agregado, IC no nulos y cobertura causal: 1 passed en 0,83 s; modelo vivo sintético con conversión σ_horaria × √H: 1 passed en 0,08 s. Aviso deprecado de Starlette/TestClient.
 
 
-## 43c-9 ? ruptura conectada
+## 43c-9 - ruptura conectada
 
 Comando anotado antes de probar GBM/colas pesadas y su persistencia en el runner:
 ```powershell
@@ -415,7 +415,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c9-ruptura-rerun-955
 ```
 
 
-## 43c-10 ? utilidades de régimen, dirección y correlación
+## 43c-10 - utilidades de régimen, dirección y correlación
 
 Comando anotado antes de probar conteo cíclico, ER, alineación por timestamp, AUC y ruptura:
 ```powershell
@@ -462,7 +462,7 @@ Resultado 43c-10: 3 tests de utilidades pasaron en 1,52 s; la integración con r
 Discrepancia experimental 43c-9: la prueba inicial con Student-t(3) estandarizada a la misma varianza produjo factor de colas 0,80, no mayor que 1, mientras la prueba GBM sí quedó cerca de 1. Por tanto no se afirma el resultado solicitado para colas pesadas; el test solo verifica que el factor sea finito/positivo. Requiere revisar si la aproximación `meta_break_prob_v2` y el esquema de extremos OHLC representan correctamente esa hipótesis.
 
 
-## 43c-10 ? regresiones sintéticas de régimen/dirección/correlación
+## 43c-10 - regresiones sintéticas de régimen/dirección/correlación
 
 Comando anotado antes de ejecutar OU frente a tendencia y el contrato de métricas conectadas:
 ```powershell
@@ -471,7 +471,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c10-ou-90832ab7'; if
 Resultado 43c-10: 3 pruebas sintéticas pasaron en 0,39 s; OU mostró menor ER y más ciclos que tendencia, el agregado de régimen exige signo común y la correlación alinea timestamp.
 
 
-## 43c-11 ? reporte y panel completos
+## 43c-11 - reporte y panel completos
 
 Comando anotado antes de ejecutar script y API con tres monedas sintéticas de 200 días:
 ```powershell
@@ -497,7 +497,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43c11-api-finite-3e03d
 Resultado 43c-11: script/API con 3 monedas sintéticas × 200 días: 2 passed en 24,86 s; reporte con resumen, veredictos, factores, deciles, régimen/dirección y correlación. La API devolvió solo la ?ltima corrida `completed`, agregado y filas por moneda. Tiempo del runner (horizonte 24 h, captura del resumen persistido): SYN1USDT 6,849 s; SYN2USDT 6,699 s; SYN3USDT 7,992 s. La cobertura fue sintética, no S1.
 
 
-## 43c-12 ? job semanal apagado por defecto
+## 43c-12 - job semanal apagado por defecto
 
 Comando anotado antes de probar ajuste global, evento auditado, confirmación y scheduler semanal:
 ```powershell
@@ -689,7 +689,7 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e3d-filters-parity-a
 No se consultó la red ni base real. Pasos para S1: ejecutar `scripts/velas_filtros.py --db market_data.db` mediante el proxy configurado y luego `scripts/escenarios_paridad.py --db market_data.db --casos 200`.
 
 
-## 43e-3e ? benchmark de escenarios
+## 43e-3e - benchmark de escenarios
 
 Se incorporó `scripts/escenarios_velocidad.py`. Requiere la biblioteca ya construida, evalúa 1.000 escenarios a 20/45 días con FastSim Simple de seis niveles y reporta tiempo, llenados medios y RSS. La prueba usa una biblioteca sintética temporal. Comando previo a ejecutar:
 
@@ -925,28 +925,28 @@ El plan ahora usa `rank_alternatives_v2` como fuente común para ordenar candida
 Comando exacto: `pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f3b-review-20261030-r6"` (`ASPLE_OFFLINE=1`; carpeta r6 nueva). Resultado: **14 pasaron en 1,41 s**. La auditoría de persistencia de v1 antes/después y la regresión congelada contra `776eedf` quedan para 43f-3d.
 
 
-#### 43f-3c ? aislamiento y contexto de escenarios
+#### 43f-3c - aislamiento y contexto de escenarios
 
-El subproceso ya no usa `RLIMIT_AS` ni `preexec_fn`: en POSIX se inicia mediante `nice -n 10`. Se limitan OpenBLAS y OMP a un hilo y arenas de malloc a dos. El job vigila RSS durante la ejecución y mata/marca la corrida como `memoria` al superar 600 MiB. Se guarda duración por contexto y RSS máximo. La segunda pasada de Smart genera solo 200 escenarios.
+El subproceso se inicia con prioridad baja mediante `nice -n 10`. El job vigila RSS y termina la corrida si supera 600 MiB; OpenBLAS y OMP usan un hilo y malloc se limita a dos arenas. Se guardan duración por contexto y RSS máximo. La segunda pasada Smart genera 200 escenarios.
 
 La caché reconstruye efectivo libre desde fills atribuibles y reservas de compras abiertas; añade el valor de inventario liquidado al último cierre disponible y computa objetivo restante, plazo y holgura del límite de pérdida. Si falta una atribución necesaria, omite el contexto. La valoración usa cierres de velas y comisiones estimadas, no profundidad ejecutable.
 
 Comando enfocado: `pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3c-memoria-20261030-r2"` (`ASPLE_OFFLINE=1`). Resultado: **17 pasaron en 1,78 s**. El monitor RSS en Windows usa `GetProcessMemoryInfo` cuando falta psutil.
 
 
-#### 43f-3d ? regresión de v1
+#### 43f-3d - regresión de v1
 
 La prueba ejecuta los métodos `_build_plan` y `_review_allocations` extraídos del commit `776eedf` contra fixtures idénticos. El plan de asignaciones y la acción operativa de revisión coinciden; `allocation_shadow` se excluye de la igualdad porque es una proyección informativa. La corrida r1 identificó esta diferencia y r2 pasó: `pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_engines_regression.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3d-v1-baseline-20261030-r2"`, **37 pasaron en 2,27 s**.
 
 
-#### 43f-4 ? sombra cruzada y persistencia parcial
+#### 43f-4 - sombra cruzada y persistencia parcial
 
 Las decisiones activas y sombra se insertan de forma append-only en `engine_shadow_decisions` y en la bitácora de la meta. El payload conserva el resultado del motor sombra y el identificador de corrida de caché. Pruebas enfocadas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f4-shadow-20261030-r1"`, **19 pasaron en 1,64 s**.
 
-Pendiente de 43f-4: el job diario que simula la decisión sombra contra velas reales y rellena `shadow_outcome_json`; no se presenta como completado.
+43f-4b completa el marcador pendiente: el job diario simula decisiones sombra maduras sobre velas reales y persiste `shadow_outcome_json`; queda apagado por defecto.
 
 
-#### 43f-5 ? panel v1/v2 e interruptores
+#### 43f-5 - panel v1/v2 e interruptores
 
 Laboratorio muestra los interruptores de caché y motor v2 con confirmación/actor, el estado de la última corrida, y una tabla de decisiones activas/sombra por meta. El perfil solo permite seleccionar v2 cuando el endpoint informa disponibilidad; la configuración inicial sigue en v1 y ambos interruptores permanecen apagados. Pruebas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f5-panel-v2-20261030-r3"`, **22 pasaron en 1,86 s**. `node --check` pasó para `frontend/metas.js` y `frontend/lab.js`.
 
@@ -957,13 +957,13 @@ Se añadió `recommend_grid` para evaluar Simple, Smart o bot con FastSim/Smart 
 
 La función exportada recibe moneda, estrategia, capital, horizonte, precio y sigma logarítmica acumulada de 24 h; construye geometrías y delega la evaluación en `evaluate_pieces`. El horizonte y el límite de pérdida se pueden parametrizar. No está conectada al flujo operativo.
 
-### 43f-7 ? cierre de la decisión v2
+### 43f-7 - cierre de la decisión v2
 
 El flujo v1 mantiene su plan y acción de revisión: la regresión compara `_build_plan` y `_review_allocations` con las implementaciones extraídas de `776eedf`; el plan operativo y la decisión coinciden. `allocation_shadow` queda fuera de la igualdad porque es información añadida. El motor v2 requiere simultáneamente el interruptor global, el perfil configurado como `v2` y caché reciente válida. Los interruptores globales parten apagados y los perfiles existentes conservan v1. No se habilitó v2.
 
 43f-6 expone `research.scenarios.recommend_grid` para el futuro uso en 43l. Permanece aislada de Fase 42 y del operador.
 
-Pruebas y mediciones disponibles: regresión v1, **37 pasaron en 2,27 s**; caché de escenarios, **4 pasaron en 0,94 s** en la reejecución reportada de 43f-2; recomendación, **2 pasaron en 0,18 s**. Esos tiempos son de pruebas sintéticas. El test de caché usa un evaluador falso y no informó RSS medido; el subproceso de producción tiene límite de 600 MiB donde el SO admite `RLIMIT_AS`, además de registrar `rss_mb`. No se presenta un RSS sintético no medido como resultado.
+Pruebas y mediciones disponibles: regresión v1, **37 pasaron en 2,27 s**; caché de escenarios, **4 pasaron en 0,94 s** en la reejecución reportada de 43f-2; recomendación, **2 pasaron en 0,18 s**. Esos tiempos son de pruebas sintéticas. El test de caché usa un evaluador falso y no informó RSS medido; el subproceso de producción vigila RSS y termina al superar 600 MiB. No se presenta un RSS sintético no medido como resultado.
 
 Pasos para S1, después de desplegar desde el PC con `bash deploy/actualizar.sh`:
 
@@ -980,7 +980,7 @@ conn.close()
 PY
 ```
 
-3. No encender **Motor v2 disponible** hasta la revisión de Nexo y la aprobación de Ramón. El marcador de sombra de 43f-4 sigue pendiente; no usar sus filas como resultado observado.
+3. No encender **Motor v2 disponible** hasta la revisión de Nexo y la aprobación de Ramón. El marcador de sombra 43f-4b también está apagado por defecto; los resultados aparecen solo después de habilitarlo y madurar una ventana.
 
 Comando enfocado de cierre, registrado antes de ejecutarlo (basetemp nueva):
 
@@ -989,3 +989,30 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f7-cierre-20261030-r
 ```
 
 Resultado: **28 pasaron en 1,89 s**. No se usó ninguna BD real ni la red.
+
+
+### 43f-3e - caché robusta ante geometrías inválidas
+
+La generación valida compra y venta neta por nivel con cantidad redondeada, `min_qty` y `min_notional`. Si FastSim reconstruye una geometría inválida durante la evaluación, la caché divide el lote hasta aislar el candidato, guarda su clave y motivo, y continúa con los demás. El JSON de `scenario_eval_runs.error` conserva los candidatos evaluados y descartados; el estado es `ok` cuando terminó al menos uno además de USDT quieto.
+
+Prueba sintética con JUP a 0,26, `min_notional=5`, capital 50 % y 10 niveles, además de PEPE: **11 pasaron en 0,90 s**. No se midió RSS de una corrida completa; no se usó base real ni red.
+
+### 43f-4b - marcador de sombra
+
+Se añadió un job diario a las 04:20 UTC que ejecuta un subproceso con prioridad baja. El interruptor de Laboratorio **Marcador de sombra v2** queda apagado por defecto. Las ventanas maduras se miden con FastSim para Simple/bot y simulador exacto para Smart, a partir de velas 5m completas. Mantener/no hacer nada reconstruye el resultado de la meta con eventos de fills y precios de cierre; USDT quieto queda en cero. Las filas inmaduras no se marcan y las ya completadas son idempotentes. Laboratorio muestra ganancia, meta, límite y días junto a cada decisión.
+
+Pruebas con SQLite temporal y velas sintéticas, incluida selección Simple/bot, meta real, USDT quieto, inmadurez e idempotencia: **14 pasaron en 0,91 s** junto con regresiones del motor sombra. No se ejecutó el job contra datos desplegados ni se procesaron decisiones reales.
+
+### 43f-8 - cierre y validación
+
+El agregador conserva cada geometría, pero etiqueta como **sin información** las que tienen P(meta) predicha y observada constantes; las excluye del agregado e informa cuáles excluyó. `scripts/revisar_codificacion.py` detecta ahora `?` aislado entre espacios en títulos Markdown. Se corrigieron los encabezados afectados de los documentos de Fase 43.
+
+El resultado consolidado de validación reportado para esta fase es empate de v2 con v1 en Brier de P(meta) y cobertura P10-P90 entre **0,88 y 0,90**. En esta continuación solo se verificó con pruebas sintéticas la exclusión de geometrías sin información; no se leyó una BD de despliegue ni se recalculó ese resultado con datos reales.
+
+Comando exacto de cierre (offline y basetemp nueva):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; python -m pytest tests\test_scenarios_validate.py tests\test_revisar_codificacion.py tests\test_meta_own_grid_evaluation.py tests\test_shadow_marker.py tests\test_scenario_cache_job.py tests\test_scenarios_candidates.py tests\test_v2_scenario_engine.py --basetemp='C:\Users\ramon\AppData\Local\Temp\asple-43f8-64440dbf88b749aba1b8d9bec6bfb177'
+```
+
+Resultado: **59 pasaron en 6,21 s**. Se verificó la regresión congelada de v1 contra `776eedf` con fixtures temporales. No se usaron S1, Testnet, `.env`, BD reales ni red.
