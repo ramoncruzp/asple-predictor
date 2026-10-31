@@ -445,3 +445,17 @@ Se conectó el tope configurable al ranking del CLI. Comando exacto de regresió
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
 ```
 Resultado r5: **7 pasaron en 0,22 s**.
+
+## 43f-1 — generador de candidatos
+
+Comando exacto previo a las pruebas:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f1-candidatos-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_candidates.py tests/test_scenarios_objective.py --basetemp="$base"
+```
+La corrida r1 dio 6 pasaron y 1 fallo: tres geometrías Simple fueron descartadas correctamente por notional mínimo, por lo que el esperado de 18 candidatos no era válido. La prueba ahora espera 15 Simple válidos y comprueba los tres descartes. Comando corregido:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f1-candidatos-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_candidates.py tests/test_scenarios_objective.py --basetemp="$base"
+```
+Resultado r2: **7 pasaron en 0,19 s**. Los candidatos Smart se generan solo cuando el llamador entrega las dos mejores Simple de la primera pasada, para no preseleccionar Smart antes de medir.

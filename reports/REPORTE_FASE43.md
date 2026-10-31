@@ -894,3 +894,9 @@ Nada de esta parte modifica decisiones reales; v2 continúa con `available=False
 
 Pruebas enfocadas: 24 pasaron en 7,32 s. Sin S1, red, BD real ni cambios de decisiones v1.
 La regresión del ranking desde el CLI, tras conectar el ajuste configurable, pasó: 7 pruebas en 0,22 s. El escáner de codificación reportó cero hallazgos.
+
+## 43f-1 — generador de candidatos
+
+Se agregó `build_candidates` con Simple (n 6/10, anchos 0,5/1/2 σ), bots (compras −1,5/−3 %, ventas +1,5/+3 %) y capitales 100/70/50 % del disponible. Cada propuesta se valida con filtros y planificación de producción; los rechazos se agrupan por motivo. USDT quieto siempre se agrega. `build_smart_candidates` prepara hasta dos geometrías Simple para evaluación Smart posterior, sin hacer Smart en la primera pasada.
+
+Pruebas enfocadas: 7 pasaron en 0,19 s; incluye descartes de notional para PEPE sintético y presencia de USDT quieto. La codificación se vuelve a verificar al cierre de 43f.
