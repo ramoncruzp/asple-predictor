@@ -39,6 +39,7 @@ _PLAN_READ_CONTEXT = ContextVar("meta_plan_reads", default=None)
 
 # Reserva hasta el límite general de 30 s para cerrar y registrar la sombra.
 ALLOCATION_SHADOW_EVALUATION_BUDGET_S = 25.0
+META_REVIEW_CYCLE_BUDGET_S = 600.0
 
 
 def summarize_replays(rows, independent_window_days=30, target_usdt=None):
@@ -398,6 +399,7 @@ class MetaOperator:
         self._engine_failure_alert_at = {}
         self.scheduler = BackgroundScheduler(timezone="UTC")
         self._operation_lock = getattr(getattr(self.core, "monitor", None), "ops_lock", None) or threading.RLock()
+        self.review_cycle_budget_s = META_REVIEW_CYCLE_BUDGET_S
 
     def _ledger(self, meta_id, event, details, **kwargs):
         self.core._ledger(meta_id, None, event, details, **kwargs)
@@ -4912,13 +4914,62 @@ class MetaOperator:
         return result
 
     def review_active(self):
-        """Revisa una sola meta activa; el watchdog 60 s sigue siendo de MetaCore."""
+        """Revisa metas activas por turno, respetando el presupuesto de diez minutos."""
         from sqlalchemy import select
         with self.db.engine.connect() as conn:
-            row = conn.execute(select(self.db.meta_goals.c.id).where(
+            rows = conn.execute(select(self.db.meta_goals.c.id).where(
                 self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED"])).order_by(
-                    self.db.meta_goals.c.id)).first()
-        return None if row is None else self.review_once(int(row[0]))
+                    self.db.meta_goals.c.id)).all()
+        goal_ids = [int(row[0]) for row in rows]
+        if not goal_ids:
+            return None
+        if len(goal_ids) == 1:
+            return self.review_once(goal_ids[0])
+        pending_order = []
+        with self.db.engine.connect() as conn:
+            events = conn.execute(select(self.db.meta_ledger.c.meta_id,
+                self.db.meta_ledger.c.event_type).where(
+                self.db.meta_ledger.c.meta_id.in_(goal_ids),
+                self.db.meta_ledger.c.event_type.in_({"META_REVIEW_SKIPPED_BUDGET",
+                    "META_REVIEW_FAILED", "META_OPERATOR_REVIEW_DECISION"})).order_by(
+                        self.db.meta_ledger.c.ts.desc(), self.db.meta_ledger.c.id.desc())).all()
+        latest_event = {}
+        for meta_id, event_type in events:
+            latest_event.setdefault(int(meta_id), str(event_type))
+        pending_order = [meta_id for meta_id in goal_ids
+            if latest_event.get(meta_id) == "META_REVIEW_SKIPPED_BUDGET"]
+        order = pending_order + [meta_id for meta_id in goal_ids if meta_id not in pending_order]
+        started = time.monotonic()
+        reviewed = []
+        skipped = []
+        errors = []
+        for index, meta_id in enumerate(order):
+            if index and time.monotonic() - started >= float(self.review_cycle_budget_s):
+                skipped = order[index:]
+                for skipped_id in skipped:
+                    try:
+                        self._ledger(skipped_id, "META_REVIEW_SKIPPED_BUDGET", {
+                            "reason": "presupuesto de ciclo de revisiones agotado",
+                            "budget_seconds": float(self.review_cycle_budget_s),
+                            "pending_count": len(skipped)})
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "No se pudo registrar meta omitida por presupuesto: %s", skipped_id)
+                break
+            try:
+                reviewed.append({"meta_id": meta_id, "result": self.review_once(meta_id)})
+            except Exception as exc:
+                detail = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+                errors.append({"meta_id": meta_id, **detail})
+                try:
+                    self._ledger(meta_id, "META_REVIEW_FAILED", detail)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "No se pudo registrar el fallo de revisión de Meta %s", meta_id)
+                logging.getLogger(__name__).exception(
+                    "Falló la revisión de Meta %s; continúa el ciclo", meta_id)
+        return {"status": "budget_skipped" if skipped else "completed",
+            "reviewed": reviewed, "skipped_budget": skipped, "errors": errors}
 
     def precompute_daily(self):
         """Precarga Advisor/replay de perfiles sin tomar el lock del monitor."""

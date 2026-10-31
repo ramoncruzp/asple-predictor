@@ -669,6 +669,16 @@ $env:ASPLE_OFFLINE='1'; python -m py_compile research/scenarios/fastsim.py resea
 
 Resultado: **142 pasaron en 11,31 s**. Incluye el estado exacto de grid 13 pausado bajo el piso, SELL abiertas que siguen ejecutándose, equivalencia `initial_cells`/`plan_cells`, marcadores `mantener_fallido`/`sin_baseline`, hash congelado de FastSim y regresión de plan/revisión v1 contra `776eedf`. `py_compile` pasó. `scripts/revisar_codificacion.py`: `HALLAZGOS=0`. No se usaron S1, Testnet, `.env`, bases reales ni red.
 
+## 43h-0a — revisión secuencial de metas activas
+
+Comando exacto de pruebas enfocadas:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0a-20261031-e'; python -m pytest tests/test_meta_multi_goal.py tests/test_meta_engines_regression.py tests/test_meta_review_resilience.py --basetemp=$base -q
+```
+
+Resultado: **17 pasaron en 0,68 s**. Cubre dos metas, error aislado en la primera, prioridad de pendientes por presupuesto, retorno idéntico con una sola meta y regresiones v1 existentes. La comparación heredada normaliza `elapsed_s` del cálculo en sombra, que varía entre ejecuciones sin cambiar la decisión ni los demás datos. La regresión completa de watchdog/caché con una meta queda para 43h-0e. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
 
 ## 43f-7: estado y límites de cierre
 

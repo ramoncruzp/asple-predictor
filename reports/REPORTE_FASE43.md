@@ -1052,3 +1052,8 @@ Cuando el capital nominal vivo supera el disponible, la caché registra un aviso
 La caché reconstruye las celdas desde `grid_levels`, los flujos de efectivo desde `grid_events` y el inventario actual. FastSim recibe ese estado mediante `initial_cells`; no exige que el precio inicial esté dentro del rango. En Smart pausado, las ventas abiertas siguen activas y no se abren compras mientras el cierre esté fuera del piso/techo. Esta aproximación conserva la geometría y el inventario actuales, pero no las pausas dinámicas de Smart por sigma.
 
 El almacén offline no contiene el mejor bid ni una valoración ejecutable reciente de la meta. Por eso se usa el último cierre neto de comisión como proxy y la pieza persiste una advertencia para que la cifra no se confunda con valoración de profundidad exacta. Si falla “mantener”, la corrida guarda `mantener_fallido`, no simula las alternativas y las marca `sin_baseline`. Validación enfocada: **142 pruebas pasaron en 11,31 s**; incluye el hash congelado de FastSim, paridad y regresión de v1 contra `776eedf`. El comando final está en `reports/DISCREPANCIAS_FASE43.md`. Todo sigue apagado por defecto.
+
+
+### 43h-0a — el operador revisa todas las metas activas
+
+`review_active()` ahora visita las metas `ACTIVE` y `PIECES_BLOCKED` en serie. Un fallo se registra y continúa con la meta siguiente. El ciclo dura como máximo 10 minutos; lo que queda pendiente registra `META_REVIEW_SKIPPED_BUDGET` y se adelanta en la siguiente pasada. El camino de una meta mantiene el resultado legado. Pruebas enfocadas: **17 pasaron en 0,68 s**; comando exacto en `reports/DISCREPANCIAS_FASE43.md`. La regresión completa de watchdog y caché con una meta queda para 43h-0e.

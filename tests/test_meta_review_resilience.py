@@ -112,7 +112,14 @@ def test_normal_review_matches_dd10892_comparison_and_real_decision():
     reference._active_review_choices = MethodType(namespace["_active_review_choices"], reference)
     for _ in range(2):
         assert actual.review_once(3) == reference.review_once(3)
-        assert actual_core.events == reference_core.events
+        actual_events = copy.deepcopy(actual_core.events)
+        reference_events = copy.deepcopy(reference_core.events)
+        for events in (actual_events, reference_events):
+            for event in events:
+                shadow = event.get("details", {}).get("engine_shadow")
+                if isinstance(shadow, dict):
+                    shadow.pop("elapsed_s", None)
+        assert actual_events == reference_events
 
 
 def test_rotation_gate_with_no_current_alternative_keeps_existing_guard():

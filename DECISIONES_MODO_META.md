@@ -482,6 +482,10 @@ Para grids terminales, una referencia de orden no basta para considerar viva la 
 
 “Mantener” parte de los niveles, inventario, órdenes abiertas, reservas y efectivo atribuible reconstruidos desde la BD; ya no vuelve a planificar un grid nuevo. Si un Smart está pausado fuera de rango, FastSim conserva sus ventas abiertas y espera para colocar compras hasta que el cierre vuelva al rango. Esta comparación hacia adelante no reproduce las pausas dinámicas por sigma de Smart. El almacén offline no conserva el mejor bid actual ni una valoración ejecutable reciente; se usa el cierre más reciente como proxy y se persiste una advertencia de valoración en los parámetros de la pieza. Si falla cualquier baseline vivo, la corrida registra `mantener_fallido`, omite la evaluación de alternativas y las etiqueta `sin_baseline`. La ruta por defecto de FastSim y todas las decisiones v1 permanecen iguales.
 
+### Fase 43h-0a — revisión de todas las metas activas
+
+El operador recorre todas las metas `ACTIVE` y `PIECES_BLOCKED` en orden de ID, una a la vez y bajo el mismo `_operation_lock` de cada `review_once`. Un error se registra como `META_REVIEW_FAILED` y no detiene las metas siguientes. El ciclo tiene un presupuesto de 600 segundos; las metas restantes se registran como `META_REVIEW_SKIPPED_BUDGET` y se priorizan al inicio del siguiente ciclo. Con una sola meta, `review_active()` conserva su retorno anterior.
+
 
 ### Fase 43f-3e, 43f-4b y 43f-8
 
