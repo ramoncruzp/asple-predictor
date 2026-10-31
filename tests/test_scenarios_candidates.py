@@ -4,10 +4,10 @@ from data.exchange_filters import SymbolFilters
 from research.scenarios.candidates import build_candidates, build_smart_candidates
 
 
-def _filters(min_notional="5"):
+def _filters(min_notional="5", step_size="0.00000001"):
     return SymbolFilters(tick_size=Decimal("0.00000001"), min_price=Decimal("0.00000001"),
-        max_price=Decimal("100000"), step_size=Decimal("0.00000001"),
-        min_qty=Decimal("0.00000001"), max_qty=Decimal("100000000"),
+        max_price=Decimal("100000"), step_size=Decimal(step_size),
+        min_qty=Decimal(step_size), max_qty=Decimal("100000000"),
         min_notional=Decimal(min_notional), apply_min_to_market=True,
         max_num_orders=None)
 
@@ -32,6 +32,18 @@ def test_candidate_generator_discards_pepe_grid_below_per_cell_notional():
         horizon_days=20)
     assert result["invalid_count"] > 0
     assert any("notional" in reason.lower() for reason in result["discarded"])
+    assert result["candidates"][-1]["strategy"] == "usdt_quieto"
+
+
+def test_candidate_generator_descarta_venta_neta_jup_con_capital_50_y_n10():
+    result = build_candidates(symbols=["JUPUSDT"], capital_libre=106,
+        perfil="RAPIDO", filters_by_symbol={"JUPUSDT": _filters("5", "1")},
+        price_by_symbol={"JUPUSDT": .26}, sigma_by_symbol={"JUPUSDT": .015},
+        horizon_days=15)
+    assert any("net sell" in reason.lower() or "venta" in reason.lower()
+        for reason in result["discarded"])
+    assert not any(row["strategy"] == "simple" and row["n"] == 10
+        and row["capital"] == 53 for row in result["candidates"])
     assert result["candidates"][-1]["strategy"] == "usdt_quieto"
 
 

@@ -175,22 +175,24 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     candidates = built["candidates"][:-1]
     candidates.extend(_active_grid_pieces(app_db, context["goal_id"]))
     pieces = [dict(row) for row in candidates]
-    first = evaluator(pieces, perfil=context["profile"], capital=capital,
+    eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
         max_loss_pct=context["max_loss_pct"], n_scenarios=SCENARIO_COUNT, n_smart=200,
-        seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas") if pieces else {
-            "pieces": [], "skipped_symbols": {}}
+        seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
+    first_rows, failed_candidates = _evaluate_with_isolation(evaluator, pieces, **eval_kwargs)
+    first = {"pieces": first_rows, "skipped_symbols": skipped}
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
         capital_meta=capital) if first["pieces"] else []
     simple_ranked = [row for row in ranked if row.get("piece", {}).get("strategy") == "simple"][:2]
     smart = build_smart_candidates(simple_ranked)
     second_rows = []
     if smart:
-        second = evaluator(smart, perfil=context["profile"], capital=capital,
-            meta=context["target"], horizon_days=context["horizon"],
+        second_rows, smart_errors = _evaluate_with_isolation(evaluator, smart,
+            perfil=context["profile"], capital=capital, meta=context["target"],
+            horizon_days=context["horizon"],
             max_loss_pct=context["max_loss_pct"], n_scenarios=200, n_smart=200,
             seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
-        second_rows = second.get("pieces", [])
+        failed_candidates.update(smart_errors)
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
     for row in [*first.get("pieces", []), *second_rows]:
@@ -211,8 +213,14 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0},
         "objective": {"factible": True, "motivos": [], "clave_orden": (0, 0, 0)}}
     results.append(quiet)
-    return {"status": "ok", "results": results,
-        "discarded": built["discarded"], "skipped_symbols": skipped}
+    discarded = dict(built["discarded"])
+    for reason in failed_candidates.values():
+        label = reason.split(":", 1)[0]
+        discarded[label] = discarded.get(label, 0) + 1
+    evaluated_count = len(first_rows) + len(second_rows)
+    return {"status": "ok" if evaluated_count else "failed", "results": results,
+        "evaluated_count": evaluated_count, "discarded": discarded,
+        "failed_candidates": failed_candidates, "skipped_symbols": skipped}
 
 
 def _candidate_key(piece):
@@ -229,6 +237,24 @@ def _scenario_metrics(row):
         "p_loss": sum(bool(item["loss_cut"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss_ci95": [0, 1] if pnls else [None, None], "cvar_5_usdt": 0,
         "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0}
+
+
+def _evaluate_with_isolation(evaluator, pieces, **kwargs):
+    """Aísla geometrías que hacen fallar FastSim sin perder las válidas."""
+    if not pieces:
+        return [], {}
+    try:
+        result = evaluator(pieces, **kwargs)
+        return list(result.get("pieces", [])), {}
+    except (ValueError, ArithmeticError) as exc:
+        if len(pieces) == 1:
+            piece = pieces[0]
+            key = str(piece.get("candidate_key") or _candidate_key(piece))
+            return [], {key: str(exc)[:240]}
+        middle = len(pieces) // 2
+        left, left_errors = _evaluate_with_isolation(evaluator, pieces[:middle], **kwargs)
+        right, right_errors = _evaluate_with_isolation(evaluator, pieces[middle:], **kwargs)
+        return left + right, {**left_errors, **right_errors}
 
 
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
@@ -264,7 +290,10 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
                     "WHERE run_id=?", (evaluated["status"],
                         json.dumps({"skipped": evaluated.get("skipped_symbols", skipped),
-                            "discarded": evaluated.get("discarded", {})}, ensure_ascii=False),
+                            "discarded": evaluated.get("discarded", {}),
+                            "evaluated_count": evaluated.get("evaluated_count", 0),
+                            "failed_candidates": evaluated.get("failed_candidates", {})},
+                            ensure_ascii=False),
                         time.perf_counter() - context_started, _rss_max_mb(), run_id))
             results_summary.append({"run_id": run_id, "context_seconds":
                 time.perf_counter() - context_started, **evaluated})

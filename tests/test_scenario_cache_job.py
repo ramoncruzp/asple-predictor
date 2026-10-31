@@ -161,11 +161,13 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
     piece = {"candidate_key": "simple-test", "symbol": "JUPUSDT",
         "strategy": "simple", "capital": 50.0, "n": 6,
         "low": .2, "high": .3}
+    invalid_piece = {"candidate_key": "simple-invalid", "symbol": "JUPUSDT",
+        "strategy": "simple", "capital": 25.0, "n": 10, "low": .2, "high": .3}
     monkeypatch.setattr(cache_script, "_read_market_inputs",
         lambda _store: ({"JUPUSDT": object()}, {"JUPUSDT": .25},
             {"JUPUSDT": .04}, {}))
     monkeypatch.setattr(cache_script, "build_candidates",
-        lambda **_kwargs: {"candidates": [piece, {"strategy": "usdt_quieto"}],
+        lambda **_kwargs: {"candidates": [piece, invalid_piece, {"strategy": "usdt_quieto"}],
             "discarded": {}})
     monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
     monkeypatch.setattr(cache_script, "rank_alternatives_v2",
@@ -174,6 +176,8 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
             for row in rows])
 
     def evaluate(pieces, **_kwargs):
+        if any(candidate["candidate_key"] == "simple-invalid" for candidate in pieces):
+            raise ValueError("level 5 net sell does not meet quantity/notional filters")
         return {"pieces": [{"piece": candidate, "metrics": {"n": 1000,
             "pnl_mean_usdt": 1.2, "p_target": .4, "p_loss": .1,
             "p_loss_ci95": [.08, .12], "cvar_5_usdt": -2,
@@ -187,8 +191,12 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
 
     assert result["contexts"] == 1
     assert result["runs"][0]["status"] == "ok"
+    assert result["runs"][0]["evaluated_count"] == 1
+    assert result["runs"][0]["discarded"]["level 5 net sell does not meet quantity/notional filters"] == 1
     with sqlite3.connect(market_path) as conn:
         rows = conn.execute("SELECT strategy FROM scenario_eval_results ORDER BY strategy").fetchall()
-        status = conn.execute("SELECT status FROM scenario_eval_runs").fetchone()[0]
+        status, error = conn.execute("SELECT status,error FROM scenario_eval_runs").fetchone()
     assert rows == [("simple",), ("usdt_quieto",)]
     assert status == "ok"
+    assert json.loads(error)["evaluated_count"] == 1
+    assert json.loads(error)["discarded"]["level 5 net sell does not meet quantity/notional filters"] == 1
