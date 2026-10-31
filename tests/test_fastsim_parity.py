@@ -25,6 +25,46 @@ def _candles(scenario, start_ts=0):
         *(scenario[key][0] for key in ("open", "high", "low", "close")), 0)
 
 
+@pytest.mark.parametrize("strategy", ["simple", "bot"])
+def test_lote_geometrias_coincide_con_candidatos_individuales(strategy):
+    rng = np.random.default_rng(4308)
+    closes = np.vstack([100 * np.exp(np.cumsum(np.r_[0.,
+        rng.normal(0, .012, 59)])) for _ in range(5)])
+    open_prices = np.column_stack([closes[:, 0], closes[:, :-1]])
+    scenarios = {"open": open_prices,
+        "high": np.maximum(open_prices, closes) * 1.003,
+        "low": np.minimum(open_prices, closes) * .997, "close": closes}
+    capitals = np.array([1000., 700., 500.])
+    if strategy == "simple":
+        lows, highs = np.array([80., 82., 84.]), np.array([120., 118., 116.])
+        combined_input = {key: np.concatenate([value] * len(capitals), axis=0)
+            for key, value in scenarios.items()}
+        combined = simulate_simple(combined_input, n_levels=6,
+            capital=np.repeat(capitals, len(closes)), low=np.repeat(lows, len(closes)),
+            high=np.repeat(highs, len(closes)), max_loss_pct=18, target_usdt=20)
+        single = [simulate_simple(scenarios, n_levels=6, capital=capital,
+            low=low, high=high, max_loss_pct=18, target_usdt=20)
+            for capital, low, high in zip(capitals, lows, highs)]
+    else:
+        buys, sells = np.array([98., 99., 97.]), np.array([104., 105., 103.])
+        combined_input = {key: np.concatenate([value] * len(capitals), axis=0)
+            for key, value in scenarios.items()}
+        combined = simulate_bot(combined_input,
+            capital=np.repeat(capitals, len(closes)),
+            buy_price=np.repeat(buys, len(closes)), sell_price=np.repeat(sells, len(closes)),
+            max_loss_pct=18, target_usdt=20)
+        single = [simulate_bot(scenarios, capital=capital, buy_price=buy,
+            sell_price=sell, max_loss_pct=18, target_usdt=20)
+            for capital, buy, sell in zip(capitals, buys, sells)]
+    for geometry_index, reference in enumerate(single):
+        start, end = geometry_index * len(closes), (geometry_index + 1) * len(closes)
+        for key in ("final_equity", "pnl_usdt", "cycles", "buys", "sells",
+                "fees_usdt", "inventory_qty", "inventory_value", "loss_cut",
+                "loss_cut_candle", "target_candle", "cash_curve", "equity_curve"):
+            np.testing.assert_allclose(combined[key][start:end], reference[key],
+                rtol=0, atol=1e-12, err_msg=f"{strategy} geometría={geometry_index} campo={key}")
+
+
 @pytest.mark.parametrize("case", range(40))
 @pytest.mark.parametrize("start_ts", [0, 1_727_740_800])
 def test_simple_batch_matches_production_replay(case, start_ts):

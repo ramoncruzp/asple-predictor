@@ -28,7 +28,8 @@ def _inputs(scenarios):
 
 def _curves(timestamps, cash_rows, equity_rows, capital):
     from grid.sim.meta_portfolio import pack_curve
-    return [pack_curve(timestamps, cash_rows[i], equity_rows[i], capital)
+    capitals = np.broadcast_to(np.asarray(capital, dtype=np.float64), (len(cash_rows),))
+    return [pack_curve(timestamps, cash_rows[i], equity_rows[i], capitals[i])
         for i in range(len(cash_rows))]
 
 
@@ -40,19 +41,22 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
     filters = FILTERS if filters is None else filters
     if not isinstance(filters, SymbolFilters):
         raise TypeError("filters debe ser SymbolFilters")
-    if resync_candles < 1 or fee_pct < 0 or capital <= 0:
+    if resync_candles < 1 or fee_pct < 0:
         raise ValueError("parámetros de capital, comisión o resincronización inválidos")
     if max_loss_pct is not None and not 0 < max_loss_pct < 100:
         raise ValueError("max_loss_pct debe estar entre 0 y 100")
     close = bars["close"]
     n_scenarios, n_bars = close.shape
+    capital_rows = np.broadcast_to(np.asarray(capital, dtype=np.float64), (n_scenarios,))
+    if np.any(capital_rows <= 0):
+        raise ValueError("capital debe ser positivo para cada escenario")
     lows = np.broadcast_to(np.asarray(low, dtype=np.float64), (n_scenarios,))
     highs = np.broadcast_to(np.asarray(high, dtype=np.float64), (n_scenarios,))
     plans_by_scenario = []
     for scenario in range(n_scenarios):
         initial_price = float(close[scenario, 0])
         lines = compute_lines(str(lows[scenario]), str(highs[scenario]), int(n_levels), filters)
-        plans_by_scenario.append(plan_cells(lines, str(capital),
+        plans_by_scenario.append(plan_cells(lines, str(float(capital_rows[scenario])),
             {"bid_price": str(initial_price * (1 - 1e-8)),
              "ask_price": str(initial_price * (1 + 1e-8)), "avg_price": str(initial_price)},
             filters, {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30}))
@@ -71,7 +75,7 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         for value in row] for row in raw_net_qty], dtype=np.float64)
     initial_buy_open = np.asarray([[plan.initial_state == "BUY_OPEN" for plan in plans]
         for plans in plans_by_scenario])
-    cash = np.full(n_scenarios, float(capital), dtype=np.float64)
+    cash = capital_rows.copy()
     held = np.zeros((n_scenarios, cells), dtype=np.float64)
     dust = np.zeros(n_scenarios, dtype=np.float64)
     order_side = np.zeros((n_scenarios, cells), dtype=np.int8)
@@ -142,7 +146,7 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         if max_loss_pct is not None:
             base = held.sum(axis=1) + dust
             mark_low = cash + base * lo * (1 - fee)
-            newly_cut = (~cut) & (mark_low <= float(capital) * (1 - max_loss_pct / 100))
+            newly_cut = (~cut) & (mark_low <= capital_rows * (1 - max_loss_pct / 100))
             if np.any(newly_cut):
                 for cell in range(cells):
                     qty_sell = held[newly_cut, cell].copy()
@@ -170,17 +174,17 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
             curve_cash[:, j] = cash
             curve_equity[:, j] = cash + (held.sum(axis=1) + dust) * cls * (1 - fee)
             if target_enabled:
-                hit = (target_candle < 0) & (cash >= float(capital) + float(target_usdt))
+                hit = (target_candle < 0) & (cash >= capital_rows + float(target_usdt))
                 target_candle[hit] = i
     final_equity = cash + (held.sum(axis=1) + dust) * close[:, -1] * (1 - fee)
-    return {"final_equity": final_equity, "pnl_usdt": final_equity - float(capital),
+    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
         "cycles": sales.copy(), "buys": buys, "sells": sales, "fees_usdt": fees,
         "inventory_qty": held.sum(axis=1) + dust,
         "inventory_value": (held.sum(axis=1) + dust) * close[:, -1],
         "loss_cut": cut, "loss_cut_candle": cut_candle, "target_candle": target_candle,
         "timestamps": curve_timestamps, "cash_curve": curve_cash.astype(np.float32),
         "equity_curve": curve_equity.astype(np.float32),
-        "curves": (_curves(curve_timestamps, curve_cash, curve_equity, capital)
+        "curves": (_curves(curve_timestamps, curve_cash, curve_equity, capital_rows)
             if pack_curves else None),
         "low": lows.copy(), "high": highs.copy(), "n_levels": n_levels}
 
@@ -194,14 +198,15 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
     fee = float(fee_pct) / 100
     close = bars["close"]
     count, n_bars = close.shape
+    capital_rows = np.broadcast_to(np.asarray(capital, dtype=np.float64), (count,))
     buy_prices = np.broadcast_to(np.asarray(buy_price, dtype=np.float64), (count,))
     sell_prices = np.broadcast_to(np.asarray(sell_price, dtype=np.float64), (count,))
-    if capital <= 0 or np.any(buy_prices <= 0) or np.any(sell_prices <= buy_prices) or fee < 0:
+    if np.any(capital_rows <= 0) or np.any(buy_prices <= 0) or np.any(sell_prices <= buy_prices) or fee < 0:
         raise ValueError("capital, rango o comisión inválidos para el bot")
     if np.any((sell_prices / buy_prices - 1) * 100 - fee_pct * 2 < min_margin_pct):
         raise ValueError("margen neto inferior al mínimo del bot")
-    qty = np.asarray([float(filters.round_qty_down(Decimal(str(capital)) /
-        (Decimal(str(price)) * (1 + Decimal(str(fee)))))) for price in buy_prices])
+    qty = np.asarray([float(filters.round_qty_down(Decimal(str(capital_rows[index])) /
+        (Decimal(str(price)) * (1 + Decimal(str(fee)))))) for index, price in enumerate(buy_prices)])
     if np.any(qty < float(filters.min_qty)) or np.any(qty * buy_prices < float(filters.min_notional)):
         raise ValueError("notional de compra inferior al mínimo")
     net_inventory = qty * (1 - fee)
@@ -209,7 +214,7 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
         (1 - Decimal(str(fee))))) for value in qty])
     if np.any(sell_qty < float(filters.min_qty)) or np.any(sell_qty * sell_prices < float(filters.min_notional)):
         raise ValueError("notional neto de venta inferior al mínimo")
-    cash = np.full(count, float(capital), dtype=np.float64)
+    cash = capital_rows.copy()
     bought = np.zeros(count, bool); sold = np.zeros(count, bool); cut = np.zeros(count, bool)
     cut_candle = np.full(count, -1, np.int32); target_candle = np.full(count, -1, np.int32)
     inventory = np.zeros(count, dtype=np.float64); fees = np.zeros(count, dtype=np.float64)
@@ -236,7 +241,7 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
             sold[sell_mask] = True
         if max_loss_pct is not None:
             mark = cash + inventory * bars["low"][:, i] * (1 - fee)
-            mask = ~cut & (mark <= capital * (1 - max_loss_pct / 100))
+            mask = ~cut & (mark <= capital_rows * (1 - max_loss_pct / 100))
             if np.any(mask):
                 proceeds = inventory[mask] * bars["low"][mask, i] * (1 - fee)
                 fees[mask] += inventory[mask] * bars["low"][mask, i] * fee
@@ -249,13 +254,13 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
             cash_curve[:, j] = cash
             equity_curve[:, j] = cash + inventory * close[:, i] * (1 - fee)
             if target_usdt is not None:
-                mask = (target_candle < 0) & (cash >= capital + target_usdt)
+                mask = (target_candle < 0) & (cash >= capital_rows + target_usdt)
                 target_candle[mask] = i
     final_equity = cash + inventory * close[:, -1] * (1 - fee)
-    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital,
+    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
         "cycles": sold.astype(np.int32), "buys": bought.astype(np.int32), "sells": sold.astype(np.int32),
         "fees_usdt": fees, "inventory_qty": inventory, "inventory_value": inventory * close[:, -1],
         "loss_cut": cut, "loss_cut_candle": cut_candle, "target_candle": target_candle,
         "timestamps": timestamps, "cash_curve": cash_curve.astype(np.float32),
         "equity_curve": equity_curve.astype(np.float32),
-        "curves": (_curves(timestamps, cash_curve, equity_curve, capital) if pack_curves else None)}
+        "curves": (_curves(timestamps, cash_curve, equity_curve, capital_rows) if pack_curves else None)}

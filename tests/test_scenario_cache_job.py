@@ -68,6 +68,83 @@ def test_cache_excluye_rol_datos_y_registra_motivos(tmp_path):
     assert skipped["SINBIBLIOTECAUSDT"] == "biblioteca de escenarios ausente"
 
 
+def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
+        cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    current = [
+        {"candidate_key": "mantener:X", "symbol": "XUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True},
+        {"candidate_key": "mantener:Y", "symbol": "YUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .8, "high": 1.2, "is_current": True},
+    ]
+    alternatives = [
+        {"candidate_key": "alternativa:X", "symbol": "XUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .7, "high": 1.3},
+        {"candidate_key": "alternativa:Y", "symbol": "YUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .7, "high": 1.3},
+    ]
+    monkeypatch.setattr(cache_script, "_active_grid_pieces", lambda *_args: current)
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [*alternatives, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {"factible": True,
+            "motivos": [], "clave_orden": [0, 0, 0]}} for row in rows])
+    calls = []
+
+    def evaluate(pieces, **_kwargs):
+        calls.extend(piece["candidate_key"] for piece in pieces)
+        return {"pieces": [{"piece": piece, "metrics": {"pnl_mean_usdt": 0,
+            "p_target": .5, "p_loss": 0}} for piece in pieces]}
+
+    cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
+        "free_cash": 20, "capital": 20, "target": 1, "horizon": 15,
+        "max_loss_pct": 18, "balance_approximate": False},
+        store=CandleStore(market_path), app_db=db.engine.url.database,
+        market_path=market_path, library_dir="unused", filters={"XUSDT": object(),
+            "YUSDT": object()}, prices={"XUSDT": 1, "YUSDT": 1},
+        sigmas={"XUSDT": .01, "YUSDT": .01}, skipped={}, evaluator=evaluate)
+
+    assert calls == ["mantener:X", "mantener:Y", "alternativa:X", "alternativa:Y"]
+
+
+def test_cache_omite_smart_si_quedan_menos_de_120_segundos(
+        cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    candidates = [
+        {"candidate_key": "simple-a", "symbol": "XUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .8, "high": 1.2},
+        {"candidate_key": "simple-b", "symbol": "XUSDT", "strategy": "simple",
+            "capital": 10, "n": 6, "low": .7, "high": 1.3},
+    ]
+    monkeypatch.setattr(cache_script, "_active_grid_pieces", lambda *_args: [])
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [*candidates, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [
+        {"candidate_key": "smart-a", "symbol": "XUSDT", "strategy": "smart",
+            "capital": 10, "n": 6, "low": .8, "high": 1.2},
+        {"candidate_key": "smart-b", "symbol": "XUSDT", "strategy": "smart",
+            "capital": 10, "n": 6, "low": .7, "high": 1.3},
+    ])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {"factible": True,
+            "motivos": [], "clave_orden": [0, 0, 0]}} for row in rows])
+
+    result = cache_script._evaluate_context({"goal_id": None, "profile": "RAPIDO",
+        "free_cash": 20, "capital": 20, "target": 1, "horizon": 15,
+        "max_loss_pct": 18, "balance_approximate": False},
+        store=CandleStore(market_path), app_db=db.engine.url.database,
+        market_path=market_path, library_dir="unused", filters={"XUSDT": object()},
+        prices={"XUSDT": 1}, sigmas={"XUSDT": .01}, skipped={},
+        evaluator=lambda pieces, **_kwargs: {"pieces": [
+            {"piece": piece, "metrics": {"pnl_mean_usdt": 0,
+                "p_target": .5, "p_loss": 0}} for piece in pieces]},
+        remaining_seconds=lambda: 119)
+
+    assert result["evaluated_count"] == 2
+    assert result["smart_omitido_por_tiempo"] == 2
+
+
 def test_timeout_queda_registrado_en_la_corrida(cache_databases):
     db, market_path = cache_databases
     _set_enabled(db, True)

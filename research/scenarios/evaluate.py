@@ -45,6 +45,39 @@ def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct):
         "capital_unused_usdt": float(capital) - float(piece_capital)}
 
 
+def _piece_geometry(piece, *, symbol, price, sigma24, horizon, profile):
+    """Resuelve la geometría de una pieza con las mismas reglas del evaluador."""
+    strategy = str(piece["strategy"]).lower()
+    low, high = piece.get("low"), piece.get("high")
+    if piece.get("width_sigma") is not None:
+        width = _log_width_from_sigma_24h(sigma24, horizon, piece["width_sigma"])
+        low, high = price * np.exp(-width), price * np.exp(width)
+    if strategy == "bot" and piece.get("buy_offset_pct") is not None:
+        low = price * (1 + float(piece["buy_offset_pct"]) / 100)
+        margin = float(profile["min_margin_pct"]) + .2
+        high = low * (1 + (margin + .2) / 100)
+        if piece.get("sell_offset_pct") is not None:
+            high = price * (1 + float(piece["sell_offset_pct"]) / 100)
+    low = float(piece.get("buy_price", low)) if strategy == "bot" else float(low)
+    high = float(piece.get("sell_price", high)) if strategy == "bot" else float(high)
+    return low, high
+
+
+def _fast_result_slice(fast, start, end, total):
+    """Extrae las filas de un candidato de la salida concatenada de FastSim."""
+    sliced = {}
+    for key, value in fast.items():
+        if key == "timestamps" or value is None:
+            sliced[key] = value
+        elif isinstance(value, np.ndarray) and value.ndim and value.shape[0] == total:
+            sliced[key] = value[start:end]
+        elif key == "curves":
+            sliced[key] = value[start:end]
+        else:
+            sliced[key] = value
+    return sliced
+
+
 def causal_sigma_24h(close, timestamp, upto_index=None, calibration=1.0):
     """Sigma EWMA logarítmica de 24 h con datos estrictamente anteriores al índice."""
     close = np.asarray(close, dtype=np.float64)
@@ -118,10 +151,14 @@ def prepare_scenario_batches(symbol, *, horizon_days, n_scenarios, seed=43,
     calibration = _calibration_factors(path, [symbol]).get(symbol, 1.0)
     batches = []
     generation_timings = {}
+    max_geometries_per_batch = 6
+    max_batch_bytes = 80 * 1024 * 1024
+    bytes_per_scenario = (max_geometries_per_batch * 4 * int(horizon_days) * 288 * 12)
+    scenario_batch_size = max(1, min(64, max_batch_bytes // max(1, bytes_per_scenario)))
     for batch in generate([symbol], horizon_days=int(horizon_days),
         n_scenarios=int(n_scenarios), seed=int(seed), price_now={symbol: price},
         sigma_today_24h={symbol: sigma_today}, sigma_long_24h={symbol: sigma_long},
-        batch_size=32, library_directory=library_dir,
+        batch_size=scenario_batch_size, library_directory=library_dir,
         calibration_factors={symbol: calibration}, timings=generation_timings):
         for values in batch["symbols"].values():
             for key in ("open", "high", "low", "close", "sigma_path"):
@@ -319,7 +356,62 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         per_index = ([{} for _ in range(next(iter(batch["symbols"].values()))["close"].shape[0])]
             if record_pairs else None)
         geometry = [None] * len(pieces) if record_pairs else None
+        grouped_indices = set()
+        if mode == "alternativas" and not keep_curves:
+            groups = {}
+            for index, piece in enumerate(pieces):
+                strategy = str(piece["strategy"]).lower()
+                if strategy not in {"simple", "bot"}:
+                    continue
+                group_key = (str(piece["symbol"]).upper(), strategy,
+                    int(piece.get("n", 6)) if strategy == "simple" else 1)
+                groups.setdefault(group_key, []).append(index)
+            for (symbol, strategy, levels), indices in groups.items():
+                for group_start in range(0, len(indices), 6):
+                    grouped = indices[group_start:group_start + 6]
+                    market = batch["symbols"][symbol]
+                    scenario_count = len(market["close"])
+                    geometries = [_piece_geometry(pieces[index], symbol=symbol,
+                        price=price[symbol], sigma24=today_calibrated[symbol],
+                        horizon=horizon, profile=profile) for index in grouped]
+                    row_lows = np.repeat(np.asarray([item[0] for item in geometries]), scenario_count)
+                    row_highs = np.repeat(np.asarray([item[1] for item in geometries]), scenario_count)
+                    row_capitals = np.repeat(np.asarray([
+                        float(pieces[index]["capital"]) for index in grouped]), scenario_count)
+                    expanded = {key: np.concatenate([market[key]] * len(grouped), axis=0)
+                        for key in ("open", "high", "low", "close")}
+                    started = time.perf_counter()
+                    if strategy == "simple":
+                        fast = simulate_simple(expanded, n_levels=levels, capital=row_capitals,
+                            low=row_lows, high=row_highs, filters=store.filters(symbol),
+                            max_loss_pct=loss_pct, target_usdt=meta,
+                            initial_timestamp=START_TS, pack_curves=False, fee_pct=fee_pct)
+                    else:
+                        fast = simulate_bot(expanded, capital=row_capitals, buy_price=row_lows,
+                            sell_price=row_highs, filters=store.filters(symbol),
+                            max_loss_pct=loss_pct, target_usdt=meta,
+                            initial_timestamp=START_TS, pack_curves=False, fee_pct=fee_pct)
+                    timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - started
+                    if timings is not None:
+                        timings["batch_count"] = timings.get("batch_count", 0) + 1
+                        timings.setdefault("batch_rows", []).append(len(row_lows))
+                        timings.setdefault("batch_seconds", []).append(time.perf_counter() - started)
+                    total_rows = len(row_lows)
+                    for group_offset, index in enumerate(grouped):
+                        start_row = group_offset * scenario_count
+                        sliced = _fast_result_slice(fast, start_row,
+                            start_row + scenario_count, total_rows)
+                        raw[index]["cycles"].extend(sliced["cycles"].tolist())
+                        raw[index]["inventory_qty"].extend(sliced["inventory_qty"].tolist())
+                        raw[index]["inventory_value"].extend(sliced["inventory_value"].tolist())
+                        raw[index]["fills"].extend((sliced["buys"] + sliced["sells"]).tolist())
+                        raw[index]["outcomes"].append(_fast_outcomes(sliced,
+                            capital=capital, piece_capital=pieces[index]["capital"],
+                            target=meta, loss_pct=loss_pct))
+                        grouped_indices.add(index)
         for index, piece in enumerate(pieces):
+            if index in grouped_indices:
+                continue
             symbol = str(piece["symbol"]).upper()
             strategy = str(piece["strategy"]).lower()
             market = batch["symbols"][symbol]
