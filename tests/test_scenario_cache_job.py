@@ -200,3 +200,98 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
     assert status == "ok"
     assert json.loads(error)["evaluated_count"] == 1
     assert json.loads(error)["discarded"]["level 5 net sell does not meet quantity/notional filters"] == 1
+
+
+def test_corrida_running_antigua_se_marca_abandonada(cache_databases):
+    from datetime import datetime, timedelta, timezone
+
+    _db, market_path = cache_databases
+    old = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+    with sqlite3.connect(market_path) as conn:
+        conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,profile,horizon_days,"
+            "n_scenarios,status) VALUES('run-antigua',?,'RAPIDO',20,1000,'running')",
+            (old,))
+
+    result = cache_script.run_cache(_db.engine.url.database, market_path,
+        evaluator=lambda *_args, **_kwargs: {"pieces": []})
+
+    assert result["contexts"] == 0
+    with sqlite3.connect(market_path) as conn:
+        status = conn.execute("SELECT status FROM scenario_eval_runs "
+            "WHERE run_id='run-antigua'").fetchone()[0]
+    assert status == "abandonada"
+
+
+def test_vigilante_distingue_memoria_y_tiempo(monkeypatch):
+    monkeypatch.setattr(cache_script, "_rss_current_mb", lambda: 51)
+    with pytest.raises(cache_script.CacheLimitExceeded) as memory:
+        cache_script._check_limits(0, 50, None)
+    assert memory.value.status == "memoria"
+
+    monkeypatch.setattr(cache_script, "_rss_current_mb", lambda: 1)
+    with pytest.raises(cache_script.CacheLimitExceeded) as timeout:
+        cache_script._check_limits(0, None, .001)
+    assert timeout.value.status == "timeout"
+
+
+@pytest.mark.parametrize(("limit_kwargs", "expected_status"), [
+    ({"max_rss_mb": 0, "max_seconds": None}, "memoria"),
+    ({"max_rss_mb": None, "max_seconds": 1}, "timeout"),
+])
+def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_path,
+        monkeypatch, limit_kwargs, expected_status):
+    db, market_path = cache_databases
+    with db.engine.begin() as conn:
+        raw = conn.execute(select(db.meta_profile_settings.c.settings).where(
+            db.meta_profile_settings.c.profile == "PRUDENTE")).scalar_one()
+        settings = json.loads(raw)
+        settings["decision_engine"] = "v2"
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "PRUDENTE").values(
+                settings=json.dumps(settings)))
+    piece = {"candidate_key": "partial", "symbol": "JUPUSDT",
+        "strategy": "simple", "capital": 50, "n": 6, "low": .2, "high": .3}
+    monkeypatch.setattr(cache_script, "_read_market_inputs",
+        lambda _store: ({"JUPUSDT": object()}, {"JUPUSDT": .25}, {"JUPUSDT": .04}, {}))
+    monkeypatch.setattr(cache_script, "build_candidates",
+        lambda **_kwargs: {"candidates": [piece, {"strategy": "usdt_quieto"}],
+            "discarded": {}, "invalid_count": 0})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2",
+        lambda rows, **_kwargs: [{"piece": row.get("piece", row),
+            "objetivo": {"factible": True, "motivos": [], "clave_orden": [0, 0, 0]}}
+            for row in rows])
+    def evaluator(pieces, **_kwargs):
+        if expected_status == "timeout":
+            import time
+            time.sleep(3)
+        return {"pieces": [{"piece": row, "metrics": {"n": 1000,
+            "pnl_mean_usdt": .1, "p_target": .2, "p_loss": .1,
+            "p_loss_ci95": [.05, .15], "cut_slippage_mean_usdt": 0,
+            "cut_slippage_p90_usdt": 0}} for row in pieces]}
+
+    result = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir=tmp_path, evaluator=evaluator, **limit_kwargs)
+
+    run_id = result["runs"][0]["run_id"]
+    assert result["runs"][0]["status"] == expected_status
+    with sqlite3.connect(market_path) as conn:
+        status, error, count = conn.execute("SELECT status,error,(SELECT COUNT(*) FROM "
+            "scenario_eval_results WHERE run_id=scenario_eval_runs.run_id) "
+            "FROM scenario_eval_runs WHERE run_id=?", (run_id,)).fetchone()
+    assert status == expected_status
+    assert count == (1 if expected_status == "memoria" else 0)
+    details = json.loads(error)
+    assert details["generated_count"] == 1
+    assert details["evaluated_count"] == count
+
+
+@pytest.mark.parametrize(("status", "exit_code"), [("memoria", 3), ("timeout", 4)])
+def test_main_devuelve_codigo_de_salida_del_limite(monkeypatch, capsys, status, exit_code):
+    monkeypatch.setattr(cache_script, "run_cache", lambda *_args, **_kwargs: {
+        "contexts": 1, "runs": [{"status": status}], "seconds": 1.0, "rss_mb": 50.0})
+
+    result = cache_script.main(["--app-db", "temporal.sqlite", "--market-db", "market.sqlite"])
+
+    assert result == exit_code
+    assert f"estado={status}" in capsys.readouterr().out

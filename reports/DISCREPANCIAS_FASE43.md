@@ -649,3 +649,8 @@ La regresión congelada confirma la paridad del plan y revisión operativa de v1
 - 43f-4b: el marcador corre en subproceso diario a las 04:20 UTC y permanece apagado por defecto. Las pruebas usan velas y base temporales; todavía no hay resultados producidos en S1. El resultado de mantener/no hacer nada se reconstruye desde eventos de fills y cierres de vela, por lo que queda pendiente contrastarlo con una ventana madura de producción.
 - 43f-8: las geometrías con P(meta) predicha y observada constantes se muestran como «sin informaci\u00f3n» y salen del agregado. La cobertura 0,88-0,90 y el empate Brier v2/v1 son el resultado consolidado comunicado para esta fase; en esta continuación no se reestimaron con BD real.
 - v1 sigue bajo prueba de regresión contra `776eedf`; el motor v2, la caché y el marcador parten apagados. No se usaron S1, Testnet, `.env`, BD reales ni red.
+
+
+### 43f-3f - memoria y tiempo de la caché
+
+La caché se cambió a generación por moneda, lotes de hasta seis candidatos y lotes de 32 escenarios en `float32`. La corrida sintética de cinco símbolos (1.000 escenarios, horizonte 15 días) completó `ok` en **223,71 s**, con pico de **204,09 MB**: 152 candidatos generados, 68 evaluados y 84 descartados. Los topes propios registran `memoria`/`timeout`, preservan resultados completados y convierten corridas `running` de más de 30 minutos en `abandonada`. Esta medición no representa producción ni sustituye la verificación en S1; no se consultaron datos desplegados.

@@ -1016,3 +1016,19 @@ $env:ASPLE_OFFLINE='1'; python -m pytest tests\test_scenarios_validate.py tests\
 ```
 
 Resultado: **59 pasaron en 6,21 s**. Se verificó la regresión congelada de v1 contra `776eedf` con fixtures temporales. No se usaron S1, Testnet, `.env`, BD reales ni red.
+
+### 43f-3f - caché dentro de los límites
+
+La caché valida la compra y la venta neta por nivel antes de FastSim con el redondeo y la comisión del 0,1 %; los bots conservan las mismas comprobaciones de compra/venta del simulador. Genera escenarios una vez por símbolo y los reutiliza en lotes de hasta seis piezas. Los lotes del generador se limitan a 32 escenarios, guardan OHLC en `float32`, y la evaluación devuelve métricas sin persistir curvas. La bisección de fallos queda acotada al lote y reutiliza esos escenarios. Libera arreglos entre lotes y monedas.
+
+`scripts/escenarios_cache.py` acepta `--max-rss-mb` (600 por defecto) y `--max-segundos` (540 por defecto). Un vigilante consulta RSS cada 2 s; usa `/proc/self/statm` en Linux y `GetProcessMemoryInfo` en Windows. Al exceder el límite registra `memoria` o `timeout`, conserva los resultados ya evaluados y el proceso devuelve código 3 o 4. Al iniciar, las corridas `running` con más de 30 minutos pasan a `abandonada`. La salida informa candidatos, motivos de descarte, evaluados, tiempo por moneda y RSS máximo.
+
+Medición con biblioteca y velas enteramente sintéticas, cinco símbolos, 1.000 escenarios y horizonte de 15 días: estado **ok**, **223,71 s**, **204,09 MB** de RSS máximo; **152** candidatos generados (incluida la segunda pasada Smart), **68** evaluados y **84** descartados. Tiempo total por moneda, incluida Smart: SYNTHAUSDT 89,556 s; SYNTHBUSDT 24,846 s; SYNTHCUSDT 24,758 s; SYNTHDUSDT 59,369 s; SYNTHEUSDT 25,033 s. La fixture se preparó antes y fuera del proceso medido.
+
+Comando enfocado final (offline, basetemp nueva):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; python -m pytest tests\test_scenarios_candidates.py tests\test_scenarios_evaluate.py tests\test_scenario_cache_job.py tests\test_meta_own_grid_evaluation.py tests\test_v2_scenario_engine.py tests\test_shadow_marker.py --basetemp='C:\Users\ramon\AppData\Local\Temp\asple-f43f3f-r8'
+```
+
+Resultado: **58 pasaron en 10,58 s**. Incluye JUP/PEPE y FastSim, estado/persistencia bajo límites de memoria y tiempo, abandono de corridas antiguas, regresión de plan y revisión v1 contra `776eedf`, y pruebas del motor y marcador. La caché, v2 y el marcador siguen apagados por defecto. No se usaron S1, Testnet, `.env`, bases reales ni red.

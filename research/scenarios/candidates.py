@@ -30,8 +30,15 @@ def _simple_candidate(symbol, capital, levels, width_sigma, price, sigma, horizo
     width = float(width_sigma) * float(sigma) * np.sqrt(float(horizon_days))
     low, high = price * np.exp(-width), price * np.exp(width)
     lines = compute_lines(str(low), str(high), int(levels), filters)
-    plan_cells(lines, str(capital), _market(price), filters,
+    plans = plan_cells(lines, str(capital), _market(price), filters,
         {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
+    # FastSim aplica 0,1 % de comisión y vuelve a redondear la venta neta.
+    # Repetimos la comprobación con esa misma cantidad para descartar antes.
+    fee = Decimal("0.001")
+    for plan in plans:
+        net_qty = filters.round_qty_down(plan.qty * (Decimal(1) - fee))
+        if net_qty < filters.min_qty or net_qty * plan.sell_price < filters.min_notional:
+            raise ValueError(f"level {plan.level_idx} net sell does not meet quantity/notional filters")
     return {"symbol": symbol, "strategy": "simple", "capital": float(capital),
         "n": int(levels), "width_sigma": float(width_sigma), "low": float(low),
         "high": float(high), "candidate_key": None}

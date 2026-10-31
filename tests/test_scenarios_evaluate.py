@@ -4,7 +4,7 @@ import math
 from grid.sim.meta_portfolio import pack_curve
 from data.market_store import CandleStore
 from research.scenarios.evaluate import (evaluate_pieces, _paired_alternatives,
-    _log_width_from_sigma_24h, evaluate_history)
+    _log_width_from_sigma_24h, evaluate_history, prepare_scenario_batches)
 
 
 def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, monkeypatch):
@@ -53,6 +53,16 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     assert result["smart_paired"][0]["label"] == "smart_menos_simple"
     assert all(set(row["pnl_usdt"]) == {"mean", "ci_low", "ci_high"}
         for row in result["smart_paired"])
+
+    compact = evaluate_pieces([{"symbol": "SYNTHUSDT", "strategy": "simple",
+        "capital": 40, "low": 70, "high": 130, "n": 6}], perfil="RAPIDO",
+        capital=100, meta=3, n_scenarios=2, seed=43, db_path=db,
+        library_dir=library, workers=1, keep_curves=False)
+    assert compact["pieces"][0]["metrics"]["n"] == 2
+    assert compact["pieces"][0]["scenario_results"] == []
+    cached_batches = prepare_scenario_batches("SYNTHUSDT", horizon_days=2,
+        n_scenarios=2, db_path=db, library_dir=library)
+    assert cached_batches[0]["symbols"]["SYNTHUSDT"]["close"].dtype == np.float32
 
     portfolio = evaluate_pieces([
         {"symbol": "SYNTHUSDT", "strategy": "simple", "capital": 40,

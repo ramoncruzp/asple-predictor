@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from data.exchange_filters import SymbolFilters
 from research.scenarios.candidates import build_candidates, build_smart_candidates
+from research.scenarios.fastsim import simulate_bot, simulate_simple
 
 
 def _filters(min_notional="5", step_size="0.00000001"):
@@ -45,6 +46,31 @@ def test_candidate_generator_descarta_venta_neta_jup_con_capital_50_y_n10():
     assert not any(row["strategy"] == "simple" and row["n"] == 10
         and row["capital"] == 53 for row in result["candidates"])
     assert result["candidates"][-1]["strategy"] == "usdt_quieto"
+
+
+def test_todos_los_candidatos_jup_y_pepe_validos_pasan_fastsim():
+    import numpy as np
+
+    for symbol, price, filters in (
+            ("JUPUSDT", .26, _filters("5", "1")),
+            ("PEPEUSDT", .00001, _filters("5", "0.00000001"))):
+        for capital in (50, 70, 100):
+            built = build_candidates(symbols=[symbol], capital_libre=capital,
+                perfil="RAPIDO", filters_by_symbol={symbol: filters},
+                price_by_symbol={symbol: price}, sigma_by_symbol={symbol: .015},
+                horizon_days=15)
+            candles = np.full((1, 2), price, dtype=float)
+            scenarios = {"open": candles.copy(), "high": candles * 1.01,
+                "low": candles * .99, "close": candles.copy()}
+            for piece in built["candidates"]:
+                if piece["strategy"] == "simple":
+                    simulate_simple(scenarios, n_levels=piece["n"],
+                        capital=piece["capital"], low=piece["low"],
+                        high=piece["high"], filters=filters)
+                elif piece["strategy"] == "bot":
+                    simulate_bot(scenarios, capital=piece["capital"],
+                        buy_price=piece["buy_price"], sell_price=piece["sell_price"],
+                        filters=filters)
 
 
 def test_smart_candidates_are_limited_to_two_simple_geometries():

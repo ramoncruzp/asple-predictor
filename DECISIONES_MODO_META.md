@@ -474,3 +474,10 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 La caché cuenta geometrías evaluadas y descartadas con sus motivos, y descarta aisladamente una candidata cuando FastSim detecta filtros inválidos. El marcador registra la alternativa sombra contra velas reales cuando vence su ventana; mantener/no hacer nada se compara con el resultado reconstruido de la meta y USDT quieto tiene ganancia cero. Su job diario y su interruptor de Laboratorio están apagados por defecto.
 
 La validación deja las geometrías sin variación predictiva y observada en su fila con veredicto «sin información» y no las usa en el agregado. El resultado consolidado comunicado es empate de v2 y v1 en Brier de P(meta), con cobertura P10-P90 de 0,88-0,90. La regresión v1 contra `776eedf` conserva plan y revisión; no se habilita v2 aquí.
+
+
+### 43f-3f - límites operativos de caché
+
+La validación de candidatos Simple verifica compra y venta neta con redondeo de cantidad, comisión de 0,1 %, `min_qty` y `min_notional`; el bot usa los filtros del simulador. Los escenarios se generan una vez por moneda y se reutilizan para lotes de hasta seis piezas; el evaluador no devuelve curvas cuando la caché solo necesita métricas. La bisección opera dentro del lote y reutiliza los escenarios.
+
+El proceso aplica `--max-rss-mb=600` y `--max-segundos=540` por defecto, mide RSS cada 2 s, guarda resultados completados y devuelve 3 (`memoria`) o 4 (`timeout`). Las corridas `running` mayores de 30 minutos se marcan `abandonada`. Medición sintética: cinco monedas, 1.000 escenarios, 15 días, `ok`, 204,09 MB y 223,71 s. Los interruptores de caché, motor v2 y marcador de sombra continúan apagados por defecto; la regresión conserva la decisión v1 de `776eedf`.

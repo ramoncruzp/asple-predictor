@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,20 +21,100 @@ if str(ROOT) not in sys.path:
 from data.market_store import CandleStore, market_db_path
 from grid.meta import DEFAULT_PROFILES
 from research.scenarios.candidates import build_candidates, build_smart_candidates
-from research.scenarios.evaluate import _sigma_estimates, evaluate_pieces
+from research.scenarios.evaluate import (_sigma_estimates, evaluate_pieces,
+    prepare_scenario_batches)
 from research.scenarios.objective import objective_limits, rank_alternatives_v2
 
 RETENTION_DAYS = 7
 SCENARIO_COUNT = 1000
+MAX_PIECES_PER_BATCH = 6
+ABANDON_AFTER_MINUTES = 30
+_RSS_PEAK_MB = 0.0
+
+
+class CacheLimitExceeded(Exception):
+    def __init__(self, status, message):
+        self.status = status
+        super().__init__(message)
+
+
+class CacheMemoryExceeded(CacheLimitExceeded):
+    def __init__(self):
+        super().__init__("memoria", "tope RSS excedido por vigilante")
+
+
+class CacheTimeoutExceeded(CacheLimitExceeded):
+    def __init__(self):
+        super().__init__("timeout", "tope de tiempo excedido por vigilante")
+
+
+def _rss_current_mb():
+    try:
+        if os.name == "posix":
+            with open("/proc/self/statm", encoding="ascii") as stream:
+                resident = int(stream.read().split()[1])
+            return resident * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+        import ctypes
+        from ctypes import wintypes
+        class MemoryCounters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                ("PrivateUsage", ctypes.c_size_t)]
+        counters = MemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        process = ctypes.windll.kernel32.GetCurrentProcess()
+        reader = ctypes.windll.psapi.GetProcessMemoryInfo
+        reader.argtypes = [wintypes.HANDLE, ctypes.POINTER(MemoryCounters), wintypes.DWORD]
+        reader.restype = wintypes.BOOL
+        ok = reader(process, ctypes.byref(counters), counters.cb)
+        if not ok:
+            return None
+        return counters.WorkingSetSize / (1024 * 1024)
+    except (ImportError, OSError, AttributeError, ValueError, IndexError):
+        return None
+
+
+def _check_limits(started, max_rss_mb, max_seconds):
+    if max_rss_mb is not None:
+        current = _rss_current_mb()
+        if current is not None and current > max_rss_mb:
+            raise CacheLimitExceeded("memoria", f"RSS {current:.1f} MB supera {max_rss_mb} MB")
+    if max_seconds is not None and time.perf_counter() - started > max_seconds:
+        raise CacheLimitExceeded("timeout", f"tiempo supera {max_seconds} s")
 
 
 def _rss_max_mb():
+    global _RSS_PEAK_MB
     try:
         if os.name == "posix":
             import resource
-            return round(float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024, 2)
-        import psutil
-        return round(psutil.Process().memory_info().rss / (1024 * 1024), 2)
+            measured = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024
+        else:
+            import ctypes
+            from ctypes import wintypes
+            class MemoryCounters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t)]
+            counters = MemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            reader = ctypes.windll.psapi.GetProcessMemoryInfo
+            reader.argtypes = [wintypes.HANDLE, ctypes.POINTER(MemoryCounters), wintypes.DWORD]
+            reader.restype = wintypes.BOOL
+            if not reader(process, ctypes.byref(counters), counters.cb):
+                return None
+            measured = counters.PeakWorkingSetSize / (1024 * 1024)
+        _RSS_PEAK_MB = max(_RSS_PEAK_MB, measured)
+        return round(_RSS_PEAK_MB, 2)
     except (ImportError, OSError, AttributeError):
         return None
 
@@ -161,7 +243,9 @@ def _insert_run(conn, context, as_of):
 
 
 def _evaluate_context(context, *, store, app_db, market_path, library_dir,
-        filters, prices, sigmas, skipped, evaluator):
+        filters, prices, sigmas, skipped, evaluator, check_limits=None,
+        on_progress=None, progress_state=None):
+    progress_state = {} if progress_state is None else progress_state
     if context.get("balance_approximate"):
         return {"status": "skipped", "reason": "efectivo o inventario sin atribución completa"}
     if not filters:
@@ -174,25 +258,87 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         horizon_days=context["horizon"])
     candidates = built["candidates"][:-1]
     candidates.extend(_active_grid_pieces(app_db, context["goal_id"]))
+    progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
+        "generated_candidates": len(candidates), "evaluated_count": 0,
+        "discarded": dict(built["discarded"]), "candidate_seconds": {}})
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
         max_loss_pct=context["max_loss_pct"], n_scenarios=SCENARIO_COUNT, n_smart=200,
         seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
-    first_rows, failed_candidates = _evaluate_with_isolation(evaluator, pieces, **eval_kwargs)
+    first_rows, failed_candidates = [], {}
+    candidate_seconds = {}
+    for symbol in sorted({str(piece["symbol"]).upper() for piece in pieces}):
+        symbol_pieces = [piece for piece in pieces if str(piece["symbol"]).upper() == symbol]
+        symbol_started = time.perf_counter()
+        batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
+            n_scenarios=SCENARIO_COUNT, seed=43, db_path=market_path,
+            library_dir=library_dir) if evaluator is evaluate_pieces else None)
+        for start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
+            chunk = symbol_pieces[start:start + MAX_PIECES_PER_BATCH]
+            kwargs = dict(eval_kwargs)
+            if batches is not None:
+                kwargs["scenario_batches"] = batches
+                kwargs["keep_curves"] = False
+            rows, errors = _evaluate_with_isolation(evaluator, chunk, **kwargs)
+            first_rows.extend(rows)
+            failed_candidates.update(errors)
+            progress_state["evaluated_count"] += len(rows)
+            for reason in errors.values():
+                label = reason.split(":", 1)[0]
+                progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+            if on_progress and rows:
+                on_progress(rows)
+            del rows, errors
+            gc.collect()
+            if check_limits:
+                check_limits()
+            candidate_seconds[symbol] = round(time.perf_counter() - symbol_started, 3)
+            progress_state["candidate_seconds"] = dict(candidate_seconds)
+        del batches, symbol_pieces
+        gc.collect()
     first = {"pieces": first_rows, "skipped_symbols": skipped}
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
         capital_meta=capital) if first["pieces"] else []
     simple_ranked = [row for row in ranked if row.get("piece", {}).get("strategy") == "simple"][:2]
     smart = build_smart_candidates(simple_ranked)
+    progress_state["generated_count"] += len(smart)
+    progress_state["generated_candidates"] += len(smart)
     second_rows = []
-    if smart:
-        second_rows, smart_errors = _evaluate_with_isolation(evaluator, smart,
-            perfil=context["profile"], capital=capital, meta=context["target"],
-            horizon_days=context["horizon"],
-            max_loss_pct=context["max_loss_pct"], n_scenarios=200, n_smart=200,
-            seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
-        failed_candidates.update(smart_errors)
+    for symbol in sorted({str(piece["symbol"]).upper() for piece in smart}):
+        smart_started = time.perf_counter()
+        symbol_pieces = [piece for piece in smart if str(piece["symbol"]).upper() == symbol]
+        batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
+            n_scenarios=200, seed=43, db_path=market_path, library_dir=library_dir)
+            if evaluator is evaluate_pieces else None)
+        for start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
+            kwargs = dict(perfil=context["profile"], capital=capital, meta=context["target"],
+                horizon_days=context["horizon"], max_loss_pct=context["max_loss_pct"],
+                n_scenarios=200, n_smart=200, seed=43, db_path=market_path,
+                library_dir=library_dir, mode="alternativas")
+            if batches is not None:
+                kwargs["scenario_batches"] = batches
+                kwargs["keep_curves"] = False
+            rows, errors = _evaluate_with_isolation(evaluator,
+                symbol_pieces[start:start + MAX_PIECES_PER_BATCH], **kwargs)
+            second_rows.extend(rows)
+            failed_candidates.update(errors)
+            progress_state["evaluated_count"] += len(rows)
+            for reason in errors.values():
+                label = reason.split(":", 1)[0]
+                progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+            if on_progress and rows:
+                on_progress(rows)
+            del rows, errors
+            gc.collect()
+            if check_limits:
+                check_limits()
+            candidate_seconds[symbol] = round(candidate_seconds.get(symbol, 0.0) +
+                time.perf_counter() - smart_started, 3)
+            smart_started = time.perf_counter()
+            progress_state["candidate_seconds"] = dict(candidate_seconds)
+        del batches, symbol_pieces
+        gc.collect()
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
     for row in [*first.get("pieces", []), *second_rows]:
@@ -220,7 +366,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     evaluated_count = len(first_rows) + len(second_rows)
     return {"status": "ok" if evaluated_count else "failed", "results": results,
         "evaluated_count": evaluated_count, "discarded": discarded,
-        "failed_candidates": failed_candidates, "skipped_symbols": skipped}
+        "failed_candidates": failed_candidates, "skipped_symbols": skipped,
+        "candidate_seconds": candidate_seconds,
+        "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + len(smart),
+        "generated_candidates": len(candidates) + len(smart),
+        "discarded_count": sum(discarded.values())}
 
 
 def _candidate_key(piece):
@@ -258,7 +408,7 @@ def _evaluate_with_isolation(evaluator, pieces, **kwargs):
 
 
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
-        evaluator=evaluate_pieces, now=None):
+        evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540):
     started = time.perf_counter()
     app_path = Path(app_db).resolve()
     market_path = market_db_path(market_db)
@@ -267,19 +417,59 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     filters, prices, sigmas, skipped = _read_market_inputs(store)
     contexts = _contexts(app_path, prices)
     with store._connect() as conn:
+        conn.execute("UPDATE scenario_eval_runs SET status='abandonada',error=? "
+            "WHERE status='running' AND julianday(as_of) < julianday('now', ?)",
+            (json.dumps({"motivo": "running anterior a 30 minutos"}),
+             f"-{ABANDON_AFTER_MINUTES} minutes"))
         conn.execute("DELETE FROM scenario_eval_results WHERE run_id IN "
             "(SELECT run_id FROM scenario_eval_runs WHERE as_of < datetime('now', ?))",
             (f"-{RETENTION_DAYS} days",))
         conn.execute("DELETE FROM scenario_eval_runs WHERE as_of < datetime('now', ?)",
             (f"-{RETENTION_DAYS} days",))
-        run_ids = [_insert_run(conn, context, as_of) for context in contexts]
+    watchdog_stop = threading.Event()
+    main_thread_id = threading.get_ident()
+    def watchdog():
+        while not watchdog_stop.wait(2):
+            try:
+                _check_limits(started, max_rss_mb, max_seconds)
+            except CacheLimitExceeded as exc:
+                error_type = CacheMemoryExceeded if exc.status == "memoria" else CacheTimeoutExceeded
+                import ctypes
+                result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(main_thread_id), ctypes.py_object(error_type))
+                if result > 1:
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(main_thread_id), None)
+                return
+    watcher = threading.Thread(target=watchdog, name="scenario-cache-limits", daemon=True)
+    watcher.start()
     results_summary = []
-    for context, run_id in zip(contexts, run_ids):
+    for context in contexts:
+        with store._connect() as conn:
+            run_id = _insert_run(conn, context, as_of)
         context_started = time.perf_counter()
+        progress_state = {}
+        def check_context_limits():
+            _check_limits(started, max_rss_mb, max_seconds)
+        def persist_progress(rows):
+            with store._connect() as conn:
+                for row in rows:
+                    piece = row.get("piece", {})
+                    key = str(piece.get("candidate_key") or _candidate_key(piece))
+                    ranked_row = rank_alternatives_v2([row], perfil=context["profile"],
+                        capital_meta=float(context["capital"]))[0]
+                    conn.execute("INSERT OR REPLACE INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)",
+                        (run_id, key, piece.get("symbol"), piece.get("strategy", "simple"),
+                         json.dumps({k: v for k, v in piece.items()
+                             if k not in {"symbol", "strategy", "candidate_key"}}, ensure_ascii=False),
+                         json.dumps(row.get("metrics") or {}, ensure_ascii=False),
+                         json.dumps(ranked_row.get("objetivo") or {}, ensure_ascii=False)))
         try:
             evaluated = _evaluate_context(context, store=store, app_db=app_path,
                 market_path=market_path, library_dir=library_dir, filters=filters,
-                prices=prices, sigmas=sigmas, skipped=skipped, evaluator=evaluator)
+                prices=prices, sigmas=sigmas, skipped=skipped, evaluator=evaluator,
+                check_limits=check_context_limits, on_progress=persist_progress,
+                progress_state=progress_state)
             with store._connect() as conn:
                 for row in evaluated.get("results", []):
                     conn.execute("INSERT OR REPLACE INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)",
@@ -298,14 +488,38 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             results_summary.append({"run_id": run_id, "context_seconds":
                 time.perf_counter() - context_started, **evaluated})
             print(f"SCENARIO_CACHE contexto={context['goal_id'] or context['profile']} "
-                f"estado={evaluated['status']} segundos={time.perf_counter()-context_started:.3f} "
-                f"rss_max_mb={_rss_max_mb()}")
+                f"estado={evaluated['status']} generados={evaluated.get('generated_count', 0)} "
+                f"evaluados={evaluated.get('evaluated_count', 0)} "
+                f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
+                f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
+                f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
         except Exception as exc:
+            status = exc.status if isinstance(exc, CacheLimitExceeded) else "failed"
+            error_details = {"motivo": str(exc), **progress_state}
+            error_details["discarded_count"] = sum(progress_state.get("discarded", {}).values())
             with store._connect() as conn:
-                conn.execute("UPDATE scenario_eval_runs SET status='failed',error=?,seconds=?,rss_mb=? "
-                    "WHERE run_id=?", (str(exc), time.perf_counter() - started,
+                conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
+                    "WHERE run_id=?", (status, json.dumps(error_details, ensure_ascii=False),
+                        time.perf_counter() - started,
                         _rss_max_mb(), run_id))
+            if isinstance(exc, CacheLimitExceeded):
+                with store._connect() as conn:
+                    count = conn.execute("SELECT COUNT(*) FROM scenario_eval_results WHERE run_id=?",
+                        (run_id,)).fetchone()[0]
+                results_summary.append({"run_id": run_id, "status": status,
+                    **progress_state, "discarded_count": error_details["discarded_count"],
+                    "evaluated_count": count})
+                print(f"SCENARIO_CACHE contexto={context['goal_id'] or context['profile']} "
+                    f"estado={status} generados={progress_state.get('generated_count', 0)} "
+                    f"evaluados={count} descartados={json.dumps(progress_state.get('discarded', {}), ensure_ascii=False)} "
+                    f"segundos_moneda={json.dumps(progress_state.get('candidate_seconds', {}), ensure_ascii=False)} "
+                    f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
+                break
+            watchdog_stop.set()
+            watcher.join(timeout=2)
             raise
+    watchdog_stop.set()
+    watcher.join(timeout=2)
     return {"contexts": len(contexts), "runs": results_summary,
         "seconds": time.perf_counter() - started, "rss_mb": _rss_max_mb()}
 
@@ -315,6 +529,8 @@ def main(argv=None):
     parser.add_argument("--app-db", required=True)
     parser.add_argument("--market-db", required=True)
     parser.add_argument("--biblioteca", default="data/derived/scenario_lib")
+    parser.add_argument("--max-rss-mb", type=float, default=600)
+    parser.add_argument("--max-segundos", type=float, default=540)
     args = parser.parse_args(argv)
     if os.name == "posix":
         try:
@@ -323,7 +539,14 @@ def main(argv=None):
             pass
     started = time.perf_counter()
     try:
-        result = run_cache(args.app_db, args.market_db, library_dir=args.biblioteca)
+        result = run_cache(args.app_db, args.market_db, library_dir=args.biblioteca,
+            max_rss_mb=args.max_rss_mb, max_seconds=args.max_segundos)
+        limit_status = next((row.get("status") for row in result["runs"]
+            if row.get("status") in {"memoria", "timeout"}), None)
+        if limit_status:
+            print(f"SCENARIO_CACHE estado={limit_status} segundos={result['seconds']:.3f} "
+                f"rss_max_mb={result['rss_mb']}")
+            return 3 if limit_status == "memoria" else 4
         print(f"SCENARIO_CACHE estado=completed contextos={result['contexts']} "
             f"segundos={time.perf_counter()-started:.3f} rss_max_mb={result['rss_mb']}")
         return 0
