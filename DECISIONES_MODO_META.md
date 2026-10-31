@@ -474,6 +474,10 @@ La caché toma como piezas vivas los grids ligados mediante una fila `meta_piece
 
 Un Smart pausado se proyecta desde el precio actual con el simulador exacto y su misma geometría. Es una aproximación hacia adelante: el costo base de la simulación difiere del inventario real. La caché permanece apagada por defecto; v1 continúa como motor predeterminado y no se modifica.
 
+### Fase 43f-3k — IDs históricos en grids terminales
+
+Para grids terminales, una referencia de orden no basta para considerar viva la pieza: solo cuenta inventario `held_qty > 0` o un nivel cuyo estado sea `BUY_OPEN`/`SELL_OPEN`. Los IDs conservados en niveles `DONE` no son órdenes actuales. Si el capital nominal de las piezas vivas excede la asignación disponible, la caché registra un aviso y dimensiona “mantener” por el valor liquidable estimado (inventario al último precio disponible, neto de comisión, más reservas de compras abiertas), limitado al capital atribuible. Esto evita sumar dos veces el capital nominal de grids.
+
 
 ### Fase 43f-3e, 43f-4b y 43f-8
 

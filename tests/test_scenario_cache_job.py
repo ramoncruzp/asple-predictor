@@ -125,7 +125,7 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
     assert alternative["metrics"]["metrics_pieza_sola"]["p_target"] == .5
 
 
-def test_piezas_vivas_incluye_pausado_y_excluye_cerrado_o_liberado(cache_databases):
+def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_databases):
     db, _market_path = cache_databases
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -137,16 +137,21 @@ def test_piezas_vivas_incluye_pausado_y_excluye_cerrado_o_liberado(cache_databas
             config_snapshot=json.dumps({"max_loss_pct": 18}))).inserted_primary_key[0]
         run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal_id,
             status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+    grid12_levels = [{"level_idx": idx, "price": .25, "capital": 50 / 6,
+        "sell_price": None, "entry_price": None, "held_qty": 0, "state": "DONE",
+        "order_id": 1200 + idx, "client_order_id": f"historico-s-{idx}",
+        "buy_client_order_id": f"historico-b-{idx}"} for idx in range(6)]
+    grid12 = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
+        "range_low": .2, "range_high": .3, "n_levels": 6, "capital_total": 70,
+        "status": "CLOSED", "environment": "testnet"}, grid12_levels)
+    grid13_levels = [{"level_idx": idx, "price": .25, "capital": 70 / 6,
+        "sell_price": .27 if idx < 4 else None, "entry_price": .25 if idx < 4 else None,
+        "held_qty": 42.575 if idx < 4 else 0,
+        "state": "SELL_OPEN" if idx < 4 else "IDLE",
+        "order_id": 1300 + idx if idx < 4 else None} for idx in range(6)]
     paused = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
-        "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
-        "status": "PAUSED", "environment": "testnet"}, [{"level_idx": 0,
-        "price": .25, "capital": 12.5, "sell_price": .27, "entry_price": .25,
-        "held_qty": 50, "state": "SELL_OPEN", "order_id": 101}])
-    closed = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
-        "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
-        "status": "CLOSED", "environment": "testnet"}, [{"level_idx": 0,
-        "price": .25, "capital": 12.5, "sell_price": None, "entry_price": None,
-        "held_qty": 0, "state": "IDLE"}])
+        "range_low": .2, "range_high": .3, "n_levels": 6, "capital_total": 70,
+        "status": "PAUSED", "environment": "testnet"}, grid13_levels)
     released = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
         "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
         "status": "PAUSED", "environment": "testnet"}, [{"level_idx": 0,
@@ -154,27 +159,73 @@ def test_piezas_vivas_incluye_pausado_y_excluye_cerrado_o_liberado(cache_databas
         "held_qty": 0, "state": "IDLE"}])
     with db.engine.begin() as conn:
         link_ids = []
-        for grid in (paused, closed, released):
+        for grid in (grid12, paused, released):
             link_ids.append(conn.execute(db.meta_piece_links.insert().values(
                 meta_id=goal_id, run_id=run_id, grid_id=grid["id"],
                 piece_type="grid", created_at=now)).inserted_primary_key[0])
         conn.execute(db.meta_piece_links.update().where(
             db.meta_piece_links.c.id == link_ids[2]).values(released_at=now))
 
-    pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id)
+    pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
+        {"JUPUSDT": .26})
 
     assert [piece["grid_id"] for piece in pieces] == [paused["id"]]
     assert pieces[0]["grid_status"] == "PAUSED"
     assert "Smart pausado" in pieces[0]["simulation_approximation"]
+    assert pieces[0]["liquidation_value"] == pytest.approx(170.3 * .26 * .999)
+
+
+def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases):
+    db, _market_path = cache_databases
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=3, target_input_type="USDT",
+            target_input_value=3, profile="RAPIDO", status="ACTIVE",
+            environment="testnet", created_at=now, started_at=now,
+            config_snapshot=json.dumps({"max_loss_pct": 18}))).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal_id,
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+    terminal_grids = [db.create_grid_with_levels({"symbol": "JUPUSDT",
+        "strategy": "smart", "range_low": .2, "range_high": .3,
+        "n_levels": 1, "capital_total": 10, "status": "CLOSED",
+        "environment": "testnet"}, [level]) for level in (
+            {"level_idx": 0, "price": .25, "capital": 10, "sell_price": None,
+                "entry_price": .25, "held_qty": 2, "state": "DONE"},
+            {"level_idx": 0, "price": .25, "capital": 10, "sell_price": .27,
+                "entry_price": None, "held_qty": 0, "state": "SELL_OPEN"})]
+    with db.engine.begin() as conn:
+        for grid in terminal_grids:
+            conn.execute(db.meta_piece_links.insert().values(meta_id=goal_id,
+                run_id=run_id, grid_id=grid["id"], piece_type="grid", created_at=now))
+    pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
+        {"JUPUSDT": .26})
+    assert [piece["grid_id"] for piece in pieces] == [
+        grid["id"] for grid in terminal_grids]
+
+
+def test_capital_vivo_excedido_usa_liquidacion_y_registra_aviso():
+    pieces = [{"capital": 70, "liquidation_value": 22},
+        {"capital": 70, "liquidation_value": 22}]
+
+    warning = cache_script._fit_live_piece_capital(pieces, capital=99, free_cash=55)
+
+    assert [piece["capital"] for piece in pieces] == pytest.approx([22, 22])
+    assert [piece["capital_nominal"] for piece in pieces] == [70, 70]
+    assert warning["capital_nominal_usdt"] == 140
+    assert warning["capital_liquidacion_usdt"] == 44
+    assert warning["capital_aplicado_usdt"] == 44
 
 
 def test_corrida_persiste_ids_y_estado_de_piezas_vivas(cache_databases, monkeypatch):
     db, market_path = cache_databases
-    context = {"goal_id": 7, "profile": "RAPIDO", "free_cash": 20,
-        "capital": 20, "target": 1.1, "horizon": 15,
+    context = {"goal_id": 7, "profile": "RAPIDO", "free_cash": 55,
+        "capital": 99, "target": 1.1, "horizon": 15,
         "max_loss_pct": 18, "balance_approximate": False}
     current = {"candidate_key": "mantener:7:31", "symbol": "JUPUSDT",
-        "strategy": "smart", "capital": 10, "n": 4, "low": .2, "high": .3,
+        "strategy": "smart", "capital": 140, "liquidation_value": 44,
+        "n": 4, "low": .2, "high": .3,
         "grid_id": 31, "grid_status": "PAUSED", "is_current": True}
     alternative = {"candidate_key": "alternativa:jup", "symbol": "JUPUSDT",
         "strategy": "simple", "capital": 5, "n": 6, "low": .21, "high": .29}
@@ -213,6 +264,7 @@ def test_corrida_persiste_ids_y_estado_de_piezas_vivas(cache_databases, monkeypa
     assert status == "ok"
     assert details["live_piece_count"] == 1
     assert details["live_pieces"] == [{"grid_id": 31, "status": "PAUSED"}]
+    assert details["live_capital_warning"]["capital_aplicado_usdt"] == 44
 
 
 def test_cache_omite_smart_si_quedan_menos_de_120_segundos(

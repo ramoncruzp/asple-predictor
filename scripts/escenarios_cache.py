@@ -251,24 +251,29 @@ def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horiz
     return filters, prices, sigmas, skipped
 
 
-def _active_grid_pieces(app_db, goal_id):
+def _active_grid_pieces(app_db, goal_id, prices=None):
     if goal_id is None:
         return []
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         rows = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
-            "g.n_levels,g.status,l.piece_type FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
+            "g.n_levels,g.status,l.piece_type,COALESCE((SELECT SUM(gl.held_qty) "
+            "FROM grid_levels gl WHERE gl.grid_id=g.id AND gl.held_qty>0),0),"
+            "COALESCE((SELECT SUM(gl.capital) FROM grid_levels gl WHERE gl.grid_id=g.id "
+            "AND UPPER(gl.state)='BUY_OPEN'),0) FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
             "WHERE l.meta_id=? AND l.released_at IS NULL AND (UPPER(g.status) NOT IN "
             "('CLOSED','ARCHIVED','CANCELLED','FAILED','ERROR') OR EXISTS ("
             "SELECT 1 FROM grid_levels gl WHERE gl.grid_id=g.id AND "
-            "(COALESCE(gl.held_qty,0)>0 OR gl.order_id IS NOT NULL "
-            "OR gl.client_order_id IS NOT NULL OR gl.buy_client_order_id IS NOT NULL))) "
+            "(COALESCE(gl.held_qty,0)>0 OR UPPER(gl.state) IN ('BUY_OPEN','SELL_OPEN')))) "
             "ORDER BY g.id", (goal_id,)).fetchall()
     output = []
-    for grid_id, symbol, strategy, capital, low, high, levels, status, piece_type in rows:
+    for grid_id, symbol, strategy, capital, low, high, levels, status, piece_type, held_qty, buy_open_capital in rows:
         if str(strategy).lower() not in {"simple", "smart", "bot"}:
             continue
-        piece = {"symbol": str(symbol).upper(), "strategy": str(strategy).lower(),
+        symbol = str(symbol).upper()
+        price = float((prices or {}).get(symbol, 0))
+        piece = {"symbol": symbol, "strategy": str(strategy).lower(),
             "capital": float(capital), "low": float(low), "high": float(high),
+            "liquidation_value": max(0.0, float(held_qty) * price * .999 + float(buy_open_capital)),
             "n": int(levels), "grid_id": int(grid_id), "grid_status": str(status).upper(),
             "piece_type": str(piece_type), "is_current": True,
             "candidate_key": f"mantener:{goal_id}:{grid_id}:{symbol}:{levels}:{low}:{high}"}
@@ -288,6 +293,27 @@ def _insert_run(conn, context, as_of, n_scenarios=SCENARIO_COUNT):
     return run_id
 
 
+def _fit_live_piece_capital(current_pieces, *, capital, free_cash):
+    """Evita doble conteo de capital nominal y limita mantener al valor liquidable."""
+    nominal = sum(float(piece["capital"]) for piece in current_pieces)
+    if nominal <= float(capital) + 1e-6:
+        return None
+    liquidation_total = sum(float(piece.get("liquidation_value", 0))
+        for piece in current_pieces)
+    budget = min(max(0.0, float(capital) - float(free_cash)), liquidation_total)
+    factor = budget / liquidation_total if liquidation_total > 0 else 0.0
+    for piece in current_pieces:
+        piece["capital_nominal"] = float(piece["capital"])
+        piece["capital"] = float(piece.get("liquidation_value", 0)) * factor
+    return {"motivo": ("capital nominal vivo superior al capital asignable de la meta; "
+            "se usa el valor de liquidación" if liquidation_total > 0 else
+            "capital nominal vivo superior al capital asignable de la meta; "
+            "sin inventario liquidable ni compras abiertas"),
+        "capital_nominal_usdt": nominal,
+        "capital_liquidacion_usdt": liquidation_total,
+        "capital_aplicado_usdt": budget}
+
+
 def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         filters, prices, sigmas, skipped, evaluator, check_limits=None,
         on_progress=None, progress_state=None, n_scenarios=SCENARIO_COUNT,
@@ -303,7 +329,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         perfil=context["profile"], filters_by_symbol=filters,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
         horizon_days=context["horizon"])
-    current_pieces = _active_grid_pieces(app_db, context["goal_id"])
+    current_pieces = _active_grid_pieces(app_db, context["goal_id"], prices)
+    live_capital_warning = _fit_live_piece_capital(current_pieces,
+        capital=capital, free_cash=free)
     live_piece_details = [{"grid_id": int(piece["grid_id"]),
         "status": piece["grid_status"]} for piece in current_pieces]
     candidates = current_pieces + built["candidates"][:-1]
@@ -313,7 +341,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
         "generated_candidates": len(candidates), "evaluated_count": 0,
         "discarded": dict(built["discarded"]), "candidate_seconds": {},
-        "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details})
+        "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
+        "live_capital_warning": live_capital_warning})
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
@@ -487,6 +516,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     return {"status": "ok" if evaluated_count else "failed", "results": results,
         "evaluated_count": evaluated_count, "discarded": discarded,
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
+        "live_capital_warning": live_capital_warning,
         "failed_candidates": failed_candidates, "skipped_symbols": skipped,
         "candidate_seconds": candidate_seconds,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
@@ -667,6 +697,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "evaluated_count": evaluated.get("evaluated_count", 0),
                             "live_piece_count": evaluated.get("live_piece_count", 0),
                             "live_pieces": evaluated.get("live_pieces", []),
+                            "live_capital_warning": evaluated.get("live_capital_warning"),
                             "failed_candidates": evaluated.get("failed_candidates", {}),
                             "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
                             ensure_ascii=False),

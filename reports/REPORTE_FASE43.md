@@ -1040,3 +1040,9 @@ La selección de “mantener” ahora considera los enlaces de Meta no liberados
 Los grids Smart pausados se proyectan con el simulador exacto desde el precio actual y su geometría guardada. La proyección conserva el comportamiento futuro del simulador, aunque su costo base no representa el costo real del inventario. Cada corrida guarda en `scenario_eval_runs.error` el número de piezas vivas y sus `grid_id`/estados. No se alteran decisiones v1 ni defaults.
 
 Validación offline sintética: **48 pasaron en 10,43 s**, incluida selección `PAUSED`/`CLOSED`/liberada, evaluación pareada con alternativas y regresión del plan/revisión v1 contra `776eedf`. Comando y resultado exactos en `reports/DISCREPANCIAS_FASE43.md`. `scripts/revisar_codificacion.py` reportó `HALLAZGOS=0`. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+### 43f-3k — órdenes históricas no mantienen vivo un grid cerrado
+
+En grids terminales, la caché ahora requiere inventario positivo o un nivel en estado `BUY_OPEN`/`SELL_OPEN`; `order_id` y client IDs históricos en niveles `DONE` no cuentan. La prueba fixture reproduce la estructura de S1: grid 12 `CLOSED` con seis niveles `DONE` y IDs antiguos queda excluido; grid 13 `PAUSED` con cuatro niveles `SELL_OPEN` e inventario aparece como único “mantener”. También comprueba grids terminales con inventario o nivel `SELL_OPEN` y enlaces liberados.
+
+Cuando el capital nominal vivo supera el disponible, la caché registra un aviso en `scenario_eval_runs.error` y dimensiona las piezas con el valor de liquidación estimado, sin rebasar la asignación atribuible. El cálculo usa el último precio disponible, inventario neto de comisión y reserva de compras abiertas. Pruebas enfocadas: **50 pasaron en 10,58 s**, incluida la regresión v1 contra `776eedf`; comando exacto en `reports/DISCREPANCIAS_FASE43.md`. `scripts/revisar_codificacion.py`: `HALLAZGOS=0`. No se consultó S1 ni datos reales.
