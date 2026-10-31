@@ -922,3 +922,12 @@ La disponibilidad que se expone en configuración/API depende de ambos interrupt
 El plan ahora usa `rank_alternatives_v2` como fuente común para ordenar candidatos y USDT quieto. Si USDT queda primero, el arranque no crea un run vacío. La revisión solo delega a los frenos existentes cuando la alternativa supera el mínimo de 5 puntos de probabilidad objetivo y su ganancia neta, descontando la pérdida realizada y el coste estimado de salida/entrada, supera mantener por al menos un error estándar. La sombra v1 solicita `record=False` y tiene un límite de 30 segundos.
 
 Comando exacto: `pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f3b-review-20261030-r6"` (`ASPLE_OFFLINE=1`; carpeta r6 nueva). Resultado: **14 pasaron en 1,41 s**. La auditoría de persistencia de v1 antes/después y la regresión congelada contra `776eedf` quedan para 43f-3d.
+
+
+#### 43f-3c ? aislamiento y contexto de escenarios
+
+El subproceso ya no usa `RLIMIT_AS` ni `preexec_fn`: en POSIX se inicia mediante `nice -n 10`. Se limitan OpenBLAS y OMP a un hilo y arenas de malloc a dos. El job vigila RSS durante la ejecución y mata/marca la corrida como `memoria` al superar 600 MiB. Se guarda duración por contexto y RSS máximo. La segunda pasada de Smart genera solo 200 escenarios.
+
+La caché reconstruye efectivo libre desde fills atribuibles y reservas de compras abiertas; añade el valor de inventario liquidado al último cierre disponible y computa objetivo restante, plazo y holgura del límite de pérdida. Si falta una atribución necesaria, omite el contexto. La valoración usa cierres de velas y comisiones estimadas, no profundidad ejecutable.
+
+Comando enfocado: `pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3c-memoria-20261030-r2"` (`ASPLE_OFFLINE=1`). Resultado: **17 pasaron en 1,78 s**. El monitor RSS en Windows usa `GetProcessMemoryInfo` cuando falta psutil.

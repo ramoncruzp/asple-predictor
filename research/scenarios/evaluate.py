@@ -162,7 +162,7 @@ def _summarize_null_comparison(rows, *, seed=43, replicas=1000,
 def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
         library_dir="data/derived/scenario_lib", workers=2, mode="alternativas",
-        fee_pct=.1, detrend_scenarios=False):
+        fee_pct=.1, detrend_scenarios=False, horizon_days=None, max_loss_pct=None):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
@@ -184,8 +184,10 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             raise ValueError(f"las piezas suman {pieces_total:g} USDT y la meta tiene "
                 f"{float(capital):g}; usa --modo alternativas para compararlas")
     profile = DEFAULT_PROFILES[str(perfil).upper()]
-    horizon = int(profile["max_days"])
-    loss_pct = float(profile["max_loss_pct"])
+    horizon = int(profile["max_days"] if horizon_days is None else horizon_days)
+    loss_pct = float(profile["max_loss_pct"] if max_loss_pct is None else max_loss_pct)
+    if horizon <= 0 or loss_pct < 0:
+        raise ValueError("horizonte y límite de pérdida deben ser válidos")
     symbols = sorted({str(piece["symbol"]).upper() for piece in pieces})
     db_path = market_db_path(db_path)
     store = CandleStore(db_path)

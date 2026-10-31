@@ -37,43 +37,81 @@ def _rss_max_mb():
         return None
 
 
-def _contexts(app_db):
+def _contexts(app_db, prices=None):
+    prices = prices or {}
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
-        table_names = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+        table_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         settings = {}
         if "meta_profile_settings" in table_names:
             settings = {row["profile"]: json.loads(row["settings"] or "{}")
                 for row in conn.execute("SELECT profile,settings FROM meta_profile_settings")}
         contexts = []
         if "meta_goals" in table_names:
-            goals = conn.execute("SELECT * FROM meta_goals WHERE status IN "
-                "('ACTIVE','PIECES_BLOCKED') ORDER BY id").fetchall()
+            goals = conn.execute("SELECT * FROM meta_goals WHERE status IN ('ACTIVE','PIECES_BLOCKED') ORDER BY id").fetchall()
             for goal in goals:
                 profile = str(goal["profile"]).upper()
                 defaults = DEFAULT_PROFILES.get(profile)
-                if defaults:
-                    started = goal["started_at"] or goal["created_at"]
-                    elapsed = 0
-                    if started:
-                        try:
-                            elapsed = max(0, (datetime.now(timezone.utc) -
-                                datetime.fromisoformat(str(started).replace("Z", "+00:00")).replace(
-                                    tzinfo=timezone.utc)).days)
-                        except ValueError:
-                            pass
-                    contexts.append({"goal_id": int(goal["id"]), "profile": profile,
-                        "capital": float(goal["capital_initial"]),
-                        "target": float(goal["target_usdt"]),
-                        "horizon": max(1, int(defaults["max_days"]) - elapsed)})
+                if not defaults:
+                    continue
+                initial = float(goal["capital_initial"])
+                links = conn.execute("SELECT g.id,g.symbol FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id WHERE l.meta_id=? AND l.released_at IS NULL", (int(goal["id"]),)).fetchall()
+                delivered = returned = fees = inventory = reserved_buys = 0.0
+                balance_known = True
+                for link in links:
+                    grid_id = int(link["id"])
+                    symbol = str(link["symbol"]).upper()
+                    events = conn.execute("SELECT event_type,price,details FROM grid_events WHERE grid_id=? AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED') ORDER BY id", (grid_id,)).fetchall()
+                    for event in events:
+                        details = json.loads(event["details"] or "{}")
+                        quote = details.get("cummulative_quote_qty", details.get("quote_qty", details.get("executed_quote_qty")))
+                        if event["event_type"] == "CELL_LIQUIDATED":
+                            quote = details.get("cash_proceeds_net", quote)
+                        qty = details.get("executed_qty", details.get("qty", details.get("quantity")))
+                        if quote is None and qty is not None and event["price"] is not None:
+                            quote = float(qty) * float(event["price"])
+                        if quote is None:
+                            balance_known = False
+                            continue
+                        quote = float(quote)
+                        fee = details.get("commission_usdt", details.get("fee_usdt"))
+                        fees += quote * .001 if fee is None else float(fee)
+                        if event["event_type"] == "BUY_FILLED":
+                            delivered += quote
+                        else:
+                            returned += quote
+                    current_price = prices.get(symbol)
+                    if current_price is None:
+                        balance_known = False
+                    levels = conn.execute("SELECT held_qty,state,order_id,capital FROM grid_levels WHERE grid_id=?", (grid_id,)).fetchall()
+                    inventory += sum(float(level["held_qty"] or 0) for level in levels) * float(current_price or 0) * .999
+                    reserved_buys += sum(float(level["capital"] or 0) for level in levels
+                        if level["order_id"] is not None and "BUY" in str(level["state"]).upper())
+                free_cash = max(0.0, initial - delivered + returned - fees - reserved_buys)
+                current_equity = free_cash + inventory
+                started = goal["started_at"] or goal["created_at"]
+                elapsed = 0
+                if started:
+                    try:
+                        elapsed = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(str(started).replace("Z", "+00:00")).replace(tzinfo=timezone.utc)).days)
+                    except ValueError:
+                        pass
+                config = json.loads(goal["config_snapshot"] or "{}")
+                loss_pct = float(config.get("max_loss_pct", defaults["max_loss_pct"]))
+                threshold = initial * (1 - loss_pct / 100)
+                loss_headroom = max(0.0, current_equity - threshold)
+                effective_loss_pct = min(loss_pct, 100 * loss_headroom / current_equity if current_equity > 0 else 0.0)
+                contexts.append({"goal_id": int(goal["id"]), "profile": profile,
+                    "capital": current_equity, "free_cash": free_cash,
+                    "target": max(0.0, float(goal["target_usdt"]) - max(0.0, current_equity - initial)),
+                    "horizon": max(1, int(defaults["max_days"]) - elapsed),
+                    "max_loss_pct": effective_loss_pct, "balance_approximate": not balance_known})
         for profile, defaults in DEFAULT_PROFILES.items():
             if str((settings.get(profile) or {}).get("decision_engine", "v1")).lower() == "v2":
-                contexts.append({"goal_id": None, "profile": profile,
-                    "capital": 100.0, "target": 3.0,
-                    "horizon": int(defaults["max_days"])})
+                contexts.append({"goal_id": None, "profile": profile, "capital": 100.0,
+                    "free_cash": 100.0, "target": 3.0, "horizon": int(defaults["max_days"]),
+                    "max_loss_pct": float(defaults["max_loss_pct"]), "balance_approximate": False})
         return contexts
-
 
 def _read_market_inputs(store):
     with store._connect() as conn:
@@ -124,9 +162,12 @@ def _insert_run(conn, context, as_of):
 
 def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         filters, prices, sigmas, skipped, evaluator):
+    if context.get("balance_approximate"):
+        return {"status": "skipped", "reason": "efectivo o inventario sin atribución completa"}
     if not filters:
         return {"status": "skipped", "reason": "ningún símbolo con filtros, velas e historia"}
-    free = float(context["capital"])
+    free = float(context["free_cash"])
+    capital = float(context["capital"])
     built = build_candidates(symbols=filters, capital_libre=free,
         perfil=context["profile"], filters_by_symbol=filters,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
@@ -134,18 +175,20 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     candidates = built["candidates"][:-1]
     candidates.extend(_active_grid_pieces(app_db, context["goal_id"]))
     pieces = [dict(row) for row in candidates]
-    first = evaluator(pieces, perfil=context["profile"], capital=free,
-        meta=context["target"], n_scenarios=SCENARIO_COUNT, n_smart=200,
+    first = evaluator(pieces, perfil=context["profile"], capital=capital,
+        meta=context["target"], horizon_days=context["horizon"],
+        max_loss_pct=context["max_loss_pct"], n_scenarios=SCENARIO_COUNT, n_smart=200,
         seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas") if pieces else {
             "pieces": [], "skipped_symbols": {}}
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
-        capital_meta=free) if first["pieces"] else []
+        capital_meta=capital) if first["pieces"] else []
     simple_ranked = [row for row in ranked if row.get("piece", {}).get("strategy") == "simple"][:2]
     smart = build_smart_candidates(simple_ranked)
     second_rows = []
     if smart:
-        second = evaluator(smart, perfil=context["profile"], capital=free,
-            meta=context["target"], n_scenarios=SCENARIO_COUNT, n_smart=200,
+        second = evaluator(smart, perfil=context["profile"], capital=capital,
+            meta=context["target"], horizon_days=context["horizon"],
+            max_loss_pct=context["max_loss_pct"], n_scenarios=200, n_smart=200,
             seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
         second_rows = second.get("pieces", [])
     results = []
@@ -154,7 +197,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
         objective = rank_alternatives_v2([row], perfil=context["profile"],
-            capital_meta=free)[0]["objetivo"]
+            capital_meta=capital)[0]["objetivo"]
         results.append({"candidate_key": candidate_key, "symbol": piece.get("symbol"),
             "strategy": piece.get("strategy", "simple"),
             "params": {key: value for key, value in piece.items()
@@ -196,7 +239,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     store = CandleStore(market_path)
     as_of = (now or datetime.now(timezone.utc)).isoformat()
     filters, prices, sigmas, skipped = _read_market_inputs(store)
-    contexts = _contexts(app_path)
+    contexts = _contexts(app_path, prices)
     with store._connect() as conn:
         conn.execute("DELETE FROM scenario_eval_results WHERE run_id IN "
             "(SELECT run_id FROM scenario_eval_runs WHERE as_of < datetime('now', ?))",
@@ -206,6 +249,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
         run_ids = [_insert_run(conn, context, as_of) for context in contexts]
     results_summary = []
     for context, run_id in zip(contexts, run_ids):
+        context_started = time.perf_counter()
         try:
             evaluated = _evaluate_context(context, store=store, app_db=app_path,
                 market_path=market_path, library_dir=library_dir, filters=filters,
@@ -221,8 +265,12 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     "WHERE run_id=?", (evaluated["status"],
                         json.dumps({"skipped": evaluated.get("skipped_symbols", skipped),
                             "discarded": evaluated.get("discarded", {})}, ensure_ascii=False),
-                        time.perf_counter() - started, _rss_max_mb(), run_id))
-            results_summary.append({"run_id": run_id, **evaluated})
+                        time.perf_counter() - context_started, _rss_max_mb(), run_id))
+            results_summary.append({"run_id": run_id, "context_seconds":
+                time.perf_counter() - context_started, **evaluated})
+            print(f"SCENARIO_CACHE contexto={context['goal_id'] or context['profile']} "
+                f"estado={evaluated['status']} segundos={time.perf_counter()-context_started:.3f} "
+                f"rss_max_mb={_rss_max_mb()}")
         except Exception as exc:
             with store._connect() as conn:
                 conn.execute("UPDATE scenario_eval_runs SET status='failed',error=?,seconds=?,rss_mb=? "

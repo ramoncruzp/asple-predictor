@@ -543,3 +543,22 @@ La corrida r5 mostró una carrera: la función falsa terminaba antes de expirar 
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
 ```
 Resultado r6: **14 pasaron en 1,41 s**. Las pruebas cubren ranking con USDT quieto, plan sin asignación consumible, mantener por umbral/costo, delegación de cooldown al freno existente y timeout de sombra v1. No se comparó todavía la persistencia de todas las tablas antes/después; queda para el commit de regresión de v1.
+
+
+## 43f-3c ? memoria y contexto financiero
+
+Antes de las pruebas de 43f-3c, comando exacto (PowerShell; `ASPLE_OFFLINE=1`; `--basetemp` nuevo):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3c-memoria-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp="$base"
+```
+
+Alcance de la valoración: los eventos con importe/fee no reconstruibles detienen la valoración de esa meta y la caché queda `skipped`; no se inventa efectivo. Cuando la comisión histórica falta pero el quote sí es atribuible, se estima 0,1 %. El inventario se valora al último cierre almacenado menos comisión de salida estimada de 0,1 %, por lo que no sustituye una valoración ejecutable por libro.
+
+La primera corrida enfocada de 43f-3c (r1) dio **17 pasaron en 1,82 s**. Tras añadir la lectura RSS nativa en Windows, se repitió con r2:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3c-memoria-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp="$base"
+```
+
+Resultado r2: **17 pasaron en 1,78 s**. Las pruebas verifican variables de entorno, ausencia de `preexec_fn`/`RLIMIT_AS`, marcado de estado `memoria`, capital libre + inventario y conservación de pruebas del motor.

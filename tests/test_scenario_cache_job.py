@@ -73,6 +73,80 @@ def test_importar_job_no_importa_numpy_ni_evaluador_en_servicio():
     assert result.returncode == 0, result.stderr
 
 
+def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases):
+    db, market_path = cache_databases
+    _set_enabled(db, True)
+    captured = {}
+
+    def run(args, **kwargs):
+        captured.update(kwargs)
+        captured["args"] = args
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    result = ScenarioCacheJob(db, market_path, run=run).run_if_enabled()
+
+    assert result["status"] == "completed"
+    assert captured["env"]["OPENBLAS_NUM_THREADS"] == "1"
+    assert captured["env"]["OMP_NUM_THREADS"] == "1"
+    assert captured["env"]["MALLOC_ARENA_MAX"] == "2"
+    assert "preexec_fn" not in captured
+    assert "RLIMIT_AS" not in open("scheduler/scenario_cache_job.py", encoding="utf-8").read()
+
+
+def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path):
+    db, market_path = cache_databases
+    _set_enabled(db, True)
+    with sqlite3.connect(market_path) as conn:
+        conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,profile,horizon_days,"
+            "n_scenarios,status) VALUES('run-memory','2026-10-30T00:00:00+00:00',"
+            "'RAPIDO',20,1000,'running')")
+    child = tmp_path / "slow_child.py"
+    child.write_text("import time; time.sleep(10)\n", encoding="utf-8", newline="\n")
+    job = ScenarioCacheJob(db, market_path, script_path=child,
+        rss_reader=lambda _pid: 601 * 1024 * 1024)
+
+    result = job.run_if_enabled()
+
+    assert result["status"] == "memoria"
+    with sqlite3.connect(market_path) as conn:
+        status = conn.execute("SELECT status FROM scenario_eval_runs "
+            "WHERE run_id='run-memory'").fetchone()[0]
+    assert status == "memoria"
+
+
+def test_contexto_meta_calcula_efectivo_valor_inventario_y_objetivo(cache_databases):
+    db, _market_path = cache_databases
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=10, target_input_type="USDT",
+            target_input_value=10, profile="RAPIDO", status="ACTIVE",
+            environment="testnet", created_at=now, started_at=now,
+            config_snapshot=json.dumps({"max_loss_pct": 18}))).inserted_primary_key[0]
+    grid = db.create_grid_with_levels({"symbol": "XRPUSDT", "range_low": .8,
+        "range_high": 1.2, "n_levels": 6, "capital_total": 40,
+        "status": "active", "environment": "testnet"}, [{"level_idx": 0,
+        "price": 1, "capital": 40, "sell_price": 1.1,
+        "entry_price": 1, "held_qty": 40, "state": "HOLDING"}])
+    with db.engine.begin() as conn:
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal_id,
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal_id,
+            run_id=run_id, grid_id=grid["id"], piece_type="grid", created_at=now))
+    db.add_grid_event(run_id=grid.get("run_id"), source="MONITOR",
+        event_type="BUY_FILLED", grid_id=grid["id"], price=1,
+        details={"quote_qty": 40, "fee_usdt": .04})
+
+    context = cache_script._contexts(db.engine.url.database, {"XRPUSDT": 1})[0]
+
+    assert context["free_cash"] == pytest.approx(59.96)
+    assert context["capital"] == pytest.approx(99.92004)
+    assert context["target"] == pytest.approx(10)
+    assert context["horizon"] == 20
+    assert context["balance_approximate"] is False
+
+
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,
         monkeypatch):
     db, market_path = cache_databases
