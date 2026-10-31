@@ -507,3 +507,39 @@ Resultado r3: 8 pasaron y 1 falló porque el test usaba una fecha fija incompati
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3-engine-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
 ```
 Resultado r4: **9 pasaron en 1,15 s**. La API publica v2 disponible solo con ambos interruptores y caché reciente; no cambia el estado apagado predeterminado.
+
+## 43f-3b — revisión v2 mantener/cambiar
+
+El plan usa un único ranking `rank_alternatives_v2`, incluido USDT quieto; si este es primero, la asignación queda vacía y `start_plan` devuelve estado `USDT_QUIETO` sin iniciar una meta ni abrir piezas. Se agregó la evaluación identificable `mantener` para cada grid activo, preservando `grid_id` y geometría. La revisión requiere +5 puntos de P(meta) y ganancia neta tras comisiones/pérdida de cierre por encima del promedio de mantener menos un error estándar; solo después delega la ejecución al flujo v1 existente, que mantiene frenos de persistencia, cooldown, cortes y límites de rotación.
+
+La sombra v1 corre `_build_plan(record=False)` en un hilo daemon con espera máxima de 30 s; vencido el presupuesto devuelve `sin_tiempo`. Comando exacto de pruebas antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+La corrida r1 encontró que la lectura omitía la columna de descartes y fallaron 2 de 12; se corrigió el SELECT. Verificación r2:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r2: 11 pasaron y 1 falló porque el fixture no incluía el desliz que el objetivo exige para considerar una alternativa factible; el fixture se completó con las métricas del contrato. Verificación r3:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r3: **12 pasaron en 1,53 s**. Se agregaron casos explícitos para el bloqueo por pérdida/comisiones y vencimiento del presupuesto v1. Verificación final r4:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+La corrida r4 dio 13 pasaron y 1 fallo: reemplazar `threading.Event` interfería con el mecanismo interno de `Thread`; el test ahora reduce la constante de presupuesto sin parchear threading. Verificación r5:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+La corrida r5 mostró una carrera: la función falsa terminaba antes de expirar incluso con presupuesto cero. El test ahora bloquea y libera explícitamente el hilo. Verificación r6:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3b-review-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r6: **14 pasaron en 1,41 s**. Las pruebas cubren ranking con USDT quieto, plan sin asignación consumible, mantener por umbral/costo, delegación de cooldown al freno existente y timeout de sombra v1. No se comparó todavía la persistencia de todas las tablas antes/después; queda para el commit de regresión de v1.

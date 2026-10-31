@@ -3746,6 +3746,10 @@ class MetaOperator:
         planned_engine = str((plan.get("engine") or {}).get("name") or "v1").lower()
         if planned_engine != expected_engine:
             raise ValueError("El plan fue calculado con otro motor; vuelve a analizar.")
+        if planned_engine == "v2" and not plan.get("pieces"):
+            return {"meta": goal, "opened": [], "failed": 0,
+                "status": "USDT_QUIETO", "reason": (plan.get("v2") or {}).get(
+                    "selection_reason") or "el plan conserva el capital en USDT"}
         max_drift = float(cfg.get("plan_price_drift_pct", self.price_drift_pct))
         if self.engine is not None:
             for piece in plan.get("pieces", []):

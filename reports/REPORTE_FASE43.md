@@ -916,3 +916,9 @@ Pruebas enfocadas r2: `tests/test_v2_scenario_engine.py tests/test_scenario_cach
 43f queda **parcial**: aún no está implementada la comparación v2 mantener/cambiar con umbral de 5 puntos, costos de salida/entrada, error estándar y frenos v1; falta la regresión de decisiones v1 contra `776eedf`. No se completaron 43f-4 a 43f-7. La caché de metas existentes tampoco usa valor de liquidación/efectivo libre y objetivo restante, por lo que no debe considerarse habilitable para operar. Los subcomponentes actuales están apagados por defecto.
 
 La disponibilidad que se expone en configuración/API depende de ambos interruptores y de una corrida `ok` menor a dos horas. Verificación r4 del motor y job: **9 pasaron en 1,15 s**.
+
+#### 43f-3b — revisión v2 mantener/cambiar
+
+El plan ahora usa `rank_alternatives_v2` como fuente común para ordenar candidatos y USDT quieto. Si USDT queda primero, el arranque no crea un run vacío. La revisión solo delega a los frenos existentes cuando la alternativa supera el mínimo de 5 puntos de probabilidad objetivo y su ganancia neta, descontando la pérdida realizada y el coste estimado de salida/entrada, supera mantener por al menos un error estándar. La sombra v1 solicita `record=False` y tiene un límite de 30 segundos.
+
+Comando exacto: `pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f3b-review-20261030-r6"` (`ASPLE_OFFLINE=1`; carpeta r6 nueva). Resultado: **14 pasaron en 1,41 s**. La auditoría de persistencia de v1 antes/después y la regresión congelada contra `776eedf` quedan para 43f-3d.

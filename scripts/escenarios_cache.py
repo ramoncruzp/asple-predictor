@@ -100,16 +100,17 @@ def _active_grid_pieces(app_db, goal_id):
     if goal_id is None:
         return []
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
-        rows = conn.execute("SELECT g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
+        rows = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
             "g.n_levels FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
             "WHERE l.meta_id=? AND l.released_at IS NULL AND g.status='active'", (goal_id,)).fetchall()
     output = []
-    for symbol, strategy, capital, low, high, levels in rows:
+    for grid_id, symbol, strategy, capital, low, high, levels in rows:
         if str(strategy).lower() not in {"simple", "smart"}:
             continue
         output.append({"symbol": str(symbol).upper(), "strategy": str(strategy).lower(),
             "capital": float(capital), "low": float(low), "high": float(high),
-            "n": int(levels), "candidate_key": f"mantener:{goal_id}:{symbol}:{levels}:{low}:{high}"})
+            "n": int(levels), "grid_id": int(grid_id), "is_current": True,
+            "candidate_key": f"mantener:{goal_id}:{grid_id}:{symbol}:{levels}:{low}:{high}"})
     return output
 
 
@@ -132,8 +133,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         horizon_days=context["horizon"])
     candidates = built["candidates"][:-1]
     candidates.extend(_active_grid_pieces(app_db, context["goal_id"]))
-    pieces = [{key: value for key, value in row.items() if key != "candidate_key"}
-        for row in candidates]
+    pieces = [dict(row) for row in candidates]
     first = evaluator(pieces, perfil=context["profile"], capital=free,
         meta=context["target"], n_scenarios=SCENARIO_COUNT, n_smart=200,
         seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas") if pieces else {
