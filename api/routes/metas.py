@@ -242,6 +242,17 @@ def engine_shadow_decisions(request: Request, limit: int = 100):
     return _operator(request).engine_shadow_history(limit=limit)
 
 
+@router.get("/shadow-marker")
+def shadow_marker_status(request: Request):
+    return _operator(request).shadow_marker_status()
+
+
+@router.put("/shadow-marker/switch")
+def update_shadow_marker_switch(request: Request, body: ScenarioCacheSwitch):
+    return _call(_operator(request).set_shadow_marker_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
 @router.put("/v2-engine/switch")
 def update_v2_engine_switch(request: Request, body: ScenarioCacheSwitch):
     return _call(_operator(request).set_v2_engine_enabled, body.enabled,

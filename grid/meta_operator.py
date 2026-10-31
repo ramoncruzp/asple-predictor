@@ -982,6 +982,25 @@ class MetaOperator:
         return self._set_global_switch("scenario_cache_enabled", "scenario_cache_switch_events",
             enabled, confirm=confirm, actor=actor)
 
+    def shadow_marker_status(self):
+        from sqlalchemy import func, select
+        result = self._global_switch_status("shadow_marker_enabled",
+            "shadow_marker_switch_events")
+        table = getattr(self.db, "engine_shadow_decisions", None)
+        result["completed"] = 0
+        result["pending"] = 0
+        if table is not None:
+            with self.db.engine.connect() as conn:
+                result["completed"] = int(conn.execute(select(func.count()).select_from(table)
+                    .where(table.c.shadow_outcome_json.is_not(None))).scalar_one())
+                result["pending"] = int(conn.execute(select(func.count()).select_from(table)
+                    .where(table.c.shadow_outcome_json.is_(None))).scalar_one())
+        return result
+
+    def set_shadow_marker_enabled(self, enabled, *, confirm, actor):
+        return self._set_global_switch("shadow_marker_enabled", "shadow_marker_switch_events",
+            enabled, confirm=confirm, actor=actor)
+
     def v2_engine_status(self):
         result = self._global_switch_status("v2_engine_enabled", "v2_engine_switch_events")
         cache_switch = self._global_switch_status("scenario_cache_enabled",
