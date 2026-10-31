@@ -477,3 +477,33 @@ Resultado r1: 3 pasaron en 0,83 s. Se agregó una prueba de corrida completa con
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f2-cache-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenario_cache_job.py --basetemp="$base"
 ```
 Resultado r2: **4 pasaron en 0,94 s**. La prueba completa valida escritura de ambas estrategias de resultado (Simple y USDT quieto) con un almacén de mercado temporal y un evaluador sintético; no se consultaron velas reales ni se llamó a red.
+
+Límite pendiente de 43f-2: la caché de metas existentes aún aproxima capital y objetivo usando `capital_initial` y `target_usdt`, no el efectivo libre más el valor de liquidación actual ni el objetivo neto de la ganancia realizada. Tampoco aplica el límite de pérdida relativo al patrimonio actual. Por eso sus corridas no deben habilitar operación v2 hasta cerrar este cálculo con una fuente temporal validada.
+
+## 43f-3 — motor v2 consumidor de caché
+
+El motor v2 ya puede leer la corrida completa más reciente para la meta/perfil en modo SQLite solo lectura. Rechaza expresamente los interruptores apagados, las corridas ausentes y las cachés con más de dos horas; no deriva a v1. El global `v2_engine_enabled` inicia falso y solo puede activarse con confirmación después de activar `scenario_cache_enabled`. La configuración de perfil sigue predeterminada en v1; la selección v2 requiere el global encendido. La revisión de grids activos es conservadora y devuelve no-op en esta primera integración: la caché no reconfigura ni rota órdenes vivas.
+
+Comando exacto de pruebas enfocado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3-engine-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+La corrida r1 aprobó 7 pruebas en 1,15 s. Se incluyó `capital` en los parámetros persistidos para conservar la fracción de presupuesto elegida, y la sombra v1 ahora solicita `_build_plan(record=False)`. Verificación r2:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3-engine-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r2: **8 pasaron en 1,09 s**. Discrepancia conservadora: la revisión v2 de metas ya activas aún no cambia grids ni órdenes; devuelve no-op con la corrida vigente porque la política de reconfiguración no está validada. La evaluación v1 en sombra usa `record=False`; no se agrega fallback cuando falla la caché v2.
+
+La disponibilidad publicada en API se corrigió para depender de ambos interruptores globales y de una corrida `ok` vigente (<2 h). Comando exacto de comprobación r3:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3-engine-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r3: 8 pasaron y 1 falló porque el test usaba una fecha fija incompatible con el reloj efectivo. El fixture ahora toma la hora UTC actual; verificación r4:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3-engine-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r4: **9 pasaron en 1,15 s**. La API publica v2 disponible solo con ambos interruptores y caché reciente; no cambia el estado apagado predeterminado.

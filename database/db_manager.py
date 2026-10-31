@@ -510,6 +510,8 @@ class DBManager:
                         "learning_time_budget_minutes": 20,
                         "learning_v1_enabled": True,
                         "scorecard_weekly_enabled": False,
+                        "scenario_cache_enabled": False,
+                        "v2_engine_enabled": False,
                         "reconfig_persistence_40d6b_migrated": True}, sort_keys=True), updated_at=now))
             else:
                 row = conn.execute(select(self.meta_profile_settings.c.settings).where(
@@ -520,6 +522,8 @@ class DBManager:
                 global_values.setdefault("learning_time_budget_minutes", 20)
                 global_values.setdefault("learning_v1_enabled", True)
                 global_values.setdefault("scorecard_weekly_enabled", False)
+                global_values.setdefault("scenario_cache_enabled", False)
+                global_values.setdefault("v2_engine_enabled", False)
                 if not migration_pending:
                     global_values["reconfig_persistence_40d6b_migrated"] = True
                 conn.execute(self.meta_profile_settings.update().where(

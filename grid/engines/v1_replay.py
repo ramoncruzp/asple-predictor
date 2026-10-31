@@ -17,8 +17,11 @@ class V1ReplayEngine(DecisionEngine):
         return operator._review_allocations(goal, valuation, plan=plan)
 
     def shadow_review(self, operator, goal, valuation, plan):
-        choices = (plan or {}).get("decision_choices") or {}
-        choice = choices.get("scanner_advisor") or choices.get("learned") or {}
+        # Al ser sombra del motor v2, calcula la alternativa v1 sin persistir
+        # el plan ni ejecutar acciones del operador.
+        v1_plan = operator._build_plan(goal, record=False)
+        choices = (v1_plan or {}).get("decision_choices") or {}
+        choice = choices.get("real") or choices.get("scanner_advisor") or {}
         return {"decision": choice.get("decision", "mantener"),
             "reason": choice.get("reason"), "alternative_id": choice.get("alternative_id"),
-            "source": "decision_choices"}
+            "source": "v1_plan_read_only"}

@@ -454,3 +454,7 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 43e-6a fija el objetivo informativo: PnL medio >= -1 % del capital, cota superior del IC de P(límite) <= 5 % Prudente / 15 % Rápido y CVaR 5 % dentro de la pérdida maxima del perfil. Ordena por P(meta), mediana de días a meta y PnL; si todo falla, mantiene USDT quieto como alternativa factible.
 
 43e-6c quedó completada en 43e-6e: historia usa EWMA causal con factor verificado anterior a t, geometría compartida con escenarios, bot por offsets y Smart exacto sobre hasta 200 inicios; se verificaron OU/GBM y la variante sin tendencia. 43e-6d se completó en 43e-6f con aceptación predictiva contra realidad y baseline v1. 43e-7 exporta la API pública de investigación. La validación predictiva local usa sintéticos; falta la corrida de S1 antes de aceptar científicamente el modelo. Nada cambia decisiones reales; v2 permanece `available=False`.
+
+### Estado parcial de 43f
+
+43f-2 quedó implementada como infraestructura experimental, pero la caché de metas existentes aún usa capital y objetivo originales y no calcula equity de liquidación ni target restante. 43f-3 integra lectura de caché y plan de apertura, pero la revisión de metas vivas permanece no-op. El motor, la caché y todos los perfiles continúan apagados por defecto. Falta terminar la revisión v2 con frenos, la regresión de v1 y el resto de 43f-3 antes de continuar con 43f-4 a 43f-7.

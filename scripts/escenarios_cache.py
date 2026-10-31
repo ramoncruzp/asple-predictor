@@ -158,7 +158,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         results.append({"candidate_key": candidate_key, "symbol": piece.get("symbol"),
             "strategy": piece.get("strategy", "simple"),
             "params": {key: value for key, value in piece.items()
-                if key not in {"symbol", "strategy", "capital", "candidate_key"}},
+                if key not in {"symbol", "strategy", "candidate_key"}},
             "metrics": row.get("metrics") or _scenario_metrics(row),
             "objective": objective})
     quiet = {"candidate_key": _candidate_key({"strategy": "usdt_quieto"}),

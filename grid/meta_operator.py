@@ -952,15 +952,47 @@ class MetaOperator:
 
     def v2_engine_status(self):
         result = self._global_switch_status("v2_engine_enabled", "v2_engine_switch_events")
-        result["available"] = False
-        result["reason"] = "el motor v2 continúa deshabilitado hasta completar la integración y validación"
+        cache_switch = self._global_switch_status("scenario_cache_enabled",
+            "scenario_cache_switch_events")
+        from grid.engines import get_engine
+        code_available = bool(get_engine("v2").available)
+        ready_cache = False
+        cache_as_of = None
+        if result["enabled"] and cache_switch["enabled"]:
+            try:
+                from datetime import datetime, timezone
+                import sqlite3
+                from data.market_store import market_db_path
+                path = market_db_path()
+                with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+                    row = conn.execute("SELECT as_of FROM scenario_eval_runs WHERE status='ok' "
+                        "ORDER BY as_of DESC LIMIT 1").fetchone()
+                if row:
+                    stamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    cache_as_of = stamp.isoformat()
+                    ready_cache = (datetime.now(timezone.utc) - stamp).total_seconds() <= 7200
+            except Exception:
+                ready_cache = False
+        result["cache_as_of"] = cache_as_of
+        result["cache_enabled"] = bool(cache_switch["enabled"])
+        result["available"] = bool(code_available and result["enabled"] and
+            cache_switch["enabled"] and ready_cache)
+        result["reason"] = None if result["available"] else (
+            "motor v2 apagado" if not result["enabled"] else
+            "caché de escenarios apagada" if not cache_switch["enabled"] else
+            "no hay una corrida de caché vigente de menos de dos horas")
         return result
 
     def set_v2_engine_enabled(self, enabled, *, confirm, actor):
-        if enabled:
-            raise ValueError("El motor v2 sigue no disponible; el interruptor debe permanecer apagado.")
+        from grid.engines import get_engine
+        if enabled and not get_engine("v2").available:
+            raise ValueError("El motor v2 no está disponible.")
+        if enabled and not self.scenario_cache_status().get("enabled"):
+            raise ValueError("Activa primero 'Caché de escenarios v2'.")
         return self._set_global_switch("v2_engine_enabled", "v2_engine_switch_events",
-            False, confirm=confirm, actor=actor)
+            enabled, confirm=confirm, actor=actor)
 
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
@@ -975,6 +1007,11 @@ class MetaOperator:
             raise ValueError("Confirma el cambio e indica quién lo autoriza.")
         if not selected.available:
             raise ValueError("El motor v2 todavía no está disponible.")
+        if selected.name == "v2":
+            global_settings = self._global_switch_status("v2_engine_enabled",
+                "v2_engine_switch_events")
+            if not global_settings.get("enabled"):
+                raise ValueError("Activa primero el interruptor global del motor v2.")
         with self.db.engine.begin() as conn:
             raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
                 self.db.meta_profile_settings.c.profile == profile)).scalar_one_or_none()

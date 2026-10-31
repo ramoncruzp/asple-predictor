@@ -134,8 +134,11 @@ def _operator(request: Request):
 def get_config(request: Request):
     from grid.engines import ENGINES
     result = _core(request).config()
+    v2_status = _operator(request).v2_engine_status()
     result["engines"] = [{"name": engine.name, "version": engine.version,
-        "available": engine.available} for engine in ENGINES.values()]
+        "available": (v2_status["available"] if engine.name == "v2" else engine.available),
+        **({"reason": v2_status["reason"]} if engine.name == "v2" else {})}
+        for engine in ENGINES.values()]
     return result
 
 

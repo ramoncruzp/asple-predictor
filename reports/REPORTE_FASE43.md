@@ -906,3 +906,13 @@ Pruebas enfocadas: 7 pasaron en 0,19 s; incluye descartes de notional para PEPE 
 Se añadió `ScenarioCacheJob` a las 00:10 de cada hora UTC, después de MarketSync a las :02. Arranca en modo apagado; al activarse mediante el ajuste GLOBAL, delega el cálculo a `scripts/escenarios_cache.py` en un subproceso de prioridad baja, con timeout de 10 minutos y límite de 600 MiB en POSIX cuando está disponible. No importa numpy desde el módulo del job. La corrida guarda perfiles/meta, métricas y propuestas en `market_data.db`, conserva siete días y registra timeout/fallo. El test de corrida usa SQLite temporal y un evaluador falso, no velas o base reales.
 
 Pruebas exactas: `pytest tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f2-cache-20261030-r1"` (3 pasaron en 0,83 s) y la reejecución aislada r2 (4 pasaron en 0,94 s). La llamada real al proceso de escenarios queda sin habilitar por defecto. `scripts/revisar_codificacion.py` informó `HALLAZGOS=0` sobre todos los archivos tocados de esta parte.
+
+### 43f-3 — motor v2 y caché vigente
+
+`V2ScenarioEngine` lee métricas persistidas en solo lectura; requiere los dos interruptores globales, un perfil configurado como v2 y una corrida `ok` de menos de dos horas. Devuelve error explícito ante ausencia/frescura inválida y no recurre a v1. La habilitación global está confirmada por actor, exige primero la caché activa y parte apagada. El motor v1 conserva su método de plan normal; cuando sirve de sombra bajo v2, calcula un plan con `record=False`.
+
+Pruebas enfocadas r2: `tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py`, **8 pasaron en 1,09 s**. La revisión v2 de grids ya existentes permanece en no-op; se deja documentado como límite pendiente de política, sin cancelar, reemplazar ni reconfigurar órdenes en esta entrega.
+
+43f queda **parcial**: aún no está implementada la comparación v2 mantener/cambiar con umbral de 5 puntos, costos de salida/entrada, error estándar y frenos v1; falta la regresión de decisiones v1 contra `776eedf`. No se completaron 43f-4 a 43f-7. La caché de metas existentes tampoco usa valor de liquidación/efectivo libre y objetivo restante, por lo que no debe considerarse habilitable para operar. Los subcomponentes actuales están apagados por defecto.
+
+La disponibilidad que se expone en configuración/API depende de ambos interruptores y de una corrida `ok` menor a dos horas. Verificación r4 del motor y job: **9 pasaron en 1,15 s**.
