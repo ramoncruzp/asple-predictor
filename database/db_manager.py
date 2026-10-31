@@ -419,6 +419,14 @@ class DBManager:
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
             Column("changed_at", DateTime(timezone=True), nullable=False))
+        self.scenario_cache_switch_events = Table("scenario_cache_switch_events", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
+            Column("changed_at", DateTime(timezone=True), nullable=False))
+        self.v2_engine_switch_events = Table("v2_engine_switch_events", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("enabled", Boolean, nullable=False), Column("actor", String(80), nullable=False),
+            Column("changed_at", DateTime(timezone=True), nullable=False))
         self.meta_valuation_states = Table("meta_valuation_states", self.metadata,
             Column("meta_id", Integer, ForeignKey("meta_goals.id"), primary_key=True),
             Column("symbol", String(32), primary_key=True), Column("state", String(16), nullable=False),

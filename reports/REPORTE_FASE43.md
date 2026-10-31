@@ -900,3 +900,9 @@ La regresión del ranking desde el CLI, tras conectar el ajuste configurable, pa
 Se agregó `build_candidates` con Simple (n 6/10, anchos 0,5/1/2 σ), bots (compras −1,5/−3 %, ventas +1,5/+3 %) y capitales 100/70/50 % del disponible. Cada propuesta se valida con filtros y planificación de producción; los rechazos se agrupan por motivo. USDT quieto siempre se agrega. `build_smart_candidates` prepara hasta dos geometrías Simple para evaluación Smart posterior, sin hacer Smart en la primera pasada.
 
 Pruebas enfocadas: 7 pasaron en 0,19 s; incluye descartes de notional para PEPE sintético y presencia de USDT quieto. La codificación se vuelve a verificar al cierre de 43f.
+
+### 43f-2 — caché horaria de escenarios
+
+Se añadió `ScenarioCacheJob` a las 00:10 de cada hora UTC, después de MarketSync a las :02. Arranca en modo apagado; al activarse mediante el ajuste GLOBAL, delega el cálculo a `scripts/escenarios_cache.py` en un subproceso de prioridad baja, con timeout de 10 minutos y límite de 600 MiB en POSIX cuando está disponible. No importa numpy desde el módulo del job. La corrida guarda perfiles/meta, métricas y propuestas en `market_data.db`, conserva siete días y registra timeout/fallo. El test de corrida usa SQLite temporal y un evaluador falso, no velas o base reales.
+
+Pruebas exactas: `pytest tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f2-cache-20261030-r1"` (3 pasaron en 0,83 s) y la reejecución aislada r2 (4 pasaron en 0,94 s). La llamada real al proceso de escenarios queda sin habilitar por defecto. `scripts/revisar_codificacion.py` informó `HALLAZGOS=0` sobre todos los archivos tocados de esta parte.

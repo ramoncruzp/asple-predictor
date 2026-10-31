@@ -902,6 +902,66 @@ class MetaOperator:
                 enabled=bool(enabled), actor=str(actor).strip()[:80], changed_at=now))
         return {"enabled": bool(enabled), "actor": str(actor).strip()[:80], "changed_at": now.isoformat()}
 
+    def _global_switch_status(self, setting_key, events_table):
+        from sqlalchemy import select
+        settings_table = getattr(self.db, "meta_profile_settings", None)
+        events = getattr(self.db, events_table, None)
+        if settings_table is None or getattr(self.db, "engine", None) is None:
+            return {"enabled": False, "changed_at": None, "actor": None}
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(settings_table.c.settings).where(
+                settings_table.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            event = conn.execute(select(events).order_by(events.c.id.desc()).limit(1)
+                ).mappings().first() if events is not None else None
+        return {"enabled": bool(values.get(setting_key, False)),
+            "changed_at": str(event["changed_at"]) if event else None,
+            "actor": event["actor"] if event else None}
+
+    def _set_global_switch(self, setting_key, events_table, enabled, *, confirm, actor):
+        from sqlalchemy import select
+        actor = str(actor or "").strip()
+        if not confirm or not actor:
+            raise ValueError("Confirma el cambio e indica quién lo autoriza.")
+        value, now = bool(enabled), datetime.now(timezone.utc)
+        settings_table = self.db.meta_profile_settings
+        events = getattr(self.db, events_table)
+        with self.db.engine.begin() as conn:
+            raw = conn.execute(select(settings_table.c.settings).where(
+                settings_table.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+            values[setting_key] = value
+            present = conn.execute(select(settings_table.c.profile).where(
+                settings_table.c.profile == "GLOBAL")).first()
+            if present:
+                conn.execute(settings_table.update().where(
+                    settings_table.c.profile == "GLOBAL").values(
+                        settings=json.dumps(values, sort_keys=True), updated_at=now))
+            else:
+                conn.execute(settings_table.insert().values(profile="GLOBAL",
+                    settings=json.dumps(values, sort_keys=True), updated_at=now))
+            conn.execute(events.insert().values(enabled=value, actor=actor[:80], changed_at=now))
+        return {"enabled": value, "actor": actor[:80], "changed_at": now.isoformat()}
+
+    def scenario_cache_status(self):
+        return self._global_switch_status("scenario_cache_enabled", "scenario_cache_switch_events")
+
+    def set_scenario_cache_enabled(self, enabled, *, confirm, actor):
+        return self._set_global_switch("scenario_cache_enabled", "scenario_cache_switch_events",
+            enabled, confirm=confirm, actor=actor)
+
+    def v2_engine_status(self):
+        result = self._global_switch_status("v2_engine_enabled", "v2_engine_switch_events")
+        result["available"] = False
+        result["reason"] = "el motor v2 continúa deshabilitado hasta completar la integración y validación"
+        return result
+
+    def set_v2_engine_enabled(self, enabled, *, confirm, actor):
+        if enabled:
+            raise ValueError("El motor v2 sigue no disponible; el interruptor debe permanecer apagado.")
+        return self._set_global_switch("v2_engine_enabled", "v2_engine_switch_events",
+            False, confirm=confirm, actor=actor)
+
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
         from grid.engines import get_engine

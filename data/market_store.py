@@ -68,6 +68,19 @@ class CandleStore:
                     symbol TEXT PRIMARY KEY, tick_size TEXT NOT NULL, step_size TEXT NOT NULL,
                     min_qty TEXT NOT NULL, min_notional TEXT NOT NULL, raw_json TEXT NOT NULL,
                     fetched_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS scenario_eval_runs(
+                    run_id TEXT PRIMARY KEY, as_of TEXT NOT NULL, goal_id INTEGER,
+                    profile TEXT NOT NULL, horizon_days INTEGER NOT NULL,
+                    n_scenarios INTEGER NOT NULL, seconds REAL NOT NULL DEFAULT 0,
+                    rss_mb REAL, status TEXT NOT NULL, error TEXT);
+                CREATE TABLE IF NOT EXISTS scenario_eval_results(
+                    run_id TEXT NOT NULL REFERENCES scenario_eval_runs(run_id) ON DELETE CASCADE,
+                    candidate_key TEXT NOT NULL, symbol TEXT, strategy TEXT NOT NULL,
+                    params_json TEXT NOT NULL, metrics_json TEXT NOT NULL,
+                    objective_json TEXT NOT NULL,
+                    PRIMARY KEY(run_id,candidate_key));
+                CREATE INDEX IF NOT EXISTS ix_scenario_eval_runs_as_of
+                    ON scenario_eval_runs(as_of);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_market_gap
                     ON gaps(symbol_id, interval, from_ts, to_ts);
                 CREATE INDEX IF NOT EXISTS ix_market_candles_ts

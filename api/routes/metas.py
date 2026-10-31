@@ -110,6 +110,13 @@ class ScorecardWeeklySwitch(BaseModel):
     actor: str = Field(min_length=1, max_length=80)
 
 
+class ScenarioCacheSwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    confirm: StrictBool = False
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class StartPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_id: str = Field(min_length=16, max_length=64)
@@ -208,6 +215,28 @@ def scorecard_weekly_status(request: Request):
 @router.put("/scorecard-weekly/switch")
 def update_scorecard_weekly_switch(request: Request, body: ScorecardWeeklySwitch):
     return _call(_operator(request).set_scorecard_weekly_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
+@router.get("/scenario-cache")
+def scenario_cache_status(request: Request):
+    return _operator(request).scenario_cache_status()
+
+
+@router.put("/scenario-cache/switch")
+def update_scenario_cache_switch(request: Request, body: ScenarioCacheSwitch):
+    return _call(_operator(request).set_scenario_cache_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
+@router.get("/v2-engine")
+def v2_engine_status(request: Request):
+    return _operator(request).v2_engine_status()
+
+
+@router.put("/v2-engine/switch")
+def update_v2_engine_switch(request: Request, body: ScenarioCacheSwitch):
+    return _call(_operator(request).set_v2_engine_enabled, body.enabled,
         confirm=body.confirm, actor=body.actor)
 
 

@@ -459,3 +459,21 @@ La corrida r1 dio 6 pasaron y 1 fallo: tres geometrías Simple fueron descartada
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f1-candidatos-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_candidates.py tests/test_scenarios_objective.py --basetemp="$base"
 ```
 Resultado r2: **7 pasaron en 0,19 s**. Los candidatos Smart se generan solo cuando el llamador entrega las dos mejores Simple de la primera pasada, para no preseleccionar Smart antes de medir.
+
+## 43f-2 — caché horaria de escenarios
+
+Se añadió el almacenamiento de corridas y resultados en `market_data.db`, con retención de siete días, junto con `ScenarioCacheJob` horario al minuto 10 UTC. El ajuste GLOBAL `scenario_cache_enabled` queda apagado por defecto; el job lanza `scripts/escenarios_cache.py` en un subproceso, con prioridad baja, timeout de 600 s y límite de memoria virtual de 600 MiB en POSIX cuando el sistema permite aplicarlo. Un timeout registra `status=timeout`. La ruta del job importa solo el scheduler y SQLAlchemy, no numpy ni el evaluador de escenarios.
+
+El script contempla metas activas y perfiles configurados para v2; los grids actuales se guardan como aproximaciones etiquetadas `mantener`. Las propuestas incluyen USDT quieto. Sin historia, filtros o biblioteca suficientes el resultado se conserva como omitido con motivo, sin inventar métricas. La caché aún es diagnóstica y no participa en decisiones de v1.
+
+Comando exacto de pruebas enfocado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f2-cache-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r1: 3 pasaron en 0,83 s. Se agregó una prueba de corrida completa contra SQLite temporal; comando de verificación:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f2-cache-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenario_cache_job.py --basetemp="$base"
+```
+Resultado r2: **4 pasaron en 0,94 s**. La prueba completa valida escritura de ambas estrategias de resultado (Simple y USDT quieto) con un almacén de mercado temporal y un evaluador sintético; no se consultaron velas reales ni se llamó a red.
