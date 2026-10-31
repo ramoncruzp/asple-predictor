@@ -565,6 +565,8 @@ class DBManager:
                     conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
                 if "control_result_json" not in run_present:
                     conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN control_result_json TEXT")
+                conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_piece_grid_unreleased "
+                    "ON meta_piece_links (grid_id) WHERE released_at IS NULL")
             elif self.engine.dialect.name == "postgresql":
                 for name, sql_type in additions.items():
                     conn.exec_driver_sql(f"ALTER TABLE meta_piece_links ADD COLUMN IF NOT EXISTS {name} {sql_type}")
@@ -573,6 +575,8 @@ class DBManager:
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_plan_json TEXT")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS loss_limit_breach_count INTEGER NOT NULL DEFAULT 0")
                 conn.exec_driver_sql("ALTER TABLE meta_runs ADD COLUMN IF NOT EXISTS control_result_json TEXT")
+                conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_piece_grid_unreleased "
+                    "ON meta_piece_links (grid_id) WHERE released_at IS NULL")
 
     def _migrate_meta_learning_columns(self) -> None:
         """Conserva muestras previas y las marca para recalcular su base causal."""

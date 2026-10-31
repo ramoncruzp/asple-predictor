@@ -698,3 +698,15 @@ La regresión congelada confirma la paridad del plan y revisión operativa de v1
 ### 43f-3f - memoria y tiempo de la caché
 
 La caché se cambió a generación por moneda, lotes de hasta seis candidatos y lotes de 32 escenarios en `float32`. La corrida sintética de cinco símbolos (1.000 escenarios, horizonte 15 días) completó `ok` en **223,71 s**, con pico de **204,09 MB**: 152 candidatos generados, 68 evaluados y 84 descartados. Los topes propios registran `memoria`/`timeout`, preservan resultados completados y convierten corridas `running` de más de 30 minutos en `abandonada`. Esta medición no representa producción ni sustituye la verificación en S1; no se consultaron datos desplegados.
+
+### 43h-0b - aislamiento de capital por meta
+
+La disponibilidad para iniciar una meta descuenta el efectivo atribuible de las demás metas activas y las reservas de grids no ligados. Para añadir o rotar piezas, el operador limita el capital a la vez por el efectivo atribuible a esa meta y por el USDT libre después de los compromisos ajenos. Los vínculos activos tienen un índice único por `grid_id`; el historial liberado se conserva.
+
+Prueba enfocada (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0b-20261031-a'; python -m pytest tests/test_meta_core.py --basetemp=$base -q
+```
+
+Resultado: **42 pruebas pasaron en 4,31 s**; codificación `HALLAZGOS=0`; `git diff --check` sin errores. Las pruebas verifican rechazo con 150 USDT para dos metas de 100, inicio con 250 y límite de 50 USDT disponibles para Meta B cuando Meta A conserva su efectivo atribuible. No se usaron S1, Testnet, `.env`, bases reales ni red.

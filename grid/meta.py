@@ -396,21 +396,72 @@ class MetaCore:
                 self.db.meta_piece_links.c.released_at.is_(None))).mappings().all()
         return [dict(row) for row in rows]
 
-    def _available_usdt(self):
-        balances = self.exchange.get_balance("USDT")
-        free = _d(balances.get("USDT", {}).get("free"))
-        # Reservas contabilizadas por grids ajenos, además de órdenes ya bloqueadas por el exchange.
+    def _goal_cash(self, meta_id):
+        """Efectivo atribuible a una meta segun sus propios fills."""
+        delivered = returned = commissions = Decimal(0)
+        for link in self._owned_grids(meta_id):
+            grid = self.db.get_grid(int(link["grid_id"]))
+            if grid is None:
+                continue
+            events = list(reversed(self.db.list_grid_events(grid_id=int(grid["id"]), limit=100000)))
+            repository_grid_id = link.get("repository_grid_id")
+            level_map = json.loads(link.get("repository_level_map") or "{}")
+            if repository_grid_id is not None:
+                repository_events = self.db.list_grid_events(grid_id=int(repository_grid_id), limit=100000)
+                moved_ids = {int(index) for index in level_map.values()}
+                events.extend(event for event in reversed(repository_events)
+                              if event.get("level_idx") is not None
+                              and int(event["level_idx"]) in moved_ids)
+            for event in events:
+                details = event.get("details") or {}
+                if event.get("event_type") == "BUY_FILLED":
+                    quote, fee = self._fill_cash(grid, event, details)
+                    delivered += quote
+                    commissions += fee
+                elif event.get("event_type") in {"SELL_FILLED", "CELL_LIQUIDATED"}:
+                    if event.get("event_type") == "CELL_LIQUIDATED" and details.get("cash_proceeds_net") is not None:
+                        returned += _d(details["cash_proceeds_net"])
+                    else:
+                        quote, fee = self._fill_cash(grid, event, details)
+                        returned += quote
+                        commissions += fee
+        return attributable_cash(self.get_goal(meta_id)["capital_initial"], delivered, returned, commissions)
+
+    def _unlinked_grid_reserve(self, excluded_grid_ids=()):
         from sqlalchemy import select
+        excluded = {int(value) for value in excluded_grid_ids}
         with self.db.engine.connect() as conn:
-            rows = conn.execute(select(self.db.grids).where(self.db.grids.c.status.in_(["ACTIVE", "PAUSED", "CLOSING"]))).mappings().all()
+            rows = conn.execute(select(self.db.grids).where(
+                self.db.grids.c.status.in_(["ACTIVE", "PAUSED", "CLOSING"]))).mappings().all()
         reserved = Decimal(0)
         for row in rows:
             grid = dict(row)
+            if int(grid["id"]) in excluded:
+                continue
             levels = self.db.get_grid_levels(int(grid["id"]))
             reserved += sum((_d(level.get("capital")) for level in levels
                              if level.get("state") in {"IDLE", "WAITING", "BUY_PENDING"}
                              and not level.get("order_id") and _d(level.get("held_qty")) <= 0), Decimal(0))
-        return max(Decimal(0), free - reserved), reserved
+        return reserved
+
+    def _available_usdt(self, goal_id=None):
+        balances = self.exchange.get_balance("USDT")
+        free = _d(balances.get("USDT", {}).get("free"))
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            active_goals = conn.execute(select(self.db.meta_goals.c.id).where(
+                self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED", "CLOSING", "TARGET_CLOSING"]))).scalars().all()
+        linked_ids = set()
+        other_cash = Decimal(0)
+        for active_id in active_goals:
+            linked_ids.update(int(link["grid_id"]) for link in self._owned_grids(int(active_id)))
+            if goal_id is None or int(active_id) != int(goal_id):
+                other_cash += max(Decimal(0), self._goal_cash(int(active_id)))
+        reserved = self._unlinked_grid_reserve(linked_ids)
+        available = max(Decimal(0), free - other_cash - reserved)
+        if goal_id is not None:
+            available = min(available, max(Decimal(0), self._goal_cash(goal_id)))
+        return available, reserved
 
     def start_goal(self, meta_id):
         from sqlalchemy import func, select
@@ -418,22 +469,30 @@ class MetaCore:
         goal = self.get_goal(meta_id)
         if goal["status"] != "DRAFT":
             raise ValueError("La meta no está en estado DRAFT.")
-        free, reserved = self._available_usdt()
         capital = _d(goal["capital_initial"])
-        if free < capital:
-            self._ledger(meta_id, None, "META_START_REJECTED", {"free_usdt": str(free), "other_grids_reserved_usdt": str(reserved)})
-            raise ValueError(f"USDT libre insuficiente: disponible {free}; capital requerido {capital}.")
         now = self._now()
+        insufficient = None
         with self.db.engine.begin() as conn:
             self._lock_capacity_row(conn)
             active = conn.execute(select(func.count()).select_from(self.db.meta_goals).where(
                 self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED", "CLOSING", "TARGET_CLOSING"]))).scalar_one()
             if active >= int(self.config()["max_active"]):
                 raise ValueError("Ya existe una meta activa.")
-            conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == int(meta_id),
-                self.db.meta_goals.c.status == "DRAFT").values(status="ACTIVE", started_at=now))
-            run_id = conn.execute(self.db.meta_runs.insert().values(meta_id=int(meta_id), status="ACTIVE",
-                started_at=now, worst_result_pct=0.0, realized_extra_usdt=0.0)).inserted_primary_key[0]
+            free, reserved = self._available_usdt()
+            if free < capital:
+                insufficient = {"free_usdt": str(free),
+                    "other_goals_cash_usdt": str(max(Decimal(0),
+                        _d(self.exchange.get_balance("USDT").get("USDT", {}).get("free")) - reserved - free)),
+                    "other_grids_reserved_usdt": str(reserved)}
+                run_id = None
+            else:
+                conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == int(meta_id),
+                    self.db.meta_goals.c.status == "DRAFT").values(status="ACTIVE", started_at=now))
+                run_id = conn.execute(self.db.meta_runs.insert().values(meta_id=int(meta_id), status="ACTIVE",
+                    started_at=now, worst_result_pct=0.0, realized_extra_usdt=0.0)).inserted_primary_key[0]
+        if insufficient is not None:
+            self._ledger(meta_id, None, "META_START_REJECTED", insufficient)
+            raise ValueError(f"USDT libre insuficiente: disponible {free}; capital requerido {capital}.")
         self._ledger(meta_id, run_id, "META_STARTED", {"reserved_capital_usdt": str(capital),
                      "exchange_free_usdt": str(free), "other_grids_reserved_usdt": str(reserved)})
         return self.get_goal(meta_id)

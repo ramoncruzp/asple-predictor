@@ -1547,6 +1547,8 @@ class MetaOperator:
                 return {"allowed": False, "reason": "conflicto con niveles de venta vivos"}
             balance = self._plan_read(exchange, "get_balance", "USDT").get("USDT", {"free": 0})
             free = Decimal(str(balance.get("free", 0)))
+            goal_available, _goal_reserve = self.core._available_usdt(int(goal["id"]))
+            free = min(free, Decimal(str(goal_available)))
             releasable = Decimal(0)
             if replacing_grid_id is not None:
                 prefix = f"g{int(replacing_grid_id)}L"
@@ -4827,7 +4829,11 @@ class MetaOperator:
                 valuation = None
         attributable_cash = (float(valuation.get("cash_usdt")) if valuation is not None
                              and valuation.get("cash_usdt") is not None else allocatable)
-        free = max(0.0, min(allocatable, attributable_cash))
+        try:
+            goal_available, _goal_reserve = self.core._available_usdt(int(goal["id"]))
+        except Exception:
+            goal_available = 0
+        free = max(0.0, min(allocatable, attributable_cash, float(goal_available)))
         grids = sum(link["piece_type"] == "grid" for link, _ in active)
         bots = len(active) - grids
         if free < 5.5 or (grids >= int(cfg.get("max_grids", 0)) and bots >= int(cfg.get("max_bots", 0))):

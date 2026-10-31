@@ -247,6 +247,27 @@ def test_single_active_goal_enforced_transactionally(tmp_path):
         core.create_goal(100, 10)
 
 
+def test_start_goal_reserves_other_active_goal_cash(tmp_path):
+    _db, core = _core(tmp_path, exchange=FakeTestnet(free=150))
+    core.set_max_active(2)
+    first = core.create_goal(100, 10)
+    core.start_goal(first["id"])
+    second = core.create_goal(100, 10)
+    with pytest.raises(ValueError, match="USDT libre insuficiente"):
+        core.start_goal(second["id"])
+
+
+def test_start_goal_allows_capital_after_other_goal_commitment(tmp_path):
+    _db, core = _core(tmp_path, exchange=FakeTestnet(free=250))
+    core.set_max_active(2)
+    first = core.create_goal(100, 10)
+    core.start_goal(first["id"])
+    second = core.create_goal(100, 10)
+    assert core.start_goal(second["id"])["status"] == "ACTIVE"
+    core.exchange.free = 150
+    assert core._available_usdt(second["id"])[0] == Decimal("50")
+
+
 def test_valuation_uses_piece_cash_bid_and_estimated_sell_fee(tmp_path):
     db, core = _core(tmp_path, exchange=FakeTestnet(bid=10))
     goal = core.create_goal(100, 10)
