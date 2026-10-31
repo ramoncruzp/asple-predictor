@@ -948,3 +948,10 @@ Pendiente de 43f-4: el job diario que simula la decisión sombra contra velas re
 #### 43f-5 ? panel v1/v2 e interruptores
 
 Laboratorio muestra los interruptores de caché y motor v2 con confirmación/actor, el estado de la última corrida, y una tabla de decisiones activas/sombra por meta. El perfil solo permite seleccionar v2 cuando el endpoint informa disponibilidad; la configuración inicial sigue en v1 y ambos interruptores permanecen apagados. Pruebas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f5-panel-v2-20261030-r3"`, **22 pasaron en 1,86 s**. `node --check` pasó para `frontend/metas.js` y `frontend/lab.js`.
+
+
+#### 43f-6: API de recomendación reutilizable
+
+Se añadió `recommend_grid` para evaluar Simple, Smart o bot con FastSim/Smart exacto, ordenar por P(ganancia positiva) y ganancia media, y aplicar el límite de pérdida configurado. Es investigación aislada y no modifica grids ni decisiones. Prueba enfocada: `pytest tests/test_scenarios_recommend.py --basetemp="$env:TEMP/asple-f43f6-recommend-20261030-r1"`, **2 pasaron en 0,18 s**.
+
+La función exportada recibe moneda, estrategia, capital, horizonte, precio y sigma logarítmica acumulada de 24 h; construye geometrías y delega la evaluación en `evaluate_pieces`. El horizonte y el límite de pérdida se pueden parametrizar. No está conectada al flujo operativo.

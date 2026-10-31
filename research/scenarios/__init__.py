@@ -3,6 +3,7 @@
 from research.scenarios.evaluate import evaluate_history, evaluate_pieces
 from research.scenarios.candidates import build_candidates, build_smart_candidates
 from research.scenarios.objective import objective_limits, objective_v2, rank_alternatives_v2
+from research.scenarios.recommend import recommend_grid
 
 __all__ = [
     "evaluate_history",
@@ -12,4 +13,5 @@ __all__ = [
     "objective_limits",
     "objective_v2",
     "rank_alternatives_v2",
+    "recommend_grid",
 ]

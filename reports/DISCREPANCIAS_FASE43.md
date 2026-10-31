@@ -621,3 +621,16 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f5-panel-v2-20261030
 ```
 
 Resultado r3: **22 pasaron en 1,86 s**; `node --check frontend/metas.js` y `node --check frontend/lab.js` terminaron correctamente.
+
+
+## 43f-6: recomendación de grids aislada
+
+Comando exacto antes de pytest (offline, basetemp r1 nueva):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f6-recommend-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_recommend.py --basetemp="$base"
+```
+
+La función vive en `research/scenarios/recommend.py` y no se conecta a grids, Fase 42 ni al operador. Resultado r1: **2 pasaron en 0,18 s**. Se cubren ranking por probabilidad/ganancia, geometría logarítmica y offsets del bot.
+
+La recomendación es una interfaz de investigación reutilizable. No se conecta a la caché Meta, no lee la base de la aplicación ni cambia la disponibilidad del motor. 43f-4 sigue parcial: falta el job diario que mida los resultados de la decisión sombra y complete `shadow_outcome_json`.
