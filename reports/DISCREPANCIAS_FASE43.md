@@ -659,6 +659,16 @@ El fixture replica grid 12 `CLOSED` con niveles `DONE` e IDs históricos y grid 
 
 Resultado: **50 pasaron en 10,58 s**. `py_compile` de `scripts/escenarios_cache.py` pasó. `scripts/revisar_codificacion.py`: `HALLAZGOS=0`. Incluye regresión de plan y revisión v1 contra `776eedf`. No se usaron S1, Testnet, `.env`, bases reales ni red.
 
+## 43f-3l — estado real de las piezas vivas
+
+Comando exacto, offline y con carpeta temporal nueva bajo `%TEMP%`:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; python -m py_compile research/scenarios/fastsim.py research/scenarios/evaluate.py scripts/escenarios_cache.py; $base=Join-Path $env:TEMP 'pytest-f43f3l-20261031-g'; python -m pytest tests/test_scenario_cache_job.py tests/test_fastsim_parity.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_evaluate.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp=$base -q
+```
+
+Resultado: **142 pasaron en 11,31 s**. Incluye el estado exacto de grid 13 pausado bajo el piso, SELL abiertas que siguen ejecutándose, equivalencia `initial_cells`/`plan_cells`, marcadores `mantener_fallido`/`sin_baseline`, hash congelado de FastSim y regresión de plan/revisión v1 contra `776eedf`. `py_compile` pasó. `scripts/revisar_codificacion.py`: `HALLAZGOS=0`. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
 
 ## 43f-7: estado y límites de cierre
 

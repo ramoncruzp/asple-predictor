@@ -35,7 +35,7 @@ def _curves(timestamps, cash_rows, equity_rows, capital):
 
 def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         fee_pct=.1, resync_candles=3, max_loss_pct=None, target_usdt=None,
-        initial_timestamp=0, candle_seconds=300, pack_curves=False):
+        initial_timestamp=0, candle_seconds=300, pack_curves=False, initial_cells=None):
     """Simula Simple en un lote; OHLC son matrices float64 (escenario, vela)."""
     bars = _inputs(scenarios)
     filters = FILTERS if filters is None else filters
@@ -52,6 +52,13 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         raise ValueError("capital debe ser positivo para cada escenario")
     lows = np.broadcast_to(np.asarray(low, dtype=np.float64), (n_scenarios,))
     highs = np.broadcast_to(np.asarray(high, dtype=np.float64), (n_scenarios,))
+    if initial_cells is not None:
+        return _simulate_simple_initial_state(bars, n_levels=n_levels, capital=capital,
+            low=lows, high=highs, filters=filters, fee_pct=fee_pct,
+            resync_candles=resync_candles, max_loss_pct=max_loss_pct,
+            target_usdt=target_usdt, initial_timestamp=initial_timestamp,
+            candle_seconds=candle_seconds, pack_curves=pack_curves,
+            initial_cells=initial_cells)
     plans_by_scenario = []
     for scenario in range(n_scenarios):
         initial_price = float(close[scenario, 0])
@@ -187,6 +194,146 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         "curves": (_curves(curve_timestamps, curve_cash, curve_equity, capital_rows)
             if pack_curves else None),
         "low": lows.copy(), "high": highs.copy(), "n_levels": n_levels}
+
+
+def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filters,
+        fee_pct, resync_candles, max_loss_pct, target_usdt, initial_timestamp,
+        candle_seconds, pack_curves, initial_cells):
+    """Replaya celdas existentes sin volver a planificar su geometrÃ­a."""
+    close = bars["close"]
+    count, n_bars = close.shape
+    capital_rows = np.broadcast_to(np.asarray(capital, dtype=np.float64), (count,))
+    lows = np.broadcast_to(np.asarray(low, dtype=np.float64), (count,))
+    highs = np.broadcast_to(np.asarray(high, dtype=np.float64), (count,))
+    cells = list(initial_cells.get("cells", [])) if isinstance(initial_cells, dict) else list(initial_cells)
+    if not cells:
+        raise ValueError("initial_cells debe incluir al menos una celda")
+    fee = float(Decimal(str(fee_pct)) / 100)
+    prices = np.broadcast_to(np.asarray([float(row["buy_price"]) for row in cells]),
+        (count, len(cells))).copy()
+    sells = np.broadcast_to(np.asarray([float(row.get("sell_price") or row["buy_price"])
+        for row in cells]), (count, len(cells))).copy()
+    qty = np.broadcast_to(np.asarray([float(row.get("qty", 0)) for row in cells]),
+        (count, len(cells))).copy()
+    held = np.broadcast_to(np.asarray([float(row.get("held_qty", 0)) for row in cells]),
+        (count, len(cells))).copy()
+    states = [str(row.get("state", "IDLE")).upper() for row in cells]
+    sides = {"IDLE": 0, "BUY_OPEN": 1, "SELL_OPEN": 2, "DONE": 0}
+    if any(state not in sides for state in states) or np.any(prices <= 0) or np.any(sells <= 0) \
+            or np.any(qty < 0) or np.any(held < 0):
+        raise ValueError("estado, precio o cantidad invÃ¡lidos en initial_cells")
+    order_side = np.broadcast_to(np.asarray([sides[state] for state in states], dtype=np.int8),
+        (count, len(cells))).copy()
+    state_codes = {"IDLE": 0, "BUY_OPEN": 1, "SELL_OPEN": 2, "DONE": 0}
+    state = np.broadcast_to(np.asarray([state_codes[value] for value in states], dtype=np.int8),
+        (count, len(cells))).copy()
+    active_from = np.broadcast_to(np.asarray([int(row.get("active_from", 0))
+        for row in cells], dtype=np.int32), (count, len(cells))).copy()
+    reserved = np.broadcast_to(np.asarray([float(row.get("reserved_cash", 0))
+        for row in cells], dtype=np.float64), (count, len(cells))).copy()
+    if np.any((order_side == 1) & (qty <= 0)) or np.any((order_side == 2) & (held <= 0)):
+        raise ValueError("orden abierta sin cantidad en initial_cells")
+    cash_value = initial_cells.get("cash_usdt") if isinstance(initial_cells, dict) else None
+    cash = (np.full(count, float(cash_value), dtype=np.float64) if cash_value is not None else
+        np.maximum(0.0, capital_rows - held.sum(axis=1) * close[:, 0] * (1 - fee)))
+    dust = np.zeros(count, dtype=np.float64)
+    raw_net = qty - qty * fee
+    net_qty = np.asarray([[float(filters.round_qty_down(Decimal(str(value)))) for value in row]
+        for row in raw_net], dtype=np.float64)
+    buys = np.zeros(count, dtype=np.int32)
+    sales = np.zeros(count, dtype=np.int32)
+    fees = np.zeros(count, dtype=np.float64)
+    cut = np.zeros(count, dtype=bool)
+    cut_candle = np.full(count, -1, dtype=np.int32)
+    target_candle = np.full(count, -1, dtype=np.int32)
+    wait_outside = bool(initial_cells.get("wait_outside_range", False)) \
+        if isinstance(initial_cells, dict) else False
+    samples = [i for i in range(n_bars) if i == 0 or
+        (initial_timestamp + i * candle_seconds) % 900 == 0 or i == n_bars - 1]
+    curve_cash = np.zeros((count, len(samples)), dtype=np.float64)
+    curve_equity = np.zeros_like(curve_cash)
+    timestamps = np.asarray([initial_timestamp + i * candle_seconds for i in samples], np.int64)
+    lookup = {bar: index for index, bar in enumerate(samples)}
+    for i in range(n_bars):
+        lo, hi, cls = bars["low"][:, i], bars["high"][:, i], close[:, i]
+        for cell in range(len(cells)):
+            buy_hit = (order_side[:, cell] == 1) & (i >= active_from[:, cell]) & (lo < prices[:, cell])
+            if np.any(buy_hit):
+                cost = prices[:, cell] * qty[:, cell]
+                mask = buy_hit & (cash + 1e-12 >= cost)
+                cash[mask] -= cost[mask]
+                fees[mask] += qty[mask, cell] * fee * prices[mask, cell]
+                held[mask, cell] = net_qty[mask, cell]
+                dust[mask] += raw_net[mask, cell] - net_qty[mask, cell]
+                state[mask, cell] = 2
+                buys[mask] += 1
+                order_side[mask, cell] = 0
+                reserved[mask, cell] = 0
+            sell_hit = (order_side[:, cell] == 2) & (i >= active_from[:, cell]) & (hi > sells[:, cell])
+            if np.any(sell_hit):
+                proceeds = held[:, cell] * sells[:, cell] * (1 - fee)
+                fees[sell_hit] += held[sell_hit, cell] * sells[sell_hit, cell] * fee
+                cash[sell_hit] += proceeds[sell_hit]
+                held[sell_hit, cell] = 0
+                state[sell_hit, cell] = 0
+                sales[sell_hit] += 1
+                order_side[sell_hit, cell] = 0
+                reserved[sell_hit, cell] = 0
+        if i % resync_candles == 0:
+            locked = np.where(order_side == 1, reserved, 0).sum(axis=1)
+            in_range = (cls >= lows) & (cls <= highs) if wait_outside else True
+            for cell in range(len(cells)):
+                missing = order_side[:, cell] == 0
+                sell_mask = missing & (state[:, cell] == 2) & (held[:, cell] > 0)
+                order_side[sell_mask, cell] = 2
+                active_from[sell_mask, cell] = i + 1
+                buy_mask = (missing & (state[:, cell] <= 1) & (cls > prices[:, cell]) & in_range
+                    & (cash - locked >= prices[:, cell] * qty[:, cell] * (1 + fee)))
+                if np.any(buy_mask):
+                    order_side[buy_mask, cell] = 1
+                    state[buy_mask, cell] = 1
+                    active_from[buy_mask, cell] = i + 1
+                    reserve_value = prices[:, cell] * qty[:, cell] * (1 + fee)
+                    reserved[buy_mask, cell] = reserve_value[buy_mask]
+                    locked[buy_mask] += reserve_value[buy_mask]
+        if max_loss_pct is not None:
+            mark = cash + (held.sum(axis=1) + dust) * lo * (1 - fee)
+            newly_cut = (~cut) & (mark <= capital_rows * (1 - max_loss_pct / 100))
+            if np.any(newly_cut):
+                cash[newly_cut] += (held[newly_cut] * lo[newly_cut, None] * (1 - fee)).sum(axis=1)
+                held[newly_cut] = 0
+                state[newly_cut] = 3
+                order_side[newly_cut] = 0
+                reserved[newly_cut] = 0
+                for scenario in np.flatnonzero(newly_cut):
+                    sweep = plan_dust_sweep(Decimal(str(dust[scenario])),
+                        Decimal(str(lo[scenario])), filters, Decimal(str(fee_pct)))
+                    if sweep["sweepable"]:
+                        swept = float(sweep["qty"])
+                        gross = swept * lo[scenario]
+                        cash[scenario] += gross * (1 - fee)
+                        fees[scenario] += gross * fee
+                        dust[scenario] -= swept
+                cut[newly_cut] = True
+                cut_candle[newly_cut] = i
+        if i in lookup:
+            j = lookup[i]
+            curve_cash[:, j] = cash
+            curve_equity[:, j] = cash + (held.sum(axis=1) + dust) * cls * (1 - fee)
+            if target_usdt is not None:
+                hit = (target_candle < 0) & (cash >= capital_rows + float(target_usdt))
+                target_candle[hit] = i
+    final_equity = cash + (held.sum(axis=1) + dust) * close[:, -1] * (1 - fee)
+    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
+        "cycles": sales.copy(), "buys": buys, "sells": sales, "fees_usdt": fees,
+        "inventory_qty": held.sum(axis=1) + dust,
+        "inventory_value": (held.sum(axis=1) + dust) * close[:, -1],
+        "loss_cut": cut, "loss_cut_candle": cut_candle, "target_candle": target_candle,
+        "timestamps": timestamps, "cash_curve": curve_cash.astype(np.float32),
+        "equity_curve": curve_equity.astype(np.float32),
+        "curves": (_curves(timestamps, curve_cash, curve_equity, capital_rows)
+            if pack_curves else None), "low": lows.copy(), "high": highs.copy(),
+        "n_levels": n_levels}
 
 
 def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,

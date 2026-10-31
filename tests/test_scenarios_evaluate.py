@@ -93,6 +93,17 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     assert result["pieces"][1]["metrics"]["n"] == 1
     assert result["pieces"][0]["aviso"] == "la geometría casi nunca se toca"
     assert all(row["piece"]["capital"] == 40 for row in result["pieces"])
+    paused_piece = {"candidate_key": "mantener:paused", "symbol": "SYNTHUSDT",
+        "strategy": "smart", "capital": 10, "low": 120, "high": 140,
+        "n": 6, "is_current": True, "initial_cells": {"cash_usdt": 0,
+            "wait_outside_range": True, "cells": [{"buy_price": 99,
+                "sell_price": 100.1, "qty": .1, "held_qty": .1,
+                "state": "SELL_OPEN", "active_from": 0}]}}
+    paused = evaluate_pieces([paused_piece], perfil="RAPIDO", capital=100,
+        meta=3, n_scenarios=2, n_smart=1, seed=43, db_path=db,
+        library_dir=library, workers=1, keep_curves=False)
+    assert paused["pieces"][0]["piece"]["candidate_key"] == "mantener:paused"
+    assert paused["pieces"][0]["scenario_outcomes"]["inventory_qty"].tolist() == [0, 0]
     assert all(row["metrics"]["capital_unused_usdt"] == 60 for row in result["pieces"])
     assert result["portfolio"] is None
     assert len(result["smart_paired"]) == 1

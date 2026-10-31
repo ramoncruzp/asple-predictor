@@ -14,6 +14,7 @@ import uuid
 import math
 import numpy as np
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -251,39 +252,88 @@ def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horiz
     return filters, prices, sigmas, skipped
 
 
-def _active_grid_pieces(app_db, goal_id, prices=None):
+def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
     if goal_id is None:
         return []
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
-        rows = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
-            "g.n_levels,g.status,l.piece_type,COALESCE((SELECT SUM(gl.held_qty) "
-            "FROM grid_levels gl WHERE gl.grid_id=g.id AND gl.held_qty>0),0),"
-            "COALESCE((SELECT SUM(gl.capital) FROM grid_levels gl WHERE gl.grid_id=g.id "
-            "AND UPPER(gl.state)='BUY_OPEN'),0) FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
+        conn.row_factory = sqlite3.Row
+        grids = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
+            "g.n_levels,g.status,l.piece_type FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
             "WHERE l.meta_id=? AND l.released_at IS NULL AND (UPPER(g.status) NOT IN "
             "('CLOSED','ARCHIVED','CANCELLED','FAILED','ERROR') OR EXISTS ("
             "SELECT 1 FROM grid_levels gl WHERE gl.grid_id=g.id AND "
             "(COALESCE(gl.held_qty,0)>0 OR UPPER(gl.state) IN ('BUY_OPEN','SELL_OPEN')))) "
             "ORDER BY g.id", (goal_id,)).fetchall()
-    output = []
-    for grid_id, symbol, strategy, capital, low, high, levels, status, piece_type, held_qty, buy_open_capital in rows:
-        if str(strategy).lower() not in {"simple", "smart", "bot"}:
-            continue
-        symbol = str(symbol).upper()
-        price = float((prices or {}).get(symbol, 0))
-        piece = {"symbol": symbol, "strategy": str(strategy).lower(),
-            "capital": float(capital), "low": float(low), "high": float(high),
-            "liquidation_value": max(0.0, float(held_qty) * price * .999 + float(buy_open_capital)),
-            "n": int(levels), "grid_id": int(grid_id), "grid_status": str(status).upper(),
-            "piece_type": str(piece_type), "is_current": True,
-            "candidate_key": f"mantener:{goal_id}:{grid_id}:{symbol}:{levels}:{low}:{high}"}
-        if piece["strategy"] == "smart" and piece["grid_status"] == "PAUSED":
-            piece["simulation_approximation"] = (
-                "Smart pausado: geometría exacta reiniciada al precio actual; "
-                "el costo base difiere del inventario real, la decisión es hacia adelante")
-        output.append(piece)
+        output = []
+        for grid in grids:
+            strategy = str(grid['strategy']).lower()
+            if strategy not in {'simple', 'smart', 'bot'}:
+                continue
+            grid_id = int(grid['id'])
+            symbol = str(grid['symbol']).upper()
+            price = float((prices or {}).get(symbol, 0))
+            levels = conn.execute("SELECT level_idx,price,sell_price,held_qty,state,capital "
+                "FROM grid_levels WHERE grid_id=? ORDER BY level_idx", (grid_id,)).fetchall()
+            events = conn.execute("SELECT event_type,price,details FROM grid_events WHERE grid_id=? "
+                "AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED') ORDER BY id",
+                (grid_id,)).fetchall()
+            delivered = returned = commissions = 0.0
+            for event in events:
+                details = json.loads(event['details'] or '{}')
+                quote = details.get('cummulative_quote_qty', details.get('quote_qty',
+                    details.get('executed_quote_qty', details.get('cash_proceeds_net'))))
+                if quote is None and event['price'] is not None:
+                    qty_event = details.get('executed_qty', details.get('qty', details.get('quantity')))
+                    quote = float(qty_event or 0) * float(event['price'])
+                if quote is None:
+                    continue
+                quote = float(quote)
+                fee_value = details.get('commission_usdt', details.get('fee_usdt'))
+                commissions += float(fee_value if fee_value is not None else quote * .001)
+                if event['event_type'] == 'BUY_FILLED':
+                    delivered += quote
+                else:
+                    returned += quote
+            held_qty = sum(float(level['held_qty'] or 0) for level in levels)
+            buy_open_capital = sum(float(level['capital'] or 0) for level in levels
+                if str(level['state']).upper() == 'BUY_OPEN')
+            piece_cash = max(0.0, float(grid['capital_total']) - delivered + returned - commissions - buy_open_capital)
+            inventory_value = max(0.0, held_qty * price * .999)
+            cell_rows = []
+            symbol_filters = (filters or {}).get(symbol)
+            for level in levels:
+                buy_price = float(level['price'])
+                qty = 0.0
+                if symbol_filters is not None:
+                    qty = float(symbol_filters.round_qty_down(Decimal(str(float(level['capital'] or 0))) /
+                        Decimal(str(buy_price))))
+                state = str(level['state']).upper()
+                if float(level['held_qty'] or 0) > 0 and state != 'SELL_OPEN':
+                    state = 'SELL_OPEN'
+                cell_rows.append({'buy_price': buy_price,
+                    'sell_price': float(level['sell_price'] or buy_price), 'qty': qty,
+                    'state': state, 'held_qty': float(level['held_qty'] or 0),
+                    'reserved_cash': float(level['capital'] or 0) * 1.001 if state == 'BUY_OPEN' else 0,
+                    'active_from': 0})
+            status = str(grid['status']).upper()
+            piece = {'symbol': symbol, 'strategy': strategy,
+                'capital': piece_cash + inventory_value, 'capital_nominal': float(grid['capital_total']),
+                'cash_usdt': piece_cash, 'inventory_value_executable': inventory_value,
+                'liquidation_value': inventory_value + buy_open_capital,
+                'low': float(grid['range_low']), 'high': float(grid['range_high']),
+                'initial_cells': {'cells': cell_rows, 'cash_usdt': piece_cash,
+                    'wait_outside_range': status == 'PAUSED'},
+                'n': int(grid['n_levels']), 'grid_id': grid_id, 'grid_status': status,
+                'piece_type': str(grid['piece_type']), 'is_current': True,
+                'candidate_key': f"mantener:{goal_id}:{grid_id}:{symbol}:{grid['n_levels']}:{grid['range_low']}:{grid['range_high']}",
+                'valuation_warning': ('mejor bid no disponible en la cach\u00e9 offline; se usa el cierre '
+                    'm\u00e1s reciente como aproximaci\u00f3n' if held_qty > 0 else None)}
+            if strategy == 'smart' and status == 'PAUSED':
+                piece['simulation_approximation'] = (
+                    'Smart pausado: FastSim desde celdas e inventario actuales; '
+                    'espera fuera del rango y no modela pausas por sigma')
+            output.append(piece)
     return output
-
 
 def _insert_run(conn, context, as_of, n_scenarios=SCENARIO_COUNT):
     run_id = str(uuid.uuid4())
@@ -295,16 +345,33 @@ def _insert_run(conn, context, as_of, n_scenarios=SCENARIO_COUNT):
 
 def _fit_live_piece_capital(current_pieces, *, capital, free_cash):
     """Evita doble conteo de capital nominal y limita mantener al valor liquidable."""
-    nominal = sum(float(piece["capital"]) for piece in current_pieces)
-    if nominal <= float(capital) + 1e-6:
+    nominal = sum(float(piece.get("capital_nominal", piece["capital"]))
+        for piece in current_pieces)
+    current_value = sum(float(piece["capital"]) for piece in current_pieces)
+    if max(nominal, current_value) <= float(capital) + 1e-6:
         return None
     liquidation_total = sum(float(piece.get("liquidation_value", 0))
         for piece in current_pieces)
     budget = min(max(0.0, float(capital) - float(free_cash)), liquidation_total)
     factor = budget / liquidation_total if liquidation_total > 0 else 0.0
     for piece in current_pieces:
-        piece["capital_nominal"] = float(piece["capital"])
+        piece.setdefault("capital_nominal", float(piece["capital"]))
         piece["capital"] = float(piece.get("liquidation_value", 0)) * factor
+        initial_cells = piece.get("initial_cells")
+        if isinstance(initial_cells, dict):
+            released_reserves = sum(float(cell.get("reserved_cash", 0)) / 1.001
+                for cell in initial_cells.get("cells", [])
+                if str(cell.get("state", "")).upper() == "BUY_OPEN") * factor
+            piece["cash_usdt"] = released_reserves
+            initial_cells["cash_usdt"] = released_reserves
+            for cell in initial_cells.get("cells", []):
+                if str(cell.get("state", "")).upper() == "BUY_OPEN":
+                    cell.update({"state": "IDLE", "reserved_cash": 0.0})
+                else:
+                    cell["held_qty"] = float(cell.get("held_qty", 0)) * factor
+                    cell["qty"] = float(cell.get("qty", 0)) * factor
+        else:
+            piece["cash_usdt"] = 0.0
     return {"motivo": ("capital nominal vivo superior al capital asignable de la meta; "
             "se usa el valor de liquidación" if liquidation_total > 0 else
             "capital nominal vivo superior al capital asignable de la meta; "
@@ -329,7 +396,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         perfil=context["profile"], filters_by_symbol=filters,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
         horizon_days=context["horizon"])
-    current_pieces = _active_grid_pieces(app_db, context["goal_id"], prices)
+    current_pieces = _active_grid_pieces(app_db, context["goal_id"], prices, filters)
     live_capital_warning = _fit_live_piece_capital(current_pieces,
         capital=capital, free_cash=free)
     live_piece_details = [{"grid_id": int(piece["grid_id"]),
@@ -372,7 +439,13 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         [piece for piece in pieces if str(piece.get("candidate_key")) in current_keys],
         [piece for piece in pieces if str(piece.get("candidate_key")) not in current_keys],
     )
-    for phase_pieces in phases:
+    baseline_failed = False
+    for phase_index, phase_pieces in enumerate(phases):
+        if phase_index == 1 and baseline_failed:
+            for piece in phase_pieces:
+                failed_candidates[str(piece.get("candidate_key") or _candidate_key(piece))] = (
+                    "sin_baseline: falló mantener; alternativa no evaluada")
+            continue
         phase_symbols = [symbol for symbol in symbol_order if any(
             str(piece["symbol"]).upper() == symbol for piece in phase_pieces)]
         for symbol in phase_symbols:
@@ -395,6 +468,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             rows, errors = _evaluate_with_isolation(evaluator, symbol_pieces, **kwargs)
             first_rows.extend(rows)
             failed_candidates.update(errors)
+            if phase_index == 0 and errors:
+                baseline_failed = True
             progress_state["evaluated_count"] += len(rows)
             for reason in errors.values():
                 label = reason.split(":", 1)[0]
@@ -478,21 +553,40 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         profile_times["metricas_bootstrap_s"] += smart_timings.get("metrics_s", 0.0)
     live_rows = [row for row in first_rows
         if (row.get("piece") or {}).get("is_current")]
-    _apply_live_portfolio_metrics([*first_rows, *second_rows], live_rows,
-        capital=capital, target=context["target"],
-        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+    if not baseline_failed:
+        _apply_live_portfolio_metrics([*first_rows, *second_rows], live_rows,
+            capital=capital, target=context["target"],
+            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
     if on_progress and live_rows:
         on_progress([*first_rows, *second_rows])
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
-    for row in [*first.get("pieces", []), *second_rows]:
+    evaluated_keys = {str((row.get("piece") or {}).get("candidate_key"))
+        for row in [*first.get("pieces", []), *second_rows]}
+    output_rows = [*first.get("pieces", []), *second_rows]
+    if baseline_failed:
+        for candidate in candidates:
+            key = str(candidate.get("candidate_key") or _candidate_key(candidate))
+            if candidate.get("is_current") and key not in evaluated_keys:
+                output_rows.append({"piece": candidate, "error": failed_candidates.get(key,
+                    "mantener_fallido: no se pudo evaluar la pieza viva")})
+            elif not candidate.get("is_current") and key not in evaluated_keys:
+                output_rows.append({"piece": candidate, "sin_baseline": True})
+    for row in output_rows:
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
         objective_started = time.perf_counter()
         objective = rank_alternatives_v2([row], perfil=context["profile"],
             capital_meta=capital)[0]["objetivo"]
+        if row.get("sin_baseline"):
+            objective = {**objective, "factible": False,
+                "motivos": [*objective.get("motivos", []), "sin_baseline"]}
         profile_times["objetivo_s"] += time.perf_counter() - objective_started
         metrics = row.get("metrics") or _scenario_metrics(row)
+        if row.get("sin_baseline"):
+            metrics = {**metrics, "sin_baseline": True}
+        if row.get("error"):
+            metrics = {**metrics, "mantener_fallido": row["error"]}
         if row.get("metrics_pieza_sola") is not None:
             metrics = {**metrics, "metrics_pieza_sola": row["metrics_pieza_sola"]}
         results.append({"candidate_key": candidate_key, "symbol": piece.get("symbol"),

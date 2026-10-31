@@ -7,7 +7,8 @@ from data.exchange_filters import SymbolFilters
 from grid.sim.data import CandleData
 from grid.sim.meta_bot import run_meta_bot
 from grid.sim.meta_portfolio import evaluate_portfolio, pack_curve
-from grid.sim.runner import run_simulation
+from grid.sim.runner import FILTERS, run_simulation
+from grid.levels import compute_lines, plan_cells
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 
 
@@ -23,6 +24,45 @@ def _scenario(close):
 def _candles(scenario, start_ts=0):
     return CandleData(start_ts + np.arange(scenario["close"].shape[1], dtype=np.int64) * 300,
         *(scenario[key][0] for key in ("open", "high", "low", "close")), 0)
+
+
+def test_initial_cells_equivalentes_a_plan_cells_reproducen_el_replay():
+    scenario = _scenario([100, 99, 98, 101, 103, 100, 97, 102, 104, 101])
+    filters = FILTERS
+    plans = plan_cells(compute_lines("90", "110", 4, filters), "1000",
+        {"bid_price": "99.999999", "ask_price": "100.000001", "avg_price": "100"},
+        filters, {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
+    initial = {"cash_usdt": 1000, "cells": [{
+        "buy_price": float(plan.buy_price), "sell_price": float(plan.sell_price),
+        "qty": float(plan.qty), "held_qty": 0,
+        "state": plan.initial_state, "active_from": 1, "reserved_cash": 0,
+    } for plan in plans]}
+    usual = simulate_simple(scenario, n_levels=4, capital=1000, low=90, high=110,
+        filters=filters, max_loss_pct=18, target_usdt=10)
+    from_state = simulate_simple(scenario, n_levels=4, capital=1000, low=90, high=110,
+        filters=filters, max_loss_pct=18, target_usdt=10, initial_cells=initial)
+    for key in ("final_equity", "pnl_usdt", "buys", "sells", "fees_usdt",
+            "inventory_qty", "loss_cut", "loss_cut_candle", "target_candle",
+            "cash_curve", "equity_curve"):
+        np.testing.assert_allclose(from_state[key], usual[key], rtol=0, atol=1e-12,
+            err_msg=key)
+
+
+def test_initial_cells_fuera_de_rango_conserva_ventas_y_no_abre_compras():
+    scenario = _scenario([.24] * 10)
+    scenario["high"][:] = .27
+    scenario["low"][:] = .23
+    cells = {"cash_usdt": 20, "wait_outside_range": True, "cells": [
+        {"buy_price": .254, "sell_price": .2646, "qty": 1, "held_qty": 1,
+            "state": "SELL_OPEN", "active_from": 0},
+        {"buy_price": .27, "sell_price": .28, "qty": 1, "held_qty": 0,
+            "state": "IDLE"}]}
+    filters = FILTERS
+    result = simulate_simple(scenario, n_levels=2, capital=20, low=.254, high=.318,
+        filters=filters, initial_cells=cells)
+    assert result["sells"].tolist() == [1]
+    assert result["buys"].tolist() == [0]
+    assert result["inventory_qty"].tolist() == [0]
 
 
 @pytest.mark.parametrize("strategy", ["simple", "bot"])

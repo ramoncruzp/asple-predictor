@@ -99,3 +99,21 @@ estrictos con resincronización diferida; el bot usa cruces inclusivos inmediato
 No es equivalente inferir el orden intravela únicamente por la secuencia de high y
 low: el replay solo consulta ambos extremos. Las comisiones, redondeo, reservas y
 polvo dependen de `SymbolFilters` y no se aproximan como PnL porcentual al final.
+
+## Estado inicial de una pieza viva
+
+`simulate_simple(..., initial_cells=...)` acepta una estructura con `cells`,
+`cash_usdt` y `wait_outside_range`. Cada celda incluye sus precios de compra y
+venta, cantidad ordenable, estado, inventario, efectivo reservado y vela desde
+la que la orden está activa. Esta ruta no llama `compute_lines` ni `plan_cells`;
+reproduce las celdas persistidas aunque el precio actual quede fuera de su rango.
+El valor inicial se mide como efectivo atribuible más inventario valorado al
+precio de referencia neto de comisión.
+
+Para una pieza Smart pausada, la caché proyecta el estado actual con FastSim:
+las ventas abiertas continúan y no se crean compras nuevas mientras el cierre
+siga fuera del piso/techo. No se reproducen las pausas dinámicas por sigma de
+Smart; la aproximación sirve para comparar el comportamiento hacia adelante de
+las celdas existentes contra alternativas bajo los mismos escenarios. En modo
+offline no hay libro de órdenes actual en el almacén de velas: se usa el último
+cierre como proxy del mejor bid y se registra ese límite como aviso de valoración.

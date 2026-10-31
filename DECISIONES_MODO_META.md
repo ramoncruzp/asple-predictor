@@ -478,6 +478,10 @@ Un Smart pausado se proyecta desde el precio actual con el simulador exacto y su
 
 Para grids terminales, una referencia de orden no basta para considerar viva la pieza: solo cuenta inventario `held_qty > 0` o un nivel cuyo estado sea `BUY_OPEN`/`SELL_OPEN`. Los IDs conservados en niveles `DONE` no son órdenes actuales. Si el capital nominal de las piezas vivas excede la asignación disponible, la caché registra un aviso y dimensiona “mantener” por el valor liquidable estimado (inventario al último precio disponible, neto de comisión, más reservas de compras abiertas), limitado al capital atribuible. Esto evita sumar dos veces el capital nominal de grids.
 
+### Fase 43f-3l — mantener desde el estado persistido
+
+“Mantener” parte de los niveles, inventario, órdenes abiertas, reservas y efectivo atribuible reconstruidos desde la BD; ya no vuelve a planificar un grid nuevo. Si un Smart está pausado fuera de rango, FastSim conserva sus ventas abiertas y espera para colocar compras hasta que el cierre vuelva al rango. Esta comparación hacia adelante no reproduce las pausas dinámicas por sigma de Smart. El almacén offline no conserva el mejor bid actual ni una valoración ejecutable reciente; se usa el cierre más reciente como proxy y se persiste una advertencia de valoración en los parámetros de la pieza. Si falla cualquier baseline vivo, la corrida registra `mantener_fallido`, omite la evaluación de alternativas y las etiqueta `sin_baseline`. La ruta por defecto de FastSim y todas las decisiones v1 permanecen iguales.
+
 
 ### Fase 43f-3e, 43f-4b y 43f-8
 

@@ -386,6 +386,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         if mode == "alternativas" and not keep_curves:
             groups = {}
             for index, piece in enumerate(pieces):
+                if piece.get("initial_cells"):
+                    continue
                 strategy = str(piece["strategy"]).lower()
                 if strategy not in {"simple", "bot"}:
                     continue
@@ -459,7 +461,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             common = {key: market[key] for key in ("open", "high", "low", "close")}
             if detrend_scenarios:
                 common = _remove_log_trend(common)
-            if strategy == "smart":
+            if strategy == "smart" and not piece.get("initial_cells"):
                 smart_count = max(0, min(len(market["close"]),
                     int(n_smart) - int(batch["scenario_start"])))
                 if smart_count <= 0:
@@ -493,12 +495,19 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                         for row in smart_outcomes], dtype=np.float64),
                     "capital_unused_usdt": float(capital) - float(piece["capital"]),
                 })
-            elif strategy == "bot":
+            elif strategy in {"bot", "simple", "smart"}:
                 fastsim_started = time.perf_counter()
-                fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
-                    sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
-                    target_usdt=meta, initial_timestamp=START_TS, pack_curves=keep_curves,
-                    fee_pct=fee_pct)
+                if strategy == "bot" and not piece.get("initial_cells"):
+                    fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
+                        sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
+                        target_usdt=meta, initial_timestamp=START_TS, pack_curves=keep_curves,
+                        fee_pct=fee_pct)
+                else:
+                    fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
+                        capital=float(piece["capital"]), low=low, high=high,
+                        filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
+                        initial_timestamp=START_TS, pack_curves=keep_curves, fee_pct=fee_pct,
+                        initial_cells=piece.get("initial_cells"))
                 timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
                 if keep_curves:
                     piece_curves[index].extend(fast["curves"])
@@ -515,30 +524,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 raw[index]["fills"].extend((fast["buys"] + fast["sells"]).tolist())
                 if record_pairs:
                     for offset, curve in enumerate(fast["curves"]):
-                        per_index[offset][index] = ("bot", curve)
-            elif strategy == "simple":
-                fastsim_started = time.perf_counter()
-                fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
-                    capital=float(piece["capital"]), low=low, high=high,
-                    filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
-                    initial_timestamp=START_TS, pack_curves=keep_curves, fee_pct=fee_pct)
-                timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
-                if keep_curves:
-                    piece_curves[index].extend(fast["curves"])
-                else:
-                    raw[index]["outcomes"].append(_fast_outcomes(fast, capital=capital,
-                        piece_capital=piece["capital"], target=meta, loss_pct=loss_pct))
-                start_index = int(batch["scenario_start"])
-                if keep_curves:
-                    piece_scenario_curves[index].update({start_index + offset: curve
-                        for offset, curve in enumerate(fast["curves"])})
-                raw[index]["cycles"].extend(fast["cycles"].tolist())
-                raw[index]["inventory_qty"].extend(fast["inventory_qty"].tolist())
-                raw[index]["inventory_value"].extend(fast["inventory_value"].tolist())
-                raw[index]["fills"].extend((fast["buys"] + fast["sells"]).tolist())
-                if record_pairs:
-                    for offset, curve in enumerate(fast["curves"]):
-                        per_index[offset][index] = ("simple", curve)
+                        per_index[offset][index] = (strategy, curve)
             else:
                 raise ValueError(f"estrategia no reconocida: {strategy}")
         if record_pairs:
@@ -570,7 +556,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             max_loss_pct=loss_pct, horizon_days=horizon, cycles=values["cycles"],
             inventory_qty=values["inventory_qty"], inventory_value=values["inventory_value"],
             seed=seed) if mode == "alternativas" and not keep_curves
-                and str(piece["strategy"]).lower() in {"simple", "bot"} else
+                and (str(piece["strategy"]).lower() in {"simple", "bot"}
+                    or piece.get("initial_cells")) else
             summarize(piece_curves[index], **summarize_args))
         timings["metrics_s"] = timings.get("metrics_s", 0.0) + time.perf_counter() - metrics_started
         zero_fill_fraction = (float(np.mean(np.asarray(values["fills"]) == 0))

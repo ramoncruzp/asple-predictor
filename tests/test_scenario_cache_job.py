@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from data.market_store import CandleStore
 from database.db_manager import DBManager
+from grid.sim.runner import FILTERS
 from scheduler.scenario_cache_job import ScenarioCacheJob
 import scripts.escenarios_cache as cache_script
 
@@ -125,6 +126,44 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
     assert alternative["metrics"]["metrics_pieza_sola"]["p_target"] == .5
 
 
+def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    current = {"candidate_key": "mantener:JUP", "symbol": "JUPUSDT",
+        "strategy": "smart", "capital": 40, "n": 6, "low": .254,
+        "high": .318, "is_current": True, "grid_id": 91, "grid_status": "PAUSED",
+        "initial_cells": {"cells": []}}
+    alternative = {"candidate_key": "alternativa:JUP", "symbol": "JUPUSDT",
+        "strategy": "simple", "capital": 10, "n": 6, "low": .25, "high": .32}
+    monkeypatch.setattr(cache_script, "_active_grid_pieces", lambda *_args: [current])
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [alternative, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {"factible": True,
+            "motivos": [], "clave_orden": [0, 0, 0]}} for row in rows])
+    calls = []
+
+    def evaluate(pieces, **_kwargs):
+        calls.extend(piece["candidate_key"] for piece in pieces)
+        raise ValueError("exchange mid price must be strictly inside the grid range")
+
+    result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
+        "free_cash": 50, "capital": 90, "target": 3, "horizon": 15,
+        "max_loss_pct": 18, "balance_approximate": False},
+        store=CandleStore(market_path), app_db=db.engine.url.database,
+        market_path=market_path, library_dir="unused", filters={"JUPUSDT": FILTERS},
+        prices={"JUPUSDT": .24}, sigmas={"JUPUSDT": .01}, skipped={}, evaluator=evaluate)
+
+    assert calls == ["mantener:JUP"]
+    maintain = next(row for row in result["results"] if row["candidate_key"] == "mantener:JUP")
+    alternative_result = next(row for row in result["results"]
+        if row["candidate_key"] == "alternativa:JUP")
+    assert "mantener_fallido" in maintain["metrics"]
+    assert alternative_result["metrics"]["sin_baseline"] is True
+    assert alternative_result["objective"]["factible"] is False
+    assert "sin_baseline" in alternative_result["objective"]["motivos"]
+
+
 def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_databases):
     db, _market_path = cache_databases
     from datetime import datetime, timezone
@@ -144,13 +183,14 @@ def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_data
     grid12 = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
         "range_low": .2, "range_high": .3, "n_levels": 6, "capital_total": 70,
         "status": "CLOSED", "environment": "testnet"}, grid12_levels)
-    grid13_levels = [{"level_idx": idx, "price": .25, "capital": 70 / 6,
-        "sell_price": .27 if idx < 4 else None, "entry_price": .25 if idx < 4 else None,
+    grid13_levels = [{"level_idx": idx, "price": .254, "capital": 70 / 6,
+        "sell_price": (.2646, .2753, .286, .2966)[idx] if idx < 4 else None,
+        "entry_price": .254 if idx < 4 else None,
         "held_qty": 42.575 if idx < 4 else 0,
         "state": "SELL_OPEN" if idx < 4 else "IDLE",
         "order_id": 1300 + idx if idx < 4 else None} for idx in range(6)]
     paused = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
-        "range_low": .2, "range_high": .3, "n_levels": 6, "capital_total": 70,
+        "range_low": .254, "range_high": .318, "n_levels": 6, "capital_total": 70,
         "status": "PAUSED", "environment": "testnet"}, grid13_levels)
     released = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "smart",
         "range_low": .2, "range_high": .3, "n_levels": 4, "capital_total": 50,
@@ -165,14 +205,23 @@ def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_data
                 piece_type="grid", created_at=now)).inserted_primary_key[0])
         conn.execute(db.meta_piece_links.update().where(
             db.meta_piece_links.c.id == link_ids[2]).values(released_at=now))
+        conn.execute(db.grid_events.insert().values(grid_id=paused["id"],
+            source="fixture", ts=now, event_type="BUY_FILLED", price=.254,
+            details=json.dumps({"quote_qty": 44, "fee_usdt": .044})))
 
     pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
-        {"JUPUSDT": .26})
+        {"JUPUSDT": .24}, {"JUPUSDT": FILTERS})
 
     assert [piece["grid_id"] for piece in pieces] == [paused["id"]]
     assert pieces[0]["grid_status"] == "PAUSED"
     assert "Smart pausado" in pieces[0]["simulation_approximation"]
-    assert pieces[0]["liquidation_value"] == pytest.approx(170.3 * .26 * .999)
+    assert pieces[0]["initial_cells"]["wait_outside_range"] is True
+    assert pieces[0]["initial_cells"]["cash_usdt"] == pytest.approx(25.956)
+    assert pieces[0]["capital"] == pytest.approx(25.956 + 170.3 * .24 * .999)
+    assert [cell["sell_price"] for cell in pieces[0]["initial_cells"]["cells"][:4]] == [
+        .2646, .2753, .286, .2966]
+    assert pieces[0]["inventory_value_executable"] == pytest.approx(170.3 * .24 * .999)
+    assert "mejor bid no disponible" in pieces[0]["valuation_warning"]
 
 
 def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases):
