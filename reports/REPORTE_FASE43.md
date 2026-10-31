@@ -931,3 +931,8 @@ El subproceso ya no usa `RLIMIT_AS` ni `preexec_fn`: en POSIX se inicia mediante
 La caché reconstruye efectivo libre desde fills atribuibles y reservas de compras abiertas; añade el valor de inventario liquidado al último cierre disponible y computa objetivo restante, plazo y holgura del límite de pérdida. Si falta una atribución necesaria, omite el contexto. La valoración usa cierres de velas y comisiones estimadas, no profundidad ejecutable.
 
 Comando enfocado: `pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3c-memoria-20261030-r2"` (`ASPLE_OFFLINE=1`). Resultado: **17 pasaron en 1,78 s**. El monitor RSS en Windows usa `GetProcessMemoryInfo` cuando falta psutil.
+
+
+#### 43f-3d ? regresión de v1
+
+La prueba ejecuta los métodos `_build_plan` y `_review_allocations` extraídos del commit `776eedf` contra fixtures idénticos. El plan de asignaciones y la acción operativa de revisión coinciden; `allocation_shadow` se excluye de la igualdad porque es una proyección informativa. La corrida r1 identificó esta diferencia y r2 pasó: `pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_engines_regression.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3d-v1-baseline-20261030-r2"`, **37 pasaron en 2,27 s**.

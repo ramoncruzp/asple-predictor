@@ -266,6 +266,42 @@ def test_no_own_symbol_plan_probabilities_and_decision_match_a25818b(monkeypatch
     assert actual._review_allocations(goal, {}, plan=current_plan) == reference._review_allocations(goal, {}, plan=old_plan)
 
 
+def test_v1_plan_y_review_son_identicos_a_776eedf(monkeypatch):
+    import grid.meta_operator as module
+
+    source = subprocess.check_output(["git", "show", "776eedf:grid/meta_operator.py"]).decode("utf-8")
+    cls = next(node for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "MetaOperator")
+    frozen = {name: next(node for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == name)
+        for name in ("_build_plan", "_review_allocations")}
+    namespace = dict(vars(module))
+    for name, method in frozen.items():
+        exec(compile(ast.Module(body=[method], type_ignores=[]),
+            f"776eedf:{name}", "exec"), namespace)
+
+    monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="plan-v1-fijo"))
+    current, _, goal, _, _ = plan_setup(owner="manual")
+    reference, _, _, _, _ = plan_setup(owner="manual")
+    reference._build_plan = MethodType(namespace["_build_plan"], reference)
+    reference._review_allocations = MethodType(namespace["_review_allocations"], reference)
+
+    current_plan = current._build_plan(goal, record=False, plan_kind="revision")
+    baseline_plan = reference._build_plan(goal, record=False, plan_kind="revision")
+    current_plan.pop("timings_s", None)
+    baseline_plan.pop("timings_s", None)
+    current_plan.pop("allocation_shadow", None)
+    baseline_plan.pop("allocation_shadow", None)
+    assert current_plan == baseline_plan
+
+    current._add_piece_from_free_cash = lambda *_args, **_kwargs: None
+    reference._add_piece_from_free_cash = lambda *_args, **_kwargs: None
+    valuation = {"status": "KNOWN", "cash_usdt": 20, "free_capital_usdt": 20,
+        "result_pct": 0}
+    assert current._review_allocations(goal, valuation, plan=current_plan) == \
+        reference._review_allocations(goal, valuation, plan=baseline_plan)
+
+
 def test_allocation_shadow_keeps_source_testnet_checked_alternative_id(monkeypatch):
     import grid.meta_allocation as allocation_module
 

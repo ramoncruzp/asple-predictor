@@ -562,3 +562,23 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3c-memoria-20261030
 ```
 
 Resultado r2: **17 pasaron en 1,78 s**. Las pruebas verifican variables de entorno, ausencia de `preexec_fn`/`RLIMIT_AS`, marcado de estado `memoria`, capital libre + inventario y conservación de pruebas del motor.
+
+
+## 43f-3d ? regresión congelada de v1
+
+Comando exacto antes de correr las pruebas (PowerShell, carpeta r1 nueva y modo offline):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3d-v1-baseline-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_engines_regression.py tests/test_v2_scenario_engine.py --basetemp="$base"
+```
+
+La prueba nueva carga `_build_plan` y `_review_allocations` directamente del commit `776eedf`, y compara ambos resultados con la implementación actual usando dos operadores aislados y fixture sintético determinista. Los casos v2 disponible apagado/encendido y sombra se cubren con las pruebas enfocadas ya existentes del motor y su integración.
+
+
+La corrida r1 dio 36 pasaron y 1 falló: el plan incluía `allocation_shadow`, una medición informativa ampliada desde 776eedf. La regresión ahora compara el plan operativo (quitando solo ese bloque informativo) y mantiene plan y revisión operativa congelados. Repetición con basetemp nuevo:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3d-v1-baseline-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_engines_regression.py tests/test_v2_scenario_engine.py --basetemp="$base"
+```
+
+Resultado r2: **37 pasaron en 2,27 s**. La regresión confirma que el plan operativo y la acción de revisión de v1 coinciden con los métodos congelados de `776eedf`; solo se excluye `allocation_shadow`, que es informativo.
