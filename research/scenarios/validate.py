@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -258,10 +259,22 @@ def validate_scenarios(*, db_path="market_data.db", months=12, step_days=7,
             selected = [row[0] for row in conn.execute(
                 "SELECT symbol FROM symbols WHERE active=1 AND role='operar' ORDER BY symbol")]
     now_rows = {}
+    skipped_symbols = {}
     dates = set()
     for symbol in selected:
-        data = store.load(symbol, "5m")
+        library_path = Path(library_dir) / f"{symbol}.npz"
+        if not library_path.is_file():
+            skipped_symbols[symbol] = "biblioteca de escenarios ausente"
+            continue
+        try:
+            data = store.load(symbol, "5m")
+        except (KeyError, ValueError, OSError) as exc:
+            skipped_symbols[symbol] = f"velas no disponibles: {exc}"
+            continue
         stamps = np.asarray(data.timestamp, dtype=np.int64)
+        if len(stamps) < 30 * 288 + HORIZON_DAYS * 288 + 1:
+            skipped_symbols[symbol] = "historia insuficiente para calentamiento y horizonte"
+            continue
         first = max(30 * 288 + 1, int(np.searchsorted(stamps, stamps[-1] - months * 30 * 86400)))
         last = len(stamps) - HORIZON_DAYS * 288
         if evaluation_timestamp is None:
@@ -275,7 +288,8 @@ def validate_scenarios(*, db_path="market_data.db", months=12, step_days=7,
         dates.update(int(stamps[index]) for index in indices)
     all_dates = sorted(dates)
     output = {"horizon_days": HORIZON_DAYS, "months": months, "step_days": step_days,
-        "n_scenarios": n_scenarios, "n_smart": n_smart, "symbols": {}, "pairs": []}
+        "n_scenarios": n_scenarios, "n_smart": n_smart, "symbols": {}, "pairs": [],
+        "skipped_symbols": skipped_symbols}
     selected_strategies = None if strategies is None else set(strategies)
     selected_specs = tuple(spec for spec in DEFAULT_PIECES
         if selected_strategies is None or spec[0] in selected_strategies)

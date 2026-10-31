@@ -92,6 +92,21 @@ def test_validation_reports_no_pairs_without_inventing_metrics():
     assert summarize_validation([]) == {"n": 0, "estado": "sin_pares"}
 
 
+def test_validate_scenarios_skips_symbol_without_library(tmp_path, monkeypatch):
+    import research.scenarios.validate as module
+
+    class FakeStore:
+        def __init__(self, _path):
+            self.path = _path
+
+    monkeypatch.setattr(module, "CandleStore", FakeStore)
+    monkeypatch.setattr(module, "market_db_path", lambda value: value)
+    result = module.validate_scenarios(db_path="unused.sqlite", symbols=["GRAMUSDT"],
+        library_dir=tmp_path / "no-existe", n_scenarios=2, n_smart=1)
+    assert result["pairs"] == []
+    assert result["skipped_symbols"] == {"GRAMUSDT": "biblioteca de escenarios ausente"}
+
+
 def test_validation_rss_helper_reports_peak_on_this_platform():
     peak = _rss_max_mb()
     assert peak is not None
@@ -188,13 +203,16 @@ def test_future_candle_mutation_does_not_change_before_t_prediction(tmp_path):
     assert results[0]["pieces"][0]["scenario_results"] == results[1]["pieces"][0]["scenario_results"]
 
 
-def test_validate_scenarios_wires_causal_forecast_actual_and_23_v1_windows(monkeypatch):
+def test_validate_scenarios_wires_causal_forecast_actual_and_23_v1_windows(monkeypatch, tmp_path):
     import research.scenarios.validate as module
 
     count = 250 * 288
     stamps = 1_700_000_000 + np.arange(count, dtype=np.int64) * 300
     close = 100 * np.exp(np.arange(count) * .000001)
     data = CandleData(stamps, close.copy(), close * 1.001, close * .999, close.copy(), 0)
+    library_dir = tmp_path / "library"
+    library_dir.mkdir()
+    np.savez_compressed(library_dir / "SYNTHUSDT.npz", dates=np.arange(3, dtype=np.int64))
 
     class FakeStore:
         def __init__(self, _path):
@@ -224,7 +242,8 @@ def test_validate_scenarios_wires_causal_forecast_actual_and_23_v1_windows(monke
     monkeypatch.setattr("research.scenarios.evaluate._calibration_factor_timeline",
         lambda *args: (np.empty(0, dtype=np.int64), np.empty(0)))
     result = module.validate_scenarios(db_path="synthetic.sqlite", months=1, step_days=30,
-        symbols=["SYNTHUSDT"], n_scenarios=5, n_smart=2, replicas=20)
+        symbols=["SYNTHUSDT"], n_scenarios=5, n_smart=2, replicas=20,
+        library_dir=library_dir)
     assert len(result["pairs"]) == 5
     assert len(seen_before) == 1
     assert seen_before[0] == int(stamps[220 * 288 - 1])

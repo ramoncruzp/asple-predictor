@@ -21,3 +21,12 @@ def test_piece_and_portfolio_metrics_are_paired_and_reproducible():
     portfolio = summarize_portfolio([first, second], capital_initial=100,
         target_usdt=3, max_loss_pct=10, horizon_days=1, seed=43, replicas=100)
     assert portfolio["capital_unused_usdt"] == 30
+
+
+def test_cut_slippage_measures_overshoot_only_on_loss_cut_scenarios():
+    curves = [_curve(40, [40, 40], [40, 32]),
+        _curve(40, [40, 40], [40, 38])]
+    result = summarize(curves, capital_initial=40, target_usdt=2,
+        max_loss_pct=10, horizon_days=1, replicas=20)
+    assert result["cut_slippage_mean_usdt"] == 4.0
+    assert result["cut_slippage_p90_usdt"] == 4.0

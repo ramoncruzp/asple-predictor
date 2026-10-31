@@ -409,8 +409,39 @@ Se añadió el conteo de una ventana como excluida si el simulador la rechaza du
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r6'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
 ```
 Resultado r6: **99 pasaron en 8,24 s**.
+
+## 43f-0 — bibliotecas ausentes y desliz del corte
+
+Comando exacto de pruebas enfocado antes de ejecutar:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate.py --basetemp="$base"
+```
+La corrida r1 dio 12 aprobadas y 1 fallo: un fixture existente simulaba el generador pero no creaba el archivo `.npz`; ahora lo declara explícitamente. Se añadieron además pruebas de descarte por biblioteca ausente en evaluación y validación. Reejecución exacta:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate.py tests/test_scenarios_validate.py --basetemp="$base"
+```
 Reejecución tras fijar las huellas a las obtenidas ejecutando el archivo congelado de `6f3bb7b` directamente:
 
 ```powershell
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6i-paridad-20261030-r2'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_fastsim_parity.py tests/test_scenarios_parity_script.py tests/test_fastsim_scalar_regression.py tests/test_scenarios_validate.py --basetemp="$base"
 ```
+La corrida r2 detectó que la comprobación añadida al validador necesitaba importar `Path`; se corrigió. Comando exacto final de 43f-0:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r3'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+La corrida r3 aprobó 23 y falló 1 porque otro fixture del validador no creaba el `.npz` que ahora es requisito previo. El fixture ya genera una biblioteca sintética mínima. Comando corregido:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r4'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate.py tests/test_scenarios_validate.py --basetemp="$base"
+```
+Resultado r4: **24 pasaron en 7,32 s**. La métrica CVaR queda informativa; la factibilidad utiliza el desliz medio del corte frente al máximo configurable de 2 %.
+
+Se conectó el tope configurable al ranking del CLI. Comando exacto de regresión de CLI y objetivo:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f0-objetivo-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_metrics.py tests/test_scenarios_objective.py tests/test_scenarios_evaluate_cli.py --basetemp="$base"
+```
+Resultado r5: **7 pasaron en 0,22 s**.

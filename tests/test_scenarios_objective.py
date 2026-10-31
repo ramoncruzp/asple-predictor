@@ -6,7 +6,8 @@ from research.scenarios.objective import (objective_limits, objective_v2,
 
 
 def _metrics(**overrides):
-    row = {"pnl_mean_usdt": -.5, "cvar_5_usdt": -5.0, "p_target": .3,
+    row = {"pnl_mean_usdt": -.5, "cvar_5_usdt": -5.0,
+        "cut_slippage_mean_usdt": 1.0, "cut_slippage_p90_usdt": 2.0, "p_target": .3,
         "days_to_target_p50": 8.0, "p_loss_ci95": [.01, .04]}
     row.update(overrides)
     return row
@@ -21,9 +22,14 @@ def test_objective_reports_each_infeasibility_reason():
         capital_meta=100, max_loss_pct=18, p_limit_cap=5)
     assert not risk["factible"] and "límite superior" in risk["motivos"][0]
 
-    tail = objective_v2(_metrics(cvar_5_usdt=-18.01), perfil="RAPIDO",
+    tail = objective_v2(_metrics(cut_slippage_mean_usdt=2.01), perfil="RAPIDO",
         capital_meta=100, max_loss_pct=18, p_limit_cap=15)
-    assert not tail["factible"] and "CVaR 5 %" in tail["motivos"][0]
+    assert not tail["factible"] and "desliz medio" in tail["motivos"][0]
+
+    cvar_is_informative_only = objective_v2(_metrics(cvar_5_usdt=-99,
+        cut_slippage_mean_usdt=1.0), perfil="RAPIDO", capital_meta=100,
+        max_loss_pct=18, p_limit_cap=15)
+    assert cvar_is_informative_only["factible"]
 
     no_ci = objective_v2({key: value for key, value in _metrics().items()
         if key != "p_loss_ci95"}, perfil="RAPIDO", capital_meta=100)
@@ -65,6 +71,8 @@ def test_objective_limits_read_profile_json_from_sqlite_read_only(tmp_path):
             ("RAPIDO", json.dumps({"max_loss_pct": 17, "p_limit_cap": 12,
                 "ev_floor_pct": .5})))
     limits = objective_limits("RAPIDO", settings_db=path)
-    assert limits == {"max_loss_pct": 17.0, "p_limit_cap": 12.0, "ev_floor_pct": .5}
+    assert limits == {"max_loss_pct": 17.0, "p_limit_cap": 12.0, "ev_floor_pct": .5,
+        "cut_slippage_max_pct": 2.0}
     assert objective_limits("PRUDENTE", settings_db=tmp_path / "missing.sqlite") == {
-        "max_loss_pct": 8.0, "p_limit_cap": 5.0, "ev_floor_pct": 1.0}
+        "max_loss_pct": 8.0, "p_limit_cap": 5.0, "ev_floor_pct": 1.0,
+        "cut_slippage_max_pct": 2.0}

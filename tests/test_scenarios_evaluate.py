@@ -182,6 +182,9 @@ def test_simple_uses_all_scenarios_when_smart_uses_n_smart(tmp_path, monkeypatch
         rows.append({"open_ts": index * 300, "open": 100, "high": 101,
             "low": 99, "close": 100, "volume": 1, "quote_volume": 100, "trades": 1})
     store.upsert("SYNTHUSDT", "5m", rows, "test")
+    library_dir = tmp_path / "unused"
+    library_dir.mkdir()
+    np.savez_compressed(library_dir / "SYNTHUSDT.npz", dates=np.asarray([0, 86400, 172800]))
     monkeypatch.setattr(evaluate_module, "_sigma_estimates", lambda _data: (.04, .04))
     monkeypatch.setattr(evaluate_module, "_calibration_factors", lambda *_args: {})
     scenario_count, smart_count = 1000, 200
@@ -228,7 +231,7 @@ def test_simple_uses_all_scenarios_when_smart_uses_n_smart(tmp_path, monkeypatch
         {"symbol": "SYNTHUSDT", "strategy": "smart", "capital": 40, "low": 80, "high": 120},
     ], perfil="RAPIDO", capital=100, meta=3, n_scenarios=scenario_count,
         n_smart=smart_count, seed=43, db_path=tmp_path / "market_synthetic.sqlite",
-        library_dir=tmp_path / "unused", workers=1)
+        library_dir=library_dir, workers=1)
 
     assert result["n_scenarios"] == scenario_count
     assert result["pieces"][0]["metrics"]["n"] == scenario_count
@@ -238,3 +241,10 @@ def test_simple_uses_all_scenarios_when_smart_uses_n_smart(tmp_path, monkeypatch
         rtol=0, atol=1e-12)
     assert result["smart_paired"][0]["n"] == smart_count
     assert abs(result["smart_paired"][0]["pnl_usdt"]["mean"]) < 1e-6
+def test_evaluate_pieces_skips_symbols_without_scenario_library(tmp_path):
+    result = evaluate_pieces([{"symbol": "GRAMUSDT", "strategy": "simple",
+        "capital": 70, "n": 6, "width_sigma": 2}], perfil="RAPIDO",
+        capital=100, meta=3, n_scenarios=2, db_path=tmp_path / "temporary.sqlite",
+        library_dir=tmp_path / "sin_biblioteca")
+    assert result["pieces"] == []
+    assert result["skipped_symbols"] == {"GRAMUSDT": "biblioteca de escenarios ausente"}

@@ -888,3 +888,9 @@ No se midió el tiempo con datos reales: queda para Ramón ejecutar `scripts/esc
 Resultado final enfocado: **99 pasaron en 8,24 s**, con `ASPLE_OFFLINE=1`; incluye las pruebas de paridad Simple/bot heredadas y el escenario de estimación con almacén falso. La verificación `scripts/revisar_codificacion.py` sobre todos los archivos tocados informó `HALLAZGOS=0`. La única comparación no ejecutada es la medición con dos monedas de S1: no se usó BD de despliegue en esta sesión.
 
 Nada de esta parte modifica decisiones reales; v2 continúa con `available=False` y la validación permanece diagnóstica.
+## 43f-0 — bibliotecas ausentes y desliz del corte
+
+`evaluate_pieces` y `validate_scenarios` omiten monedas sin archivo de biblioteca, con velas insuficientes o con biblioteca insuficiente antes del corte, y devuelven el motivo en `skipped_symbols`. Las métricas conservan CVaR 5 % como dato descriptivo y agregan desliz medio/P90 solo en escenarios que tocaron el límite. `objective_v2` reemplaza la restricción CVaR por desliz medio ≤ 2 % del capital de la meta; `objective_limits` permite configurar `cut_slippage_max_pct` con valor predeterminado 2 %.
+
+Pruebas enfocadas: 24 pasaron en 7,32 s. Sin S1, red, BD real ni cambios de decisiones v1.
+La regresión del ranking desde el CLI, tras conectar el ajuste configurable, pasó: 7 pruebas en 0,22 s. El escáner de codificación reportó cero hallazgos.

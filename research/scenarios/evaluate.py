@@ -189,7 +189,42 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     symbols = sorted({str(piece["symbol"]).upper() for piece in pieces})
     db_path = market_db_path(db_path)
     store = CandleStore(db_path)
-    loaded = {symbol: store.load(symbol, "5m") for symbol in symbols}
+    skipped_symbols = {}
+    loaded = {}
+    for symbol in symbols:
+        library_path = Path(library_dir) / f"{symbol}.npz"
+        if not library_path.is_file():
+            skipped_symbols[symbol] = "biblioteca de escenarios ausente"
+            continue
+        try:
+            candles = store.load(symbol, "5m")
+        except (KeyError, ValueError, OSError) as exc:
+            skipped_symbols[symbol] = f"velas no disponibles: {exc}"
+            continue
+        if len(candles.close) < 30 * 288 + 1:
+            skipped_symbols[symbol] = "historia menor al calentamiento de 30 días"
+            continue
+        try:
+            with np.load(library_path, allow_pickle=False) as archive:
+                dates = np.asarray(archive["dates"], dtype=np.int64)
+            cutoff_for_library = None if before is None else _to_timestamp(before)
+            if cutoff_for_library is not None:
+                dates = dates[dates < cutoff_for_library]
+            if len(dates) < 3:
+                skipped_symbols[symbol] = "biblioteca sin bloques completos de 3 días antes del corte"
+                continue
+        except (OSError, ValueError, KeyError) as exc:
+            skipped_symbols[symbol] = f"biblioteca ilegible: {exc}"
+            continue
+        loaded[symbol] = candles
+    pieces = [piece for piece in pieces if str(piece["symbol"]).upper() in loaded]
+    symbols = sorted(loaded)
+    if not pieces:
+        return {"profile": str(perfil).upper(), "mode": mode, "fee_pct": float(fee_pct),
+            "horizon_days": horizon, "n_scenarios": int(n_scenarios), "pieces": [],
+            "portfolio": None, "smart_paired": [], "calibration_factors": {},
+            "sigma_today_24h": {}, "as_of_ts": None,
+            "skipped_symbols": skipped_symbols}
     cutoff = None if before is None else _to_timestamp(before)
     data = {}
     for symbol, candles in loaded.items():
@@ -346,6 +381,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         "horizon_days": horizon,
         "n_scenarios": target_count, "pieces": piece_results, "portfolio": portfolio,
         "smart_paired": comparisons, "calibration_factors": calibration,
+        "skipped_symbols": skipped_symbols,
         "sigma_today_24h": effective_sigma,
         "as_of_ts": cutoff if cutoff is not None else int(max(data[s].timestamp[-1] for s in symbols))}
 

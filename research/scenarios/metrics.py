@@ -21,6 +21,9 @@ def summarize(curves, *, capital_initial, target_usdt, max_loss_pct=None,
     losses = np.asarray([item["loss_cut"] for item in outcomes], dtype=float)
     reached = np.asarray([item["reached"] for item in outcomes], dtype=float)
     days = np.asarray([item["days"] for item in outcomes if item["days"] is not None], dtype=float)
+    cut_slippage = np.asarray([max(0.0, -float(capital_initial) *
+        float(max_loss_pct or 0) / 100 - item["pnl_usdt"])
+        for item in outcomes if item["loss_cut"]], dtype=np.float64)
     tail_count = max(1, int(math.ceil(count * .05)))
     rng = np.random.default_rng(seed)
     samples = rng.integers(0, count, size=(int(replicas), count))
@@ -32,6 +35,8 @@ def summarize(curves, *, capital_initial, target_usdt, max_loss_pct=None,
         "pnl_p50_usdt": float(np.quantile(pnl, .5)),
         "pnl_p90_usdt": float(np.quantile(pnl, .9)),
         "p_loss": float(losses.mean()), "cvar_5_usdt": float(np.sort(pnl)[:tail_count].mean()),
+        "cut_slippage_mean_usdt": float(cut_slippage.mean()) if len(cut_slippage) else 0.0,
+        "cut_slippage_p90_usdt": float(np.quantile(cut_slippage, .9)) if len(cut_slippage) else 0.0,
         "p_target": float(reached.mean()),
         "days_to_target_p10": float(np.quantile(days, .1)) if len(days) else None,
         "days_to_target_p50": float(np.quantile(days, .5)) if len(days) else None,
@@ -59,6 +64,9 @@ def summarize_portfolio(curves_by_piece, *, capital_initial, target_usdt,
     loss = np.asarray([row["loss_cut"] for row in combined], dtype=float)
     reached = np.asarray([row["reached"] for row in combined], dtype=float)
     tail = max(1, int(math.ceil(count * .05)))
+    cut_slippage = np.asarray([max(0.0, -float(capital_initial) *
+        float(max_loss_pct or 0) / 100 - row["pnl_usdt"])
+        for row in combined if row["loss_cut"]], dtype=np.float64)
     rng = np.random.default_rng(seed)
     sample = rng.integers(0, count, (int(replicas), count))
     return {"n": count, "pnl_mean_usdt": float(pnl.mean()),
@@ -66,6 +74,8 @@ def summarize_portfolio(curves_by_piece, *, capital_initial, target_usdt,
         "pnl_p10_usdt": float(np.quantile(pnl, .1)), "pnl_p50_usdt": float(np.quantile(pnl, .5)),
         "pnl_p90_usdt": float(np.quantile(pnl, .9)), "p_loss": float(loss.mean()),
         "cvar_5_usdt": float(np.sort(pnl)[:tail].mean()), "p_target": float(reached.mean()),
+        "cut_slippage_mean_usdt": float(cut_slippage.mean()) if len(cut_slippage) else 0.0,
+        "cut_slippage_p90_usdt": float(np.quantile(cut_slippage, .9)) if len(cut_slippage) else 0.0,
         "pnl_mean_ci95": [float(v) for v in np.quantile(pnl[sample].mean(axis=1), [.025, .975])],
         "p_loss_ci95": [float(v) for v in np.quantile(loss[sample].mean(axis=1), [.025, .975])],
         "capital_unused_usdt": float(combined[0]["capital_unused_usdt"])}
