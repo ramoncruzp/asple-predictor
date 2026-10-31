@@ -735,3 +735,28 @@ node --check frontend/metas.js
 ```
 
 Resultado: **18 pruebas pasaron en 30,69 s**, con dos avisos deprecados de `websockets`; `node --check frontend/metas.js` pasó. El arnés Playwright reportó cero hosts externos.
+
+### 43h-0e - cierre de regresión y operación
+
+Las pruebas de cierre cubren: retorno legado de `review_active()` con una sola meta; plan/revisión v1 sin cambio de motor; watchdog de caché 540 s por contexto y 1.500 s total; contextos ordenados y omitidos que vuelven a la próxima corrida; y dos metas concurrentes, una v1 y otra v2, con caché SQLite fresca e intercambio falso. v2, caché y marcador siguen apagados por defecto; `max_active` sigue en 1.
+
+Suposiciones de una sola meta encontradas y correcciones: (1) el ciclo del operador revisaba únicamente la primera meta: ahora recorre todas en serie, aísla fallos y prioriza omitidas; (2) el capital de Testnet se trataba como una bolsa global: inicio, altas y rotaciones descuentan compromisos de otras metas y limitan cada plan al efectivo atribuible; (3) la exclusividad de piezas dependía solo de la ruta Python: índice único parcial impide vínculos activos duplicados y conserva liberaciones históricas; (4) el job de caché disponía de un único presupuesto de 540 s para todo: ahora son 540 s por contexto y 25 min total, con prioridad v2 y reintento de omitidos; (5) Metas y Laboratorio asumían un panel/objetivo: el control permite 1/2 y la pantalla enumera cada meta. El vigilante de pérdidas y las transiciones por meta ya recorren las filas activas individualmente; no se cambió esa lógica.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0e-20261031-b'; python -m pytest tests/test_meta_multi_goal.py tests/test_meta_core.py tests/test_meta_engines_regression.py tests/test_meta_review_resilience.py tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py --basetemp=$base -q
+node --check frontend/metas.js
+```
+
+Comandos S1 para ejecutar después del despliegue, en modo solo lectura:
+
+```bash
+cd ~/asple-predictor
+sqlite3 -readonly asple_predictor.db "SELECT json_extract(settings,'$.max_active'), json_extract(settings,'$.scenario_cache_enabled'), json_extract(settings,'$.v2_engine_enabled'), json_extract(settings,'$.shadow_marker_enabled') FROM meta_profile_settings WHERE profile='GLOBAL';"
+sqlite3 -readonly asple_predictor.db "SELECT id,status,capital_initial,target_usdt,profile,json_extract(config_snapshot,'$.decision_engine') AS motor FROM meta_goals ORDER BY id;"
+sqlite3 -readonly market_data.db "SELECT goal_id,profile,status,seconds,rss_mb,as_of FROM scenario_eval_runs ORDER BY as_of DESC LIMIT 20;"
+sqlite3 -readonly asple_predictor.db "SELECT goal_id,active_engine,shadow_engine,cache_run_id,review_at,shadow_outcome_json FROM engine_shadow_decisions ORDER BY review_at DESC LIMIT 20;"
+```
+
+Resultado: **100 pruebas pasaron en 11,63 s**; `node --check frontend/metas.js` pasó. Incluye revisión de una meta v1, presupuestos/reintentos de caché, regresión v1, estado por defecto y la corrida integrada v1/v2 con exchange y caché sintéticos. No se ejecutaron los comandos S1.

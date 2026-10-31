@@ -274,7 +274,7 @@ def test_availability_and_max_active_authorization_metadata(tmp_path):
     goal = core.create_goal(100, 10)
     core.start_goal(goal["id"])
     snapshot = core.availability_snapshot()
-    assert snapshot["available_usdt"] == "150"
+    assert Decimal(snapshot["available_usdt"]) == Decimal("150")
     config = core.config()
     assert config["max_active"] == 2
     assert config["max_active_actor"] == "operador"

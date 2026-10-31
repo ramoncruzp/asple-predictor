@@ -158,7 +158,8 @@ class ScenarioCacheJob:
             result = self._run_monitored(args, env)
             elapsed = self.clock() - started
             if result.returncode:
-                status = "memoria" if result.returncode == 75 else "failed"
+                status = ("memoria" if result.returncode in {3, 75} else
+                    "timeout" if result.returncode == 4 else "failed")
                 logger.error("SCENARIO_CACHE estado=failed duración_s=%.3f stderr=%s",
                     elapsed, (result.stderr or "")[-2000:])
                 return {"status": status, "duration_s": elapsed,

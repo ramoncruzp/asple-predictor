@@ -403,6 +403,30 @@ def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases):
     assert "RLIMIT_AS" not in open("scheduler/scenario_cache_job.py", encoding="utf-8").read()
 
 
+@pytest.mark.parametrize(("returncode", "expected"), [(3, "memoria"), (4, "timeout")])
+def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected):
+    db, market_path = cache_databases
+    _set_enabled(db, True)
+    def run(args, **_kwargs):
+        return subprocess.CompletedProcess(args, returncode, "", "límite del script")
+
+    result = ScenarioCacheJob(db, market_path, run=run).run_if_enabled()
+
+    assert result["status"] == expected
+
+
+@pytest.mark.parametrize(("returncode", "expected"), [(3, "memoria"), (4, "timeout")])
+def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected):
+    db, market_path = cache_databases
+    _set_enabled(db, True)
+    def run(args, **_kwargs):
+        return subprocess.CompletedProcess(args, returncode, "", "límite del script")
+
+    result = ScenarioCacheJob(db, market_path, run=run).run_if_enabled()
+
+    assert result["status"] == expected
+
+
 def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path):
     db, market_path = cache_databases
     _set_enabled(db, True)
