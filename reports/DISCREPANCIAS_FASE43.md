@@ -634,3 +634,10 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f6-recommend-2026103
 La función vive en `research/scenarios/recommend.py` y no se conecta a grids, Fase 42 ni al operador. Resultado r1: **2 pasaron en 0,18 s**. Se cubren ranking por probabilidad/ganancia, geometría logarítmica y offsets del bot.
 
 La recomendación es una interfaz de investigación reutilizable. No se conecta a la caché Meta, no lee la base de la aplicación ni cambia la disponibilidad del motor. 43f-4 sigue parcial: falta el job diario que mida los resultados de la decisión sombra y complete `shadow_outcome_json`.
+
+
+## 43f-7: estado y límites de cierre
+
+La regresión congelada confirma la paridad del plan y revisión operativa de v1 con `776eedf`; el bloque informativo `allocation_shadow` no forma parte del plan operativo. v2 y la caché permanecen apagados por defecto. La recomendación de 43f-6 no se conecta al operador.
+
+Pendiente explícito: 43f-4 no implementó el job diario que evalúa decisiones sombra sobre velas reales y guarda `shadow_outcome_json`. La prueba sintética de caché persistió resultados con evaluador falso (4 pruebas, 0,94 s), pero no midió RSS del proceso; no se afirma una cifra de memoria sintética. El registro `rss_mb` se verificará en S1 con la consulta SQLite `mode=ro` incluida en el reporte.

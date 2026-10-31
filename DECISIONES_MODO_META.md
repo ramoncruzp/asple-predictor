@@ -455,6 +455,15 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 
 43e-6c quedó completada en 43e-6e: historia usa EWMA causal con factor verificado anterior a t, geometría compartida con escenarios, bot por offsets y Smart exacto sobre hasta 200 inicios; se verificaron OU/GBM y la variante sin tendencia. 43e-6d se completó en 43e-6f con aceptación predictiva contra realidad y baseline v1. 43e-7 exporta la API pública de investigación. La validación predictiva local usa sintéticos; falta la corrida de S1 antes de aceptar científicamente el modelo. Nada cambia decisiones reales; v2 permanece `available=False`.
 
-### Estado parcial de 43f
 
-43f-2 quedó implementada como infraestructura experimental, pero la caché de metas existentes aún usa capital y objetivo originales y no calcula equity de liquidación ni target restante. 43f-3 integra lectura de caché y plan de apertura, pero la revisión de metas vivas permanece no-op. El motor, la caché y todos los perfiles continúan apagados por defecto. Falta terminar la revisión v2 con frenos, la regresión de v1 y el resto de 43f-3 antes de continuar con 43f-4 a 43f-7.
+
+### Fase 43f ? decisión de v2 y estado
+
+- **F1:** el criterio CVaR 5 % se sustituye por el desliz del corte: media ? 2 % del capital de la meta, configurable por perfil. Se conserva CVaR como métrica informativa.
+- **F2:** el motor queda fijado por meta. En una meta nueva, v2 solo puede operar si el interruptor global ?Motor v2 disponible? está encendido, el perfil ya tiene `decision_engine=v2` y la caché contextual está vigente. La configuración inicial conserva v1 y los dos interruptores globales parten apagados. El motor activo no recurre al otro si falla.
+- **F3 / D7:** `recommend_grid` queda como función experimental reutilizable para 43l; no se conecta a grids de Fase 42 en esta entrega.
+- **Mantener:** se aproxima evaluando una pieza nueva con las mismas líneas desde el precio actual; las comisiones de salida de la pieza actual se descuentan al comparar alternativas.
+- La caché horaria corre fuera del servicio, con prioridad baja, límite de 10 minutos y tope de 600 MiB donde el sistema permite imponerlo. Su capital contextual usa fills, reservas y valoración al último cierre con comisión estimada; los casos de atribución incompleta se omiten.
+- La prueba congelada de `_build_plan` y `_review_allocations` contra `776eedf` confirma que plan operativo y decisión v1 permanecen iguales. Las metas actuales siguen en v1.
+- **Pendiente:** 43f-4 persiste las decisiones activa/sombra, pero falta el job diario que simula el resultado sombra en velas reales y completa `shadow_outcome_json`. Por eso todavía no hay marcador de desempeño v1/v2 observado.
+- 43f-6 exporta la recomendación experimental aislada. No cambia decisiones reales. No habilitar v2 hasta revisión de Nexo y aprobación de Ramón.

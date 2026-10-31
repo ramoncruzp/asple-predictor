@@ -913,7 +913,8 @@ Pruebas exactas: `pytest tests/test_scenario_cache_job.py --basetemp="$env:TEMP/
 
 Pruebas enfocadas r2: `tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py`, **8 pasaron en 1,09 s**. La revisión v2 de grids ya existentes permanece en no-op; se deja documentado como límite pendiente de política, sin cancelar, reemplazar ni reconfigurar órdenes en esta entrega.
 
-43f queda **parcial**: aún no está implementada la comparación v2 mantener/cambiar con umbral de 5 puntos, costos de salida/entrada, error estándar y frenos v1; falta la regresión de decisiones v1 contra `776eedf`. No se completaron 43f-4 a 43f-7. La caché de metas existentes tampoco usa valor de liquidación/efectivo libre y objetivo restante, por lo que no debe considerarse habilitable para operar. Los subcomponentes actuales están apagados por defecto.
+43f queda parcialmente completada: 43f-0 a 43f-3d y 43f-5 a 43f-6 tienen implementación y pruebas enfocadas. 43f-4 registra decisiones cruzadas, pero falta el job diario que simula la alternativa sombra contra velas reales y rellena `shadow_outcome_json`. No se deben interpretar los registros actuales como resultados sombra medidos. El efectivo e inventario del contexto se reconstruyen con fills, reservas, último cierre y comisiones estimadas; una atribución incompleta omite ese contexto.
+
 
 La disponibilidad que se expone en configuración/API depende de ambos interruptores y de una corrida `ok` menor a dos horas. Verificación r4 del motor y job: **9 pasaron en 1,15 s**.
 
@@ -955,3 +956,36 @@ Laboratorio muestra los interruptores de caché y motor v2 con confirmación/act
 Se añadió `recommend_grid` para evaluar Simple, Smart o bot con FastSim/Smart exacto, ordenar por P(ganancia positiva) y ganancia media, y aplicar el límite de pérdida configurado. Es investigación aislada y no modifica grids ni decisiones. Prueba enfocada: `pytest tests/test_scenarios_recommend.py --basetemp="$env:TEMP/asple-f43f6-recommend-20261030-r1"`, **2 pasaron en 0,18 s**.
 
 La función exportada recibe moneda, estrategia, capital, horizonte, precio y sigma logarítmica acumulada de 24 h; construye geometrías y delega la evaluación en `evaluate_pieces`. El horizonte y el límite de pérdida se pueden parametrizar. No está conectada al flujo operativo.
+
+### 43f-7 ? cierre de la decisión v2
+
+El flujo v1 mantiene su plan y acción de revisión: la regresión compara `_build_plan` y `_review_allocations` con las implementaciones extraídas de `776eedf`; el plan operativo y la decisión coinciden. `allocation_shadow` queda fuera de la igualdad porque es información añadida. El motor v2 requiere simultáneamente el interruptor global, el perfil configurado como `v2` y caché reciente válida. Los interruptores globales parten apagados y los perfiles existentes conservan v1. No se habilitó v2.
+
+43f-6 expone `research.scenarios.recommend_grid` para el futuro uso en 43l. Permanece aislada de Fase 42 y del operador.
+
+Pruebas y mediciones disponibles: regresión v1, **37 pasaron en 2,27 s**; caché de escenarios, **4 pasaron en 0,94 s** en la reejecución reportada de 43f-2; recomendación, **2 pasaron en 0,18 s**. Esos tiempos son de pruebas sintéticas. El test de caché usa un evaluador falso y no informó RSS medido; el subproceso de producción tiene límite de 600 MiB donde el SO admite `RLIMIT_AS`, además de registrar `rss_mb`. No se presenta un RSS sintético no medido como resultado.
+
+Pasos para S1, después de desplegar desde el PC con `bash deploy/actualizar.sh`:
+
+1. Encender únicamente **Caché de escenarios v2** en Laboratorio. Mantener apagado **Motor v2 disponible**.
+2. Esperar dos corridas horarias `ok` y comprobarlas con SQLite en solo lectura:
+
+```bash
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect('file:market_data.db?mode=ro', uri=True)
+for row in conn.execute("SELECT run_id, as_of, goal_id, profile, seconds, rss_mb, status FROM scenario_eval_runs ORDER BY as_of DESC LIMIT 10"):
+    print(row)
+conn.close()
+PY
+```
+
+3. No encender **Motor v2 disponible** hasta la revisión de Nexo y la aprobación de Ramón. El marcador de sombra de 43f-4 sigue pendiente; no usar sus filas como resultado observado.
+
+Comando enfocado de cierre, registrado antes de ejecutarlo (basetemp nueva):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f7-cierre-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_recommend.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py tests/test_scenario_cache_job.py --basetemp="$base"
+```
+
+Resultado: **28 pasaron en 1,89 s**. No se usó ninguna BD real ni la red.
