@@ -4063,6 +4063,7 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
             self._alert_engine_failure(meta_id, engine, exc)
             engine_shadow = self._run_engine_shadow(goal, value, None, engine)
+            self._persist_engine_shadow_decision(goal, engine, result, engine_shadow, None)
             self._record_review(meta_id, result, value, None, engine=engine, engine_shadow=engine_shadow)
             return result
         try:
@@ -4103,6 +4104,7 @@ class MetaOperator:
                     self._alert_engine_failure(meta_id, engine, exc)
             value = current_value
         engine_shadow = self._run_engine_shadow(goal, value, plan, engine)
+        self._persist_engine_shadow_decision(goal, engine, result, engine_shadow, plan)
         choices = self._safe_active_review_choices(plan, result, meta_id)
         for proposal in touch_bot_proposals:
             self._ledger(meta_id, "META_BOT_TOUCH_SHADOW", proposal)
@@ -4197,7 +4199,28 @@ class MetaOperator:
                 "elapsed_s": elapsed, "error": state["error"]}
         result = state.get("result") or {}
         return {"name": shadow_engine.name, "decision": result.get("decision"),
-            "reason": result.get("reason"), "elapsed_s": elapsed, "error": None}
+            "reason": result.get("reason"), "elapsed_s": elapsed, "error": None,
+            "result": result}
+
+    def _persist_engine_shadow_decision(self, goal, engine, active_decision,
+            shadow_decision, plan):
+        table = getattr(self.db, "engine_shadow_decisions", None)
+        if table is None or getattr(self.db, "engine", None) is None:
+            return False
+        from sqlalchemy import insert
+        shadow = shadow_decision or {}
+        result = shadow.get("result") or {}
+        comparison = result.get("comparison_v2") or {}
+        cache_run_id = ((plan or {}).get("cache") or {}).get("run_id") or comparison.get("cache_run_id")
+        now = datetime.now(timezone.utc)
+        with self.db.engine.begin() as conn:
+            conn.execute(insert(table).values(goal_id=int(goal["id"]), review_at=now,
+                active_engine=str(engine.name),
+                active_decision_json=json.dumps(active_decision or {}, ensure_ascii=False, default=str),
+                shadow_engine=str(shadow.get("name") or ("v2" if engine.name == "v1" else "v1")),
+                shadow_decision_json=json.dumps(shadow, ensure_ascii=False, default=str),
+                cache_run_id=str(cache_run_id) if cache_run_id else None))
+        return True
 
     def _valuation_with_retry(self, meta_id):
         attempts = []

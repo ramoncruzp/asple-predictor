@@ -238,3 +238,28 @@ def test_disponibilidad_publicada_depende_de_interruptores_y_cache(engine_databa
             "n_scenarios,status) VALUES('fresh',?,'RAPIDO',20,1000,'ok')",
             (datetime.now(timezone.utc).isoformat(),))
     assert operator.v2_engine_status()["available"] is True
+
+
+def test_engine_shadow_decision_se_persiste_en_tabla_temporal(engine_databases):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db, _market_path = engine_databases
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=3, target_input_type="USDT",
+            target_input_value=3, profile="RAPIDO", status="ACTIVE",
+            environment="testnet", created_at=now, config_snapshot="{}")).inserted_primary_key[0]
+    operator = MetaOperator(SimpleNamespace(db=db), db, None, None, None)
+
+    assert operator._persist_engine_shadow_decision({"id": goal_id},
+        SimpleNamespace(name="v2"), {"decision": "mantener"},
+        {"name": "v1", "decision": "agregar", "result": {
+            "alternative_id": "alt-1"}}, {"cache": {"run_id": "cache-1"}})
+
+    with db.engine.connect() as conn:
+        row = conn.execute(select(db.engine_shadow_decisions)).mappings().one()
+    assert row["active_engine"] == "v2"
+    assert row["shadow_engine"] == "v1"
+    assert row["cache_run_id"] == "cache-1"
+    assert json.loads(row["active_decision_json"])["decision"] == "mantener"
+    assert json.loads(row["shadow_decision_json"])["result"]["alternative_id"] == "alt-1"
+    assert row["shadow_outcome_json"] is None

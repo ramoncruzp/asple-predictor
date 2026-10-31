@@ -335,6 +335,16 @@ class DBManager:
             Column("run_id", Integer, ForeignKey("meta_runs.id")), Column("ts", DateTime, nullable=False),
             Column("event_type", String, nullable=False), Column("reason", String),
             Column("grid_id", Integer), Column("level_idx", Integer), Column("details", Text))
+        self.engine_shadow_decisions = Table("engine_shadow_decisions", self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("goal_id", Integer, ForeignKey("meta_goals.id"), nullable=False),
+            Column("review_at", DateTime(timezone=True), nullable=False),
+            Column("active_engine", String(16), nullable=False),
+            Column("active_decision_json", Text, nullable=False),
+            Column("shadow_engine", String(16), nullable=False),
+            Column("shadow_decision_json", Text, nullable=False),
+            Column("cache_run_id", String(64)),
+            Column("shadow_outcome_json", Text))
         self.meta_profile_settings = Table("meta_profile_settings", self.metadata,
             Column("profile", String, primary_key=True), Column("settings", Text, nullable=False),
             Column("updated_at", DateTime, nullable=False))

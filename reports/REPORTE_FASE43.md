@@ -936,3 +936,10 @@ Comando enfocado: `pytest tests/test_scenario_cache_job.py tests/test_v2_scenari
 #### 43f-3d ? regresión de v1
 
 La prueba ejecuta los métodos `_build_plan` y `_review_allocations` extraídos del commit `776eedf` contra fixtures idénticos. El plan de asignaciones y la acción operativa de revisión coinciden; `allocation_shadow` se excluye de la igualdad porque es una proyección informativa. La corrida r1 identificó esta diferencia y r2 pasó: `pytest tests/test_meta_own_grid_evaluation.py tests/test_meta_engines_regression.py tests/test_v2_scenario_engine.py --basetemp="$env:TEMP/asple-f43f3d-v1-baseline-20261030-r2"`, **37 pasaron en 2,27 s**.
+
+
+#### 43f-4 ? sombra cruzada y persistencia parcial
+
+Las decisiones activas y sombra se insertan de forma append-only en `engine_shadow_decisions` y en la bitácora de la meta. El payload conserva el resultado del motor sombra y el identificador de corrida de caché. Pruebas enfocadas: `pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp="$env:TEMP/asple-f43f4-shadow-20261030-r1"`, **19 pasaron en 1,64 s**.
+
+Pendiente de 43f-4: el job diario que simula la decisión sombra contra velas reales y rellena `shadow_outcome_json`; no se presenta como completado.

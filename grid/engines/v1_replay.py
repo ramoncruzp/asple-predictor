@@ -41,6 +41,10 @@ class V1ReplayEngine(DecisionEngine):
         v1_plan = state.get("plan") or {}
         choices = (v1_plan or {}).get("decision_choices") or {}
         choice = choices.get("real") or choices.get("scanner_advisor") or {}
+        selected_id = choice.get("alternative_id")
+        selected = next((row for row in v1_plan.get("alternatives", [])
+            if row.get("alternative_id") == selected_id), None)
         return {"decision": choice.get("decision", "mantener"),
             "reason": choice.get("reason"), "alternative_id": choice.get("alternative_id"),
-            "source": "v1_plan_read_only"}
+            "source": "v1_plan_read_only", "pieces": (selected or {}).get("pieces", []),
+            "selected_alternative": selected}

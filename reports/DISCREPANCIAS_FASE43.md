@@ -582,3 +582,16 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f3d-v1-baseline-2026
 ```
 
 Resultado r2: **37 pasaron en 2,27 s**. La regresión confirma que el plan operativo y la acción de revisión de v1 coinciden con los métodos congelados de `776eedf`; solo se excluye `allocation_shadow`, que es informativo.
+
+
+## 43f-4 ? persistencia de decisiones sombra (parcial)
+
+Comando exacto antes de pruebas (modo offline, basetemp r1 nueva):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43f4-shadow-20261030-r1'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp="$base"
+```
+
+La parte guarda decisiones activas/sombra en `engine_shadow_decisions` y la bitácora existente conserva el detalle. El marcador que simula la alternativa sombra contra velas reales y llena `shadow_outcome_json` no está implementado en este commit; el campo queda nulo.
+
+Resultado r1: **19 pasaron en 1,64 s**. El evento de decisión se persiste y el esquema contiene el campo pendiente `shadow_outcome_json`.

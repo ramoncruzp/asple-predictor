@@ -264,6 +264,9 @@ class V2ScenarioEngine(DecisionEngine):
             shadow_plan = self.plan(operator, goal, plan_kind="revision", record=False)
             result = self.review(operator, goal, valuation, shadow_plan)
             return {**result, "reason": result.get("reason") or "revisión en sombra",
-                "cache_run_id": (shadow_plan.get("cache") or {}).get("run_id")}
+                "cache_run_id": (shadow_plan.get("cache") or {}).get("run_id"),
+                "pieces": shadow_plan.get("pieces", []),
+                "decision_choices": shadow_plan.get("decision_choices", {}),
+                "current_pieces": shadow_plan.get("current_pieces", {})}
         except EngineUnavailable as exc:
             return {"decision": "no_disponible", "reason": str(exc)}
