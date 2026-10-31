@@ -65,9 +65,12 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         for plans in plans_by_scenario], dtype=np.float64)
     qty = np.asarray([[float(plan.qty) for plan in plans]
         for plans in plans_by_scenario], dtype=np.float64)
+    fee = float(Decimal(str(fee_pct)) / 100)
+    raw_net_qty = qty - qty * fee
+    net_qty = np.asarray([[float(filters.round_qty_down(Decimal(str(value))))
+        for value in row] for row in raw_net_qty], dtype=np.float64)
     initial_buy_open = np.asarray([[plan.initial_state == "BUY_OPEN" for plan in plans]
         for plans in plans_by_scenario])
-    fee = float(Decimal(str(fee_pct)) / 100)
     cash = np.full(n_scenarios, float(capital), dtype=np.float64)
     held = np.zeros((n_scenarios, cells), dtype=np.float64)
     dust = np.zeros(n_scenarios, dtype=np.float64)
@@ -96,9 +99,8 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
             if np.any(buy_hit):
                 cost = prices[:, cell] * qty[:, cell]
                 gross_fee = qty[:, cell] * fee
-                raw_net = qty[:, cell] - gross_fee
-                net_values = np.asarray([float(filters.round_qty_down(Decimal(str(value))))
-                    for value in raw_net])
+                raw_net = raw_net_qty[:, cell]
+                net_values = net_qty[:, cell]
                 mask = buy_hit & (cash + 1e-12 >= cost)
                 cash[mask] -= cost[mask]
                 fees[mask] += gross_fee[mask] * prices[mask, cell]

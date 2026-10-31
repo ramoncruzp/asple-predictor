@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
@@ -11,13 +12,37 @@ from grid.meta import DEFAULT_PROFILES
 from grid.sim.data import CandleData
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 from research.scenarios.generator import generate
-from research.scenarios.metrics import summarize, summarize_portfolio
+from research.scenarios.metrics import summarize, summarize_outcomes, summarize_portfolio
 from research.scenarios.smart_exact import START_TS, evaluate_smart_scenarios, paired_smart_simple
 
 
 def _log_width_from_sigma_24h(sigma_24h, horizon_days, multiplier):
     """Convierte sigma logarítmica acumulada de 24 h a un horizonte en días."""
     return float(multiplier) * float(sigma_24h) * np.sqrt(float(horizon_days))
+
+
+def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct):
+    """Calcula resultados de cartera directamente sobre las curvas float32."""
+    cash = np.asarray(fast["cash_curve"], dtype=np.float64) + float(capital) - float(piece_capital)
+    equity = np.asarray(fast["equity_curve"], dtype=np.float64) + float(capital) - float(piece_capital)
+    hit_mask = cash >= float(capital) + float(target)
+    hit_exists = hit_mask.any(axis=1)
+    hit = np.where(hit_exists, hit_mask.argmax(axis=1), cash.shape[1])
+    if loss_pct is not None and float(loss_pct) > 0:
+        loss_mask = equity <= float(capital) * (1 - float(loss_pct) / 100)
+        loss_exists = loss_mask.any(axis=1)
+        loss = np.where(loss_exists, loss_mask.argmax(axis=1), equity.shape[1])
+    else:
+        loss_exists = np.zeros(len(cash), dtype=bool)
+        loss = np.full(len(cash), equity.shape[1], dtype=int)
+    cut = loss_exists & ((~hit_exists) | (loss <= hit))
+    end_index = np.where(cut, loss, equity.shape[1] - 1)
+    pnl = equity[np.arange(len(equity)), end_index] - float(capital)
+    reached = hit_exists & ~cut
+    times = np.asarray(fast["timestamps"], dtype=np.int64)
+    days = np.where(reached, (times[np.minimum(hit, len(times)-1)] - int(START_TS)) / 86400, np.nan)
+    return {"pnl_usdt": pnl, "loss_cut": cut, "reached": reached, "days": days,
+        "capital_unused_usdt": float(capital) - float(piece_capital)}
 
 
 def causal_sigma_24h(close, timestamp, upto_index=None, calibration=1.0):
@@ -78,7 +103,7 @@ def _calibration_factors(path, symbols, *, before=None):
 
 
 def prepare_scenario_batches(symbol, *, horizon_days, n_scenarios, seed=43,
-        db_path="market_data.db", library_dir="data/derived/scenario_lib"):
+        db_path="market_data.db", library_dir="data/derived/scenario_lib", timings=None):
     """Genera una sola vez los lotes reutilizables de una moneda."""
     symbol = str(symbol).upper()
     path = market_db_path(db_path)
@@ -92,15 +117,18 @@ def prepare_scenario_batches(symbol, *, horizon_days, n_scenarios, seed=43,
     sigma_today, sigma_long = _sigma_estimates(data)
     calibration = _calibration_factors(path, [symbol]).get(symbol, 1.0)
     batches = []
+    generation_timings = {}
     for batch in generate([symbol], horizon_days=int(horizon_days),
         n_scenarios=int(n_scenarios), seed=int(seed), price_now={symbol: price},
         sigma_today_24h={symbol: sigma_today}, sigma_long_24h={symbol: sigma_long},
         batch_size=32, library_directory=library_dir,
-        calibration_factors={symbol: calibration}):
+        calibration_factors={symbol: calibration}, timings=generation_timings):
         for values in batch["symbols"].values():
             for key in ("open", "high", "low", "close", "sigma_path"):
                 values[key] = values[key].astype(np.float32, copy=False)
         batches.append(batch)
+    if timings is not None:
+        timings.update(generation_timings)
     return batches
 
 
@@ -190,7 +218,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
         library_dir="data/derived/scenario_lib", workers=2, mode="alternativas",
         fee_pct=.1, detrend_scenarios=False, horizon_days=None, max_loss_pct=None,
-        keep_curves=True, scenario_batches=None):
+        keep_curves=True, scenario_batches=None, timings=None):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
@@ -201,6 +229,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     meta (su capital no asignado queda quieto); `cartera` suma piezas.
     """
     mode = str(mode).lower()
+    timings = timings if timings is not None else {}
     if mode not in {"alternativas", "cartera"}:
         raise ValueError("modo debe ser alternativas o cartera")
     if not pieces or capital <= 0 or n_scenarios <= 0 or float(fee_pct) < 0:
@@ -279,7 +308,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         raise ValueError("n_smart debe ser positivo cuando se evalúa Smart")
     piece_curves = [[] for _ in pieces]
     piece_scenario_curves = [{} for _ in pieces]
-    raw = [{"cycles": [], "inventory_qty": [], "inventory_value": [], "fills": []}
+    raw = [{"cycles": [], "inventory_qty": [], "inventory_value": [], "fills": [], "outcomes": []}
         for _ in pieces]
     paired = {}
     batches = scenario_batches if scenario_batches is not None else generate(symbols, horizon_days=horizon, n_scenarios=target_count,
@@ -335,11 +364,17 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     if record_pairs:
                         per_index[offset][index] = ("smart", result)
             elif strategy == "bot":
+                fastsim_started = time.perf_counter()
                 fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
                     sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
-                    target_usdt=meta, initial_timestamp=START_TS, pack_curves=True,
+                    target_usdt=meta, initial_timestamp=START_TS, pack_curves=keep_curves,
                     fee_pct=fee_pct)
-                piece_curves[index].extend(fast["curves"])
+                timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
+                if keep_curves:
+                    piece_curves[index].extend(fast["curves"])
+                else:
+                    raw[index]["outcomes"].append(_fast_outcomes(fast, capital=capital,
+                        piece_capital=piece["capital"], target=meta, loss_pct=loss_pct))
                 start_index = int(batch["scenario_start"])
                 if keep_curves:
                     piece_scenario_curves[index].update({start_index + offset: curve
@@ -352,11 +387,17 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     for offset, curve in enumerate(fast["curves"]):
                         per_index[offset][index] = ("bot", curve)
             elif strategy == "simple":
+                fastsim_started = time.perf_counter()
                 fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
-                    initial_timestamp=START_TS, pack_curves=True, fee_pct=fee_pct)
-                piece_curves[index].extend(fast["curves"])
+                    initial_timestamp=START_TS, pack_curves=keep_curves, fee_pct=fee_pct)
+                timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
+                if keep_curves:
+                    piece_curves[index].extend(fast["curves"])
+                else:
+                    raw[index]["outcomes"].append(_fast_outcomes(fast, capital=capital,
+                        piece_capital=piece["capital"], target=meta, loss_pct=loss_pct))
                 start_index = int(batch["scenario_start"])
                 if keep_curves:
                     piece_scenario_curves[index].update({start_index + offset: curve
@@ -385,11 +426,23 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
     piece_results = []
     for index, piece in enumerate(pieces):
         values = raw[index]
-        metrics = summarize(piece_curves[index],
+        summarize_args = dict(
             capital_initial=(float(capital) if mode == "alternativas" else float(piece["capital"])),
             target_usdt=meta, max_loss_pct=loss_pct,
             horizon_days=horizon, cycles=values["cycles"], inventory_qty=values["inventory_qty"],
             inventory_value=values["inventory_value"], seed=seed)
+        metrics_started = time.perf_counter()
+        outcomes = values["outcomes"]
+        vector_outcomes = ({key: (np.concatenate([row[key] for row in outcomes])
+            if key != "capital_unused_usdt" else outcomes[0][key])
+            for key in outcomes[0]} if outcomes else {})
+        metrics = (summarize_outcomes(vector_outcomes, capital_initial=capital,
+            max_loss_pct=loss_pct, horizon_days=horizon, cycles=values["cycles"],
+            inventory_qty=values["inventory_qty"], inventory_value=values["inventory_value"],
+            seed=seed) if mode == "alternativas" and not keep_curves
+                and str(piece["strategy"]).lower() in {"simple", "bot"} else
+            summarize(piece_curves[index], **summarize_args))
+        timings["metrics_s"] = timings.get("metrics_s", 0.0) + time.perf_counter() - metrics_started
         zero_fill_fraction = (float(np.mean(np.asarray(values["fills"]) == 0))
             if values["fills"] else 1.0)
         warning = "la geometría casi nunca se toca" if zero_fill_fraction > .95 else None

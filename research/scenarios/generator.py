@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import time
 
 from research.scenarios.library import load_library
 
@@ -15,7 +16,7 @@ def _as_symbol_map(value, symbols):
 def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
         sigma_today_24h, sigma_long_24h, tau_days=3.0, block_days=3,
         before=None, batch_size=None, library_directory="data/derived/scenario_lib",
-        calibration_factors=None):
+        calibration_factors=None, timings=None):
     """Produce lotes reproducibles; cada lote contiene dicts por símbolo.
 
     `price_now` y sigmas pueden ser escalares o mapas por símbolo. Los lotes
@@ -29,7 +30,10 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
     long_map = _as_symbol_map(sigma_long_24h, symbols)
     calibration_factors = calibration_factors or {}
     today_map = {s: today_map[s] * float(calibration_factors.get(s, 1.0)) for s in symbols}
+    library_started = time.perf_counter()
     libraries = {s: load_library(s, before=before, directory=library_directory) for s in symbols}
+    if timings is not None:
+        timings["library_load_s"] = timings.get("library_load_s", 0.0) + time.perf_counter() - library_started
     date_maps = {s: {int(day): i for i, day in enumerate(libraries[s][1])} for s in symbols}
     common_starts = []
     candidate_days = sorted(set.intersection(*(set(map(int, libraries[s][1])) for s in symbols)))
@@ -50,6 +54,7 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
     sigma_paths = {s: long_map[s] + (today_map[s] - long_map[s]) *
         np.exp(-scale_days / max(float(tau_days), 1e-9)) for s in symbols}
     for offset in range(0, int(n_scenarios), batch_size):
+        generation_started = time.perf_counter()
         count = min(batch_size, int(n_scenarios) - offset)
         block_origins = rng.choice(np.asarray(common_starts, dtype=np.int64),
             size=(count, blocks_needed), replace=True)
@@ -77,4 +82,6 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
             batch["symbols"][symbol] = {"open": open_prices, "high": high, "low": low,
                 "close": close, "sigma_path": sigma_path,
                 "source_dates": day_origin.copy()}
+        if timings is not None:
+            timings["generation_s"] = timings.get("generation_s", 0.0) + time.perf_counter() - generation_started
         yield batch

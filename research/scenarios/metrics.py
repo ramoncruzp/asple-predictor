@@ -17,13 +17,38 @@ def summarize(curves, *, capital_initial, target_usdt, max_loss_pct=None,
         raise ValueError("se requiere al menos una curva")
     outcomes = [evaluate_portfolio([curve], capital_initial=capital_initial,
         target_usdt=target_usdt, max_loss_pct=max_loss_pct) for curve in curves]
-    pnl = np.asarray([item["pnl_usdt"] for item in outcomes], dtype=float)
-    losses = np.asarray([item["loss_cut"] for item in outcomes], dtype=float)
-    reached = np.asarray([item["reached"] for item in outcomes], dtype=float)
-    days = np.asarray([item["days"] for item in outcomes if item["days"] is not None], dtype=float)
-    cut_slippage = np.asarray([max(0.0, -float(capital_initial) *
-        float(max_loss_pct or 0) / 100 - item["pnl_usdt"])
-        for item in outcomes if item["loss_cut"]], dtype=np.float64)
+    return summarize_outcomes(outcomes, capital_initial=capital_initial,
+        max_loss_pct=max_loss_pct, horizon_days=horizon_days, cycles=cycles,
+        inventory_qty=inventory_qty, inventory_value=inventory_value,
+        seed=seed, replicas=replicas)
+
+
+def summarize_outcomes(outcomes, *, capital_initial, max_loss_pct=None,
+        horizon_days, cycles=None, inventory_qty=None, inventory_value=None,
+        seed=43, replicas=1000):
+    """Resume vectores de resultados ya calculados, con el mismo bootstrap."""
+    vector_input = isinstance(outcomes, dict)
+    count = len(outcomes["pnl_usdt"]) if vector_input else len(outcomes)
+    if count < 1:
+        raise ValueError("se requiere al menos un resultado")
+    if vector_input:
+        pnl = np.asarray(outcomes["pnl_usdt"], dtype=np.float64)
+        losses = np.asarray(outcomes["loss_cut"], dtype=np.float64)
+        reached = np.asarray(outcomes["reached"], dtype=np.float64)
+        day_values = np.asarray(outcomes["days"], dtype=np.float64)
+        days = day_values[np.isfinite(day_values)]
+        cut_slippage = np.maximum(0.0, -float(capital_initial) *
+            float(max_loss_pct or 0) / 100 - pnl[outcomes["loss_cut"]])
+        capital_unused = float(outcomes["capital_unused_usdt"])
+    else:
+        pnl = np.asarray([item["pnl_usdt"] for item in outcomes], dtype=float)
+        losses = np.asarray([item["loss_cut"] for item in outcomes], dtype=float)
+        reached = np.asarray([item["reached"] for item in outcomes], dtype=float)
+        days = np.asarray([item["days"] for item in outcomes if item["days"] is not None], dtype=float)
+        cut_slippage = np.asarray([max(0.0, -float(capital_initial) *
+            float(max_loss_pct or 0) / 100 - item["pnl_usdt"])
+            for item in outcomes if item["loss_cut"]], dtype=np.float64)
+        capital_unused = float(outcomes[0]["capital_unused_usdt"])
     tail_count = max(1, int(math.ceil(count * .05)))
     rng = np.random.default_rng(seed)
     samples = rng.integers(0, count, size=(int(replicas), count))
@@ -44,7 +69,7 @@ def summarize(curves, *, capital_initial, target_usdt, max_loss_pct=None,
         "cycles_expected": float(np.mean(cycles)) if cycles is not None else None,
         "p_inventory": float(np.mean(np.asarray(inventory_qty) > 0)) if inventory_qty is not None else None,
         "inventory_value_mean_usdt": float(np.mean(inventory_value)) if inventory_value is not None else None,
-        "capital_unused_usdt": float(outcomes[0]["capital_unused_usdt"]),
+        "capital_unused_usdt": capital_unused,
         "pnl_mean_ci95": [float(np.quantile(pnl_means, .025)), float(np.quantile(pnl_means, .975))],
         "p_loss_ci95": [float(np.quantile(loss_rates, .025)), float(np.quantile(loss_rates, .975))]}
 

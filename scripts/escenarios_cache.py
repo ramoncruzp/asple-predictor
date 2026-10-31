@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,25 @@ SCENARIO_COUNT = 1000
 MAX_PIECES_PER_BATCH = 6
 ABANDON_AFTER_MINUTES = 30
 _RSS_PEAK_MB = 0.0
+
+
+def _json_safe(value):
+    """Normaliza valores no finitos y tipos numpy para JSON estricto."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        return _json_safe(value.tolist())
+    if hasattr(value, "item"):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _json_dumps(value, **kwargs):
+    return json.dumps(_json_safe(value), allow_nan=False, **kwargs)
 
 
 class CacheLimitExceeded(Exception):
@@ -195,15 +215,23 @@ def _contexts(app_db, prices=None):
                     "max_loss_pct": float(defaults["max_loss_pct"]), "balance_approximate": False})
         return contexts
 
-def _read_market_inputs(store):
+def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horizon_days=0):
     with store._connect() as conn:
-        symbols = [row[0] for row in conn.execute(
-            "SELECT symbol FROM symbols WHERE active=1 AND role IN ('operar','datos') ORDER BY symbol")]
+        rows = conn.execute(
+            "SELECT symbol,role,active FROM symbols ORDER BY symbol").fetchall()
     filters, prices, sigmas, skipped = {}, {}, {}, {}
-    for symbol in symbols:
+    for symbol, role, active in rows:
+        if not active:
+            skipped[symbol] = "símbolo inactivo"
+            continue
+        if role != "operar":
+            skipped[symbol] = f"rol {role}; se requiere operar"
+            continue
         try:
+            if not (Path(library_dir) / f"{symbol}.npz").is_file():
+                raise ValueError("biblioteca de escenarios ausente")
             data = store.load(symbol, "5m")
-            if len(data.close) < 30 * 288 + 1:
+            if len(data.close) < 30 * 288 + int(horizon_days) * 288 + 1:
                 raise ValueError("historia menor a 30 días")
             symbol_filters = store.filters(symbol)
             if symbol_filters is None:
@@ -225,7 +253,7 @@ def _active_grid_pieces(app_db, goal_id):
             "WHERE l.meta_id=? AND l.released_at IS NULL AND g.status='active'", (goal_id,)).fetchall()
     output = []
     for grid_id, symbol, strategy, capital, low, high, levels in rows:
-        if str(strategy).lower() not in {"simple", "smart"}:
+        if str(strategy).lower() not in {"simple", "smart", "bot"}:
             continue
         output.append({"symbol": str(symbol).upper(), "strategy": str(strategy).lower(),
             "capital": float(capital), "low": float(low), "high": float(high),
@@ -234,17 +262,18 @@ def _active_grid_pieces(app_db, goal_id):
     return output
 
 
-def _insert_run(conn, context, as_of):
+def _insert_run(conn, context, as_of, n_scenarios=SCENARIO_COUNT):
     run_id = str(uuid.uuid4())
     conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,goal_id,profile,horizon_days,"
         "n_scenarios,seconds,rss_mb,status,error) VALUES(?,?,?,?,?,?,0,NULL,'running',NULL)",
-        (run_id, as_of, context["goal_id"], context["profile"], context["horizon"], SCENARIO_COUNT))
+        (run_id, as_of, context["goal_id"], context["profile"], context["horizon"], int(n_scenarios)))
     return run_id
 
 
 def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         filters, prices, sigmas, skipped, evaluator, check_limits=None,
-        on_progress=None, progress_state=None):
+        on_progress=None, progress_state=None, n_scenarios=SCENARIO_COUNT,
+        symbol_filter=None, perfilar=False):
     progress_state = {} if progress_state is None else progress_state
     if context.get("balance_approximate"):
         return {"status": "skipped", "reason": "efectivo o inventario sin atribución completa"}
@@ -256,30 +285,52 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         perfil=context["profile"], filters_by_symbol=filters,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
         horizon_days=context["horizon"])
-    candidates = built["candidates"][:-1]
-    candidates.extend(_active_grid_pieces(app_db, context["goal_id"]))
+    current_pieces = _active_grid_pieces(app_db, context["goal_id"])
+    candidates = current_pieces + built["candidates"][:-1]
+    if symbol_filter:
+        candidates = [piece for piece in candidates
+            if str(piece.get("symbol", "")).upper() == str(symbol_filter).upper()]
     progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
         "generated_candidates": len(candidates), "evaluated_count": 0,
         "discarded": dict(built["discarded"]), "candidate_seconds": {}})
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
-        max_loss_pct=context["max_loss_pct"], n_scenarios=SCENARIO_COUNT, n_smart=200,
+        max_loss_pct=context["max_loss_pct"], n_scenarios=n_scenarios, n_smart=min(200, n_scenarios),
         seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
+    profile_times = {"carga_biblioteca_s": 0.0, "generacion_escenarios_s": 0.0,
+        "simulacion_fastsim_s": 0.0, "simulacion_smart_s": 0.0,
+        "metricas_bootstrap_s": 0.0,
+        "objetivo_s": 0.0, "escritura_bd_s": 0.0}
     first_rows, failed_candidates = [], {}
     candidate_seconds = {}
-    for symbol in sorted({str(piece["symbol"]).upper() for piece in pieces}):
+    live_symbols = {str(piece["symbol"]).upper() for piece in current_pieces}
+    with store._connect() as conn:
+        latest = conn.execute("SELECT MAX(open_ts) FROM candles WHERE interval='5m'").fetchone()[0]
+        liquidity_rows = conn.execute("SELECT s.symbol,SUM(c.quote_volume) FROM candles c "
+            "JOIN symbols s ON s.id=c.symbol_id WHERE c.interval='5m' AND c.open_ts>=? "
+            "GROUP BY s.symbol", (int(latest or 0) - 24 * 3600,)).fetchall()
+    liquidity = {str(row[0]).upper(): float(row[1] or 0) for row in liquidity_rows}
+    symbol_order = sorted({str(piece["symbol"]).upper() for piece in pieces},
+        key=lambda symbol: (symbol not in live_symbols, -liquidity.get(symbol, 0), symbol))
+    for symbol in symbol_order:
         symbol_pieces = [piece for piece in pieces if str(piece["symbol"]).upper() == symbol]
         symbol_started = time.perf_counter()
+        prepare_started = time.perf_counter()
+        generation_timings = {}
         batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
-            n_scenarios=SCENARIO_COUNT, seed=43, db_path=market_path,
-            library_dir=library_dir) if evaluator is evaluate_pieces else None)
+            n_scenarios=n_scenarios, seed=43, db_path=market_path,
+            library_dir=library_dir, timings=generation_timings) if evaluator is evaluate_pieces else None)
+        profile_times["carga_biblioteca_s"] += generation_timings.get("library_load_s", 0.0)
+        profile_times["generacion_escenarios_s"] += generation_timings.get("generation_s", 0.0)
+        evaluator_timings = {}
         for start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
             chunk = symbol_pieces[start:start + MAX_PIECES_PER_BATCH]
             kwargs = dict(eval_kwargs)
             if batches is not None:
                 kwargs["scenario_batches"] = batches
                 kwargs["keep_curves"] = False
+                kwargs["timings"] = evaluator_timings
             rows, errors = _evaluate_with_isolation(evaluator, chunk, **kwargs)
             first_rows.extend(rows)
             failed_candidates.update(errors)
@@ -297,9 +348,13 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             progress_state["candidate_seconds"] = dict(candidate_seconds)
         del batches, symbol_pieces
         gc.collect()
+        profile_times["simulacion_fastsim_s"] += evaluator_timings.get("fastsim_s", 0.0)
+        profile_times["metricas_bootstrap_s"] += evaluator_timings.get("metrics_s", 0.0)
     first = {"pieces": first_rows, "skipped_symbols": skipped}
+    objective_started = time.perf_counter()
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
         capital_meta=capital) if first["pieces"] else []
+    profile_times["objetivo_s"] += time.perf_counter() - objective_started
     simple_ranked = [row for row in ranked if row.get("piece", {}).get("strategy") == "simple"][:2]
     smart = build_smart_candidates(simple_ranked)
     progress_state["generated_count"] += len(smart)
@@ -308,19 +363,30 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     for symbol in sorted({str(piece["symbol"]).upper() for piece in smart}):
         smart_started = time.perf_counter()
         symbol_pieces = [piece for piece in smart if str(piece["symbol"]).upper() == symbol]
+        smart_generation_timings = {}
         batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
-            n_scenarios=200, seed=43, db_path=market_path, library_dir=library_dir)
+            n_scenarios=min(200, n_scenarios), seed=43, db_path=market_path,
+            library_dir=library_dir, timings=smart_generation_timings)
             if evaluator is evaluate_pieces else None)
+        profile_times["carga_biblioteca_s"] += smart_generation_timings.get("library_load_s", 0.0)
+        profile_times["generacion_escenarios_s"] += smart_generation_timings.get("generation_s", 0.0)
+        smart_timings = {}
         for start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
             kwargs = dict(perfil=context["profile"], capital=capital, meta=context["target"],
                 horizon_days=context["horizon"], max_loss_pct=context["max_loss_pct"],
-                n_scenarios=200, n_smart=200, seed=43, db_path=market_path,
+                n_scenarios=min(200, n_scenarios), n_smart=min(200, n_scenarios), seed=43, db_path=market_path,
                 library_dir=library_dir, mode="alternativas")
             if batches is not None:
                 kwargs["scenario_batches"] = batches
                 kwargs["keep_curves"] = False
+                kwargs["timings"] = smart_timings
+            smart_eval_started = time.perf_counter()
+            metrics_before = smart_timings.get("metrics_s", 0.0)
             rows, errors = _evaluate_with_isolation(evaluator,
                 symbol_pieces[start:start + MAX_PIECES_PER_BATCH], **kwargs)
+            profile_times["simulacion_smart_s"] += max(0.0,
+                time.perf_counter() - smart_eval_started -
+                (smart_timings.get("metrics_s", 0.0) - metrics_before))
             second_rows.extend(rows)
             failed_candidates.update(errors)
             progress_state["evaluated_count"] += len(rows)
@@ -339,13 +405,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             progress_state["candidate_seconds"] = dict(candidate_seconds)
         del batches, symbol_pieces
         gc.collect()
+        profile_times["metricas_bootstrap_s"] += smart_timings.get("metrics_s", 0.0)
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
     for row in [*first.get("pieces", []), *second_rows]:
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
+        objective_started = time.perf_counter()
         objective = rank_alternatives_v2([row], perfil=context["profile"],
             capital_meta=capital)[0]["objetivo"]
+        profile_times["objetivo_s"] += time.perf_counter() - objective_started
         results.append({"candidate_key": candidate_key, "symbol": piece.get("symbol"),
             "strategy": piece.get("strategy", "simple"),
             "params": {key: value for key, value in piece.items()
@@ -370,12 +439,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "candidate_seconds": candidate_seconds,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + len(smart),
         "generated_candidates": len(candidates) + len(smart),
-        "discarded_count": sum(discarded.values())}
+        "discarded_count": sum(discarded.values()), "profile_times": profile_times}
 
 
 def _candidate_key(piece):
     import hashlib
-    raw = json.dumps(piece, sort_keys=True, separators=(",", ":"), default=str)
+    raw = _json_dumps(piece, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -408,18 +477,22 @@ def _evaluate_with_isolation(evaluator, pieces, **kwargs):
 
 
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
-        evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540):
+        evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540,
+        n_scenarios=SCENARIO_COUNT, symbol_filter=None, perfilar=False):
     started = time.perf_counter()
     app_path = Path(app_db).resolve()
     market_path = market_db_path(market_db)
     store = CandleStore(market_path)
     as_of = (now or datetime.now(timezone.utc)).isoformat()
-    filters, prices, sigmas, skipped = _read_market_inputs(store)
+    prior_contexts = _contexts(app_path, {})
+    filters, prices, sigmas, skipped = _read_market_inputs(store,
+        library_dir=library_dir, horizon_days=max((int(row["horizon"]) for row in
+            prior_contexts), default=20))
     contexts = _contexts(app_path, prices)
     with store._connect() as conn:
         conn.execute("UPDATE scenario_eval_runs SET status='abandonada',error=? "
             "WHERE status='running' AND julianday(as_of) < julianday('now', ?)",
-            (json.dumps({"motivo": "running anterior a 30 minutos"}),
+            (_json_dumps({"motivo": "running anterior a 30 minutos"}),
              f"-{ABANDON_AFTER_MINUTES} minutes"))
         conn.execute("DELETE FROM scenario_eval_results WHERE run_id IN "
             "(SELECT run_id FROM scenario_eval_runs WHERE as_of < datetime('now', ?))",
@@ -446,12 +519,14 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     results_summary = []
     for context in contexts:
         with store._connect() as conn:
-            run_id = _insert_run(conn, context, as_of)
+            run_id = _insert_run(conn, context, as_of, n_scenarios)
         context_started = time.perf_counter()
         progress_state = {}
+        persistence_seconds = [0.0]
         def check_context_limits():
             _check_limits(started, max_rss_mb, max_seconds)
         def persist_progress(rows):
+            persist_started = time.perf_counter()
             with store._connect() as conn:
                 for row in rows:
                     piece = row.get("piece", {})
@@ -460,26 +535,29 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                         capital_meta=float(context["capital"]))[0]
                     conn.execute("INSERT OR REPLACE INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)",
                         (run_id, key, piece.get("symbol"), piece.get("strategy", "simple"),
-                         json.dumps({k: v for k, v in piece.items()
+                         _json_dumps({k: v for k, v in piece.items()
                              if k not in {"symbol", "strategy", "candidate_key"}}, ensure_ascii=False),
-                         json.dumps(row.get("metrics") or {}, ensure_ascii=False),
-                         json.dumps(ranked_row.get("objetivo") or {}, ensure_ascii=False)))
+                         _json_dumps(row.get("metrics") or {}, ensure_ascii=False),
+                         _json_dumps(ranked_row.get("objetivo") or {}, ensure_ascii=False)))
+            persistence_seconds[0] += time.perf_counter() - persist_started
         try:
             evaluated = _evaluate_context(context, store=store, app_db=app_path,
                 market_path=market_path, library_dir=library_dir, filters=filters,
                 prices=prices, sigmas=sigmas, skipped=skipped, evaluator=evaluator,
                 check_limits=check_context_limits, on_progress=persist_progress,
-                progress_state=progress_state)
+                progress_state=progress_state, n_scenarios=n_scenarios,
+                symbol_filter=symbol_filter, perfilar=perfilar)
+            evaluated.setdefault("profile_times", {})["escritura_bd_s"] = persistence_seconds[0]
             with store._connect() as conn:
                 for row in evaluated.get("results", []):
                     conn.execute("INSERT OR REPLACE INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)",
                         (run_id, row["candidate_key"], row.get("symbol"), row["strategy"],
-                         json.dumps(row["params"], ensure_ascii=False),
-                         json.dumps(row["metrics"], ensure_ascii=False),
-                         json.dumps(row["objective"], ensure_ascii=False)))
+                         _json_dumps(row["params"], ensure_ascii=False),
+                         _json_dumps(row["metrics"], ensure_ascii=False),
+                         _json_dumps(row["objective"], ensure_ascii=False)))
                 conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
                     "WHERE run_id=?", (evaluated["status"],
-                        json.dumps({"skipped": evaluated.get("skipped_symbols", skipped),
+                        _json_dumps({"skipped": evaluated.get("skipped_symbols", skipped),
                             "discarded": evaluated.get("discarded", {}),
                             "evaluated_count": evaluated.get("evaluated_count", 0),
                             "failed_candidates": evaluated.get("failed_candidates", {})},
@@ -493,13 +571,16 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
                 f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
                 f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
+            if perfilar:
+                print(f"SCENARIO_CACHE perfil={symbol_filter or 'todos'} "
+                    f"tiempos={_json_dumps(evaluated.get('profile_times', {}), ensure_ascii=False)}")
         except Exception as exc:
             status = exc.status if isinstance(exc, CacheLimitExceeded) else "failed"
             error_details = {"motivo": str(exc), **progress_state}
             error_details["discarded_count"] = sum(progress_state.get("discarded", {}).values())
             with store._connect() as conn:
                 conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
-                    "WHERE run_id=?", (status, json.dumps(error_details, ensure_ascii=False),
+                    "WHERE run_id=?", (status, _json_dumps(error_details, ensure_ascii=False),
                         time.perf_counter() - started,
                         _rss_max_mb(), run_id))
             if isinstance(exc, CacheLimitExceeded):
@@ -531,6 +612,9 @@ def main(argv=None):
     parser.add_argument("--biblioteca", default="data/derived/scenario_lib")
     parser.add_argument("--max-rss-mb", type=float, default=600)
     parser.add_argument("--max-segundos", type=float, default=540)
+    parser.add_argument("--escenarios", type=int, default=SCENARIO_COUNT)
+    parser.add_argument("--perfilar", action="store_true")
+    parser.add_argument("--symbol")
     args = parser.parse_args(argv)
     if os.name == "posix":
         try:
@@ -540,7 +624,8 @@ def main(argv=None):
     started = time.perf_counter()
     try:
         result = run_cache(args.app_db, args.market_db, library_dir=args.biblioteca,
-            max_rss_mb=args.max_rss_mb, max_seconds=args.max_segundos)
+            max_rss_mb=args.max_rss_mb, max_seconds=args.max_segundos,
+            n_scenarios=args.escenarios, symbol_filter=args.symbol, perfilar=args.perfilar)
         limit_status = next((row.get("status") for row in result["runs"]
             if row.get("status") in {"memoria", "timeout"}), None)
         if limit_status:

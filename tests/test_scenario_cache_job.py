@@ -44,6 +44,30 @@ def test_job_apagado_no_inicia_subproceso(cache_databases):
     assert calls == []
 
 
+def test_json_cache_convierte_no_finitos_a_null():
+    value = cache_script._json_dumps({"nan": float("nan"), "inf": float("inf"),
+        "nested": [float("-inf"), 1.0]})
+    assert value == '{"nan": null, "inf": null, "nested": [null, 1.0]}'
+    assert json.loads(value) == {"nan": None, "inf": None, "nested": [None, 1.0]}
+
+
+def test_cache_excluye_rol_datos_y_registra_motivos(tmp_path):
+    market_path = tmp_path / "roles.sqlite"
+    store = CandleStore(market_path)
+    with store._connect() as conn:
+        conn.execute("INSERT INTO symbols(symbol,role,active,added_at) "
+            "VALUES('DATOSUSDT','datos',1,'sintetico')")
+        conn.execute("INSERT INTO symbols(symbol,role,active,added_at) "
+            "VALUES('SINBIBLIOTECAUSDT','operar',1,'sintetico')")
+
+    filters, prices, sigmas, skipped = cache_script._read_market_inputs(store,
+        library_dir=tmp_path, horizon_days=1)
+
+    assert not filters and not prices and not sigmas
+    assert skipped["DATOSUSDT"] == "rol datos; se requiere operar"
+    assert skipped["SINBIBLIOTECAUSDT"] == "biblioteca de escenarios ausente"
+
+
 def test_timeout_queda_registrado_en_la_corrida(cache_databases):
     db, market_path = cache_databases
     _set_enabled(db, True)
@@ -164,7 +188,7 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
     invalid_piece = {"candidate_key": "simple-invalid", "symbol": "JUPUSDT",
         "strategy": "simple", "capital": 25.0, "n": 10, "low": .2, "high": .3}
     monkeypatch.setattr(cache_script, "_read_market_inputs",
-        lambda _store: ({"JUPUSDT": object()}, {"JUPUSDT": .25},
+        lambda _store, **_kwargs: ({"JUPUSDT": object()}, {"JUPUSDT": .25},
             {"JUPUSDT": .04}, {}))
     monkeypatch.setattr(cache_script, "build_candidates",
         lambda **_kwargs: {"candidates": [piece, invalid_piece, {"strategy": "usdt_quieto"}],
@@ -181,11 +205,13 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
         return {"pieces": [{"piece": candidate, "metrics": {"n": 1000,
             "pnl_mean_usdt": 1.2, "p_target": .4, "p_loss": .1,
             "p_loss_ci95": [.08, .12], "cvar_5_usdt": -2,
-            "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .3}}
+            "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .3,
+            "extra_no_finito": float("nan")}}
             for candidate in pieces], "skipped_symbols": {}}
 
     result = cache_script.run_cache(db.engine.url.database, market_path,
         library_dir=tmp_path, evaluator=evaluate,
+        n_scenarios=17,
         now=__import__("datetime").datetime(2026, 10, 30, tzinfo=__import__(
             "datetime").timezone.utc))
 
@@ -195,9 +221,14 @@ def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp
     assert result["runs"][0]["discarded"]["level 5 net sell does not meet quantity/notional filters"] == 1
     with sqlite3.connect(market_path) as conn:
         rows = conn.execute("SELECT strategy FROM scenario_eval_results ORDER BY strategy").fetchall()
-        status, error = conn.execute("SELECT status,error FROM scenario_eval_runs").fetchone()
+        status, error, n_scenarios = conn.execute(
+            "SELECT status,error,n_scenarios FROM scenario_eval_runs").fetchone()
+        null_metric = conn.execute("SELECT json_extract(metrics_json,'$.extra_no_finito') "
+            "FROM scenario_eval_results WHERE strategy='simple'").fetchone()[0]
     assert rows == [("simple",), ("usdt_quieto",)]
     assert status == "ok"
+    assert n_scenarios == 17
+    assert null_metric is None
     assert json.loads(error)["evaluated_count"] == 1
     assert json.loads(error)["discarded"]["level 5 net sell does not meet quantity/notional filters"] == 1
 
@@ -252,7 +283,7 @@ def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_pat
     piece = {"candidate_key": "partial", "symbol": "JUPUSDT",
         "strategy": "simple", "capital": 50, "n": 6, "low": .2, "high": .3}
     monkeypatch.setattr(cache_script, "_read_market_inputs",
-        lambda _store: ({"JUPUSDT": object()}, {"JUPUSDT": .25}, {"JUPUSDT": .04}, {}))
+        lambda _store, **_kwargs: ({"JUPUSDT": object()}, {"JUPUSDT": .25}, {"JUPUSDT": .04}, {}))
     monkeypatch.setattr(cache_script, "build_candidates",
         lambda **_kwargs: {"candidates": [piece, {"strategy": "usdt_quieto"}],
             "discarded": {}, "invalid_count": 0})

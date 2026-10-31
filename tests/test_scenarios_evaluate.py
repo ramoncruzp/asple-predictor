@@ -1,10 +1,48 @@
 import numpy as np
 import math
+import pytest
 
 from grid.sim.meta_portfolio import pack_curve
 from data.market_store import CandleStore
 from research.scenarios.evaluate import (evaluate_pieces, _paired_alternatives,
-    _log_width_from_sigma_24h, evaluate_history, prepare_scenario_batches)
+    _log_width_from_sigma_24h, evaluate_history, prepare_scenario_batches,
+    _fast_outcomes)
+
+
+def test_fast_outcomes_coincide_con_evaluate_portfolio():
+    from grid.sim.meta_portfolio import evaluate_portfolio
+    from research.scenarios.metrics import summarize, summarize_outcomes
+
+    timestamps = np.array([1_700_000_100, 1_700_000_100 + 900,
+        1_700_000_100 + 1800], dtype=np.int64)
+    cash = np.array([[100, 105, 110], [100, 98, 97], [100, 103, 104]], dtype=np.float32)
+    equity = np.array([[100, 105, 110], [100, 94, 97], [100, 103, 104]], dtype=np.float32)
+    fast = {"cash_curve": cash, "equity_curve": equity, "timestamps": timestamps}
+    vector = _fast_outcomes(fast, capital=100, piece_capital=100, target=5, loss_pct=5)
+    curves = [pack_curve(timestamps, cash[i], equity[i], 100) for i in range(len(cash))]
+    expected = [evaluate_portfolio([curve], capital_initial=100,
+        target_usdt=5, max_loss_pct=5) for curve in curves]
+    for index, reference in enumerate(expected):
+        actual = {"pnl_usdt": float(vector["pnl_usdt"][index]),
+            "reached": bool(vector["reached"][index]),
+            "loss_cut": bool(vector["loss_cut"][index]),
+            "days": (float(vector["days"][index]) if np.isfinite(vector["days"][index]) else None)}
+        assert actual["pnl_usdt"] == pytest.approx(reference["pnl_usdt"], abs=1e-9)
+        assert actual["reached"] is reference["reached"]
+        assert actual["loss_cut"] is reference["loss_cut"]
+        assert actual["days"] == reference["days"]
+    old_metrics = summarize(curves, capital_initial=100, target_usdt=5,
+        max_loss_pct=5, horizon_days=1, seed=43)
+    vector_metrics = summarize_outcomes(vector, capital_initial=100,
+        max_loss_pct=5, horizon_days=1, seed=43)
+    for key, reference in old_metrics.items():
+        actual = vector_metrics[key]
+        if isinstance(reference, list):
+            assert actual == pytest.approx(reference, abs=1e-9)
+        elif isinstance(reference, float):
+            assert actual == pytest.approx(reference, abs=1e-9)
+        else:
+            assert actual == reference
 
 
 def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, monkeypatch):
