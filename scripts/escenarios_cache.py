@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import math
+import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from data.market_store import CandleStore, market_db_path
 from grid.meta import DEFAULT_PROFILES
 from research.scenarios.candidates import build_candidates, build_smart_candidates
 from research.scenarios.evaluate import (_sigma_estimates, evaluate_pieces,
-    prepare_scenario_batches)
+    prepare_scenario_batches, scenario_source_date_plan)
+from research.scenarios.metrics import summarize_outcomes
 from research.scenarios.objective import objective_limits, rank_alternatives_v2
 
 RETENTION_DAYS = 7
@@ -205,7 +207,7 @@ def _contexts(app_db, prices=None):
                 effective_loss_pct = min(loss_pct, 100 * loss_headroom / current_equity if current_equity > 0 else 0.0)
                 contexts.append({"goal_id": int(goal["id"]), "profile": profile,
                     "capital": current_equity, "free_cash": free_cash,
-                    "target": max(0.0, float(goal["target_usdt"]) - max(0.0, current_equity - initial)),
+                    "target": _remaining_target(goal["target_usdt"], current_equity, initial),
                     "horizon": max(1, int(defaults["max_days"]) - elapsed),
                     "max_loss_pct": effective_loss_pct, "balance_approximate": not balance_known})
         for profile, defaults in DEFAULT_PROFILES.items():
@@ -214,6 +216,11 @@ def _contexts(app_db, prices=None):
                     "free_cash": 100.0, "target": 3.0, "horizon": int(defaults["max_days"]),
                     "max_loss_pct": float(defaults["max_loss_pct"]), "balance_approximate": False})
         return contexts
+
+
+def _remaining_target(target, current_equity, initial):
+    """Ajusta el objetivo por la ganancia o pérdida acumulada de la meta."""
+    return max(0.0, float(target) - (float(current_equity) - float(initial)))
 
 def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horizon_days=0):
     with store._connect() as conn:
@@ -314,6 +321,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     liquidity = {str(row[0]).upper(): float(row[1] or 0) for row in liquidity_rows}
     symbol_order = sorted({str(piece["symbol"]).upper() for piece in pieces},
         key=lambda symbol: (symbol not in live_symbols, -liquidity.get(symbol, 0), symbol))
+    scenario_dates = (scenario_source_date_plan(symbol_order,
+        horizon_days=context["horizon"], n_scenarios=n_scenarios, seed=43,
+        library_dir=library_dir) if evaluator is evaluate_pieces and symbol_order else None)
     current_keys = {str(piece["candidate_key"]) for piece in current_pieces}
     phases = (
         [piece for piece in pieces if str(piece.get("candidate_key")) in current_keys],
@@ -329,7 +339,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             generation_timings = {}
             batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
                 n_scenarios=n_scenarios, seed=43, db_path=market_path,
-                library_dir=library_dir, timings=generation_timings) if evaluator is evaluate_pieces else None)
+                library_dir=library_dir, timings=generation_timings,
+                scenario_dates=scenario_dates) if evaluator is evaluate_pieces else None)
             profile_times["carga_biblioteca_s"] += generation_timings.get("library_load_s", 0.0)
             profile_times["generacion_escenarios_s"] += generation_timings.get("generation_s", 0.0)
             evaluator_timings = {}
@@ -364,7 +375,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
         capital_meta=capital) if first["pieces"] else []
     profile_times["objetivo_s"] += time.perf_counter() - objective_started
-    simple_ranked = [row for row in ranked if row.get("piece", {}).get("strategy") == "simple"][:2]
+    simple_ranked = [row for row in ranked
+        if row.get("piece", {}).get("strategy") == "simple"
+        and not row.get("piece", {}).get("is_current")][:2]
     smart = build_smart_candidates(simple_ranked)
     smart_generated = len(smart)
     if smart and remaining_seconds is not None and remaining_seconds() < 120:
@@ -379,7 +392,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         smart_generation_timings = {}
         batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
             n_scenarios=200, seed=43, db_path=market_path,
-            library_dir=library_dir, timings=smart_generation_timings)
+            library_dir=library_dir, timings=smart_generation_timings,
+            scenario_dates=scenario_dates[:200] if scenario_dates is not None else None)
             if evaluator is evaluate_pieces else None)
         profile_times["carga_biblioteca_s"] += smart_generation_timings.get("library_load_s", 0.0)
         profile_times["generacion_escenarios_s"] += smart_generation_timings.get("generation_s", 0.0)
@@ -419,6 +433,13 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         del batches, symbol_pieces
         gc.collect()
         profile_times["metricas_bootstrap_s"] += smart_timings.get("metrics_s", 0.0)
+    live_rows = [row for row in first_rows
+        if (row.get("piece") or {}).get("is_current")]
+    _apply_live_portfolio_metrics([*first_rows, *second_rows], live_rows,
+        capital=capital, target=context["target"],
+        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+    if on_progress and live_rows:
+        on_progress([*first_rows, *second_rows])
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
     for row in [*first.get("pieces", []), *second_rows]:
@@ -428,11 +449,14 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         objective = rank_alternatives_v2([row], perfil=context["profile"],
             capital_meta=capital)[0]["objetivo"]
         profile_times["objetivo_s"] += time.perf_counter() - objective_started
+        metrics = row.get("metrics") or _scenario_metrics(row)
+        if row.get("metrics_pieza_sola") is not None:
+            metrics = {**metrics, "metrics_pieza_sola": row["metrics_pieza_sola"]}
         results.append({"candidate_key": candidate_key, "symbol": piece.get("symbol"),
             "strategy": piece.get("strategy", "simple"),
             "params": {key: value for key, value in piece.items()
                 if key not in {"symbol", "strategy", "candidate_key"}},
-            "metrics": row.get("metrics") or _scenario_metrics(row),
+            "metrics": metrics,
             "objective": objective})
     quiet = {"candidate_key": _candidate_key({"strategy": "usdt_quieto"}),
         "symbol": None, "strategy": "usdt_quieto", "params": {},
@@ -470,6 +494,55 @@ def _scenario_metrics(row):
         "p_loss": sum(bool(item["loss_cut"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss_ci95": [0, 1] if pnls else [None, None], "cvar_5_usdt": 0,
         "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0}
+
+
+def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
+    """Resume la suma pareada de resultados compactos de las piezas vivas."""
+    usable = [row.get("scenario_outcomes") or {} for row in rows]
+    if not usable or any(not len(item.get("pnl_usdt", [])) for item in usable):
+        return None
+    count = min(len(item["pnl_usdt"]) for item in usable)
+    pnl = sum((np.asarray(item["pnl_usdt"][:count], dtype=np.float64)
+        for item in usable), np.zeros(count, dtype=np.float64))
+    inventory_qty = sum((np.asarray(item.get("inventory_qty", [0] * count)[:count],
+        dtype=np.float64) for item in usable), np.zeros(count, dtype=np.float64))
+    inventory_value = sum((np.asarray(item.get("inventory_value", [0] * count)[:count],
+        dtype=np.float64) for item in usable), np.zeros(count, dtype=np.float64))
+    reached = pnl >= float(target)
+    loss_cut = pnl <= -float(capital) * float(max_loss_pct) / 100
+    days = np.full(count, np.nan, dtype=np.float64)
+    for item in usable:
+        item_days = np.asarray(item.get("days", []), dtype=np.float64)[:count]
+        if len(item_days) == count:
+            days = np.where(np.isfinite(item_days), item_days, days)
+    outcomes = {"pnl_usdt": pnl, "loss_cut": loss_cut, "reached": reached,
+        "days": days, "capital_unused_usdt": max(0.0, float(capital) -
+            sum(float((row.get("piece") or {}).get("capital", 0)) for row in rows))}
+    return summarize_outcomes(outcomes, capital_initial=capital,
+        max_loss_pct=max_loss_pct, horizon_days=horizon,
+        inventory_qty=inventory_qty, inventory_value=inventory_value)
+
+
+def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
+        max_loss_pct, horizon):
+    """Asigna el baseline vivo y las alternativas sobre los mismos índices."""
+    if not live_rows:
+        return
+    baseline = _portfolio_outcome_metrics(live_rows, capital=capital,
+        target=target, max_loss_pct=max_loss_pct, horizon=horizon)
+    if baseline is None:
+        return
+    for row in rows:
+        piece = row.get("piece") or {}
+        if piece.get("is_current"):
+            row["metrics_pieza_sola"] = row.get("metrics")
+            row["metrics"] = baseline
+            continue
+        combined = _portfolio_outcome_metrics([*live_rows, row], capital=capital,
+            target=target, max_loss_pct=max_loss_pct, horizon=horizon)
+        if combined is not None:
+            row["metrics_pieza_sola"] = row.get("metrics")
+            row["metrics"] = combined
 
 
 def _evaluate_with_isolation(evaluator, pieces, **kwargs):

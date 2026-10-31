@@ -6,7 +6,7 @@ from grid.sim.meta_portfolio import pack_curve
 from data.market_store import CandleStore
 from research.scenarios.evaluate import (evaluate_pieces, _paired_alternatives,
     _log_width_from_sigma_24h, evaluate_history, prepare_scenario_batches,
-    _fast_outcomes)
+    _fast_outcomes, scenario_source_date_plan)
 
 
 def test_fast_outcomes_coincide_con_evaluate_portfolio():
@@ -72,6 +72,14 @@ def test_evaluate_pieces_uses_temporary_market_and_synthetic_library(tmp_path, m
     values[:, :, 1], values[:, :, 2] = .2, -.2
     np.savez_compressed(library / "SYNTHUSDT.npz", values=values, dates=dates,
         daily_z_return_sum=np.zeros(50), mean_z_return=np.float32(0))
+    other_dates = dates + 86400
+    np.savez_compressed(library / "SYNTH2USDT.npz", values=values, dates=other_dates,
+        daily_z_return_sum=np.zeros(50), mean_z_return=np.float32(0))
+    shared_dates = scenario_source_date_plan(["SYNTHUSDT", "SYNTH2USDT"],
+        horizon_days=15, n_scenarios=5, seed=43, library_dir=library)
+    assert shared_dates.shape == (5, 15)
+    assert all(int(day) in set(dates) and int(day) in set(other_dates)
+        for day in shared_dates.ravel())
     result = evaluate_pieces([
         {"symbol": "SYNTHUSDT", "strategy": "simple", "capital": 40,
             "low": 70, "high": 130, "n": 6},

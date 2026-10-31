@@ -16,7 +16,7 @@ def _as_symbol_map(value, symbols):
 def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
         sigma_today_24h, sigma_long_24h, tau_days=3.0, block_days=3,
         before=None, batch_size=None, library_directory="data/derived/scenario_lib",
-        calibration_factors=None, timings=None):
+        calibration_factors=None, timings=None, source_dates=None):
     """Produce lotes reproducibles; cada lote contiene dicts por símbolo.
 
     `price_now` y sigmas pueden ser escalares o mapas por símbolo. Los lotes
@@ -41,7 +41,7 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
         if all(all(start + offset * 86400 in date_maps[s] for offset in range(block_days))
                 for s in symbols):
             common_starts.append(start)
-    if not common_starts:
+    if source_dates is None and not common_starts:
         raise ValueError("no hay bloques de fechas comunes completos para las monedas")
     batch_size = int(batch_size or max(1, min(n_scenarios,
         (100 * 1024 * 1024) // max(1, len(symbols) * horizon_days * 288 * 8 * 4))))
@@ -56,12 +56,19 @@ def generate(symbols, *, horizon_days, n_scenarios, seed, price_now,
     for offset in range(0, int(n_scenarios), batch_size):
         generation_started = time.perf_counter()
         count = min(batch_size, int(n_scenarios) - offset)
-        block_origins = rng.choice(np.asarray(common_starts, dtype=np.int64),
-            size=(count, blocks_needed), replace=True)
         batch = {"scenario_start": offset, "symbols": {}}
-        day_origin = np.concatenate([block_origins[:, :, None] +
-            np.arange(block_days, dtype=np.int64)[None, None, :] * 86400], axis=2)
-        day_origin = day_origin.reshape(count, -1)[:, :days_needed]
+        if source_dates is None:
+            block_origins = rng.choice(np.asarray(common_starts, dtype=np.int64),
+                size=(count, blocks_needed), replace=True)
+            day_origin = np.concatenate([block_origins[:, :, None] +
+                np.arange(block_days, dtype=np.int64)[None, None, :] * 86400], axis=2)
+            day_origin = day_origin.reshape(count, -1)[:, :days_needed]
+        else:
+            day_origin = np.asarray(source_dates[offset:offset + count], dtype=np.int64)
+            if day_origin.shape != (count, days_needed) or any(
+                    int(day) not in date_maps[symbol] for day in np.unique(day_origin)
+                    for symbol in symbols):
+                raise ValueError("fechas de escenario incompatibles con las bibliotecas")
         for symbol in symbols:
             values, dates = libraries[symbol]
             date_to_index = date_maps[symbol]

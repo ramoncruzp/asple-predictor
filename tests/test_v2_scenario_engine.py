@@ -47,6 +47,7 @@ def _cache_row(path, *, as_of=None, status="ok"):
             json.dumps({"n": 1000, "pnl_mean_usdt": 1.4, "p_target": .35,
                 "p_loss": .01, "p_loss_ci95": [0, .02], "pnl_mean_ci95": [1.2, 1.6],
                 "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+                "p_inventory": .27,
                 "days_to_target_p50": 15, "days_to_target_p90": 18}),
             json.dumps({"factible": True, "motivos": [], "clave_orden": [-.35, 15, -1.4]})))
 
@@ -64,6 +65,9 @@ def test_plan_usa_corrida_vigente_sin_recalcular(engine_databases):
     assert plan["pieces"][0]["symbol"] == "JUPUSDT"
     assert plan["pieces"][0]["floor"] == .20
     assert plan["v2"]["p_target"] == .35
+    assert plan["v2"]["p_loss"] == .01
+    assert plan["v2"]["p_inventory"] == .27
+    assert plan["estimated_time"]["p_inventory"] == .27
     assert plan["pieces"][0]["capital_usdt"] == 70
 
 

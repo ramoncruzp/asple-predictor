@@ -12,6 +12,7 @@ from grid.meta import DEFAULT_PROFILES
 from grid.sim.data import CandleData
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 from research.scenarios.generator import generate
+from research.scenarios.library import load_library
 from research.scenarios.metrics import summarize, summarize_outcomes, summarize_portfolio
 from research.scenarios.smart_exact import START_TS, evaluate_smart_scenarios, paired_smart_simple
 
@@ -135,8 +136,32 @@ def _calibration_factors(path, symbols, *, before=None):
     return factors
 
 
+def scenario_source_date_plan(symbols, *, horizon_days, n_scenarios, seed=43,
+        library_dir="data/derived/scenario_lib", block_days=3):
+    """Genera una sola secuencia de fechas de origen compartida por moneda."""
+    symbols = tuple(sorted({str(symbol).upper() for symbol in symbols}))
+    if not symbols or int(horizon_days) <= 0 or int(n_scenarios) <= 0:
+        raise ValueError("símbolos, horizonte y escenarios positivos requeridos")
+    dates = {symbol: set(map(int, load_library(symbol, directory=library_dir)[1]))
+        for symbol in symbols}
+    common = set.intersection(*(dates[symbol] for symbol in symbols))
+    blocks_needed = int(np.ceil(int(horizon_days) / int(block_days)))
+    common_starts = sorted(start for start in common if all(
+        start + offset * 86400 in dates[symbol]
+        for symbol in symbols for offset in range(int(block_days))))
+    if not common_starts:
+        raise ValueError("no hay bloques de fechas comunes completos para las monedas")
+    rng = np.random.default_rng(int(seed))
+    origins = rng.choice(np.asarray(common_starts, dtype=np.int64),
+        size=(int(n_scenarios), blocks_needed), replace=True)
+    day_origin = np.concatenate([origins[:, :, None] +
+        np.arange(int(block_days), dtype=np.int64)[None, None, :] * 86400], axis=2)
+    return day_origin.reshape(int(n_scenarios), -1)[:, :int(horizon_days)]
+
+
 def prepare_scenario_batches(symbol, *, horizon_days, n_scenarios, seed=43,
-        db_path="market_data.db", library_dir="data/derived/scenario_lib", timings=None):
+        db_path="market_data.db", library_dir="data/derived/scenario_lib", timings=None,
+        scenario_dates=None):
     """Genera una sola vez los lotes reutilizables de una moneda."""
     symbol = str(symbol).upper()
     path = market_db_path(db_path)
@@ -159,7 +184,8 @@ def prepare_scenario_batches(symbol, *, horizon_days, n_scenarios, seed=43,
         n_scenarios=int(n_scenarios), seed=int(seed), price_now={symbol: price},
         sigma_today_24h={symbol: sigma_today}, sigma_long_24h={symbol: sigma_long},
         batch_size=scenario_batch_size, library_directory=library_dir,
-        calibration_factors={symbol: calibration}, timings=generation_timings):
+        calibration_factors={symbol: calibration}, timings=generation_timings,
+        source_dates=scenario_dates):
         for values in batch["symbols"].values():
             for key in ("open", "high", "low", "close", "sigma_path"):
                 values[key] = values[key].astype(np.float32, copy=False)
@@ -455,6 +481,18 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                         {"BUY_FILLED", "SELL_FILLED"} for event in result.get("events", [])))
                     if record_pairs:
                         per_index[offset][index] = ("smart", result)
+                from grid.sim.meta_portfolio import evaluate_portfolio
+                smart_outcomes = [evaluate_portfolio([result["curve"]],
+                    capital_initial=float(capital), target_usdt=meta,
+                    max_loss_pct=loss_pct) for result in results]
+                raw[index]["outcomes"].append({
+                    "pnl_usdt": np.asarray([row["pnl_usdt"] for row in smart_outcomes], dtype=np.float64),
+                    "loss_cut": np.asarray([row["loss_cut"] for row in smart_outcomes], dtype=bool),
+                    "reached": np.asarray([row["reached"] for row in smart_outcomes], dtype=bool),
+                    "days": np.asarray([np.nan if row["days"] is None else row["days"]
+                        for row in smart_outcomes], dtype=np.float64),
+                    "capital_unused_usdt": float(capital) - float(piece["capital"]),
+                })
             elif strategy == "bot":
                 fastsim_started = time.perf_counter()
                 fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
@@ -547,10 +585,18 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 scenario_results.append({"scenario_index": int(scenario_id),
                     "pnl_usdt": outcome["pnl_usdt"], "loss_cut": outcome["loss_cut"],
                     "reached": outcome["reached"]})
+        scenario_outcomes = {}
+        if not keep_curves and outcomes:
+            scenario_outcomes = {key: (np.concatenate([row[key] for row in outcomes])
+                if key != "capital_unused_usdt" else outcomes[0][key])
+                for key in outcomes[0]}
+            scenario_outcomes["inventory_qty"] = np.asarray(values["inventory_qty"], dtype=np.float32)
+            scenario_outcomes["inventory_value"] = np.asarray(values["inventory_value"], dtype=np.float32)
         piece_results.append({"piece": piece, "metrics": metrics,
             "fills_mean": float(np.mean(values["fills"])) if values["fills"] else 0.0,
             "aviso": warning, "zero_fill_fraction": zero_fill_fraction,
-            "scenario_results": scenario_results if keep_curves else []})
+            "scenario_results": scenario_results if keep_curves else [],
+            "scenario_outcomes": scenario_outcomes})
     portfolio = (summarize_portfolio(piece_curves, capital_initial=capital, target_usdt=meta,
         max_loss_pct=loss_pct, horizon_days=horizon, seed=seed) if mode == "cartera" else None)
     comparisons = []

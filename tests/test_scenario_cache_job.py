@@ -243,9 +243,35 @@ def test_contexto_meta_calcula_efectivo_valor_inventario_y_objetivo(cache_databa
 
     assert context["free_cash"] == pytest.approx(59.96)
     assert context["capital"] == pytest.approx(99.92004)
-    assert context["target"] == pytest.approx(10)
+    assert context["target"] == pytest.approx(10.08)
     assert context["horizon"] == 20
     assert context["balance_approximate"] is False
+
+
+def test_meta_objetivo_restante_suma_perdidas_y_resta_ganancias():
+    assert cache_script._remaining_target(3, 99.1, 100) == pytest.approx(3.9)
+    assert cache_script._remaining_target(3, 101.5, 100) == pytest.approx(1.5)
+    assert cache_script._remaining_target(3, 104, 100) == pytest.approx(0)
+
+
+def test_alternativa_usa_cartera_pareada_con_pieza_viva():
+    current = {"piece": {"capital": 40, "is_current": True},
+        "metrics": {"p_target": 0}, "scenario_outcomes": {
+            "pnl_usdt": [-1.0, -1.0, -1.0], "loss_cut": [False] * 3,
+            "reached": [False] * 3, "days": [None] * 3,
+            "inventory_qty": [1, 1, 1], "inventory_value": [10, 10, 10]}}
+    candidate = {"piece": {"capital": 50, "is_current": False},
+        "metrics": {"p_target": 1}, "scenario_outcomes": {
+            "pnl_usdt": [3.0, 3.0, 3.0], "loss_cut": [False] * 3,
+            "reached": [True] * 3, "days": [2, 2, 2],
+            "inventory_qty": [0, 0, 0], "inventory_value": [0, 0, 0]}}
+
+    cache_script._apply_live_portfolio_metrics([current, candidate], [current],
+        capital=100, target=2.1, max_loss_pct=18, horizon=15)
+
+    assert candidate["metrics_pieza_sola"]["p_target"] == 1
+    assert candidate["metrics"]["p_target"] == 0
+    assert candidate["metrics"]["pnl_mean_usdt"] == pytest.approx(2)
 
 
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,

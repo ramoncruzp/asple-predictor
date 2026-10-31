@@ -138,6 +138,7 @@ class V2ScenarioEngine(DecisionEngine):
                     "p_loss_ci95": metrics.get("p_loss_ci95"),
                     "cut_slippage_mean_usdt": metrics.get("cut_slippage_mean_usdt"),
                     "cut_slippage_p90_usdt": metrics.get("cut_slippage_p90_usdt"),
+                    "p_inventory": metrics.get("p_inventory"),
                     "days_p90": metrics.get("days_to_target_p90"),
                     "evidence_sufficient": bool(metrics.get("n")),
                     "days_median": metrics.get("days_to_target_p50"),
@@ -168,6 +169,8 @@ class V2ScenarioEngine(DecisionEngine):
             "pnl_mean_usdt": selected_metrics.get("pnl_mean_usdt", 0),
             "cut_slippage_mean_usdt": selected_metrics.get("cut_slippage_mean_usdt", 0),
             "cut_slippage_p90_usdt": selected_metrics.get("cut_slippage_p90_usdt", 0),
+            "p_loss": selected_metrics.get("p_loss", 0),
+            "p_inventory": selected_metrics.get("p_inventory"),
             "motivos": (selected.get("objetivo") or {}).get("motivos", []) if selected else [],
             "descartadas": cached["discarded"]}
         return {"profile": str(goal.get("profile") or "").upper(),
@@ -267,6 +270,7 @@ class V2ScenarioEngine(DecisionEngine):
             result = self.review(operator, goal, valuation, shadow_plan)
             return {**result, "reason": result.get("reason") or "revisión en sombra",
                 "cache_run_id": (shadow_plan.get("cache") or {}).get("run_id"),
+                "v2_metrics": shadow_plan.get("estimated_time") or {},
                 "pieces": shadow_plan.get("pieces", []),
                 "decision_choices": shadow_plan.get("decision_choices", {}),
                 "current_pieces": shadow_plan.get("current_pieces", {})}
