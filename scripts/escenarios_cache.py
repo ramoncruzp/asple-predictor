@@ -207,6 +207,7 @@ def _contexts(app_db, prices=None):
                 loss_headroom = max(0.0, current_equity - threshold)
                 effective_loss_pct = min(loss_pct, 100 * loss_headroom / current_equity if current_equity > 0 else 0.0)
                 contexts.append({"goal_id": int(goal["id"]), "profile": profile,
+                    "decision_engine": str(config.get("decision_engine", "v1")).lower(),
                     "capital": current_equity, "free_cash": free_cash,
                     "target": _remaining_target(goal["target_usdt"], current_equity, initial),
                     "horizon": max(1, int(defaults["max_days"]) - elapsed),
@@ -214,6 +215,7 @@ def _contexts(app_db, prices=None):
         for profile, defaults in DEFAULT_PROFILES.items():
             if str((settings.get(profile) or {}).get("decision_engine", "v1")).lower() == "v2":
                 contexts.append({"goal_id": None, "profile": profile, "capital": 100.0,
+                    "decision_engine": "v2",
                     "free_cash": 100.0, "target": 3.0, "horizon": int(defaults["max_days"]),
                     "max_loss_pct": float(defaults["max_loss_pct"]), "balance_approximate": False})
         return contexts
@@ -702,8 +704,16 @@ def _evaluate_with_isolation(evaluator, pieces, **kwargs):
         return left + right, {**left_errors, **right_errors}
 
 
+def _context_priority(context):
+    if context.get("goal_id") is None:
+        return (2, int(context.get("goal_id") or 0))
+    return (0 if context.get("decision_engine", "v1") == "v2" else 1,
+        int(context.get("goal_id") or 0))
+
+
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
         evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540,
+        max_total_seconds=1500,
         n_scenarios=SCENARIO_COUNT, symbol_filter=None, perfilar=False):
     started = time.perf_counter()
     app_path = Path(app_db).resolve()
@@ -714,7 +724,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     filters, prices, sigmas, skipped = _read_market_inputs(store,
         library_dir=library_dir, horizon_days=max((int(row["horizon"]) for row in
             prior_contexts), default=20))
-    contexts = _contexts(app_path, prices)
+    contexts = sorted(_contexts(app_path, prices), key=_context_priority)
     with store._connect() as conn:
         conn.execute("UPDATE scenario_eval_runs SET status='abandonada',error=? "
             "WHERE status='running' AND julianday(as_of) < julianday('now', ?)",
@@ -730,7 +740,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     def watchdog():
         while not watchdog_stop.wait(2):
             try:
-                _check_limits(started, max_rss_mb, max_seconds)
+                _check_limits(started, max_rss_mb, max_total_seconds)
             except CacheLimitExceeded as exc:
                 error_type = CacheMemoryExceeded if exc.status == "memoria" else CacheTimeoutExceeded
                 import ctypes
@@ -743,16 +753,24 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     watcher = threading.Thread(target=watchdog, name="scenario-cache-limits", daemon=True)
     watcher.start()
     results_summary = []
+    skipped_contexts = []
     for context in contexts:
+        if max_total_seconds is not None and time.perf_counter() - started >= max_total_seconds:
+            skipped_contexts.extend(row.get("goal_id") or row["profile"] for row in contexts[len(results_summary):])
+            print(f"SCENARIO_CACHE contextos_omitidos_por_presupuesto={json.dumps(skipped_contexts, ensure_ascii=False)}")
+            break
         with store._connect() as conn:
             run_id = _insert_run(conn, context, as_of, n_scenarios)
         context_started = time.perf_counter()
         progress_state = {}
         persistence_seconds = [0.0]
         def check_context_limits():
-            _check_limits(started, max_rss_mb, max_seconds)
+            _check_limits(context_started, max_rss_mb, max_seconds)
+            _check_limits(started, max_rss_mb, max_total_seconds)
         def remaining_context_seconds():
-            return math.inf if max_seconds is None else max_seconds - (time.perf_counter() - started)
+            context_remaining = math.inf if max_seconds is None else max_seconds - (time.perf_counter() - context_started)
+            total_remaining = math.inf if max_total_seconds is None else max_total_seconds - (time.perf_counter() - started)
+            return min(context_remaining, total_remaining)
         def persist_progress(rows):
             persist_started = time.perf_counter()
             with store._connect() as conn:
@@ -829,6 +847,10 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     f"evaluados={count} descartados={json.dumps(progress_state.get('discarded', {}), ensure_ascii=False)} "
                     f"segundos_moneda={json.dumps(progress_state.get('candidate_seconds', {}), ensure_ascii=False)} "
                     f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
+                if max_total_seconds is None or time.perf_counter() - started < max_total_seconds:
+                    continue
+                skipped_contexts.extend(row.get("goal_id") or row["profile"] for row in contexts[len(results_summary):])
+                print(f"SCENARIO_CACHE contextos_omitidos_por_presupuesto={json.dumps(skipped_contexts, ensure_ascii=False)}")
                 break
             watchdog_stop.set()
             watcher.join(timeout=2)
@@ -836,6 +858,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     watchdog_stop.set()
     watcher.join(timeout=2)
     return {"contexts": len(contexts), "runs": results_summary,
+        "skipped_contexts": skipped_contexts,
         "seconds": time.perf_counter() - started, "rss_mb": _rss_max_mb()}
 
 
@@ -846,6 +869,7 @@ def main(argv=None):
     parser.add_argument("--biblioteca", default="data/derived/scenario_lib")
     parser.add_argument("--max-rss-mb", type=float, default=600)
     parser.add_argument("--max-segundos", type=float, default=540)
+    parser.add_argument("--max-segundos-total", type=float, default=1500)
     parser.add_argument("--escenarios", type=int, default=SCENARIO_COUNT)
     parser.add_argument("--perfilar", action="store_true")
     parser.add_argument("--symbol")
@@ -859,6 +883,7 @@ def main(argv=None):
     try:
         result = run_cache(args.app_db, args.market_db, library_dir=args.biblioteca,
             max_rss_mb=args.max_rss_mb, max_seconds=args.max_segundos,
+            max_total_seconds=args.max_segundos_total,
             n_scenarios=args.escenarios, symbol_filter=args.symbol, perfilar=args.perfilar)
         limit_status = next((row.get("status") for row in result["runs"]
             if row.get("status") in {"memoria", "timeout"}), None)

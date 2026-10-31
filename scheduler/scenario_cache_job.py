@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
-TIMEOUT_SECONDS = 600
+TIMEOUT_SECONDS = 1500
 MEMORY_LIMIT_BYTES = 600 * 1024 * 1024
 POLL_SECONDS = 0.2
 MEMORY_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
@@ -148,7 +148,8 @@ class ScenarioCacheJob:
             logger.info("SCENARIO_CACHE estado=apagado duración_s=%.3f", elapsed)
             return {"status": "disabled", "duration_s": elapsed}
         args = [sys.executable, str(self.script_path), "--app-db", self._app_db_path(),
-            "--market-db", str(self.market_db_path)]
+            "--market-db", str(self.market_db_path), "--max-segundos-total",
+            str(TIMEOUT_SECONDS)]
         env = os.environ.copy()
         env.update(MEMORY_ENV)
         if os.name == "posix":

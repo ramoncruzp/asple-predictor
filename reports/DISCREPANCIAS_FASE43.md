@@ -710,3 +710,15 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0b-20261031-a'; py
 ```
 
 Resultado: **42 pruebas pasaron en 4,31 s**; codificación `HALLAZGOS=0`; `git diff --check` sin errores. Las pruebas verifican rechazo con 150 USDT para dos metas de 100, inicio con 250 y límite de 50 USDT disponibles para Meta B cuando Meta A conserva su efectivo atribuible. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+### 43h-0c - presupuesto compartido de caché
+
+La caché procesa primero contextos v2, luego v1 y deja perfiles al final. Conserva el tope de 540 s por contexto y añade un límite total de 1.500 s; los contextos omitidos quedan listados en la salida para reintentarse en la próxima ejecución. El job aislado admite esos 25 minutos y mantiene su límite de memoria.
+
+Prueba enfocada (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0c-20261031-a'; python -m pytest tests/test_scenario_cache_job.py --basetemp=$base -q
+```
+
+Resultado: **26 pruebas pasaron en 6,32 s**. Se verificaron prioridad v2/v1/perfiles, timeout total con contexto omitido y reintentado en la corrida siguiente, y el límite de 25 minutos del subproceso. Al agotarse un contexto conserva la evaluación parcial completada.

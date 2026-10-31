@@ -399,6 +399,7 @@ def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases):
     assert captured["env"]["OMP_NUM_THREADS"] == "1"
     assert captured["env"]["MALLOC_ARENA_MAX"] == "2"
     assert "preexec_fn" not in captured
+    assert captured["args"][captured["args"].index("--max-segundos-total") + 1] == "1500"
     assert "RLIMIT_AS" not in open("scheduler/scenario_cache_job.py", encoding="utf-8").read()
 
 
@@ -564,6 +565,57 @@ def test_corrida_running_antigua_se_marca_abandonada(cache_databases):
     assert status == "abandonada"
 
 
+def test_cache_prioriza_v2_antes_v1_y_deja_perfiles_al_final():
+    contexts = [
+        {"goal_id": 3, "decision_engine": "v1"},
+        {"goal_id": 2, "decision_engine": "v2"},
+        {"goal_id": None, "profile": "RAPIDO"},
+        {"goal_id": 1, "decision_engine": "v1"},
+    ]
+    assert sorted(contexts, key=cache_script._context_priority) == [
+        contexts[1], contexts[3], contexts[0], contexts[2]]
+
+
+def test_presupuesto_total_omite_contexto_y_lo_reintenta_en_siguiente_corrida(
+        cache_databases, monkeypatch, tmp_path):
+    import time
+
+    db, market_path = cache_databases
+    contexts = [
+        {"goal_id": 1, "profile": "RAPIDO", "decision_engine": "v2",
+            "horizon": 15, "capital": 100},
+        {"goal_id": 2, "profile": "RAPIDO", "decision_engine": "v1",
+            "horizon": 15, "capital": 100},
+    ]
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: contexts)
+    monkeypatch.setattr(cache_script, "_read_market_inputs", lambda *_args, **_kwargs:
+        ({}, {}, {}, {}))
+    attempted = []
+
+    def over_budget(context, **kwargs):
+        attempted.append(context["goal_id"])
+        time.sleep(.8)
+        kwargs["check_limits"]()
+
+    monkeypatch.setattr(cache_script, "_evaluate_context", over_budget)
+    first = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir=tmp_path, max_seconds=None, max_total_seconds=.6)
+    assert first["runs"][0]["status"] == "timeout"
+    assert first["skipped_contexts"] == [2]
+
+    def complete(context, **_kwargs):
+        attempted.append(context["goal_id"])
+        return {"status": "ok", "results": [], "generated_count": 0,
+            "evaluated_count": 0, "discarded": {}, "skipped_symbols": {},
+            "profile_times": {}}
+
+    monkeypatch.setattr(cache_script, "_evaluate_context", complete)
+    second = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir=tmp_path, max_seconds=5, max_total_seconds=10)
+    assert [row["status"] for row in second["runs"]] == ["ok", "ok"]
+    assert attempted == [1, 1, 2]
+
+
 def test_vigilante_distingue_memoria_y_tiempo(monkeypatch):
     monkeypatch.setattr(cache_script, "_rss_current_mb", lambda: 51)
     with pytest.raises(cache_script.CacheLimitExceeded) as memory:
@@ -622,7 +674,7 @@ def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_pat
             "scenario_eval_results WHERE run_id=scenario_eval_runs.run_id) "
             "FROM scenario_eval_runs WHERE run_id=?", (run_id,)).fetchone()
     assert status == expected_status
-    assert count == (1 if expected_status == "memoria" else 0)
+    assert count == 1
     details = json.loads(error)
     assert details["generated_count"] == 1
     assert details["evaluated_count"] == count
