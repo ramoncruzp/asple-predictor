@@ -179,8 +179,11 @@ class MetaCore:
         with self.db.engine.connect() as conn:
             rows = conn.execute(select(self.db.meta_profile_settings)).mappings().all()
         profiles = self._profile_settings()
+        global_settings = profiles.get("GLOBAL", {})
         return {"enabled": bool(getattr(self.settings, "meta_mode_enabled", False)),
-                "max_active": int(profiles.get("GLOBAL", {}).get("max_active", 1)),
+                "max_active": int(global_settings.get("max_active", 1)),
+                "max_active_actor": global_settings.get("max_active_actor"),
+                "max_active_changed_at": global_settings.get("max_active_changed_at"),
                 "learning_limits": {"max_templates_per_run": int(profiles.get("GLOBAL", {}).get(
                     "learning_max_templates_per_run", 30)), "time_budget_minutes": float(
                     profiles.get("GLOBAL", {}).get("learning_time_budget_minutes", 20))},
@@ -211,7 +214,7 @@ class MetaCore:
                     settings=json.dumps({"max_active": 1, **values}, sort_keys=True), updated_at=self._now()))
         return {"cache_retention_days": cache_days, "ledger_plan_detail_days": ledger_days}
 
-    def set_max_active(self, value):
+    def set_max_active(self, value, *, actor=None):
         from sqlalchemy import select
         value = int(value)
         if value < 1 or value > 10:
@@ -223,6 +226,9 @@ class MetaCore:
                 self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
             values = json.loads(raw or "{}")
             values["max_active"] = value
+            if actor is not None:
+                values["max_active_actor"] = str(actor).strip()[:80]
+                values["max_active_changed_at"] = self._now().isoformat()
             if present:
                 conn.execute(self.db.meta_profile_settings.update().where(
                     self.db.meta_profile_settings.c.profile == "GLOBAL").values(
@@ -231,6 +237,16 @@ class MetaCore:
                 conn.execute(self.db.meta_profile_settings.insert().values(
                     profile="GLOBAL", settings=json.dumps(values), updated_at=self._now()))
         return value
+
+    def availability_snapshot(self):
+        balances = self.exchange.get_balance("USDT")
+        exchange_free = _d(balances.get("USDT", {}).get("free"))
+        available, reserved = self._available_usdt()
+        other_commitments = max(Decimal(0), exchange_free - reserved - available)
+        return {"exchange_free_usdt": str(exchange_free),
+            "other_meta_commitments_usdt": str(other_commitments),
+            "unlinked_grid_reserves_usdt": str(reserved),
+            "available_usdt": str(available)}
 
     def set_learning_limits(self, *, max_templates_per_run, time_budget_minutes):
         from sqlalchemy import select

@@ -325,6 +325,54 @@ def test_learning_switches_live_in_lab_and_require_actor(metas_page):
     assert server.operator.learning_status('RAPIDO')['use_extended_allocation'] is True
 
 
+def test_lab_max_active_requires_author_and_is_limited_to_one_or_two(metas_page):
+    page, server = metas_page
+    page.goto(f"{server.url}/#lab")
+    row = page.locator("[data-meta-active-limit]")
+    page.wait_for_selector("[data-max-active-open]")
+    assert "Con 2, cada meta usa solo su propio capital; el operador revisa ambas." in row.inner_text()
+    assert row.locator("select option").all_text_contents() == ["1", "2"]
+    row.locator("[data-max-active-open]").click()
+    row.locator("[data-max-active-save]").click()
+    assert "Escribe quién confirma" in row.inner_text()
+    row.locator("[data-max-active-value]").select_option("2")
+    row.locator("[data-max-active-actor]").fill("Operador local")
+    row.locator("[data-max-active-save]").click()
+    page.wait_for_function("() => document.querySelector('[data-meta-active-limit]')?.innerText.includes('Actual: 2')")
+    assert server.core.config()["max_active"] == 2
+    assert server.core.config()["max_active_actor"] == "Operador local"
+
+
+def test_metas_lista_dos_paneles_con_motor_capital_y_ultima_revision(metas_page):
+    page, server = metas_page
+    server.core.set_max_active(2)
+    first = server.core.create_goal(100, 10, profile="RAPIDO")
+    second = server.core.create_goal(100, 10, profile="PRUDENTE")
+    server.core.start_goal(first["id"])
+    server.core.start_goal(second["id"])
+    for goal in (first, second):
+        server.core._ledger(goal["id"], None, "META_OPERATOR_REVIEW_DECISION", {
+            "decision": {"decision": "no_hacer_nada"}, "engine": {"name": "v1"}})
+    page.goto(f"{server.url}/#metas")
+    page.wait_for_function("() => document.querySelectorAll('.metas-active[data-meta-id]').length === 2")
+    assert f"Meta #{first['id']}" in page.locator(f".metas-active[data-meta-id='{first['id']}']").inner_text()
+    assert f"Meta #{second['id']}" in page.locator(f".metas-active[data-meta-id='{second['id']}']").inner_text()
+    assert "Motor: v1" in page.locator(".metas-active[data-meta-id]").first.locator("h2").inner_text()
+    assert "Última revisión" in page.locator(".metas-active[data-meta-id]").first.inner_text()
+
+
+def test_create_meta_muestra_motor_y_usdt_tras_compromisos(metas_page):
+    page, server = metas_page
+    server.core.set_max_active(2)
+    goal = server.core.create_goal(100, 10, profile="RAPIDO")
+    server.core.start_goal(goal["id"])
+    page.goto(f"{server.url}/#metas")
+    page.wait_for_selector("[data-create-meta-context]")
+    create_context = page.locator("[data-create-meta-context]").inner_text()
+    assert "USDT disponibles después de otros compromisos" in create_context
+    assert "Motor de esta meta:" in create_context
+
+
 
 def test_auto_refresh_updates_live_blocks_without_replacing_meta_panel(metas_page):
     page, server = metas_page

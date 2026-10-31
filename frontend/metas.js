@@ -154,8 +154,11 @@
       <p class="muted">Enciéndelo en <a href="#lab">Laboratorio</a> para crear una meta.</p></div>`;
   }
 
-  function renderCreateForm(config) {
+  function renderCreateForm(config, availability = null) {
     const profiles = config.profiles || {};
+    const availableText = availability
+      ? `${fmtMoney(availability.available_usdt)} USDT disponibles después de otros compromisos.`
+      : 'Disponibilidad USDT no disponible.';
     return `<div class="card metas-create">
       <h2>Crear una meta</h2>
       <p class="muted">Dale un objetivo a la app; ella decide cómo llegar.</p>
@@ -172,6 +175,7 @@
           <label><input type="radio" name="profile" value="PRUDENTE"> Prudente</label>
           <label><input type="radio" name="profile" value="RAPIDO" checked> Rápido</label>
         </fieldset>
+        <p class="muted" data-create-meta-context>${availableText} Motor de esta meta: <b>${esc(profiles.RAPIDO?.decision_engine || 'v1')}</b>.</p>
         ${profileLimitsTable(profiles, 'RAPIDO')}
         <button type="submit" class="button primary">Crear meta</button>
         <p class="metas-form-error" role="alert"></p>
@@ -187,6 +191,8 @@
     form.querySelectorAll('[name="profile"]').forEach(radio => radio.addEventListener('change', () => {
       const table = form.querySelector('.metas-limits-table');
       if (table) table.dataset.selectedProfile = radio.value;
+      const motor = form.querySelector('[data-create-meta-context] b');
+      if (motor) motor.textContent = profiles[radio.value]?.decision_engine || 'v1';
     }));
     form.addEventListener('submit', async event => {
       event.preventDefault();
@@ -467,7 +473,8 @@
   }
 
   async function renderLedger(container, goalId) {
-    const slot = container.querySelector('[data-ledger-slot]');
+    const scope = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
+    const slot = scope?.querySelector('[data-ledger-slot]');
     if (!slot) return;
     slot.innerHTML = '<p class="muted">Cargando bitácora…</p>';
     try {
@@ -490,17 +497,18 @@
   }
 
   function wireLedgerControls(container, goalId) {
-    const typeSelect = container.querySelector('[data-ledger-type]');
-    const valSwitch = container.querySelector('[data-ledger-valuation]');
+    const scope = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
+    const typeSelect = scope?.querySelector('[data-ledger-type]');
+    const valSwitch = scope?.querySelector('[data-ledger-valuation]');
     typeSelect?.addEventListener('change', () => { ledgerState.type = typeSelect.value; ledgerState.page = 1; renderLedger(container, goalId); });
     valSwitch?.addEventListener('change', () => { ledgerState.includeValuation = valSwitch.checked; ledgerState.page = 1; renderLedger(container, goalId); });
   }
 
-  function renderActivePanel(goal, valuation, config) {
+  function renderActivePanel(goal, valuation, config, lastReview = 'Sin revisiones') {
     const profile = (config.profiles || {})[goal.profile] || {};
     const statusNote = goal.status === 'PIECES_BLOCKED'
       ? `<p class="metas-blocked-note">⏸ Piezas bloqueadas: ${valuation.status === 'DESCONOCIDO' ? 'valoración DESCONOCIDO' : 'aviso del 75 % del límite de pérdida'}.</p>` : '';
-    return `<div class="card metas-active" data-meta-id="${goal.id}">
+    return `<div class="card metas-active" data-meta-id="${goal.id}" data-meta-status="${esc(goal.status)}">
       <div class="metas-active-head">
         <h2>Meta #${goal.id} · ${goalTitle(goal)} · ${PROFILE_LABELS[goal.profile] || goal.profile} · ${META_STATUS_LABELS[goal.status] || esc(goal.status)} · ${decisionEngineLabel(goal)}</h2>
         <button type="button" class="button secondary" data-cancel-op="${goal.id}">Cancelar operación</button>
@@ -509,7 +517,8 @@
       <div data-live-valuation>${valuationBlock(goal, valuation)}</div>
       <div class="metas-live-facts" data-live-facts><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
         <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
-        <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span></div>
+        <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>
+        <span>Última revisión <b>${esc(lastReview)}</b></span></div>
       <div data-live-progress>${progressBars(goal, valuation, profile)}</div>
       <div class="metas-pieces" data-live-pieces><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
       <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
@@ -530,7 +539,7 @@
   }
 
   function renderSurplusPanel(goal) {
-    return `<div class="card metas-active" data-meta-id="${goal.id}">
+    return `<div class="card metas-active" data-meta-id="${goal.id}" data-meta-status="SURPLUS_WAIT">
       <h2>Meta #${goal.id} · CUMPLIDA; esperando vender sobrantes · ${decisionEngineLabel(goal)}</h2>
       <p class="muted">La meta ya llegó al objetivo. Los bots sobrantes solo venden con ganancia, sin plazo; lo que vendan es ganancia extra.</p>
       <p>Ganancia extra realizada hasta ahora: <b>${fmtMoney(goal.realized_extra_usdt)}</b> USDT</p>
@@ -555,10 +564,11 @@
   }
 
   function wireActivePanel(container, goalId, profile) {
-    container.querySelector(`[data-cancel-op]`)?.addEventListener('click', e => confirmCancel(container, e.target.dataset.cancelOp));
-    wireLedgerControls(container, goalId);
-    renderRecentAdjustments(container, goalId);
-    renderLedger(container, goalId);
+    const panel = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
+    panel?.querySelector(`[data-cancel-op]`)?.addEventListener('click', e => confirmCancel(container, e.currentTarget.dataset.cancelOp));
+    wireLedgerControls(panel || container, goalId);
+    renderRecentAdjustments(panel || container, goalId);
+    renderLedger(panel || container, goalId);
   }
 
   function learningMetric(metric) {
@@ -647,7 +657,7 @@
     try {
       const [data, intelligence, config, learningV1, scorecardWeekly, scenarioCache, v2Engine, shadowMarker] = await Promise.all([
         Promise.all(profiles.map(profile => apiGet(`/api/metas/learning?${new URLSearchParams({profile}).toString()}`))),
-        apiGet('/api/intelligence'), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1'),
+        apiGet('/api/intelligence').catch(() => ({readiness_switches: {}})), apiGet('/api/metas/config'), apiGet('/api/metas/learning-v1'),
         apiGet('/api/metas/scorecard-weekly'), apiGet('/api/metas/scenario-cache'),
         apiGet('/api/metas/v2-engine'), apiGet('/api/metas/shadow-marker')]);
       const profileConfigs = config.profiles || {};
@@ -695,12 +705,13 @@
       const scorecardChanged = scorecardWeekly.changed_at
         ? `${esc(scorecardWeekly.actor || 'operador')} &middot; ${esc(scorecardWeekly.changed_at)}` : 'Sin cambios';
       const scorecardWeeklyRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="scorecard-weekly"><div class="global-flag-copy"><h3>Marcador semanal</h3><p>Apagado hasta validar la primera corrida manual. No cambia decisiones.</p><small class="muted">Estado: <b>${scorecardWeekly.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; ${scorecardChanged}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${scorecardWeekly.enabled ? 'Apagar' : 'Encender'}</button></article>`;
+      const maxActiveRow = `<article class="global-flag-row" data-meta-active-limit><div class="global-flag-copy"><h3>Máximo de metas activas</h3><p>Con 2, cada meta usa solo su propio capital; el operador revisa ambas.</p><small class="muted">Actual: <b>${esc(config.max_active || 1)}</b>${config.max_active_actor ? ` · ${esc(config.max_active_actor)} · ${esc(config.max_active_changed_at || '')}` : ''}</small><div data-max-active-confirm hidden><label>Nuevo máximo<select data-max-active-value><option value="1" ${Number(config.max_active || 1) === 1 ? 'selected' : ''}>1</option><option value="2" ${Number(config.max_active || 1) === 2 ? 'selected' : ''}>2</option></select></label><label>¿Quién autoriza? <input data-max-active-actor maxlength="80" required></label><button type="button" class="button primary" data-max-active-save>Confirmar</button><button type="button" class="button secondary" data-max-active-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-max-active-open>Cambiar</button></article>`;
       const cacheRun = scenarioCache.latest_run;
       const cacheRunText = cacheRun ? `${esc(cacheRun.status)} &middot; ${esc(cacheRun.as_of)} &middot; ${fmtMoney(cacheRun.seconds, 1)} s &middot; RSS ${fmtMoney(cacheRun.rss_mb, 1)} MB` : 'Sin corridas registradas';
       const scenarioCacheRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="scenario-cache"><div class="global-flag-copy"><h3>Caché de escenarios v2</h3><p>Calcula candidatos fuera del servicio. No decide ni cambia órdenes.</p><small class="muted">Estado: <b>${scenarioCache.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; Última corrida: ${cacheRunText}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${scenarioCache.enabled ? 'Apagar' : 'Encender'}</button></article>`;
       const v2EngineRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="v2-engine"><div class="global-flag-copy"><h3>Motor v2 disponible</h3><p>Permite usar v2 solo en metas nuevas del perfil seleccionado. Disponibilidad: ${esc(v2Engine.reason || (v2Engine.available ? 'disponible' : 'no disponible'))}. Mantén apagado hasta revisión y autorización.</p><small class="muted">Estado: <b>${v2Engine.enabled ? 'ENCENDIDO' : 'APAGADO'}</b></small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${v2Engine.enabled ? 'Apagar' : 'Encender'}</button></article>`;
       const markerRow = `<article class="global-flag-row" data-meta-learning-switch="GLOBAL" data-switch-kind="shadow-marker"><div class="global-flag-copy"><h3>Marcador de sombra v2</h3><p>Simula decisiones sombra maduras sobre velas reales en un subproceso diario. No cambia decisiones ni órdenes.</p><small class="muted">Estado: <b>${shadowMarker.enabled ? 'ENCENDIDO' : 'APAGADO'}</b> &middot; Resultados: ${esc(shadowMarker.completed || 0)} &middot; Pendientes: ${esc(shadowMarker.pending || 0)}</small><div data-switch-confirm hidden><label>¿Quién autoriza? <input data-switch-actor maxlength="80" required></label><button type="button" class="button primary" data-switch-save>Confirmar</button><button type="button" class="button secondary" data-switch-cancel>Cancelar</button><p role="status"></p></div></div><button class="button secondary" type="button" data-switch-open>${shadowMarker.enabled ? 'Apagar' : 'Encender'}</button></article>`;
-      const rows = globalLearningRow + scorecardWeeklyRow + scenarioCacheRow + v2EngineRow + markerRow + profileRows;
+      const rows = globalLearningRow + scorecardWeeklyRow + maxActiveRow + scenarioCacheRow + v2EngineRow + markerRow + profileRows;
       host.querySelector('.meta-learning-switches')?.remove();
       host.insertAdjacentHTML('beforeend', `<div class="meta-learning-switches">${rows}</div>`);
       host.querySelectorAll('[data-switch-open]').forEach(button => button.addEventListener('click', () => {
@@ -729,6 +740,28 @@
           await loadLearningSwitches(host);
         } catch (error) { status.textContent = error.message; button.disabled = false; }
       }));
+      host.querySelector('[data-max-active-open]')?.addEventListener('click', event => {
+        const row = event.currentTarget.closest('[data-meta-active-limit]');
+        row.querySelector('[data-max-active-confirm]').hidden = false;
+        event.currentTarget.disabled = true;
+        row.querySelector('[data-max-active-actor]').focus();
+      });
+      host.querySelector('[data-max-active-cancel]')?.addEventListener('click', event => {
+        const row = event.currentTarget.closest('[data-meta-active-limit]');
+        row.querySelector('[data-max-active-confirm]').hidden = true;
+        row.querySelector('[data-max-active-open]').disabled = false;
+      });
+      host.querySelector('[data-max-active-save]')?.addEventListener('click', async event => {
+        const button = event.currentTarget, row = button.closest('[data-meta-active-limit]');
+        const actor = row.querySelector('[data-max-active-actor]').value.trim();
+        const status = row.querySelector('[role="status"]');
+        if (!actor) { status.textContent = 'Escribe quién confirma el cambio.'; return; }
+        button.disabled = true;
+        try {
+          await apiPut('/api/metas/config/max-active', {value: Number(row.querySelector('[data-max-active-value]').value), confirm: true, actor});
+          await loadLearningSwitches(host);
+        } catch (error) { status.textContent = error.message; button.disabled = false; }
+      });
       host.querySelectorAll('[data-engine-open]').forEach(button => button.addEventListener('click', () => {
         const row = button.closest('[data-meta-engine-switch]');
         row.querySelector('[data-engine-confirm]').hidden = false;
@@ -758,7 +791,8 @@
   window.ASPLEMetaLearning = { loadSwitches: loadLearningSwitches };
 
   async function renderRecentAdjustments(container, goalId) {
-    const slot = container.querySelector('[data-recent-adjustments]');
+    const scope = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
+    const slot = scope?.querySelector('[data-recent-adjustments]');
     if (!slot) return;
     try {
       const query = new URLSearchParams({page: '1', page_size: '100', include_valuation: 'false'});
@@ -808,6 +842,15 @@
     } catch (error) { slot.innerHTML = `<p class="metas-error">${esc(error.message)}</p>`; }
   }
 
+  async function latestReview(metaId) {
+    try {
+      const query = new URLSearchParams({page: '1', page_size: '50', include_valuation: 'false'});
+      const page = await apiGet(`/api/metas/${metaId}/ledger?${query.toString()}`);
+      const event = (page.events || []).find(row => row.event_type === 'META_OPERATOR_REVIEW_DECISION');
+      return event?.ts || 'Sin revisiones';
+    } catch (_) { return 'No disponible'; }
+  }
+
   function renderHistorySection(goals) {
     const showDiscarded = goals.some(g => g.status === 'DESCARTADA');
     return `<div class="card metas-history">
@@ -837,23 +880,27 @@
     }
     if (!config.enabled) { container.innerHTML = renderDisabled() + renderLearningSection(); loadAllLearning(container); container.querySelector('[data-learning-refresh]')?.addEventListener('click', () => loadAllLearning(container)); return; }
     const activeStatuses = ['ACTIVE', 'PIECES_BLOCKED', 'CLOSING', 'TARGET_CLOSING'];
-    const active = goals.find(g => activeStatuses.includes(g.status));
-    const surplus = goals.find(g => g.status === 'SURPLUS_WAIT');
+    const active = goals.filter(g => activeStatuses.includes(g.status));
+    const surplus = goals.filter(g => g.status === 'SURPLUS_WAIT');
     const drafts = goals.filter(g => g.status === 'DRAFT');
 
     let html = '';
-    if (active) {
+    for (const goal of active) {
       let valuation;
-      try { valuation = await apiGet(`/api/metas/${active.id}/valuation`); }
-      catch (error) { valuation = { status: 'DESCONOCIDO', pieces: [] }; }
-      html += renderActivePanel(active, valuation, config);
-    } else if (surplus) {
-      html += renderSurplusPanel(surplus);
-      html += `<div class="card metas-create-hint"><p class="muted">La meta cumplida no cuenta como activa.</p></div>`;
-      html += renderCreateForm(config);
-    } else {
-      if (drafts.length) html += `<div class="metas-drafts">${drafts.map(renderDraftCard).join('')}</div>`;
-      html += renderCreateForm(config);
+      try { valuation = await apiGet(`/api/metas/${goal.id}/valuation`); }
+      catch (_) { valuation = { status: 'DESCONOCIDO', pieces: [] }; }
+      const lastReview = await latestReview(goal.id);
+      html += renderActivePanel(goal, valuation, config, lastReview);
+    }
+    if (surplus.length) {
+      html += surplus.map(renderSurplusPanel).join('');
+      html += `<div class="card metas-create-hint"><p class="muted">Las metas cumplidas no cuentan como activas.</p></div>`;
+    }
+    if (drafts.length) html += `<div class="metas-drafts">${drafts.map(renderDraftCard).join('')}</div>`;
+    if (active.length < Number(config.max_active || 1)) {
+      let availability = null;
+      try { availability = await apiGet('/api/metas/availability'); } catch (_) { /* se muestra disponibilidad no disponible */ }
+      html += renderCreateForm(config, availability);
     }
     html += renderLearningSection();
     html += renderHistorySection(goals);
@@ -865,7 +912,7 @@
     const pending = loadJob();
     if (pending && drafts.some(g => Number(g.id) === Number(pending.metaId))) pollAnalysis(container, pending);
     else if (pending) clearJob();
-    if (active) wireActivePanel(container, active.id, active.profile);
+    active.forEach(goal => wireActivePanel(container, goal.id, goal.profile));
     loadAllLearning(container);
     container.querySelector('[data-learning-refresh]')?.addEventListener('click', () => loadAllLearning(container));
     container.querySelector('[data-show-discarded]')?.addEventListener('change', e => {
@@ -875,25 +922,33 @@
   }
 
   async function refreshLiveMeta(container) {
-    const panel = container.querySelector('.metas-active[data-meta-id]');
-    if (!panel) return;
+    const panels = [...container.querySelectorAll('.metas-active[data-meta-id]')]
+      .filter(panel => activeStatusesForUi.includes((panel.dataset.metaStatus || 'ACTIVE')));
+    if (!panels.length) return;
     const scrollY = window.scrollY;
-    const goalId = panel.dataset.metaId;
-    const [goalsResult, config, valuation] = await Promise.all([
-      apiGet('/api/metas'), apiGet('/api/metas/config'), apiGet(`/api/metas/${goalId}/valuation`)
-    ]);
-    const goal = (goalsResult.metas || []).find(item => String(item.id) === String(goalId));
-    if (!goal) return;
-    const profile = (config.profiles || {})[goal.profile] || {};
-    panel.querySelector('[data-live-valuation]').innerHTML = valuationBlock(goal, valuation);
-    panel.querySelector('[data-live-facts]').innerHTML = `<span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
-      <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
-      <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>`;
-    panel.querySelector('[data-live-progress]').innerHTML = progressBars(goal, valuation, profile);
-    panel.querySelector('[data-live-pieces]').innerHTML = `<h3>Piezas</h3>${piecesLinkList(valuation)}`;
-    await Promise.all([renderRecentAdjustments(panel, goalId), renderLedger(panel, goalId)]);
+    const [goalsResult, config] = await Promise.all([apiGet('/api/metas'), apiGet('/api/metas/config')]);
+    await Promise.all(panels.map(async panel => {
+      const goalId = panel.dataset.metaId;
+      const goal = (goalsResult.metas || []).find(item => String(item.id) === String(goalId));
+      if (!goal || !activeStatusesForUi.includes(goal.status)) return;
+      let valuation;
+      try { valuation = await apiGet(`/api/metas/${goalId}/valuation`); }
+      catch (_) { valuation = {status: 'DESCONOCIDO', pieces: []}; }
+      const profile = (config.profiles || {})[goal.profile] || {};
+      const review = await latestReview(goalId);
+      panel.querySelector('[data-live-valuation]').innerHTML = valuationBlock(goal, valuation);
+      panel.querySelector('[data-live-facts]').innerHTML = `<span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
+        <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
+        <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>
+        <span>Última revisión <b>${esc(review)}</b></span>`;
+      panel.querySelector('[data-live-progress]').innerHTML = progressBars(goal, valuation, profile);
+      panel.querySelector('[data-live-pieces]').innerHTML = `<h3>Piezas</h3>${piecesLinkList(valuation)}`;
+      await Promise.all([renderRecentAdjustments(panel, goalId), renderLedger(panel, goalId)]);
+    }));
     window.scrollTo(0, scrollY);
   }
+
+  const activeStatusesForUi = ['ACTIVE', 'PIECES_BLOCKED', 'CLOSING', 'TARGET_CLOSING'];
 
   function relativeUpdatedAt(timestamp) {
     if (!timestamp) return 'menos de un minuto';

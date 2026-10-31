@@ -58,6 +58,8 @@ class ProfileSettings(BaseModel):
 class MaxActive(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: int = Field(ge=1, le=10)
+    confirm: StrictBool = False
+    actor: str = Field(default="", max_length=80)
 
 
 class LearningLimits(BaseModel):
@@ -149,7 +151,15 @@ def update_profile(request: Request, body: ProfileSettings):
 
 @router.put("/config/max-active")
 def update_max_active(request: Request, body: MaxActive):
-    return {"max_active": _call(_core(request).set_max_active, body.value)}
+    if not body.confirm or not body.actor.strip():
+        raise HTTPException(409, "Confirma el cambio e indica quién lo autoriza.")
+    return {"max_active": _call(_core(request).set_max_active, body.value,
+        actor=body.actor.strip())}
+
+
+@router.get("/availability")
+def availability(request: Request):
+    return _call(_core(request).availability_snapshot)
 
 
 @router.put("/config/learning-limits")

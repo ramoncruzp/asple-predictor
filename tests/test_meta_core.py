@@ -268,6 +268,19 @@ def test_start_goal_allows_capital_after_other_goal_commitment(tmp_path):
     assert core._available_usdt(second["id"])[0] == Decimal("50")
 
 
+def test_availability_and_max_active_authorization_metadata(tmp_path):
+    _db, core = _core(tmp_path, exchange=FakeTestnet(free=250))
+    core.set_max_active(2, actor="operador")
+    goal = core.create_goal(100, 10)
+    core.start_goal(goal["id"])
+    snapshot = core.availability_snapshot()
+    assert snapshot["available_usdt"] == "150"
+    config = core.config()
+    assert config["max_active"] == 2
+    assert config["max_active_actor"] == "operador"
+    assert config["max_active_changed_at"]
+
+
 def test_valuation_uses_piece_cash_bid_and_estimated_sell_fee(tmp_path):
     db, core = _core(tmp_path, exchange=FakeTestnet(bid=10))
     goal = core.create_goal(100, 10)

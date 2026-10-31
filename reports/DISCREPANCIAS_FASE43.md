@@ -722,3 +722,16 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0c-20261031-a'; py
 ```
 
 Resultado: **26 pruebas pasaron en 6,32 s**. Se verificaron prioridad v2/v1/perfiles, timeout total con contexto omitido y reintentado en la corrida siguiente, y el límite de 25 minutos del subproceso. Al agotarse un contexto conserva la evaluación parcial completada.
+
+### 43h-0d - control y lista de metas en la interfaz
+
+Laboratorio ofrece máximo activo 1/2 con confirmación y autor. La pantalla Metas puede mostrar simultáneamente los paneles activos, perfil/motor, capital, resultado y última revisión; al crear indica el motor del perfil y el USDT disponible después de otros compromisos. La comparación v1/v2 conserva una fila por `goal_id` y el resultado sombra de cada meta.
+
+Pruebas enfocadas (comandos exactos):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0d-20261031-c'; python -m pytest tests/ui/test_metas_ui.py --basetemp=$base -q
+node --check frontend/metas.js
+```
+
+Resultado: **18 pruebas pasaron en 30,69 s**, con dos avisos deprecados de `websockets`; `node --check frontend/metas.js` pasó. El arnés Playwright reportó cero hosts externos.
