@@ -13,27 +13,38 @@ START_TS = 1_700_000_100 // 300 * 300
 
 
 def _one_smart(task):
-    bars, sigma, n, capital, low, high, filters, max_loss_pct, fee_pct, scenario_index = task
+    bars, sigma, n, capital, low, high, filters, max_loss_pct, fee_pct, scenario_index, keep_5m = task
     count = bars["close"].shape[0]
     candles = CandleData(START_TS + np.arange(count, dtype=np.int64) * 300,
         bars["open"], bars["high"], bars["low"], bars["close"], 0)
     result = simulate_piece_curve(candles, strategy="smart", n=n, capital=capital,
         low=low, high=high, filters=filters, sigma_values=sigma,
-        meta_max_loss_pct=max_loss_pct, include_replay=True, curve_every_candle=False,
+        meta_max_loss_pct=max_loss_pct, include_replay=True, curve_every_candle=keep_5m,
         fee_pct=fee_pct)
     replay = result["replay"]
     cells = (replay.get("details") or {}).get("cells", [])
     inventory_qty = sum(float(cell.get("held_qty") or 0) for cell in cells)
-    return {"curve": result["curve"], "metrics": replay["metrics"],
+    output = {"curve": result["curve"], "metrics": replay["metrics"],
         "events": replay["events"], "effective": replay["effective_params"],
         "inventory_qty": inventory_qty,
         "inventory_value": inventory_qty * float(bars["close"][-1]),
         "scenario_index": scenario_index}
+    if keep_5m:
+        from grid.sim.meta_portfolio import unpack_curve
+        timestamps, cash, equity, _capital = unpack_curve(result["curve"])
+        close = np.asarray(bars["close"], dtype=np.float64)
+        low_prices = np.asarray(bars["low"], dtype=np.float64)
+        if len(timestamps) == len(low_prices):
+            held_value = np.maximum(0.0, equity - cash)
+            low_equity = cash + held_value * low_prices / np.maximum(close, 1e-30)
+            output["low_equity_5m_f32"] = low_equity.astype(np.float32)
+            output["timestamps_5m"] = np.asarray(timestamps, dtype=np.int64)
+    return output
 
 
 def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
         filters=None, sigma_path=None, n_smart=200, workers=2, max_loss_pct=None,
-        fee_pct=.1):
+        fee_pct=.1, keep_5m=False):
     """Reproduce Smart para los primeros escenarios comunes con Simple.
 
     Desactiva crédito, compound, ADJUST, reespaciado, reducción de niveles ociosos,
@@ -56,7 +67,7 @@ def evaluate_smart_scenarios(scenarios, *, n_levels, capital, low, high,
         row = {key: value[index].copy() for key, value in bars.items()}
         row_sigma = None if sigma is None else sigma[index].copy()
         tasks.append((row, row_sigma, int(n_levels), float(capital), float(lows[index]), float(highs[index]),
-            filters, max_loss_pct, float(fee_pct), index))
+            filters, max_loss_pct, float(fee_pct), index, bool(keep_5m)))
     if int(workers) > 1 and len(tasks) > 1:
         with get_context("spawn").Pool(processes=int(workers)) as pool:
             return pool.map(_one_smart, tasks, chunksize=1)

@@ -35,7 +35,8 @@ def _curves(timestamps, cash_rows, equity_rows, capital):
 
 def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         fee_pct=.1, resync_candles=3, max_loss_pct=None, target_usdt=None,
-        initial_timestamp=0, candle_seconds=300, pack_curves=False, initial_cells=None):
+        initial_timestamp=0, candle_seconds=300, pack_curves=False, initial_cells=None,
+        keep_5m=False):
     """Simula Simple en un lote; OHLC son matrices float64 (escenario, vela)."""
     bars = _inputs(scenarios)
     filters = FILTERS if filters is None else filters
@@ -58,7 +59,7 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
             resync_candles=resync_candles, max_loss_pct=max_loss_pct,
             target_usdt=target_usdt, initial_timestamp=initial_timestamp,
             candle_seconds=candle_seconds, pack_curves=pack_curves,
-            initial_cells=initial_cells)
+            initial_cells=initial_cells, keep_5m=keep_5m)
     plans_by_scenario = []
     for scenario in range(n_scenarios):
         initial_price = float(close[scenario, 0])
@@ -100,6 +101,8 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         (initial_timestamp + i * candle_seconds) % 900 == 0 or i == n_bars - 1]
     curve_cash = np.zeros((n_scenarios, len(sample_indices)), dtype=np.float64)
     curve_equity = np.zeros_like(curve_cash)
+    low_equity_5m = (np.empty((n_scenarios, n_bars), dtype=np.float32)
+        if keep_5m else None)
     curve_timestamps = np.asarray([initial_timestamp + i * candle_seconds for i in sample_indices], np.int64)
     sample_lookup = {bar: j for j, bar in enumerate(sample_indices)}
     for i in range(n_bars):
@@ -176,6 +179,9 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
                         dust[scenario] -= swept
                 cut[newly_cut] = True
                 cut_candle[newly_cut] = i
+        if low_equity_5m is not None:
+            mark_low = cash + (held.sum(axis=1) + dust) * lo * (1 - fee)
+            low_equity_5m[:, i] = mark_low.astype(np.float32)
         if i in sample_lookup:
             j = sample_lookup[i]
             curve_cash[:, j] = cash
@@ -184,7 +190,7 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
                 hit = (target_candle < 0) & (cash >= capital_rows + float(target_usdt))
                 target_candle[hit] = i
     final_equity = cash + (held.sum(axis=1) + dust) * close[:, -1] * (1 - fee)
-    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
+    result = {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
         "cycles": sales.copy(), "buys": buys, "sells": sales, "fees_usdt": fees,
         "inventory_qty": held.sum(axis=1) + dust,
         "inventory_value": (held.sum(axis=1) + dust) * close[:, -1],
@@ -194,11 +200,15 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
         "curves": (_curves(curve_timestamps, curve_cash, curve_equity, capital_rows)
             if pack_curves else None),
         "low": lows.copy(), "high": highs.copy(), "n_levels": n_levels}
+    if keep_5m:
+        result["low_equity_5m_f32"] = low_equity_5m
+        result["timestamps_5m"] = initial_timestamp + np.arange(n_bars, dtype=np.int64) * candle_seconds
+    return result
 
 
 def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filters,
         fee_pct, resync_candles, max_loss_pct, target_usdt, initial_timestamp,
-        candle_seconds, pack_curves, initial_cells):
+        candle_seconds, pack_curves, initial_cells, keep_5m=False):
     """Replaya celdas existentes sin volver a planificar su geometrÃ­a."""
     close = bars["close"]
     count, n_bars = close.shape
@@ -252,6 +262,8 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
         (initial_timestamp + i * candle_seconds) % 900 == 0 or i == n_bars - 1]
     curve_cash = np.zeros((count, len(samples)), dtype=np.float64)
     curve_equity = np.zeros_like(curve_cash)
+    low_equity_5m = (np.empty((count, n_bars), dtype=np.float32)
+        if keep_5m else None)
     timestamps = np.asarray([initial_timestamp + i * candle_seconds for i in samples], np.int64)
     lookup = {bar: index for index, bar in enumerate(samples)}
     for i in range(n_bars):
@@ -316,6 +328,9 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
                         dust[scenario] -= swept
                 cut[newly_cut] = True
                 cut_candle[newly_cut] = i
+        if low_equity_5m is not None:
+            mark_low = cash + (held.sum(axis=1) + dust) * lo * (1 - fee)
+            low_equity_5m[:, i] = mark_low.astype(np.float32)
         if i in lookup:
             j = lookup[i]
             curve_cash[:, j] = cash
@@ -324,7 +339,7 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
                 hit = (target_candle < 0) & (cash >= capital_rows + float(target_usdt))
                 target_candle[hit] = i
     final_equity = cash + (held.sum(axis=1) + dust) * close[:, -1] * (1 - fee)
-    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
+    result = {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
         "cycles": sales.copy(), "buys": buys, "sells": sales, "fees_usdt": fees,
         "inventory_qty": held.sum(axis=1) + dust,
         "inventory_value": (held.sum(axis=1) + dust) * close[:, -1],
@@ -334,11 +349,15 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
         "curves": (_curves(timestamps, curve_cash, curve_equity, capital_rows)
             if pack_curves else None), "low": lows.copy(), "high": highs.copy(),
         "n_levels": n_levels}
+    if keep_5m:
+        result["low_equity_5m_f32"] = low_equity_5m
+        result["timestamps_5m"] = initial_timestamp + np.arange(n_bars, dtype=np.int64) * candle_seconds
+    return result
 
 
 def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
         fee_pct=.1, max_loss_pct=None, target_usdt=None, initial_timestamp=0,
-        candle_seconds=300, min_margin_pct=.30, pack_curves=False):
+        candle_seconds=300, min_margin_pct=.30, pack_curves=False, keep_5m=False):
     """Replay vectorizado del bot de compra única y venta única."""
     bars = _inputs(scenarios)
     filters = FILTERS if filters is None else filters
@@ -369,6 +388,8 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
         (initial_timestamp + i * candle_seconds) % 900 == 0 or i == n_bars - 1]
     cash_curve = np.zeros((count, len(sample_indices)), np.float64)
     equity_curve = np.zeros_like(cash_curve)
+    low_equity_5m = (np.empty((count, bars["close"].shape[1]), dtype=np.float32)
+        if keep_5m else None)
     timestamps = np.asarray([initial_timestamp + i * candle_seconds for i in sample_indices], np.int64)
     lookup = {bar: j for j, bar in enumerate(sample_indices)}
     for i in range(n_bars):
@@ -396,6 +417,9 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
                 inventory[mask] = 0
                 cut[mask] = True
                 cut_candle[mask] = i
+        if low_equity_5m is not None:
+            mark_low = cash + inventory * bars["low"][:, i] * (1 - fee)
+            low_equity_5m[:, i] = mark_low.astype(np.float32)
         if i in lookup:
             j = lookup[i]
             cash_curve[:, j] = cash
@@ -404,10 +428,14 @@ def simulate_bot(scenarios, *, capital, buy_price, sell_price, filters=None,
                 mask = (target_candle < 0) & (cash >= capital_rows + target_usdt)
                 target_candle[mask] = i
     final_equity = cash + inventory * close[:, -1] * (1 - fee)
-    return {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
+    result = {"final_equity": final_equity, "pnl_usdt": final_equity - capital_rows,
         "cycles": sold.astype(np.int32), "buys": bought.astype(np.int32), "sells": sold.astype(np.int32),
         "fees_usdt": fees, "inventory_qty": inventory, "inventory_value": inventory * close[:, -1],
         "loss_cut": cut, "loss_cut_candle": cut_candle, "target_candle": target_candle,
         "timestamps": timestamps, "cash_curve": cash_curve.astype(np.float32),
         "equity_curve": equity_curve.astype(np.float32),
         "curves": (_curves(timestamps, cash_curve, equity_curve, capital_rows) if pack_curves else None)}
+    if keep_5m:
+        result["low_equity_5m_f32"] = low_equity_5m
+        result["timestamps_5m"] = initial_timestamp + np.arange(bars["close"].shape[1], dtype=np.int64) * candle_seconds
+    return result

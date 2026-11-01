@@ -22,7 +22,8 @@ def _log_width_from_sigma_24h(sigma_24h, horizon_days, multiplier):
     return float(multiplier) * float(sigma_24h) * np.sqrt(float(horizon_days))
 
 
-def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct):
+def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct,
+        keep_5m=False):
     """Calcula resultados de cartera directamente sobre las curvas float32."""
     cash = np.asarray(fast["cash_curve"], dtype=np.float64) + float(capital) - float(piece_capital)
     equity = np.asarray(fast["equity_curve"], dtype=np.float64) + float(capital) - float(piece_capital)
@@ -48,11 +49,15 @@ def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct):
         hourly = np.r_[0, hourly]
     if times[-1] not in times[hourly]:
         hourly = np.r_[hourly, len(times) - 1]
-    return {"pnl_usdt": pnl, "loss_cut": cut, "reached": reached, "days": days,
+    result = {"pnl_usdt": pnl, "loss_cut": cut, "reached": reached, "days": days,
         "capital_unused_usdt": float(capital) - float(piece_capital),
         "trajectory_cash_f32": np.asarray(fast["cash_curve"][:, hourly], dtype=np.float32),
         "trajectory_equity_f32": np.asarray(fast["equity_curve"][:, hourly], dtype=np.float32),
         "trajectory_timestamps": times[hourly]}
+    if keep_5m and fast.get("low_equity_5m_f32") is not None:
+        result["trajectory_low_equity_5m_f32"] = fast["low_equity_5m_f32"]
+        result["trajectory_timestamps_5m"] = fast["timestamps_5m"]
+    return result
 
 
 def _piece_geometry(piece, *, symbol, price, sigma24, horizon, profile):
@@ -77,7 +82,7 @@ def _fast_result_slice(fast, start, end, total):
     """Extrae las filas de un candidato de la salida concatenada de FastSim."""
     sliced = {}
     for key, value in fast.items():
-        if key == "timestamps" or value is None:
+        if key in {"timestamps", "timestamps_5m"} or value is None:
             sliced[key] = value
         elif isinstance(value, np.ndarray) and value.ndim and value.shape[0] == total:
             sliced[key] = value[start:end]
@@ -290,7 +295,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         n_smart=200, seed=43, before=None, db_path="market_data.db",
         library_dir="data/derived/scenario_lib", workers=2, mode="alternativas",
         fee_pct=.1, detrend_scenarios=False, horizon_days=None, max_loss_pct=None,
-        keep_curves=True, scenario_batches=None, timings=None):
+        keep_curves=True, scenario_batches=None, timings=None, keep_5m=False):
     """Evalúa piezas Simple/bot/Smart y su cartera en fechas FHS pareadas.
 
     Cada pieza es un dict: `symbol`, `strategy`, `capital`, `low`, `high`, `n`;
@@ -479,7 +484,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), sigma_path=market["sigma_path"],
                     n_smart=smart_count, workers=workers, max_loss_pct=None,
-                    fee_pct=fee_pct)
+                    fee_pct=fee_pct, keep_5m=keep_5m)
                 for offset, result in enumerate(results):
                     piece_curves[index].append(result["curve"])
                     scenario_index = int(batch["scenario_start"]) + offset
@@ -503,7 +508,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     hourly = np.r_[0, hourly]
                 if smart_times[-1] not in smart_times[hourly]:
                     hourly = np.r_[hourly, len(smart_times) - 1]
-                raw[index]["outcomes"].append({
+                smart_outcomes_row = {
                     "pnl_usdt": np.asarray([row["pnl_usdt"] for row in smart_outcomes], dtype=np.float64),
                     "loss_cut": np.asarray([row["loss_cut"] for row in smart_outcomes], dtype=bool),
                     "reached": np.asarray([row["reached"] for row in smart_outcomes], dtype=bool),
@@ -512,27 +517,34 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     "capital_unused_usdt": float(capital) - float(piece["capital"]),
                     "trajectory_cash_f32": np.asarray([row[1][hourly] for row in decoded], dtype=np.float32),
                     "trajectory_equity_f32": np.asarray([row[2][hourly] for row in decoded], dtype=np.float32),
-                    "trajectory_timestamps": smart_times[hourly],
-                })
+                    "trajectory_timestamps": smart_times[hourly]}
+                if keep_5m and results and all(item.get("low_equity_5m_f32") is not None
+                        for item in results):
+                    smart_outcomes_row["trajectory_low_equity_5m_f32"] = np.asarray(
+                        [item["low_equity_5m_f32"] for item in results], dtype=np.float32)
+                    smart_outcomes_row["trajectory_timestamps_5m"] = np.asarray(
+                        results[0]["timestamps_5m"], dtype=np.int64)
+                raw[index]["outcomes"].append(smart_outcomes_row)
             elif strategy in {"bot", "simple", "smart"}:
                 fastsim_started = time.perf_counter()
                 if strategy == "bot" and not piece.get("initial_cells"):
                     fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
                         sell_price=high, filters=store.filters(symbol), max_loss_pct=None,
                         target_usdt=meta, initial_timestamp=START_TS, pack_curves=keep_curves,
-                        fee_pct=fee_pct)
+                        fee_pct=fee_pct, keep_5m=keep_5m)
                 else:
                     fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
                         capital=float(piece["capital"]), low=low, high=high,
                         filters=store.filters(symbol), max_loss_pct=None, target_usdt=meta,
                         initial_timestamp=START_TS, pack_curves=keep_curves, fee_pct=fee_pct,
-                        initial_cells=piece.get("initial_cells"))
+                        initial_cells=piece.get("initial_cells"), keep_5m=keep_5m)
                 timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
                 if keep_curves:
                     piece_curves[index].extend(fast["curves"])
                 else:
                     raw[index]["outcomes"].append(_fast_outcomes(fast, capital=capital,
-                        piece_capital=piece["capital"], target=meta, loss_pct=loss_pct))
+                        piece_capital=piece["capital"], target=meta, loss_pct=loss_pct,
+                        keep_5m=keep_5m))
                 start_index = int(batch["scenario_start"])
                 if keep_curves:
                     piece_scenario_curves[index].update({start_index + offset: curve
@@ -570,7 +582,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         outcomes = values["outcomes"]
         vector_outcomes = ({key: (np.concatenate([row[key] for row in outcomes], axis=0)
             if key in {"pnl_usdt", "loss_cut", "reached", "days",
-                "trajectory_cash_f32", "trajectory_equity_f32"}
+                "trajectory_cash_f32", "trajectory_equity_f32",
+                "trajectory_low_equity_5m_f32"}
             else outcomes[0][key])
             for key in outcomes[0]} if outcomes else {})
         metrics = (summarize_outcomes(vector_outcomes, capital_initial=capital,
@@ -597,7 +610,8 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
         if not keep_curves and outcomes:
             scenario_outcomes = {key: (np.concatenate([row[key] for row in outcomes], axis=0)
                 if key in {"pnl_usdt", "loss_cut", "reached", "days",
-                    "trajectory_cash_f32", "trajectory_equity_f32"}
+                "trajectory_cash_f32", "trajectory_equity_f32",
+                "trajectory_low_equity_5m_f32"}
                 else outcomes[0][key])
                 for key in outcomes[0]}
             scenario_outcomes["inventory_qty"] = np.asarray(values["inventory_qty"], dtype=np.float32)

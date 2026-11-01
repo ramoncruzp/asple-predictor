@@ -117,3 +117,17 @@ Smart; la aproximación sirve para comparar el comportamiento hacia adelante de
 las celdas existentes contra alternativas bajo los mismos escenarios. En modo
 offline no hay libro de órdenes actual en el almacén de velas: se usa el último
 cierre como proxy del mejor bid y se registra ese límite como aviso de valoración.
+
+
+## Corte de p?rdida de Meta a cinco minutos
+
+La cach? v2 conserva, solo cuando lo solicita, el patrimonio valorado al `low`
+de cada vela de cinco minutos para cada escenario. Al combinar piezas, suma esos
+valores pareados, busca la primera secuencia de incumplimiento que confirma
+`loss_confirm_minutes` (redondeado hacia arriba a velas de cinco minutos, con un
+m?nimo de una vela) y congela el resultado en el `low` de la vela de confirmaci?n.
+La P(meta) se compara por tiempo con ese corte; el desliz es la diferencia entre
+el umbral y el patrimonio congelado. Esto aproxima el vigilante real que consulta
+cada minuto y confirma el corte; no reconstruye el orden de ticks dentro de cada
+vela de cinco minutos ni la latencia de ejecuci?n. El camino opcional no cambia
+las curvas por defecto ni las decisiones v1.

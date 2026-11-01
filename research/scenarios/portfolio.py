@@ -12,7 +12,7 @@ from research.scenarios.objective import objective_v2
 
 
 def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss_pct,
-        horizon_days, seed=43):
+        horizon_days, seed=43, loss_confirm_minutes=2):
     """Suma trayectorias float32 y aplica el primer toque de meta o límite."""
     times = np.asarray(timestamps, dtype=np.int64)
     count = (len(rows[0]["cash"]) if rows else 1)
@@ -27,19 +27,53 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
         equity += np.asarray(row["equity"], dtype=np.float64)
         inventory_qty += np.asarray(row.get("inventory_qty", np.zeros(count)), dtype=np.float64)
         inventory_value += np.asarray(row.get("inventory_value", np.zeros(count)), dtype=np.float64)
+    low_rows = [row.get("low_equity_5m") for row in rows]
+    has_low_path = bool(rows) and all(value is not None for value in low_rows)
+    if has_low_path:
+        timestamps_5m = np.asarray(rows[0].get("timestamps_5m"), dtype=np.int64)
+        has_low_path = bool(len(timestamps_5m)) and all(np.array_equal(timestamps_5m,
+            np.asarray(row.get("timestamps_5m"), dtype=np.int64)) for row in rows[1:])
+    if has_low_path:
+        low_equity = np.full((count, len(timestamps_5m)), idle, dtype=np.float64)
+        for values in low_rows:
+            low_equity += np.asarray(values, dtype=np.float64)
     hit_mask = cash >= float(capital) + float(target)
     hit_exists = hit_mask.any(axis=1)
     hit = np.where(hit_exists, hit_mask.argmax(axis=1), len(times))
     if max_loss_pct is not None and float(max_loss_pct) > 0:
-        loss_mask = equity <= float(capital) * (1 - float(max_loss_pct) / 100)
-        loss_exists = loss_mask.any(axis=1)
-        loss = np.where(loss_exists, loss_mask.argmax(axis=1), len(times))
+        if has_low_path:
+            breach = low_equity <= float(capital) * (1 - float(max_loss_pct) / 100)
+            confirmations = max(1, int(np.ceil(max(0, int(loss_confirm_minutes)) / 5)))
+            if confirmations > 1:
+                kernel = np.ones(confirmations, dtype=np.int8)
+                breach_count = np.apply_along_axis(lambda row: np.convolve(
+                    row.astype(np.int8), kernel, mode="valid"), 1, breach)
+                found = breach_count >= confirmations
+                loss_exists = found.any(axis=1)
+                loss = np.where(loss_exists, found.argmax(axis=1) + confirmations - 1,
+                    len(timestamps_5m))
+            else:
+                loss_exists = breach.any(axis=1)
+                loss = np.where(loss_exists, breach.argmax(axis=1), len(timestamps_5m))
+            cut_time = np.where(loss_exists, timestamps_5m[np.minimum(loss,
+                len(timestamps_5m) - 1)], np.iinfo(np.int64).max)
+            hit_time = times[np.minimum(hit, len(times) - 1)]
+            cut = loss_exists & ((~hit_exists) | (cut_time <= hit_time))
+        else:
+            loss_mask = equity <= float(capital) * (1 - float(max_loss_pct) / 100)
+            loss_exists = loss_mask.any(axis=1)
+            loss = np.where(loss_exists, loss_mask.argmax(axis=1), len(times))
+            cut = loss_exists & ((~hit_exists) | (loss <= hit))
     else:
         loss_exists = np.zeros(count, dtype=bool)
         loss = np.full(count, len(times), dtype=int)
-    cut = loss_exists & ((~hit_exists) | (loss <= hit))
+        cut = np.zeros(count, dtype=bool)
     end = np.where(cut, loss, len(times) - 1)
-    pnl = equity[np.arange(count), end] - float(capital)
+    if has_low_path and max_loss_pct is not None and float(max_loss_pct) > 0:
+        cut_equity = low_equity[np.arange(count), np.minimum(loss, len(timestamps_5m) - 1)]
+        pnl = np.where(cut, cut_equity, equity[np.arange(count), end]) - float(capital)
+    else:
+        pnl = equity[np.arange(count), end] - float(capital)
     reached = hit_exists & ~cut
     days = np.where(reached,
         (times[np.minimum(hit, len(times) - 1)] - times[0]) / 86400, np.nan)
@@ -68,6 +102,10 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
                     "equity": np.asarray(archive[f"equity_{index}"], dtype=np.float32),
                     "inventory_qty": np.asarray(archive[f"inventory_qty_{index}"], dtype=np.float32),
                     "inventory_value": np.asarray(archive[f"inventory_value_{index}"], dtype=np.float32),
+                    "low_equity_5m": (np.asarray(archive[f"low_equity_5m_{index}"], dtype=np.float32)
+                        if f"low_equity_5m_{index}" in archive.files else None),
+                    "timestamps_5m": (np.asarray(archive["timestamps_5m"], dtype=np.int64)
+                        if "timestamps_5m" in archive.files else None),
                     "capital": float((item.get("piece") or {}).get("capital", 0))})
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return None
@@ -81,7 +119,8 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
     current_rows = list(live)
     current_metrics = evaluate_trajectory_portfolio(current_rows, timestamps=timestamps,
         capital=capital, target=target, max_loss_pct=max_loss_pct,
-        horizon_days=horizon_days, seed=seed)
+        horizon_days=horizon_days, seed=seed,
+        loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
     steps = []
     while candidates:
         used_cash = sum(row["capital"] for row in selected)
@@ -109,7 +148,8 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
                 continue
             metrics = evaluate_trajectory_portfolio([*current_rows, candidate],
                 timestamps=timestamps, capital=capital, target=target,
-                max_loss_pct=max_loss_pct, horizon_days=horizon_days, seed=seed)
+                max_loss_pct=max_loss_pct, horizon_days=horizon_days, seed=seed,
+                loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
             improvement = float(metrics["p_target"]) - float(current_metrics["p_target"])
             objective = objective_v2(metrics, perfil=profile, capital_meta=capital)
             if improvement < .02 - 1e-12 or not objective["factible"]:

@@ -452,6 +452,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         outcomes = row.get("scenario_outcomes") or {}
         cash = outcomes.get("trajectory_cash_f32")
         equity = outcomes.get("trajectory_equity_f32")
+        low_equity_5m = outcomes.get("trajectory_low_equity_5m_f32")
+        timestamps_5m = outcomes.get("trajectory_timestamps_5m")
         timestamps = outcomes.get("trajectory_timestamps")
         if cash is None or equity is None or timestamps is None:
             return
@@ -462,6 +464,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             "inventory_qty": np.asarray(outcomes.get("inventory_qty", []), dtype=np.float32).copy(),
             "inventory_value": np.asarray(outcomes.get("inventory_value", []), dtype=np.float32).copy(),
             "timestamps": np.asarray(timestamps, dtype=np.int64).copy(),
+            "low_equity_5m": (np.asarray(low_equity_5m, dtype=np.float32)
+                if low_equity_5m is not None else None),
+            "timestamps_5m": (np.asarray(timestamps_5m, dtype=np.int64).copy()
+                if timestamps_5m is not None else None),
             "is_current": bool(piece.get("is_current"))}
         if entry["is_current"]:
             retained_live[entry["candidate_key"]] = entry
@@ -488,6 +494,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         if not selected_rows:
             return None
         archive = {"timestamps": timestamps.astype(np.int64, copy=False),
+            "timestamps_5m": (selected_rows[0]["timestamps_5m"]
+                if selected_rows[0].get("timestamps_5m") is not None else np.asarray([], dtype=np.int64)),
             "metadata_json": np.asarray(_json_dumps([{
                 "candidate_key": row["candidate_key"], "piece": row["piece"],
                 "metrics": row["metrics"], "is_current": row["is_current"]}
@@ -497,10 +505,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             archive[f"equity_{index}"] = row["equity"]
             archive[f"inventory_qty_{index}"] = row["inventory_qty"]
             archive[f"inventory_value_{index}"] = row["inventory_value"]
+            if row.get("low_equity_5m") is not None:
+                archive[f"low_equity_5m_{index}"] = row["low_equity_5m"]
         output_path = Path(trajectory_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = output_path.with_name(f"{output_path.stem}.tmp.npz")
-        np.savez(temporary_path, **archive)
+        np.savez_compressed(temporary_path, **archive)
         os.replace(temporary_path, output_path)
         return str(output_path)
     live_symbols = {str(piece["symbol"]).upper() for piece in current_pieces}
@@ -545,6 +555,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             if batches is not None:
                 kwargs["scenario_batches"] = batches
                 kwargs["keep_curves"] = False
+                kwargs["keep_5m"] = True
                 kwargs["timings"] = evaluator_timings
             rows, errors = _evaluate_with_isolation(evaluator, symbol_pieces, **kwargs)
             if phase_index == 1 and not baseline_failed:
@@ -554,14 +565,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                     _apply_live_portfolio_metrics(rows, baseline_rows,
                         capital=capital, target=context["target"],
                         max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
-                        trajectory_sink=retain_trajectory)
-                else:
-                    for row in rows:
-                        retain_trajectory(row)
-                        outcomes = row.get("scenario_outcomes") or {}
-                        for key in ("trajectory_cash_f32", "trajectory_equity_f32",
-                                "trajectory_timestamps"):
-                            outcomes.pop(key, None)
+                        trajectory_sink=retain_trajectory,
+                        loss_confirm_minutes=(context.get("profile_config") or {}).get(
+                            "loss_confirm_minutes", 2))
             first_rows.extend(rows)
             failed_candidates.update(errors)
             if phase_index == 0 and errors:
@@ -622,6 +628,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             if batches is not None:
                 kwargs["scenario_batches"] = batches
                 kwargs["keep_curves"] = False
+                kwargs["keep_5m"] = True
                 kwargs["timings"] = smart_timings
             smart_eval_started = time.perf_counter()
             metrics_before = smart_timings.get("metrics_s", 0.0)
@@ -655,14 +662,34 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     live_rows = [row for row in first_rows
         if (row.get("piece") or {}).get("is_current")]
     if not baseline_failed:
-        _apply_live_portfolio_metrics(live_rows, live_rows,
+        if live_rows:
+            _apply_live_portfolio_metrics(live_rows, live_rows,
             capital=capital, target=context["target"],
             max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
-            trajectory_sink=retain_trajectory)
-        _apply_live_portfolio_metrics(second_rows, live_rows,
+            trajectory_sink=retain_trajectory,
+            loss_confirm_minutes=(context.get("profile_config") or {}).get(
+                "loss_confirm_minutes", 2))
+            _apply_live_portfolio_metrics(second_rows, live_rows,
             capital=capital, target=context["target"],
             max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
-            trajectory_sink=retain_trajectory)
+            trajectory_sink=retain_trajectory,
+            loss_confirm_minutes=(context.get("profile_config") or {}).get(
+                "loss_confirm_minutes", 2))
+        else:
+            for row in [*first_rows, *second_rows]:
+                row["metrics_pieza_sola"] = row.get("metrics")
+                combined = _portfolio_outcome_metrics([row], capital=capital,
+                    target=context["target"], max_loss_pct=context["max_loss_pct"],
+                    horizon=context["horizon"], loss_confirm_minutes=(
+                        context.get("profile_config") or {}).get("loss_confirm_minutes", 2))
+                if combined is not None:
+                    row["metrics"] = combined
+                retain_trajectory(row)
+                outcomes = row.get("scenario_outcomes") or {}
+                for key in ("trajectory_cash_f32", "trajectory_equity_f32",
+                        "trajectory_timestamps", "trajectory_low_equity_5m_f32",
+                        "trajectory_timestamps_5m"):
+                    outcomes.pop(key, None)
     else:
         for row in second_rows:
             retain_trajectory(row)
@@ -747,8 +774,9 @@ def _scenario_metrics(row):
         "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0}
 
 
-def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
-    """Combina trayectorias horarias y congela el resultado al primer corte."""
+def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon,
+        loss_confirm_minutes=2):
+    """Combina trayectorias pareadas y aplica corte en velas de cinco minutos."""
     usable = [row.get("scenario_outcomes") or {} for row in rows]
     if not usable or any(item.get("trajectory_equity_f32") is None for item in usable):
         return None
@@ -764,19 +792,56 @@ def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
     for item in usable:
         cash += np.asarray(item["trajectory_cash_f32"][:count], dtype=np.float64)
         equity += np.asarray(item["trajectory_equity_f32"][:count], dtype=np.float64)
+    low_items = [item.get("trajectory_low_equity_5m_f32") for item in usable]
+    has_low_path = all(value is not None for value in low_items)
+    if has_low_path:
+        timestamps_5m = np.asarray(usable[0].get("trajectory_timestamps_5m"), dtype=np.int64)
+        has_low_path = bool(len(timestamps_5m)) and all(np.array_equal(
+            timestamps_5m, np.asarray(item.get("trajectory_timestamps_5m"), dtype=np.int64))
+            for item in usable[1:])
+    if has_low_path:
+        equity_low = np.full((count, len(timestamps_5m)), idle, dtype=np.float64)
+        for values in low_items:
+            equity_low += np.asarray(values[:count], dtype=np.float64)
     hit_mask = cash >= float(capital) + float(target)
     hit_exists = hit_mask.any(axis=1)
     hit = np.where(hit_exists, hit_mask.argmax(axis=1), len(timestamps))
     if max_loss_pct is not None and float(max_loss_pct) > 0:
-        loss_mask = equity <= float(capital) * (1 - float(max_loss_pct) / 100)
-        loss_exists = loss_mask.any(axis=1)
-        loss = np.where(loss_exists, loss_mask.argmax(axis=1), len(timestamps))
+        if has_low_path:
+            breach = equity_low <= float(capital) * (1 - float(max_loss_pct) / 100)
+            confirmations = max(1, int(np.ceil(max(0, int(loss_confirm_minutes)) / 5)))
+            if confirmations > 1:
+                kernel = np.ones(confirmations, dtype=np.int8)
+                breach_count = np.apply_along_axis(lambda row: np.convolve(
+                    row.astype(np.int8), kernel, mode="valid"), 1, breach)
+                found = breach_count >= confirmations
+                loss_exists = found.any(axis=1)
+                loss = np.where(loss_exists, found.argmax(axis=1) + confirmations - 1,
+                    len(timestamps_5m))
+            else:
+                loss_exists = breach.any(axis=1)
+                loss = np.where(loss_exists, breach.argmax(axis=1), len(timestamps_5m))
+            cut_times = np.where(loss_exists, timestamps_5m[np.minimum(loss,
+                len(timestamps_5m) - 1)], np.iinfo(np.int64).max)
+            hourly_hit_time = timestamps[np.minimum(hit, len(timestamps) - 1)]
+            cut = loss_exists & ((~hit_exists) | (cut_times <= hourly_hit_time))
+        else:
+            loss_mask = equity <= float(capital) * (1 - float(max_loss_pct) / 100)
+            loss_exists = loss_mask.any(axis=1)
+            loss = np.where(loss_exists, loss_mask.argmax(axis=1), len(timestamps))
+            cut = loss_exists & ((~hit_exists) | (loss <= hit))
     else:
         loss_exists = np.zeros(count, dtype=bool)
         loss = np.full(count, len(timestamps), dtype=int)
-    cut = loss_exists & ((~hit_exists) | (loss <= hit))
-    end_index = np.where(cut, loss, len(timestamps) - 1)
-    pnl = equity[np.arange(count), end_index] - float(capital)
+        cut = np.zeros(count, dtype=bool)
+    end_index = np.full(count, len(timestamps) - 1, dtype=int)
+    if not has_low_path:
+        end_index = np.where(cut, loss, end_index)
+    if has_low_path and max_loss_pct is not None and float(max_loss_pct) > 0:
+        cut_value = equity_low[np.arange(count), np.minimum(loss, len(timestamps_5m) - 1)]
+        pnl = np.where(cut, cut_value, equity[np.arange(count), end_index]) - float(capital)
+    else:
+        pnl = equity[np.arange(count), end_index] - float(capital)
     reached = hit_exists & ~cut
     days = np.where(reached, (timestamps[np.minimum(hit, len(timestamps)-1)] - timestamps[0]) / 86400, np.nan)
     inventory_qty = sum((np.asarray(item.get("inventory_qty", [0] * count)[:count],
@@ -792,12 +857,13 @@ def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
 
 
 def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
-        max_loss_pct, horizon, trajectory_sink=None):
+        max_loss_pct, horizon, trajectory_sink=None, loss_confirm_minutes=2):
     """Asigna el baseline vivo y las alternativas sobre los mismos índices."""
     if not live_rows:
         return
     baseline = _portfolio_outcome_metrics(live_rows, capital=capital,
-        target=target, max_loss_pct=max_loss_pct, horizon=horizon)
+        target=target, max_loss_pct=max_loss_pct, horizon=horizon,
+        loss_confirm_minutes=loss_confirm_minutes)
     if baseline is None:
         return
     for row in rows:
@@ -809,7 +875,8 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
                 trajectory_sink(row)
             continue
         combined = _portfolio_outcome_metrics([*live_rows, row], capital=capital,
-            target=target, max_loss_pct=max_loss_pct, horizon=horizon)
+            target=target, max_loss_pct=max_loss_pct, horizon=horizon,
+            loss_confirm_minutes=loss_confirm_minutes)
         if combined is not None:
             row["metrics_pieza_sola"] = row.get("metrics")
             row["metrics"] = combined
@@ -819,6 +886,8 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         outcomes.pop("trajectory_cash_f32", None)
         outcomes.pop("trajectory_equity_f32", None)
         outcomes.pop("trajectory_timestamps", None)
+        outcomes.pop("trajectory_low_equity_5m_f32", None)
+        outcomes.pop("trajectory_timestamps_5m", None)
 
 
 def _evaluate_with_isolation(evaluator, pieces, **kwargs):
