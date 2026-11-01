@@ -28,9 +28,9 @@ class V2ScenarioEngine(DecisionEngine):
         return json.loads(raw or "{}")
 
     @classmethod
-    def _load_cache(cls, operator, goal):
+    def _load_cache(cls, operator, goal, *, require_engine=True):
         settings = cls._global_settings(operator)
-        if not settings.get("v2_engine_enabled", False):
+        if require_engine and not settings.get("v2_engine_enabled", False):
             raise EngineUnavailable("el interruptor global del motor v2 está apagado")
         if not settings.get("scenario_cache_enabled", False):
             raise EngineUnavailable("la caché de escenarios está apagada")
@@ -99,15 +99,20 @@ class V2ScenarioEngine(DecisionEngine):
             "mid_at_plan": float(params.get("mid_at_plan", (low + high) / 2)),
             **({"grid_id": int(params["grid_id"])} if params.get("grid_id") else {})}
 
-    def plan(self, operator, goal, *, plan_kind, allocation_free_cash=None, record=True):
-        cached = self._load_cache(operator, goal)
+    def plan(self, operator, goal, *, plan_kind, allocation_free_cash=None, record=True,
+            require_engine=True):
+        from grid.meta_live_pieces import live_meta_grid_ids
+        cached = self._load_cache(operator, goal, require_engine=require_engine)
         capital = float(goal.get("capital_initial", 0))
+        live_grid_ids = live_meta_grid_ids(getattr(operator, "core", None), int(goal["id"]))
         candidates = []
         for cached_row in cached["candidates"]:
             if cached_row["strategy"] not in {"simple", "smart", "bot", "usdt_quieto"}:
                 continue
             piece = {"strategy": cached_row["strategy"], "symbol": cached_row["symbol"],
                 **cached_row["params"], "candidate_key": cached_row["candidate_key"]}
+            if piece.get("is_current") and int(piece.get("grid_id") or -1) not in live_grid_ids:
+                continue
             candidates.append({"piece": piece, "metrics": cached_row["metrics"],
                 "candidate_key": cached_row["candidate_key"]})
         ranked = rank_alternatives_v2(candidates, perfil=goal["profile"], capital_meta=capital)
@@ -202,7 +207,8 @@ class V2ScenarioEngine(DecisionEngine):
             "use_extended_allocation": False}
 
     def review(self, operator, goal, valuation, plan):
-        links = operator.core._owned_grids(int(goal["id"]))
+        from grid.meta_live_pieces import live_meta_grid_links
+        links = live_meta_grid_links(operator.core, int(goal["id"]))
         alternatives = list((plan or {}).get("alternatives") or [])
         if not links:
             return {"decision": "no_hacer_nada", "reason": "la meta no tiene grids activos"}
@@ -266,11 +272,16 @@ class V2ScenarioEngine(DecisionEngine):
 
     def shadow_review(self, operator, goal, valuation, plan):
         try:
-            shadow_plan = self.plan(operator, goal, plan_kind="revision", record=False)
+            shadow_plan = self.plan(operator, goal, plan_kind="revision", record=False,
+                require_engine=False)
             result = self.review(operator, goal, valuation, shadow_plan)
+            live_metrics = [row.get("estimate") or {} for row in
+                (shadow_plan.get("current_pieces") or {}).values()]
+            v2_metrics = (live_metrics[0] if result.get("decision") in {"mantener", "no_hacer_nada"}
+                and live_metrics else shadow_plan.get("estimated_time") or {})
             return {**result, "reason": result.get("reason") or "revisión en sombra",
                 "cache_run_id": (shadow_plan.get("cache") or {}).get("run_id"),
-                "v2_metrics": shadow_plan.get("estimated_time") or {},
+                "v2_metrics": v2_metrics,
                 "pieces": shadow_plan.get("pieces", []),
                 "decision_choices": shadow_plan.get("decision_choices", {}),
                 "current_pieces": shadow_plan.get("current_pieces", {})}

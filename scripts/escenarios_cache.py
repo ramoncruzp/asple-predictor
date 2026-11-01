@@ -257,14 +257,12 @@ def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horiz
 def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
     if goal_id is None:
         return []
+    from grid.meta_live_pieces import is_live_meta_grid
     with sqlite3.connect(Path(app_db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         grids = conn.execute("SELECT g.id,g.symbol,g.strategy,g.capital_total,g.range_low,g.range_high,"
             "g.n_levels,g.status,l.piece_type FROM meta_piece_links l JOIN grids g ON g.id=l.grid_id "
-            "WHERE l.meta_id=? AND l.released_at IS NULL AND (UPPER(g.status) NOT IN "
-            "('CLOSED','ARCHIVED','CANCELLED','FAILED','ERROR') OR EXISTS ("
-            "SELECT 1 FROM grid_levels gl WHERE gl.grid_id=g.id AND "
-            "(COALESCE(gl.held_qty,0)>0 OR UPPER(gl.state) IN ('BUY_OPEN','SELL_OPEN')))) "
+            "WHERE l.meta_id=? AND l.released_at IS NULL "
             "ORDER BY g.id", (goal_id,)).fetchall()
         output = []
         for grid in grids:
@@ -276,6 +274,8 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
             price = float((prices or {}).get(symbol, 0))
             levels = conn.execute("SELECT level_idx,price,sell_price,held_qty,state,capital "
                 "FROM grid_levels WHERE grid_id=? ORDER BY level_idx", (grid_id,)).fetchall()
+            if not is_live_meta_grid(grid['status'], levels):
+                continue
             events = conn.execute("SELECT event_type,price,details FROM grid_events WHERE grid_id=? "
                 "AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED') ORDER BY id",
                 (grid_id,)).fetchall()

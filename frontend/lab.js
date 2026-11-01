@@ -42,7 +42,7 @@
       if (!rows.length) { host.innerHTML = '<p class="muted">Sin decisiones v1/v2 todavía.</p>'; return; }
       const decision = value => value?.result?.decision || value?.decision || 'sin decisión';
       const riskText = value => {
-        const metrics = value?.result?.v2_metrics || {};
+        const metrics = value?.v2_metrics || value?.result?.v2_metrics || {};
         const percent = number => number != null && number !== '' && Number.isFinite(Number(number)) ? `${(Number(number) * 100).toFixed(1)} %` : '—';
         const usdt = number => number != null && number !== '' && Number.isFinite(Number(number)) ? `${Number(number).toFixed(4)} USDT` : '—';
         return `P(límite) ${percent(metrics.p_loss)} · desliz ${usdt(metrics.cut_slippage_mean_usdt)} · P(inventario) ${percent(metrics.p_inventory)}`;

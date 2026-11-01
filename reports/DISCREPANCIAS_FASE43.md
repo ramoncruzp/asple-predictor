@@ -760,3 +760,16 @@ sqlite3 -readonly asple_predictor.db "SELECT goal_id,active_engine,shadow_engine
 ```
 
 Resultado: **100 pruebas pasaron en 11,63 s**; `node --check frontend/metas.js` pasó. Incluye revisión de una meta v1, presupuestos/reintentos de caché, regresión v1, estado por defecto y la corrida integrada v1/v2 con exchange y caché sintéticos. No se ejecutaron los comandos S1.
+
+### 43h-0f - v2 y caché usan las mismas piezas vivas
+
+Se comparte `grid.meta_live_pieces` entre la extracción de «mantener» y el motor v2. Los enlaces a grids terminales se conservan para valoración y efectivo atribuible, pero solo cuentan como pieza viva si conservan inventario o niveles abiertos. La revisión v2 ignora el grid 12 `CLOSED` y sigue exigiendo «mantener» para el 13 `PAUSED`. La sombra lee una caché vigente con su interruptor encendido aunque el motor v2 operativo esté apagado; el plan operativo sigue exigiendo ambos interruptores. El panel obtiene las métricas desde el objeto `v2_metrics` y en una decisión «mantener» muestra la estimación de esa pieza.
+
+Prueba enfocada (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0f-20261101-b'; python -m pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py tests/test_meta_multi_goal.py --basetemp=$base -q
+node --check frontend/lab.js
+```
+
+Resultado: **25 pruebas pasaron en 1,19 s**; `node --check frontend/lab.js` pasó. El fixture reproduce vínculos no liberados 12 `CLOSED` y 13 `PAUSED` con inventario; la caché y v2 mantienen solo el 13. También se verificó sombra con v2 operativo apagado/caché encendida y `no_disponible` con caché apagada. La regresión v1 pasó.

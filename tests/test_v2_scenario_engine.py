@@ -52,6 +52,117 @@ def _cache_row(path, *, as_of=None, status="ok"):
             json.dumps({"factible": True, "motivos": [], "clave_orden": [-.35, 15, -1.4]})))
 
 
+def _meta_three_live_piece_fixture(db):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.insert().values(id=9, capital_initial=100,
+            target_usdt=3, target_input_type="USDT", target_input_value=3,
+            profile="RAPIDO", status="ACTIVE", environment="testnet",
+            created_at=now, config_snapshot=json.dumps({"decision_engine": "v1"})))
+        for grid_id, status, level_state, held_qty in (
+                (12, "CLOSED", "DONE", 0), (13, "PAUSED", "SELL_OPEN", 5)):
+            conn.execute(db.grids.insert().values(id=grid_id, symbol="JUPUSDT",
+                range_low=.20, range_high=.30, n_levels=6, capital_total=50,
+                reserve=0, status=status, created_at=now, environment="testnet",
+                strategy="smart", params="{}", dust_qty="0"))
+            conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
+                price=.21, sell_price=.22, capital=50, state=level_state,
+                held_qty=held_qty, cycles_completed=0, pnl=0, fee_paid=0,
+                updated_at=now))
+            run_id = conn.execute(db.meta_runs.insert().values(meta_id=9,
+                status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+            conn.execute(db.meta_piece_links.insert().values(meta_id=9, run_id=run_id,
+                grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id,
+                created_at=now))
+
+    def owned(_goal_id):
+        with db.engine.connect() as conn:
+            return [dict(row) for row in conn.execute(select(db.meta_piece_links).where(
+                db.meta_piece_links.c.meta_id == 9,
+                db.meta_piece_links.c.released_at.is_(None))).mappings().all()]
+
+    return SimpleNamespace(db=db, _owned_grids=owned)
+
+
+def _meta_three_current_cache(path, *, as_of=None):
+    stamp = as_of or datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,goal_id,profile,horizon_days,"
+            "n_scenarios,status) VALUES('meta-three-current',?,9,'RAPIDO',20,1000,'ok')", (stamp,))
+        for grid_id, pnl in ((12, 2.0), (13, .5)):
+            conn.execute("INSERT INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)", (
+                "meta-three-current", f"mantener-{grid_id}", "JUPUSDT", "smart",
+                json.dumps({"low": .20, "high": .30, "n": 6, "capital": 50,
+                    "grid_id": grid_id, "is_current": True}),
+                json.dumps({"n": 1000, "pnl_mean_usdt": pnl, "p_target": .12,
+                    "p_loss": .03, "p_loss_ci95": [.02, .04],
+                    "pnl_mean_ci95": [pnl - .1, pnl + .1],
+                    "cut_slippage_mean_usdt": .04, "cut_slippage_p90_usdt": .1,
+                    "p_inventory": .2, "days_to_target_p50": 12,
+                    "days_to_target_p90": 20}),
+                json.dumps({"factible": True, "motivos": [],
+                    "clave_orden": [-.12, 12, -pnl]})))
+
+
+def test_cache_y_v2_comparten_piezas_vivas_de_meta_tres(engine_databases):
+    from scripts.escenarios_cache import _active_grid_pieces
+
+    db, market_path = engine_databases
+    core = _meta_three_live_piece_fixture(db)
+    assert [int(link["grid_id"]) for link in
+        __import__("grid.meta_live_pieces", fromlist=["live_meta_grid_links"])
+        .live_meta_grid_links(core, 9)] == [13]
+    _meta_three_current_cache(market_path)
+    pieces = _active_grid_pieces(db.engine.url.database, 9,
+        prices={"JUPUSDT": .25}, filters={})
+    assert [piece["grid_id"] for piece in pieces] == [13]
+
+    operator = SimpleNamespace(db=db, core=core)
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 3}
+    plan = V2ScenarioEngine().plan(operator, goal, plan_kind="revision")
+    assert list(plan["current_pieces"]) == ["13"]
+    result = V2ScenarioEngine().review(operator, goal,
+        {"pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}]}, plan)
+    assert result["decision"] == "mantener"
+    assert result.get("grid_id") is None
+
+
+def test_sombra_v2_usa_solo_cache_y_expone_metricas_de_mantener(engine_databases):
+    db, market_path = engine_databases
+    core = _meta_three_live_piece_fixture(db)
+    _meta_three_current_cache(market_path)
+    with db.engine.begin() as conn:
+        raw = conn.execute(select(db.meta_profile_settings.c.settings).where(
+            db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one()
+        settings = json.loads(raw)
+        settings.update({"scenario_cache_enabled": True, "v2_engine_enabled": False})
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "GLOBAL").values(
+                settings=json.dumps(settings)))
+    operator = SimpleNamespace(db=db, core=core)
+    shadow = V2ScenarioEngine().shadow_review(operator,
+        {"id": 9, "profile": "RAPIDO", "capital_initial": 100, "target_usdt": 3},
+        {"pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}]}, None)
+    assert shadow["decision"] == "mantener"
+    assert shadow["v2_metrics"]["p_loss"] == .03
+    assert shadow["v2_metrics"]["cut_slippage_mean_usdt"] == .04
+    assert shadow["v2_metrics"]["p_inventory"] == .2
+
+    with db.engine.begin() as conn:
+        settings["scenario_cache_enabled"] = False
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "GLOBAL").values(
+                settings=json.dumps(settings)))
+    unavailable = V2ScenarioEngine().shadow_review(operator,
+        {"id": 9, "profile": "RAPIDO", "capital_initial": 100, "target_usdt": 3},
+        {}, None)
+    assert unavailable["decision"] == "no_disponible"
+
+
 def test_plan_usa_corrida_vigente_sin_recalcular(engine_databases):
     db, market_path = engine_databases
     _cache_row(market_path)
