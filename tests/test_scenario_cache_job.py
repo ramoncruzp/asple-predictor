@@ -71,6 +71,7 @@ def test_cache_excluye_rol_datos_y_registra_motivos(tmp_path):
 
 def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
         cache_databases, monkeypatch):
+    import numpy as np
     db, market_path = cache_databases
     current = [
         {"candidate_key": "mantener:X", "symbol": "XUSDT", "strategy": "simple",
@@ -100,12 +101,16 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
         rows = []
         for piece in pieces:
             pnl = [-.5] * 3 if piece.get("is_current") else [1.5] * 3
+            base = float(piece["capital"])
+            path = np.repeat(np.asarray([base + pnl[0]], dtype=np.float32)[:, None], 3, axis=1)
             rows.append({"piece": piece, "metrics": {"pnl_mean_usdt": 0,
                 "p_target": .5, "p_loss": 0}, "scenario_outcomes": {
                     "pnl_usdt": pnl, "loss_cut": [False] * 3,
                     "reached": [False] * 3, "days": [None if piece.get("is_current") else 2] * 3,
                     "inventory_qty": [1 if piece.get("is_current") else 0] * 3,
-                    "inventory_value": [10 if piece.get("is_current") else 0] * 3}})
+                    "inventory_value": [10 if piece.get("is_current") else 0] * 3,
+                    "trajectory_cash_f32": path, "trajectory_equity_f32": path,
+                    "trajectory_timestamps": np.asarray([0, 3600, 7200])}})
         return {"pieces": rows}
 
     result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
@@ -488,16 +493,23 @@ def test_meta_objetivo_restante_suma_perdidas_y_resta_ganancias():
 
 
 def test_alternativa_usa_cartera_pareada_con_pieza_viva():
+    import numpy as np
     current = {"piece": {"capital": 40, "is_current": True},
         "metrics": {"p_target": 0}, "scenario_outcomes": {
             "pnl_usdt": [-1.0, -1.0, -1.0], "loss_cut": [False] * 3,
             "reached": [False] * 3, "days": [None] * 3,
-            "inventory_qty": [1, 1, 1], "inventory_value": [10, 10, 10]}}
+                "inventory_qty": [1, 1, 1], "inventory_value": [10, 10, 10],
+                "trajectory_cash_f32": np.full((3, 2), 39, dtype=np.float32),
+                "trajectory_equity_f32": np.full((3, 2), 39, dtype=np.float32),
+                "trajectory_timestamps": np.asarray([0, 3600])}}
     candidate = {"piece": {"capital": 50, "is_current": False},
         "metrics": {"p_target": 1}, "scenario_outcomes": {
             "pnl_usdt": [3.0, 3.0, 3.0], "loss_cut": [False] * 3,
             "reached": [True] * 3, "days": [2, 2, 2],
-            "inventory_qty": [0, 0, 0], "inventory_value": [0, 0, 0]}}
+                "inventory_qty": [0, 0, 0], "inventory_value": [0, 0, 0],
+                "trajectory_cash_f32": np.full((3, 2), 53, dtype=np.float32),
+                "trajectory_equity_f32": np.full((3, 2), 53, dtype=np.float32),
+                "trajectory_timestamps": np.asarray([0, 3600])}}
 
     cache_script._apply_live_portfolio_metrics([current, candidate], [current],
         capital=100, target=2.1, max_loss_pct=18, horizon=15)
@@ -652,6 +664,87 @@ def test_vigilante_distingue_memoria_y_tiempo(monkeypatch):
     assert timeout.value.status == "timeout"
 
 
+def test_corte_cartera_usa_primera_trayectoria_y_coincide_con_evaluador():
+    import numpy as np
+    from grid.sim.meta_portfolio import evaluate_portfolio, pack_curve
+
+    times = np.arange(5, dtype=np.int64) * 3600
+    equity = np.asarray([100, 90, 80, 90, 100], dtype=np.float32)
+    cash = equity.copy()
+    curve = pack_curve(times, cash, equity, 100)
+    expected = evaluate_portfolio([curve], capital_initial=100,
+        target_usdt=3, max_loss_pct=17)
+    row = {"piece": {"capital": 100}, "scenario_outcomes": {
+        "pnl_usdt": np.asarray([0], dtype=np.float32),
+        "inventory_qty": np.asarray([0], dtype=np.float32),
+        "inventory_value": np.asarray([0], dtype=np.float32),
+        "trajectory_cash_f32": cash[None, :],
+        "trajectory_equity_f32": equity[None, :],
+        "trajectory_timestamps": times}}
+    actual = cache_script._portfolio_outcome_metrics([row], capital=100,
+        target=3, max_loss_pct=17, horizon=1)
+
+    assert expected["loss_cut"] is True
+    assert actual["p_loss"] == 1
+    assert actual["p_target"] == 0
+    assert actual["pnl_mean_usdt"] == pytest.approx(expected["pnl_usdt"], abs=1e-9)
+    assert actual["cut_slippage_mean_usdt"] == pytest.approx(
+        max(0, -17 - expected["pnl_usdt"]), abs=1e-9)
+
+
+def test_dos_contextos_sinteticos_quedan_bajo_600_mb(cache_databases, monkeypatch,
+        tmp_path):
+    db, market_path = cache_databases
+    contexts = [{"goal_id": idx, "profile": "RAPIDO", "decision_engine": "v1",
+        "horizon": 1, "capital": 100} for idx in (1, 2)]
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: contexts)
+    monkeypatch.setattr(cache_script, "_read_market_inputs", lambda *_args, **_kwargs:
+        ({}, {}, {}, {}))
+    monkeypatch.setattr(cache_script, "_evaluate_context", lambda *_args, **_kwargs: {
+        "status": "ok", "results": [], "generated_count": 0,
+        "evaluated_count": 0, "discarded": {}, "skipped_symbols": {},
+        "profile_times": {}})
+
+    result = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir=tmp_path, max_seconds=5, max_total_seconds=10)
+
+    assert len(result["runs"]) == 2
+    assert result["rss_mb"] < 600
+
+
+def test_perfil_con_20_resultados_y_3_monedas_se_guarda_parcial(
+        cache_databases, monkeypatch, tmp_path):
+    import time
+
+    db, market_path = cache_databases
+    context = {"goal_id": None, "profile": "RAPIDO", "horizon": 15,
+        "capital": 100}
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: [context])
+    monkeypatch.setattr(cache_script, "_read_market_inputs", lambda *_args, **_kwargs:
+        ({}, {}, {}, {}))
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {}} for row in rows])
+
+    def interrupted(_context, **kwargs):
+        rows = [{"piece": {"candidate_key": f"{symbol}-{idx}", "symbol": symbol,
+            "strategy": "simple"}, "metrics": {"p_target": 0}, "objective": {}}
+            for symbol in ("A", "B", "C") for idx in range(7)]
+        kwargs["on_progress"](rows[:20])
+        time.sleep(.4)
+
+    monkeypatch.setattr(cache_script, "_evaluate_context", interrupted)
+    result = cache_script.run_cache(db.engine.url.database, market_path,
+        library_dir=tmp_path, max_seconds=.15, max_total_seconds=5)
+
+    assert result["runs"][0]["status"] == "parcial"
+    with sqlite3.connect(market_path) as conn:
+        status, count = conn.execute("SELECT status,(SELECT COUNT(*) FROM "
+            "scenario_eval_results WHERE run_id=scenario_eval_runs.run_id) "
+            "FROM scenario_eval_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert status == "parcial"
+    assert count == 20
+
+
 @pytest.mark.parametrize(("limit_kwargs", "expected_status"), [
     ({"max_rss_mb": 0, "max_seconds": None}, "memoria"),
     ({"max_rss_mb": None, "max_seconds": 1}, "timeout"),
@@ -698,7 +791,7 @@ def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_pat
             "scenario_eval_results WHERE run_id=scenario_eval_runs.run_id) "
             "FROM scenario_eval_runs WHERE run_id=?", (run_id,)).fetchone()
     assert status == expected_status
-    assert count == 1
+    assert count == (1 if expected_status == "memoria" else 0)
     details = json.loads(error)
     assert details["generated_count"] == 1
     assert details["evaluated_count"] == count

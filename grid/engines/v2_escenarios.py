@@ -44,7 +44,7 @@ class V2ScenarioEngine(DecisionEngine):
             with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute("SELECT run_id,as_of,goal_id,profile,horizon_days,status,error "
-                    "FROM scenario_eval_runs WHERE profile=? AND status='ok' AND "
+                    "FROM scenario_eval_runs WHERE profile=? AND status IN ('ok','parcial') AND "
                     "(goal_id=? OR goal_id IS NULL) ORDER BY CASE WHEN goal_id=? THEN 0 "
                     "ELSE 1 END, as_of DESC LIMIT 1", (profile, goal_id, goal_id)).fetchone()
                 if row is None:
@@ -78,6 +78,7 @@ class V2ScenarioEngine(DecisionEngine):
             discarded = {}
         return {"run_id": row["run_id"], "as_of": row["as_of"],
             "horizon_days": int(row["horizon_days"]), "age_seconds": age,
+            "status": str(row["status"]),
             "candidates": candidates, "discarded": discarded}
 
     @staticmethod
@@ -181,7 +182,7 @@ class V2ScenarioEngine(DecisionEngine):
         return {"profile": str(goal.get("profile") or "").upper(),
             "decision_id": decision_id, "base_method_version": self.version,
             "engine": {"name": self.name, "version": self.version},
-            "cache": {key: cached[key] for key in ("run_id", "as_of", "age_seconds")},
+            "cache": {key: cached[key] for key in ("run_id", "as_of", "age_seconds", "status")},
             "candidates": [{"symbol": row["symbol"], "scanner_eligible": True,
                 "eligible": True} for row in cached["candidates"] if row["symbol"]],
             "alternatives": alternatives, "pieces": selected_pieces,

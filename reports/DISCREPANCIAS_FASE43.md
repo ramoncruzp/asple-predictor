@@ -773,3 +773,15 @@ node --check frontend/lab.js
 ```
 
 Resultado: **25 pruebas pasaron en 1,19 s**; `node --check frontend/lab.js` pasó. El fixture reproduce vínculos no liberados 12 `CLOSED` y 13 `PAUSED` con inventario; la caché y v2 mantienen solo el 13. También se verificó sombra con v2 operativo apagado/caché encendida y `no_disponible` con caché apagada. La regresión v1 pasó.
+
+### 43h-0g - corte por trayectoria, memoria y presupuesto por contexto
+
+El agregado de piezas vivas y alternativa utiliza trayectorias `float32` submuestreadas por hora y aplica el primer cruce del límite de pérdida antes de resumir P(límite), P(meta), ganancia congelada y desliz. Las curvas de alternativas se liberan tras combinarlas; el perfil sin piezas vivas las descarta al cerrar cada lote. El vigilante ahora mide también el plazo individual de cada contexto. Un contexto de perfil interrumpido con al menos 20 resultados y 3 monedas queda `parcial`, estado que v2 admite y registra en su plan junto con la corrida de caché.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0g-20261101-e'; python -m pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp=$base -q
+```
+
+Resultado: **53 pruebas pasaron en 9,28 s**; `node --check frontend/lab.js` pasó y `python scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La regresión de motor v1 quedó incluida. La prueba de dos contextos sintéticos terminó en 0,31 s con RSS máximo observado de **205,3 MB** (límite: 600 MB). En el contexto sintético RAPIDO de 5 símbolos, el generador produjo **135 candidatos operables + USDT quieto**, descartó 15 geometrías y tardó **0,0034 s** en construir la biblioteca de candidatos (no incluye carga/generación de escenarios ni simulación). La prueba de corte comparó la trayectoria horaria con `evaluate_portfolio`: P(límite)=1, P(meta)=0 y PnL congelado/desliz coincidentes con tolerancia 1e-9. Se verificó además la transición a `parcial` con 20 resultados de 3 símbolos tras el tope de contexto.

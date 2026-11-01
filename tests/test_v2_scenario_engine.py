@@ -285,6 +285,17 @@ def test_motor_no_usa_cache_vencida_ni_fallback(engine_databases):
             "target_usdt": 3}, plan_kind="analisis")
 
 
+def test_v2_acepta_cache_parcial_reciente(engine_databases):
+    db, market_path = engine_databases
+    _cache_row(market_path, status="parcial")
+
+    cache = V2ScenarioEngine._load_cache(SimpleNamespace(db=db),
+        {"id": 9, "profile": "RAPIDO"})
+
+    assert cache["status"] == "parcial"
+    assert cache["candidates"]
+
+
 def test_motor_apagado_falla_explicito(engine_databases):
     db, market_path = engine_databases
     with db.engine.begin() as conn:

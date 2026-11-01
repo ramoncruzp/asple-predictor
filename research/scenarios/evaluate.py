@@ -42,8 +42,17 @@ def _fast_outcomes(fast, *, capital, piece_capital, target, loss_pct):
     reached = hit_exists & ~cut
     times = np.asarray(fast["timestamps"], dtype=np.int64)
     days = np.where(reached, (times[np.minimum(hit, len(times)-1)] - int(START_TS)) / 86400, np.nan)
+    # Conserva únicamente una muestra horaria compacta para sumar carteras.
+    hourly = np.flatnonzero((times - times[0]) % 3600 == 0)
+    if not len(hourly) or hourly[0] != 0:
+        hourly = np.r_[0, hourly]
+    if times[-1] not in times[hourly]:
+        hourly = np.r_[hourly, len(times) - 1]
     return {"pnl_usdt": pnl, "loss_cut": cut, "reached": reached, "days": days,
-        "capital_unused_usdt": float(capital) - float(piece_capital)}
+        "capital_unused_usdt": float(capital) - float(piece_capital),
+        "trajectory_cash_f32": np.asarray(fast["cash_curve"][:, hourly], dtype=np.float32),
+        "trajectory_equity_f32": np.asarray(fast["equity_curve"][:, hourly], dtype=np.float32),
+        "trajectory_timestamps": times[hourly]}
 
 
 def _piece_geometry(piece, *, symbol, price, sigma24, horizon, profile):
@@ -469,7 +478,7 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                 results = evaluate_smart_scenarios(common, n_levels=int(piece.get("n", 6)),
                     capital=float(piece["capital"]), low=low, high=high,
                     filters=store.filters(symbol), sigma_path=market["sigma_path"],
-                    n_smart=smart_count, workers=workers, max_loss_pct=loss_pct,
+                    n_smart=smart_count, workers=workers, max_loss_pct=None,
                     fee_pct=fee_pct)
                 for offset, result in enumerate(results):
                     piece_curves[index].append(result["curve"])
@@ -483,10 +492,17 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                         {"BUY_FILLED", "SELL_FILLED"} for event in result.get("events", [])))
                     if record_pairs:
                         per_index[offset][index] = ("smart", result)
-                from grid.sim.meta_portfolio import evaluate_portfolio
+                from grid.sim.meta_portfolio import evaluate_portfolio, unpack_curve
                 smart_outcomes = [evaluate_portfolio([result["curve"]],
                     capital_initial=float(capital), target_usdt=meta,
                     max_loss_pct=loss_pct) for result in results]
+                decoded = [unpack_curve(result["curve"]) for result in results]
+                smart_times = decoded[0][0]
+                hourly = np.flatnonzero((smart_times - smart_times[0]) % 3600 == 0)
+                if not len(hourly) or hourly[0] != 0:
+                    hourly = np.r_[0, hourly]
+                if smart_times[-1] not in smart_times[hourly]:
+                    hourly = np.r_[hourly, len(smart_times) - 1]
                 raw[index]["outcomes"].append({
                     "pnl_usdt": np.asarray([row["pnl_usdt"] for row in smart_outcomes], dtype=np.float64),
                     "loss_cut": np.asarray([row["loss_cut"] for row in smart_outcomes], dtype=bool),
@@ -494,18 +510,21 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     "days": np.asarray([np.nan if row["days"] is None else row["days"]
                         for row in smart_outcomes], dtype=np.float64),
                     "capital_unused_usdt": float(capital) - float(piece["capital"]),
+                    "trajectory_cash_f32": np.asarray([row[1][hourly] for row in decoded], dtype=np.float32),
+                    "trajectory_equity_f32": np.asarray([row[2][hourly] for row in decoded], dtype=np.float32),
+                    "trajectory_timestamps": smart_times[hourly],
                 })
             elif strategy in {"bot", "simple", "smart"}:
                 fastsim_started = time.perf_counter()
                 if strategy == "bot" and not piece.get("initial_cells"):
                     fast = simulate_bot(common, capital=float(piece["capital"]), buy_price=low,
-                        sell_price=high, filters=store.filters(symbol), max_loss_pct=loss_pct,
+                        sell_price=high, filters=store.filters(symbol), max_loss_pct=None,
                         target_usdt=meta, initial_timestamp=START_TS, pack_curves=keep_curves,
                         fee_pct=fee_pct)
                 else:
                     fast = simulate_simple(common, n_levels=int(piece.get("n", 6)),
                         capital=float(piece["capital"]), low=low, high=high,
-                        filters=store.filters(symbol), max_loss_pct=loss_pct, target_usdt=meta,
+                        filters=store.filters(symbol), max_loss_pct=None, target_usdt=meta,
                         initial_timestamp=START_TS, pack_curves=keep_curves, fee_pct=fee_pct,
                         initial_cells=piece.get("initial_cells"))
                 timings["fastsim_s"] = timings.get("fastsim_s", 0.0) + time.perf_counter() - fastsim_started
@@ -549,8 +568,10 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
             inventory_value=values["inventory_value"], seed=seed)
         metrics_started = time.perf_counter()
         outcomes = values["outcomes"]
-        vector_outcomes = ({key: (np.concatenate([row[key] for row in outcomes])
-            if key != "capital_unused_usdt" else outcomes[0][key])
+        vector_outcomes = ({key: (np.concatenate([row[key] for row in outcomes], axis=0)
+            if key in {"pnl_usdt", "loss_cut", "reached", "days",
+                "trajectory_cash_f32", "trajectory_equity_f32"}
+            else outcomes[0][key])
             for key in outcomes[0]} if outcomes else {})
         metrics = (summarize_outcomes(vector_outcomes, capital_initial=capital,
             max_loss_pct=loss_pct, horizon_days=horizon, cycles=values["cycles"],
@@ -574,8 +595,10 @@ def evaluate_pieces(pieces, *, perfil, capital, meta, n_scenarios=1000,
                     "reached": outcome["reached"]})
         scenario_outcomes = {}
         if not keep_curves and outcomes:
-            scenario_outcomes = {key: (np.concatenate([row[key] for row in outcomes])
-                if key != "capital_unused_usdt" else outcomes[0][key])
+            scenario_outcomes = {key: (np.concatenate([row[key] for row in outcomes], axis=0)
+                if key in {"pnl_usdt", "loss_cut", "reached", "days",
+                    "trajectory_cash_f32", "trajectory_equity_f32"}
+                else outcomes[0][key])
                 for key in outcomes[0]}
             scenario_outcomes["inventory_qty"] = np.asarray(values["inventory_qty"], dtype=np.float32)
             scenario_outcomes["inventory_value"] = np.asarray(values["inventory_value"], dtype=np.float32)

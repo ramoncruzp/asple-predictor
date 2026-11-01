@@ -468,6 +468,19 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 kwargs["keep_curves"] = False
                 kwargs["timings"] = evaluator_timings
             rows, errors = _evaluate_with_isolation(evaluator, symbol_pieces, **kwargs)
+            if phase_index == 1 and not baseline_failed:
+                baseline_rows = [row for row in first_rows
+                    if (row.get("piece") or {}).get("is_current")]
+                if baseline_rows:
+                    _apply_live_portfolio_metrics(rows, baseline_rows,
+                        capital=capital, target=context["target"],
+                        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+                else:
+                    for row in rows:
+                        outcomes = row.get("scenario_outcomes") or {}
+                        for key in ("trajectory_cash_f32", "trajectory_equity_f32",
+                                "trajectory_timestamps"):
+                            outcomes.pop(key, None)
             first_rows.extend(rows)
             failed_candidates.update(errors)
             if phase_index == 0 and errors:
@@ -556,7 +569,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     live_rows = [row for row in first_rows
         if (row.get("piece") or {}).get("is_current")]
     if not baseline_failed:
-        _apply_live_portfolio_metrics([*first_rows, *second_rows], live_rows,
+        _apply_live_portfolio_metrics(live_rows, live_rows,
+            capital=capital, target=context["target"],
+            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+        _apply_live_portfolio_metrics(second_rows, live_rows,
             capital=capital, target=context["target"],
             max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
     if on_progress and live_rows:
@@ -638,27 +654,44 @@ def _scenario_metrics(row):
 
 
 def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
-    """Resume la suma pareada de resultados compactos de las piezas vivas."""
+    """Combina trayectorias horarias y congela el resultado al primer corte."""
     usable = [row.get("scenario_outcomes") or {} for row in rows]
-    if not usable or any(not len(item.get("pnl_usdt", [])) for item in usable):
+    if not usable or any(item.get("trajectory_equity_f32") is None for item in usable):
         return None
-    count = min(len(item["pnl_usdt"]) for item in usable)
-    pnl = sum((np.asarray(item["pnl_usdt"][:count], dtype=np.float64)
-        for item in usable), np.zeros(count, dtype=np.float64))
+    count = min(len(item["trajectory_equity_f32"]) for item in usable)
+    timestamps = np.asarray(usable[0]["trajectory_timestamps"], dtype=np.int64)
+    if any(not np.array_equal(timestamps,
+            np.asarray(item["trajectory_timestamps"], dtype=np.int64)) for item in usable[1:]):
+        return None
+    used = sum(float((row.get("piece") or {}).get("capital", 0)) for row in rows)
+    idle = float(capital) - used
+    cash = np.full((count, len(timestamps)), idle, dtype=np.float64)
+    equity = cash.copy()
+    for item in usable:
+        cash += np.asarray(item["trajectory_cash_f32"][:count], dtype=np.float64)
+        equity += np.asarray(item["trajectory_equity_f32"][:count], dtype=np.float64)
+    hit_mask = cash >= float(capital) + float(target)
+    hit_exists = hit_mask.any(axis=1)
+    hit = np.where(hit_exists, hit_mask.argmax(axis=1), len(timestamps))
+    if max_loss_pct is not None and float(max_loss_pct) > 0:
+        loss_mask = equity <= float(capital) * (1 - float(max_loss_pct) / 100)
+        loss_exists = loss_mask.any(axis=1)
+        loss = np.where(loss_exists, loss_mask.argmax(axis=1), len(timestamps))
+    else:
+        loss_exists = np.zeros(count, dtype=bool)
+        loss = np.full(count, len(timestamps), dtype=int)
+    cut = loss_exists & ((~hit_exists) | (loss <= hit))
+    end_index = np.where(cut, loss, len(timestamps) - 1)
+    pnl = equity[np.arange(count), end_index] - float(capital)
+    reached = hit_exists & ~cut
+    days = np.where(reached, (timestamps[np.minimum(hit, len(timestamps)-1)] - timestamps[0]) / 86400, np.nan)
     inventory_qty = sum((np.asarray(item.get("inventory_qty", [0] * count)[:count],
         dtype=np.float64) for item in usable), np.zeros(count, dtype=np.float64))
     inventory_value = sum((np.asarray(item.get("inventory_value", [0] * count)[:count],
         dtype=np.float64) for item in usable), np.zeros(count, dtype=np.float64))
-    reached = pnl >= float(target)
-    loss_cut = pnl <= -float(capital) * float(max_loss_pct) / 100
-    days = np.full(count, np.nan, dtype=np.float64)
-    for item in usable:
-        item_days = np.asarray(item.get("days", []), dtype=np.float64)[:count]
-        if len(item_days) == count:
-            days = np.where(np.isfinite(item_days), item_days, days)
-    outcomes = {"pnl_usdt": pnl, "loss_cut": loss_cut, "reached": reached,
+    outcomes = {"pnl_usdt": pnl, "loss_cut": cut, "reached": reached,
         "days": days, "capital_unused_usdt": max(0.0, float(capital) -
-            sum(float((row.get("piece") or {}).get("capital", 0)) for row in rows))}
+            used)}
     return summarize_outcomes(outcomes, capital_initial=capital,
         max_loss_pct=max_loss_pct, horizon_days=horizon,
         inventory_qty=inventory_qty, inventory_value=inventory_value)
@@ -684,6 +717,10 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         if combined is not None:
             row["metrics_pieza_sola"] = row.get("metrics")
             row["metrics"] = combined
+        outcomes = row.get("scenario_outcomes") or {}
+        outcomes.pop("trajectory_cash_f32", None)
+        outcomes.pop("trajectory_equity_f32", None)
+        outcomes.pop("trajectory_timestamps", None)
 
 
 def _evaluate_with_isolation(evaluator, pieces, **kwargs):
@@ -737,10 +774,14 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             (f"-{RETENTION_DAYS} days",))
     watchdog_stop = threading.Event()
     main_thread_id = threading.get_ident()
+    active_context_started = [None]
     def watchdog():
-        while not watchdog_stop.wait(2):
+        interval = min(2.0, max(.05, float(max_seconds) / 10)) if max_seconds else 2.0
+        while not watchdog_stop.wait(interval):
             try:
                 _check_limits(started, max_rss_mb, max_total_seconds)
+                if active_context_started[0] is not None:
+                    _check_limits(active_context_started[0], max_rss_mb, max_seconds)
             except CacheLimitExceeded as exc:
                 error_type = CacheMemoryExceeded if exc.status == "memoria" else CacheTimeoutExceeded
                 import ctypes
@@ -762,6 +803,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
         with store._connect() as conn:
             run_id = _insert_run(conn, context, as_of, n_scenarios)
         context_started = time.perf_counter()
+        active_context_started[0] = context_started
         progress_state = {}
         persistence_seconds = [0.0]
         def check_context_limits():
@@ -839,6 +881,14 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 with store._connect() as conn:
                     count = conn.execute("SELECT COUNT(*) FROM scenario_eval_results WHERE run_id=?",
                         (run_id,)).fetchone()[0]
+                    symbols_done = conn.execute("SELECT COUNT(DISTINCT symbol) FROM scenario_eval_results "
+                        "WHERE run_id=? AND symbol IS NOT NULL", (run_id,)).fetchone()[0]
+                if context.get("goal_id") is None and count >= 20 and symbols_done >= 3:
+                    status = "parcial"
+                    error_details["status_limite"] = exc.status
+                    with store._connect() as conn:
+                        conn.execute("UPDATE scenario_eval_runs SET status=?,error=? WHERE run_id=?",
+                            (status, _json_dumps(error_details, ensure_ascii=False), run_id))
                 results_summary.append({"run_id": run_id, "status": status,
                     **progress_state, "discarded_count": error_details["discarded_count"],
                     "evaluated_count": count})
@@ -847,6 +897,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     f"evaluados={count} descartados={json.dumps(progress_state.get('discarded', {}), ensure_ascii=False)} "
                     f"segundos_moneda={json.dumps(progress_state.get('candidate_seconds', {}), ensure_ascii=False)} "
                     f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
+                active_context_started[0] = None
                 if max_total_seconds is None or time.perf_counter() - started < max_total_seconds:
                     continue
                 skipped_contexts.extend(row.get("goal_id") or row["profile"] for row in contexts[len(results_summary):])
@@ -855,6 +906,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             watchdog_stop.set()
             watcher.join(timeout=2)
             raise
+        finally:
+            active_context_started[0] = None
     watchdog_stop.set()
     watcher.join(timeout=2)
     return {"contexts": len(contexts), "runs": results_summary,
