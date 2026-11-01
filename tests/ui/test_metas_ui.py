@@ -263,7 +263,8 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
                 "candidates": [{"symbol": "ZROUSDT", "sigma_24h": .03,
                     "price": 2.4, "generated_count": 24, "evaluated_count": 20,
                     "discarded_count": 4, "discarded_reason": "filtro",
-                    "best_p_target": .4, "best_pnl_mean_usdt": 1.2},
+                    "best_p_target": .4, "best_pnl_mean_usdt": 1.2,
+                    "pasada": "pasada_1 + pasada_2"},
                     {"symbol": "PEPEUSDT", "generated_count": 0,
                         "evaluated_count": 0, "skipped_reason": "sin biblioteca"}],
                 "portfolio": {"steps": []}, "discarded_alternatives": []}
@@ -279,6 +280,7 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
     assert "Ganancia media" in content and "P(tocar el límite)" in content
     assert "Desliz esperado" in content
     assert "P(terminar con inventario)" in content and "parcial" in content
+    assert "pasada_1 + pasada_2" in content
     assert "PEPEUSDT" in content and "sin biblioteca" in content
     assert "Score Scanner" not in content and "Ventanas" not in content
     assert "Probabilidad ajustada" not in content

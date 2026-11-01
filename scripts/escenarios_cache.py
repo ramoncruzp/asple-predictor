@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 import math
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -29,7 +31,7 @@ from research.scenarios.candidates import build_candidates, build_smart_candidat
 from research.scenarios.evaluate import (_sigma_estimates, evaluate_pieces,
     prepare_scenario_batches, scenario_source_date_plan)
 from research.scenarios.metrics import summarize_outcomes
-from research.scenarios.objective import objective_limits, rank_alternatives_v2
+from research.scenarios.objective import objective_limits, objective_v2, rank_alternatives_v2
 
 RETENTION_DAYS = 7
 SCENARIO_COUNT = 1000
@@ -238,6 +240,25 @@ def _remaining_target(target, current_equity, initial):
     """Ajusta el objetivo por la ganancia o pérdida acumulada de la meta."""
     return max(0.0, float(target) - (float(current_equity) - float(initial)))
 
+
+def _split_candidate_passes(pieces, *, free_cash, capital_max_by_symbol):
+    """Separa el barrido inicial compacto del resto de geometrías y capitales."""
+    first, rest = [], []
+    max_by_symbol = {}
+    for piece in pieces:
+        symbol = str(piece.get("symbol") or "").upper()
+        allowed = min(float(free_cash), float(capital_max_by_symbol.get(symbol, free_cash)))
+        max_by_symbol[symbol] = allowed
+        capital = float(piece.get("capital") or 0)
+        at_maximum = abs(capital - allowed) <= max(1e-7, abs(allowed) * 1e-7)
+        simple = (piece.get("strategy") == "simple" and int(piece.get("n", 0)) == 6
+            and float(piece.get("width_sigma", -1)) in (.5, 1.0) and at_maximum)
+        bot = (piece.get("strategy") == "bot" and
+            float(piece.get("buy_offset_pct", 0)) == -1.5 and
+            float(piece.get("sell_offset_pct", 0)) == 1.5 and at_maximum)
+        (first if simple or bot else rest).append(piece)
+    return first, rest, max_by_symbol
+
 def _read_market_inputs(store, *, library_dir="data/derived/scenario_lib", horizon_days=0):
     with store._connect() as conn:
         rows = conn.execute(
@@ -401,7 +422,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         filters, prices, sigmas, skipped, evaluator, check_limits=None,
         on_progress=None, progress_state=None, n_scenarios=SCENARIO_COUNT,
         symbol_filter=None, perfilar=False, remaining_seconds=None,
-        trajectory_path=None):
+        trajectory_path=None, max_rss_mb=DEFAULT_MAX_RSS_MB):
     progress_state = {} if progress_state is None else progress_state
     if context.get("balance_approximate"):
         return {"status": "skipped", "reason": "efectivo o inventario sin atribución completa"}
@@ -437,6 +458,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     if symbol_filter:
         candidates = [piece for piece in candidates
             if str(piece.get("symbol", "")).upper() == str(symbol_filter).upper()]
+    first_pass_candidates, second_pass_candidates, _max_by_symbol = _split_candidate_passes(
+        [piece for piece in candidates if not piece.get("is_current")],
+        free_cash=free, capital_max_by_symbol=capital_max_by_symbol)
     symbol_stats = {}
     for symbol in filters:
         symbol_stats[symbol] = {"symbol": symbol, "price": prices.get(symbol),
@@ -445,12 +469,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 for piece in candidates) + sum(built.get("discarded_by_symbol", {}).get(
                     symbol, {}).values())), "evaluated_count": 0,
             "discarded": dict(built.get("discarded_by_symbol", {}).get(symbol, {})),
-            "skipped_reason": skipped.get(symbol)}
+            "skipped_reason": skipped.get(symbol), "pasada": "sin_tiempo",
+            "pasada_1_completa": False}
     progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
         "generated_candidates": len(candidates), "evaluated_count": 0,
         "discarded": dict(built["discarded"]), "candidate_seconds": {},
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
         "live_capital_warning": live_capital_warning, "symbol_stats": symbol_stats})
+    progress_state["pass1_coverage"] = {"expected_symbols": sorted(
+        {str(symbol_filter).upper()} if symbol_filter else filters),
+        "covered_symbols": [], "complete": False}
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
@@ -463,6 +491,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "metricas_bootstrap_s": 0.0,
         "objetivo_s": 0.0, "escritura_bd_s": 0.0,
         "lotes_fastsim": 0, "filas_por_lote": [], "segundos_por_lote": []}
+    pass_seconds = {"pasada_1": 0.0, "pasada_2": 0.0}
+    progress_state["pass_seconds"] = dict(pass_seconds)
     first_rows, failed_candidates = [], {}
     candidate_seconds = {}
     rss_per_symbol = {}
@@ -589,29 +619,145 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             "JOIN symbols s ON s.id=c.symbol_id WHERE c.interval='5m' AND c.open_ts>=? "
             "GROUP BY s.symbol", (int(latest or 0) - 24 * 3600,)).fetchall()
     liquidity = {str(row[0]).upper(): float(row[1] or 0) for row in liquidity_rows}
-    symbol_order = sorted({str(piece["symbol"]).upper() for piece in pieces},
+    pass1_required_symbols = ({str(symbol_filter).upper()} if symbol_filter else set(filters))
+    symbol_order = sorted(({str(piece["symbol"]).upper() for piece in pieces} |
+        (pass1_required_symbols if symbol_filter else set(filters))),
         key=lambda symbol: (symbol not in live_symbols, -liquidity.get(symbol, 0), symbol))
     scenario_dates = (scenario_source_date_plan(symbol_order,
         horizon_days=context["horizon"], n_scenarios=n_scenarios, seed=43,
         library_dir=library_dir) if evaluator is evaluate_pieces and symbol_order else None)
     current_keys = {str(piece["candidate_key"]) for piece in current_pieces}
-    phases = (
-        [piece for piece in pieces if str(piece.get("candidate_key")) in current_keys],
-        [piece for piece in pieces if str(piece.get("candidate_key")) not in current_keys],
-    )
+    phases = ((0, [piece for piece in pieces if str(piece.get("candidate_key")) in current_keys]),
+        (1, first_pass_candidates), (2, second_pass_candidates))
     baseline_failed = False
-    for phase_index, phase_pieces in enumerate(phases):
-        if phase_index == 1 and baseline_failed:
+    for phase_index, phase_pieces in phases:
+        if phase_index > 0 and baseline_failed:
             for piece in phase_pieces:
                 failed_candidates[str(piece.get("candidate_key") or _candidate_key(piece))] = (
                     "sin_baseline: falló mantener; alternativa no evaluada")
             continue
-        phase_symbols = [symbol for symbol in symbol_order if any(
+        phase_symbols = ([symbol for symbol in symbol_order if any(
             str(piece["symbol"]).upper() == symbol for piece in phase_pieces)]
+            if phase_index != 1 else list(symbol_order))
+        if phase_index == 2:
+            best_first_pass = {}
+            for row in first_rows:
+                piece = row.get("piece") or {}
+                if piece.get("is_current"):
+                    continue
+                symbol = str(piece.get("symbol") or "").upper()
+                probability = float((row.get("metrics") or {}).get("p_target", 0.0))
+                best_first_pass[symbol] = max(probability,
+                    best_first_pass.get(symbol, float("-inf")))
+            phase_symbols.sort(key=lambda symbol: (-best_first_pass.get(symbol, -1.0),
+                symbol_order.index(symbol)))
+        phase_work_symbols = [symbol for symbol in phase_symbols if any(
+            str(piece.get("symbol") or "").upper() == symbol for piece in phase_pieces)]
+        parallel_pool = None
+        parallel_futures = {}
+        next_parallel = 0
+        if phase_index > 0 and evaluator is evaluate_pieces and phase_work_symbols:
+            parallel_pool = ProcessPoolExecutor(max_workers=2,
+                mp_context=multiprocessing.get_context("spawn"))
+            baseline_rows = [row for row in first_rows
+                if (row.get("piece") or {}).get("is_current")]
+            def submit_currency(symbol):
+                symbol_pieces_for_task = [piece for piece in phase_pieces
+                    if str(piece.get("symbol") or "").upper() == symbol]
+                return parallel_pool.submit(_evaluate_currency_worker, {
+                    "symbol": symbol, "pieces": symbol_pieces_for_task,
+                    "evaluator": evaluator, "eval_kwargs": eval_kwargs,
+                    "market_path": market_path, "library_dir": library_dir,
+                    "horizon": context["horizon"], "n_scenarios": n_scenarios,
+                    "scenario_dates": scenario_dates, "live_rows": baseline_rows,
+                    "capital": capital, "target": context["target"],
+                    "max_loss_pct": context["max_loss_pct"],
+                    "loss_confirm_minutes": (context.get("profile_config") or {}).get(
+                        "loss_confirm_minutes", 2), "profile": context["profile"],
+                    "cut_slippage_expected_max_pct": cut_slippage_expected_max_pct,
+                    "max_rss_mb": max_rss_mb,
+                    "max_seconds": remaining_seconds() if remaining_seconds else max_seconds})
+            while next_parallel < min(2, len(phase_work_symbols)):
+                symbol = phase_work_symbols[next_parallel]
+                parallel_futures[symbol] = submit_currency(symbol)
+                next_parallel += 1
         for symbol in phase_symbols:
             symbol_pieces = [piece for piece in phase_pieces
                 if str(piece["symbol"]).upper() == symbol]
+            if phase_index == 2:
+                symbol_stats[symbol]["pasada"] = ("pasada_1 + pasada_2"
+                    if symbol_stats[symbol].get("pasada_1_completa") else "pasada_2")
+                progress_state["symbol_stats"] = symbol_stats
+            if not symbol_pieces:
+                if check_limits:
+                    check_limits()
+                if phase_index == 1:
+                    symbol_stats[symbol]["pasada_1_completa"] = True
+                    symbol_stats[symbol]["pasada"] = "pasada_1"
+                    covered = sorted(key for key, value in symbol_stats.items()
+                        if value.get("pasada_1_completa"))
+                    progress_state["pass1_coverage"] = {"expected_symbols": sorted(pass1_required_symbols),
+                        "covered_symbols": covered,
+                        "complete": pass1_required_symbols.issubset(covered)}
+                    progress_state["symbol_stats"] = symbol_stats
+                continue
             symbol_started = time.perf_counter()
+            if parallel_pool is not None and symbol in parallel_futures:
+                result = parallel_futures.pop(symbol).result()
+                if next_parallel < len(phase_work_symbols):
+                    next_symbol = phase_work_symbols[next_parallel]
+                    parallel_futures[next_symbol] = submit_currency(next_symbol)
+                    next_parallel += 1
+                for trajectory_row in result["trajectories"]:
+                    retain_trajectory(trajectory_row)
+                rows = result["rows"]
+                errors = result["errors"]
+                first_rows.extend(rows)
+                failed_candidates.update(errors)
+                progress_state["evaluated_count"] += len(rows)
+                symbol_stats[symbol]["evaluated_count"] += len(rows)
+                for reason in errors.values():
+                    label = reason.split(":", 1)[0]
+                    progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+                    symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
+                if phase_index in (1, 2):
+                    pass_key = f"pasada_{phase_index}"
+                    progress_state["pass_seconds"][pass_key] = pass_seconds[pass_key] + (
+                        time.perf_counter() - symbol_started)
+                if on_progress and rows:
+                    on_progress(rows)
+                candidate_seconds[symbol] = round(candidate_seconds.get(symbol, 0.0) +
+                    result["seconds"], 3)
+                pass_seconds[f"pasada_{phase_index}"] += result["seconds"]
+                rss_per_symbol[symbol] = {"rss_actual_mb": result.get("rss_actual_mb"),
+                    "rss_hwm_mb": result.get("rss_hwm_mb"),
+                    "rss_hwm_child_mb": result.get("rss_hwm_mb"), "segundos": result["seconds"]}
+                progress_state["candidate_seconds"] = dict(candidate_seconds)
+                progress_state["rss_por_moneda"] = dict(rss_per_symbol)
+                progress_state["pass_seconds"] = dict(pass_seconds)
+                profile_times["carga_biblioteca_s"] += result["generation_timings"].get("library_load_s", 0.0)
+                profile_times["generacion_escenarios_s"] += result["generation_timings"].get("generation_s", 0.0)
+                profile_times["simulacion_fastsim_s"] += result["timings"].get("fastsim_s", 0.0)
+                profile_times["metricas_bootstrap_s"] += result["timings"].get("metrics_s", 0.0)
+                profile_times["lotes_fastsim"] += result["timings"].get("batch_count", 0)
+                profile_times["filas_por_lote"].extend(result["timings"].get("batch_rows", []))
+                profile_times["segundos_por_lote"].extend(result["timings"].get("batch_seconds", []))
+                if result.get("limit_status"):
+                    raise CacheLimitExceeded(result["limit_status"],
+                        f"hijo de {symbol} alcanzó el tope de {result['limit_status']}")
+                if check_limits:
+                    check_limits()
+                if phase_index == 1:
+                    symbol_stats[symbol]["pasada_1_completa"] = True
+                    symbol_stats[symbol]["pasada"] = "pasada_1"
+                    covered = sorted(key for key, value in symbol_stats.items()
+                        if value.get("pasada_1_completa"))
+                    progress_state["pass1_coverage"] = {"expected_symbols": sorted(pass1_required_symbols),
+                        "covered_symbols": covered,
+                        "complete": pass1_required_symbols.issubset(covered)}
+                progress_state["symbol_stats"] = symbol_stats
+                gc.collect()
+                continue
             generation_timings = {}
             batches = (prepare_scenario_batches(symbol, horizon_days=context["horizon"],
                 n_scenarios=n_scenarios, seed=43, db_path=market_path,
@@ -629,7 +775,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             for batch_start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
                 piece_batch = symbol_pieces[batch_start:batch_start + MAX_PIECES_PER_BATCH]
                 rows, errors = _evaluate_with_isolation(evaluator, piece_batch, **kwargs)
-                if phase_index == 1 and not baseline_failed:
+                if phase_index > 0 and not baseline_failed:
                     baseline_rows = [row for row in first_rows
                         if (row.get("piece") or {}).get("is_current")]
                     if baseline_rows:
@@ -660,6 +806,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                     label = reason.split(":", 1)[0]
                     progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
                     symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
+                if phase_index in (1, 2):
+                    pass_key = f"pasada_{phase_index}"
+                    progress_state["pass_seconds"][pass_key] = pass_seconds[pass_key] + (
+                        time.perf_counter() - symbol_started)
                 if on_progress and rows:
                     on_progress(rows)
                 del rows, errors, piece_batch
@@ -668,10 +818,23 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                     check_limits()
             del batches, symbol_pieces
             gc.collect()
+            elapsed_symbol = time.perf_counter() - symbol_started
             candidate_seconds[symbol] = round(candidate_seconds.get(symbol, 0.0) +
-                time.perf_counter() - symbol_started, 3)
-            progress_state["candidate_seconds"] = dict(candidate_seconds)
+                elapsed_symbol, 3)
+            if phase_index in (1, 2):
+                pass_seconds[f"pasada_{phase_index}"] += elapsed_symbol
             if phase_index == 1:
+                symbol_stats[symbol]["pasada_1_completa"] = True
+                symbol_stats[symbol]["pasada"] = "pasada_1"
+                covered = sorted(key for key, value in symbol_stats.items()
+                    if value.get("pasada_1_completa"))
+                progress_state["pass1_coverage"] = {"expected_symbols": sorted(pass1_required_symbols),
+                    "covered_symbols": covered,
+                    "complete": pass1_required_symbols.issubset(covered)}
+                progress_state["symbol_stats"] = symbol_stats
+            progress_state["pass_seconds"] = dict(pass_seconds)
+            progress_state["candidate_seconds"] = dict(candidate_seconds)
+            if phase_index > 0:
                 rss_per_symbol[symbol] = {"rss_actual_mb": _rss_current_mb(),
                     "rss_hwm_mb": _rss_max_mb(), "segundos": candidate_seconds[symbol]}
                 progress_state["rss_por_moneda"] = dict(rss_per_symbol)
@@ -680,6 +843,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             profile_times["lotes_fastsim"] += evaluator_timings.get("batch_count", 0)
             profile_times["filas_por_lote"].extend(evaluator_timings.get("batch_rows", []))
             profile_times["segundos_por_lote"].extend(evaluator_timings.get("batch_seconds", []))
+        if parallel_pool is not None:
+            parallel_pool.shutdown(wait=True, cancel_futures=True)
     first = {"pieces": first_rows, "skipped_symbols": skipped}
     objective_started = time.perf_counter()
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
@@ -782,6 +947,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         for row in second_rows:
             retain_trajectory(row)
     trajectory_file = write_trajectory_archive()
+    child_peaks = sorted((float(row["rss_hwm_child_mb"])
+        for row in rss_per_symbol.values() if row.get("rss_hwm_child_mb") is not None),
+        reverse=True)
+    parallel_rss_bound = round(_rss_max_mb() + sum(child_peaks[:2]), 2)
     if on_progress and live_rows:
         on_progress([*first_rows, *second_rows])
     results = []
@@ -839,9 +1008,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
         "live_capital_warning": live_capital_warning,
         "failed_candidates": failed_candidates, "skipped_symbols": skipped,
+        "pass1_coverage": progress_state.get("pass1_coverage", {}),
         "symbol_stats": symbol_stats,
         "trajectory_file": trajectory_file,
         "candidate_seconds": candidate_seconds, "rss_por_moneda": rss_per_symbol,
+        "pass_seconds": pass_seconds,
+        "rss_paralelo_cota_mb": parallel_rss_bound,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
         "generated_candidates": len(candidates) + smart_generated,
         "discarded_count": sum(discarded.values()), "profile_times": profile_times,
@@ -1002,6 +1174,94 @@ def _evaluate_with_isolation(evaluator, pieces, **kwargs):
         return left + right, {**left_errors, **right_errors}
 
 
+def _evaluate_currency_worker(payload):
+    """Evalúa una moneda en un hijo y devuelve solo métricas y trayectorias finalistas."""
+    started = time.perf_counter()
+    if os.name == "posix":
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    symbol = payload["symbol"]
+    timings, generation_timings = {}, {}
+    batches = payload.get("scenario_batches")
+    if "scenario_batches" not in payload:
+        batches = prepare_scenario_batches(symbol, horizon_days=payload["horizon"],
+            n_scenarios=payload["n_scenarios"], seed=43, db_path=payload["market_path"],
+            library_dir=payload["library_dir"], timings=generation_timings,
+            scenario_dates=payload["scenario_dates"])
+    kwargs = dict(payload["eval_kwargs"], scenario_batches=batches,
+        keep_curves=False, keep_5m=True, timings=timings)
+    all_rows, errors = [], {}
+    retained = {}
+    limit_status = None
+    for start in range(0, len(payload["pieces"]), MAX_PIECES_PER_BATCH):
+        current = _rss_current_mb()
+        if payload["max_rss_mb"] is not None and current is not None and current > payload["max_rss_mb"]:
+            limit_status = "memoria"
+            break
+        if payload["max_seconds"] is not None and time.perf_counter() - started > payload["max_seconds"]:
+            limit_status = "timeout"
+            break
+        rows, batch_errors = _evaluate_with_isolation(payload["evaluator"],
+            payload["pieces"][start:start + MAX_PIECES_PER_BATCH], **kwargs)
+        errors.update(batch_errors)
+        for row in rows:
+            piece = row.get("piece") or {}
+            single_metrics = row.get("metrics") or {}
+            row["metrics_pieza_sola"] = single_metrics
+            current_rows = payload.get("live_rows") or []
+            combined = _portfolio_outcome_metrics([*current_rows, row],
+                capital=payload["capital"], target=payload["target"],
+                max_loss_pct=payload["max_loss_pct"], horizon=payload["horizon"],
+                loss_confirm_minutes=payload["loss_confirm_minutes"])
+            if combined is not None:
+                row["metrics"] = combined
+            key = str(piece.get("candidate_key") or _candidate_key(piece))
+            objective = objective_v2(row.get("metrics") or {}, perfil=payload["profile"],
+                capital_meta=payload["capital"],
+                cut_slippage_expected_max_pct=payload["cut_slippage_expected_max_pct"])
+            order = (not bool(objective["factible"]), *tuple(objective["clave_orden"]))
+            symbol_rows = retained.setdefault("_meta_" + symbol, {})
+            symbol_rows[key] = {"order": order, "bot": piece.get("strategy") == "bot"}
+            by_symbol = sorted((item["order"], candidate_key)
+                for candidate_key, item in symbol_rows.items())
+            keep = {candidate_key for _order, candidate_key in by_symbol[:MAX_FINALISTS]}
+            bots = sorted((item["order"], candidate_key)
+                for candidate_key, item in symbol_rows.items() if item["bot"])
+            if bots:
+                keep.add(bots[0][1])
+            outcomes = row.get("scenario_outcomes") or {}
+            if key in keep:
+                retained[key] = {"piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
+                    "scenario_outcomes": {name: np.asarray(outcomes[name]).copy()
+                        for name in ("trajectory_cash_f32", "trajectory_equity_f32",
+                            "inventory_qty", "inventory_value", "trajectory_timestamps",
+                            "trajectory_low_equity_5m_f32", "trajectory_timestamps_5m")
+                        if outcomes.get(name) is not None}}
+            for old_key in list(retained):
+                if old_key != "_meta_" + symbol and old_key not in keep:
+                    del retained[old_key]
+            compact = {"piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
+                "metrics_pieza_sola": single_metrics}
+            all_rows.append(compact)
+        del rows
+        gc.collect()
+        hwm = _rss_max_mb()
+        if payload["max_rss_mb"] is not None and hwm is not None and hwm > payload["max_rss_mb"]:
+            limit_status = "memoria"
+            break
+        if payload["max_seconds"] is not None and time.perf_counter() - started > payload["max_seconds"]:
+            limit_status = "timeout"
+            break
+    return {"symbol": symbol, "pid": os.getpid(), "rows": all_rows, "errors": errors,
+        "trajectories": [value for key, value in retained.items()
+            if not key.startswith("_meta_")],
+        "generation_timings": generation_timings, "timings": timings,
+        "seconds": time.perf_counter() - started, "rss_actual_mb": _rss_current_mb(),
+        "rss_hwm_mb": _rss_max_mb(), "limit_status": limit_status}
+
+
 def _context_priority(context):
     if context.get("goal_id") is None:
         return (2, int(context.get("goal_id") or 0))
@@ -1122,6 +1382,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 progress_state=progress_state, n_scenarios=n_scenarios,
                 symbol_filter=symbol_filter, perfilar=perfilar,
                 remaining_seconds=remaining_context_seconds,
+                max_rss_mb=max_rss_mb,
                 trajectory_path=trajectory_directory / f"{run_id}.npz")
             evaluated.setdefault("profile_times", {})["escritura_bd_s"] = persistence_seconds[0]
             with store._connect() as conn:
@@ -1139,6 +1400,9 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "live_piece_count": evaluated.get("live_piece_count", 0),
                             "live_pieces": evaluated.get("live_pieces", []),
                             "live_capital_warning": evaluated.get("live_capital_warning"),
+                            "pass1_coverage": evaluated.get("pass1_coverage", {}),
+                            "pass_seconds": evaluated.get("pass_seconds", {}),
+                            "rss_paralelo_cota_mb": evaluated.get("rss_paralelo_cota_mb"),
                             "symbol_stats": evaluated.get("symbol_stats", {}),
                             "rss_por_moneda": evaluated.get("rss_por_moneda", {}),
                             "trajectory_file": evaluated.get("trajectory_file"),
@@ -1155,7 +1419,9 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
                 f"smart_omitido_por_tiempo={evaluated.get('smart_omitido_por_tiempo', 0)} "
                 f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
+                f"segundos_pasadas={json.dumps(evaluated.get('pass_seconds', {}), ensure_ascii=False)} "
                 f"rss_por_moneda={json.dumps(evaluated.get('rss_por_moneda', {}), ensure_ascii=False)} "
+                f"rss_paralelo_cota_mb={evaluated.get('rss_paralelo_cota_mb')} "
                 f"segundos={time.perf_counter()-context_started:.3f} "
                 f"rss_actual_mb={_rss_current_mb()} rss_hwm_mb={_rss_max_mb()}")
             if perfilar:
@@ -1174,11 +1440,13 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 with store._connect() as conn:
                     count = conn.execute("SELECT COUNT(*) FROM scenario_eval_results WHERE run_id=?",
                         (run_id,)).fetchone()[0]
-                    symbols_done = conn.execute("SELECT COUNT(DISTINCT symbol) FROM scenario_eval_results "
-                        "WHERE run_id=? AND symbol IS NOT NULL", (run_id,)).fetchone()[0]
-                if context.get("goal_id") is None and count >= 20 and symbols_done >= 3:
-                    status = "parcial"
+                coverage = progress_state.get("pass1_coverage") or {}
+                pass1_complete = bool(coverage.get("complete"))
+                if context.get("goal_id") is None:
+                    status = ("parcial" if pass1_complete and count > 0 else
+                        "incompleta" if not pass1_complete else exc.status)
                     error_details["status_limite"] = exc.status
+                    error_details["pass1_coverage"] = coverage
                     with store._connect() as conn:
                         conn.execute("UPDATE scenario_eval_runs SET status=?,error=? WHERE run_id=?",
                             (status, _json_dumps(error_details, ensure_ascii=False), run_id))
@@ -1189,6 +1457,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     f"estado={status} generados={progress_state.get('generated_count', 0)} "
                     f"evaluados={count} descartados={json.dumps(progress_state.get('discarded', {}), ensure_ascii=False)} "
                     f"segundos_moneda={json.dumps(progress_state.get('candidate_seconds', {}), ensure_ascii=False)} "
+                    f"segundos_pasadas={json.dumps(progress_state.get('pass_seconds', {}), ensure_ascii=False)} "
                     f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
                 active_context_started[0] = None
                 if max_total_seconds is None or time.perf_counter() - started < max_total_seconds:

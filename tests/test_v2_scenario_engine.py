@@ -39,11 +39,12 @@ def engine_databases(tmp_path, monkeypatch):
     db.engine.dispose()
 
 
-def _cache_row(path, *, as_of=None, status="ok"):
+def _cache_row(path, *, as_of=None, status="ok", error=None):
     stamp = as_of or datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,goal_id,profile,horizon_days,"
-            "n_scenarios,status) VALUES('cache-1',?,9,'RAPIDO',20,1000,?)", (stamp, status))
+            "n_scenarios,status,error) VALUES('cache-1',?,9,'RAPIDO',20,1000,?,?)",
+            (stamp, status, json.dumps(error or {})))
         conn.execute("INSERT INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)", (
             "cache-1", "piece-1", "JUPUSDT", "simple",
             json.dumps({"low": .20, "high": .30, "n": 6, "capital": 70}),
@@ -645,13 +646,25 @@ def test_motor_no_usa_cache_vencida_ni_fallback(engine_databases):
 
 def test_v2_acepta_cache_parcial_reciente(engine_databases):
     db, market_path = engine_databases
-    _cache_row(market_path, status="parcial")
+    _cache_row(market_path, status="parcial", error={"pass1_coverage": {
+        "expected_symbols": ["JUPUSDT"], "covered_symbols": ["JUPUSDT"], "complete": True}})
 
     cache = V2ScenarioEngine._load_cache(SimpleNamespace(db=db),
         {"id": 9, "profile": "RAPIDO"})
 
     assert cache["status"] == "parcial"
     assert cache["candidates"]
+
+
+def test_v2_rechaza_cache_parcial_sin_cobertura_de_pasada_1(engine_databases):
+    db, market_path = engine_databases
+    _cache_row(market_path, status="parcial", error={"pass1_coverage": {
+        "expected_symbols": ["JUPUSDT", "WIFUSDT"], "covered_symbols": ["JUPUSDT"],
+        "complete": False}})
+
+    with pytest.raises(EngineUnavailable, match="pasada 1 no cubrió"):
+        V2ScenarioEngine._load_cache(SimpleNamespace(db=db),
+            {"id": 9, "profile": "RAPIDO"})
 
 
 def test_motor_apagado_falla_explicito(engine_databases):

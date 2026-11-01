@@ -278,15 +278,16 @@
   function candidatesTable(candidates, v2 = false) {
     if (v2) {
       const rows = (candidates || []).map(c => {
-        if (c.skipped_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="7">No evaluada: ${esc(c.skipped_reason)}</td></tr>`;
+        if (c.skipped_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="8">No evaluada: ${esc(c.skipped_reason)}</td></tr>`;
         const reason = c.discarded_reason ? `${c.discarded_count} · ${esc(c.discarded_reason)}` : `${c.discarded_count || 0}`;
         return `<tr><td>${esc(c.symbol)}</td><td>${c.sigma_24h != null ? fmtPct(Number(c.sigma_24h) * 100, 2) : '—'}</td>
           <td>${c.price != null ? fmtPrice(c.price) : '—'}</td><td>${esc(c.generated_count ?? 0)}</td>
           <td>${esc(c.evaluated_count ?? 0)}</td><td>${reason}</td>
           <td>${c.best_p_target != null ? fmtPct(Number(c.best_p_target) * 100) : '—'}</td>
-          <td>${c.best_pnl_mean_usdt != null ? `${fmtMoney(c.best_pnl_mean_usdt)} USDT` : '—'}</td></tr>`;
+          <td>${c.best_pnl_mean_usdt != null ? `${fmtMoney(c.best_pnl_mean_usdt)} USDT` : '—'}</td>
+          <td>${esc(c.pasada || 'sin_tiempo')}</td></tr>`;
       }).join('');
-      return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>σ 24 h usada</th><th>Precio</th><th>Generados</th><th>Evaluados</th><th>Descartes</th><th>Mejor P(meta)</th><th>Mejor ganancia media</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>σ 24 h usada</th><th>Precio</th><th>Generados</th><th>Evaluados</th><th>Descartes</th><th>Mejor P(meta)</th><th>Mejor ganancia media</th><th>Pasada</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     const rows = (candidates || []).map(c => {
       if (c.excluded_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="4">Excluida: ${esc(c.excluded_reason)}</td></tr>`;

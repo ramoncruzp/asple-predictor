@@ -84,6 +84,12 @@ class V2ScenarioEngine(DecisionEngine):
             skipped_symbols = run_details.get("skipped", {})
         except (TypeError, ValueError, json.JSONDecodeError):
             discarded = {}
+            symbol_stats = {}
+            skipped_symbols = {}
+            run_details = {}
+        if str(row["status"]) == "parcial" and not bool(
+                (run_details.get("pass1_coverage") or {}).get("complete")):
+            raise EngineUnavailable("caché parcial incompleta: la pasada 1 no cubrió todas las monedas")
         trajectory_file = Path("data/derived/scenario_cache") / f"{row['run_id']}.npz"
         return {"run_id": row["run_id"], "as_of": row["as_of"],
             "horizon_days": int(row["horizon_days"]), "age_seconds": age,
@@ -181,6 +187,7 @@ class V2ScenarioEngine(DecisionEngine):
                 "discarded_reason": common_reason,
                 "best_p_target": best_p_target,
                 "best_pnl_mean_usdt": best_pnl,
+                "pasada": stats.get("pasada", "sin_tiempo"),
                 "skipped_reason": stats.get("skipped_reason")})
         for symbol, reason in sorted((cached.get("skipped_symbols") or {}).items()):
             if str(reason).startswith("rol "):
@@ -190,6 +197,7 @@ class V2ScenarioEngine(DecisionEngine):
                     "generated_count": 0, "evaluated_count": 0, "discarded_count": 0,
                     "discarded_reason": None, "best_p_target": None,
                     "best_pnl_mean_usdt": None,
+                    "pasada": "sin_tiempo",
                     "skipped_reason": ("sin tiempo en la corrida parcial"
                         if cached.get("status") == "parcial" else str(reason))})
         return output

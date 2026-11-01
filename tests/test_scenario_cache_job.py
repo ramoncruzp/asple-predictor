@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 
 import pytest
 from sqlalchemy import select
@@ -12,6 +13,14 @@ from database.db_manager import DBManager
 from grid.sim.runner import FILTERS
 from scheduler.scenario_cache_job import ScenarioCacheJob
 import scripts.escenarios_cache as cache_script
+
+
+def _parallel_cache_evaluator(pieces, **_kwargs):
+    time.sleep(1.2)
+    return {"pieces": [{"piece": piece, "metrics": {"n": 10,
+        "pnl_mean_usdt": .2, "p_target": .2, "p_loss": 0,
+        "p_loss_ci95": [0, .01], "cut_slippage_mean_usdt": 0,
+        "cut_slippage_p90_usdt": 0}} for piece in pieces]}
 
 
 @pytest.fixture
@@ -68,6 +77,107 @@ def test_cache_excluye_rol_datos_y_registra_motivos(tmp_path):
     assert not filters and not prices and not sigmas
     assert skipped["DATOSUSDT"] == "rol datos; se requiere operar"
     assert skipped["SINBIBLIOTECAUSDT"] == "biblioteca de escenarios ausente"
+
+
+def test_cache_reparte_candidatos_en_dos_pasadas_y_ordena_la_segunda(
+        cache_databases, monkeypatch, tmp_path):
+    db, market_path = cache_databases
+    symbols = [f"SYN{index}USDT" for index in range(5)]
+    first = []
+    rest = []
+    probability = {symbol: (index + 1) / 10 for index, symbol in enumerate(symbols)}
+    for symbol in symbols:
+        first.extend([
+            {"candidate_key": f"{symbol}-simple-05", "symbol": symbol,
+                "strategy": "simple", "capital": 70, "n": 6, "width_sigma": .5},
+            {"candidate_key": f"{symbol}-simple-1", "symbol": symbol,
+                "strategy": "simple", "capital": 70, "n": 6, "width_sigma": 1.0},
+            {"candidate_key": f"{symbol}-bot", "symbol": symbol,
+                "strategy": "bot", "capital": 70, "buy_offset_pct": -1.5,
+                "sell_offset_pct": 1.5},
+        ])
+        rest.append({"candidate_key": f"{symbol}-rest", "symbol": symbol,
+            "strategy": "simple", "capital": 35, "n": 6, "width_sigma": 2.0})
+    all_candidates = [*first, *rest]
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [*all_candidates, {"strategy": "usdt_quieto"}],
+        "discarded": {}, "discarded_by_symbol": {}, "invalid_count": 0})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    evaluated_order = []
+
+    def evaluate(pieces, **_kwargs):
+        rows = []
+        for piece in pieces:
+            evaluated_order.append(piece["candidate_key"])
+            p_target = probability[piece["symbol"]] if piece["candidate_key"] in {
+                item["candidate_key"] for item in first} else .9
+            rows.append({"piece": piece, "metrics": {"n": 100,
+                "pnl_mean_usdt": .2, "p_target": p_target, "p_loss": 0,
+                "p_loss_ci95": [0, .01], "cut_slippage_mean_usdt": 0,
+                "cut_slippage_p90_usdt": 0, "days_to_target_p50": 4}})
+        return {"pieces": rows}
+
+    result = cache_script._evaluate_context({"goal_id": None, "profile": "RAPIDO",
+        "free_cash": 100, "capital": 100, "capital_initial": 100,
+        "target": 3, "horizon": 15, "max_loss_pct": 18,
+        "profile_config": {"capital_per_coin_pct": 70}},
+        store=CandleStore(market_path), app_db=db.engine.url.database,
+        market_path=market_path, library_dir=tmp_path,
+        filters={symbol: object() for symbol in symbols},
+        prices={symbol: 1 for symbol in symbols}, sigmas={symbol: .01 for symbol in symbols},
+        skipped={}, evaluator=evaluate)
+
+    pass1_keys = {row["candidate_key"] for row in first}
+    assert set(evaluated_order[:len(first)]) == pass1_keys
+    assert [key.rsplit("-", 1)[0].removesuffix("USDT")
+        for key in evaluated_order[len(first):]] == [
+        symbol.split("USDT")[0] for symbol in reversed(symbols)]
+    assert result["pass1_coverage"]["complete"] is True
+    assert result["pass_seconds"]["pasada_1"] >= 0
+    assert all(row["pasada"] == "pasada_1 + pasada_2"
+        for row in result["symbol_stats"].values())
+    print(f"Tiempos sintéticos de pasada 1/2: {result['pass_seconds']}")
+
+
+def test_worker_paralelo_usa_dos_hijos_y_respeta_tope_rss():
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+
+    tasks = []
+    for symbol in ("CHILD_AUSDT", "CHILD_BUSDT"):
+        tasks.append({"symbol": symbol, "pieces": [{"candidate_key": symbol,
+            "symbol": symbol, "strategy": "simple", "capital": 10}],
+            "evaluator": _parallel_cache_evaluator, "eval_kwargs": {},
+            "scenario_batches": None, "horizon": 1, "n_scenarios": 10,
+            "market_path": "", "library_dir": "", "scenario_dates": None,
+            "live_rows": [], "capital": 100, "target": 3, "max_loss_pct": 18,
+            "loss_confirm_minutes": 2, "profile": "RAPIDO",
+            "cut_slippage_expected_max_pct": .5, "max_rss_mb": 900,
+            "max_seconds": 30})
+    started = time.perf_counter()
+    with ProcessPoolExecutor(max_workers=2,
+            mp_context=multiprocessing.get_context("spawn")) as executor:
+        futures = [executor.submit(cache_script._evaluate_currency_worker, task)
+            for task in tasks]
+        results = [future.result(timeout=30) for future in futures]
+    elapsed = time.perf_counter() - started
+    serial_started = time.perf_counter()
+    with ProcessPoolExecutor(max_workers=1,
+            mp_context=multiprocessing.get_context("spawn")) as executor:
+        serial_results = [executor.submit(cache_script._evaluate_currency_worker, task).result(
+            timeout=30) for task in tasks]
+    serial_elapsed = time.perf_counter() - serial_started
+    rss_bound = cache_script._rss_current_mb() + sum(
+        row["rss_hwm_mb"] for row in results)
+
+    assert len({row["pid"] for row in results}) == 2
+    assert all(row["rss_hwm_mb"] < 900 for row in results)
+    assert all(row["rows"] and row["errors"] == {} for row in results)
+    assert len({row["pid"] for row in serial_results}) == 1
+    assert rss_bound < 10000
+    print(f"Hijos 2 vs 1: {elapsed:.3f} s / {serial_elapsed:.3f} s; "
+        f"RSS VmHWM hijos={[row['rss_hwm_mb'] for row in results]} MB; "
+        f"cota padre + ambos hijos={rss_bound:.2f} MB")
 
 
 def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
@@ -191,10 +301,12 @@ def test_perfil_libera_por_moneda_y_conserva_dieciseis_finalistas_diversos(
     db, market_path = cache_databases
     symbols = [f"SYN{index}USDT" for index in range(5)]
     candidates = [{"candidate_key": f"{symbol}-{index}", "symbol": symbol,
-        "strategy": "simple", "capital": 10, "n": 6, "low": 90, "high": 110}
+        "strategy": "simple", "capital": 70 if index < 2 else 35, "n": 6,
+        "width_sigma": (.5, 1.0, 2.0)[index], "low": 90, "high": 110}
         for symbol in symbols for index in range(3)] + [
         {"candidate_key": f"{symbol}-bot", "symbol": symbol,
-            "strategy": "bot", "capital": 10, "n": 1, "low": 90, "high": 110}
+            "strategy": "bot", "capital": 70, "n": 1, "low": 90, "high": 110,
+            "buy_offset_pct": -1.5, "sell_offset_pct": 1.5}
         for symbol in symbols]
     monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
         "candidates": [*candidates, {"strategy": "usdt_quieto"}], "discarded": {}})
@@ -252,7 +364,7 @@ def test_perfil_libera_por_moneda_y_conserva_dieciseis_finalistas_diversos(
             for symbol in symbols)
     print(f"RSS por moneda perfil 5 monedas: {result['rss_por_moneda']}; "
         f"pico={max(row['rss_hwm_mb'] for row in result['rss_por_moneda'].values()):.2f} MB; "
-        f"tiempo={elapsed:.3f} s; finalistas=16")
+        f"tiempo={elapsed:.3f} s; pasadas={result['pass_seconds']}; finalistas=16")
 
 
 def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):
@@ -946,8 +1058,10 @@ def test_dos_contextos_sinteticos_quedan_bajo_700_mb(cache_databases, monkeypatc
     assert result["rss_mb"] < 700
 
 
-def test_perfil_con_20_resultados_y_3_monedas_se_guarda_parcial(
-        cache_databases, monkeypatch, tmp_path):
+@pytest.mark.parametrize(("complete", "expected_status"), [
+    (True, "parcial"), (False, "incompleta")])
+def test_perfil_parcial_solo_si_pasada_1_cubrio_todas_las_monedas(
+        cache_databases, monkeypatch, tmp_path, complete, expected_status):
     import time
 
     db, market_path = cache_databases
@@ -964,23 +1078,27 @@ def test_perfil_con_20_resultados_y_3_monedas_se_guarda_parcial(
             "strategy": "simple"}, "metrics": {"p_target": 0}, "objective": {}}
             for symbol in ("A", "B", "C") for idx in range(7)]
         kwargs["on_progress"](rows[:20])
+        kwargs["progress_state"]["pass1_coverage"] = {
+            "expected_symbols": ["A", "B", "C"],
+            "covered_symbols": ["A", "B", "C"] if complete else ["A", "B"],
+            "complete": complete}
         time.sleep(.4)
 
     monkeypatch.setattr(cache_script, "_evaluate_context", interrupted)
     result = cache_script.run_cache(db.engine.url.database, market_path,
         library_dir=tmp_path, max_seconds=.15, max_total_seconds=5)
 
-    assert result["runs"][0]["status"] == "parcial"
+    assert result["runs"][0]["status"] == expected_status
     with sqlite3.connect(market_path) as conn:
         status, count = conn.execute("SELECT status,(SELECT COUNT(*) FROM "
             "scenario_eval_results WHERE run_id=scenario_eval_runs.run_id) "
             "FROM scenario_eval_runs ORDER BY rowid DESC LIMIT 1").fetchone()
-    assert status == "parcial"
+    assert status == expected_status
     assert count == 20
 
 
 @pytest.mark.parametrize(("limit_kwargs", "expected_status"), [
-    ({"max_rss_mb": 0, "max_seconds": None}, "memoria"),
+    ({"max_rss_mb": 0, "max_seconds": None}, "incompleta"),
     ({"max_rss_mb": None, "max_seconds": 1}, "timeout"),
 ])
 def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_path,
@@ -1029,6 +1147,8 @@ def test_limite_de_corrida_persiste_resultados_y_status(cache_databases, tmp_pat
     details = json.loads(error)
     assert details["generated_count"] == 1
     assert details["evaluated_count"] == count
+    if expected_status == "incompleta":
+        assert details["status_limite"] == "memoria"
 
 
 @pytest.mark.parametrize(("status", "exit_code"), [("memoria", 3), ("timeout", 4)])
