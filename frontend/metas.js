@@ -363,13 +363,14 @@
         <td>${fmtMoney(row.metrics?.cut_slippage_expected_usdt)} esperado · ${fmtMoney(row.metrics?.cut_slippage_mean_usdt)} / ${fmtMoney(row.metrics?.cut_slippage_p90_usdt)} USDT</td>
         <td>${percent(row.metrics?.p_loss)}</td><td>${esc(row.reason)}</td></tr>`).join('');
     const warnings = (plan.warnings || []).map(item => `<p>⚠ ${esc(item)}</p>`).join('');
-    const notAdded = (plan.v2?.cartera_no_agregadas || []).map(item =>
+    const notAddedRows = plan.v2?.cartera_no_agregadas || [];
+    const notAdded = notAddedRows.slice(0, 5).map(item =>
       `<li>${esc(item.symbol)} · ${esc(item.strategy)}: ${esc(item.reason)}</li>`).join('');
     slot.innerHTML = `
       <div class="metas-plan-section"><h4>Candidatas v2</h4>${candidatesTable(plan.candidates, true)}</div>
       <div class="metas-plan-section"><h4>Cartera v2 propuesta</h4>${piecesTable(plan.pieces)}
         ${steps ? `<ol class="metas-v2-portfolio-steps">${steps}</ol>` : '<p>No se agregaron piezas; el capital permanece en USDT.</p>'}
-        ${notAdded ? `<details><summary>Intentos no agregados (${(plan.v2?.cartera_no_agregadas || []).length})</summary><ul>${notAdded}</ul></details>` : ''}</div>
+        ${notAdded ? `<details><summary>Intentos no agregados (${Math.min(notAddedRows.length, 5)} de ${notAddedRows.length})</summary><ul>${notAdded}</ul></details>` : ''}</div>
       <div class="metas-plan-section"><h4>Estimación v2 (escenarios, no promesa)</h4>
         <div class="metas-estimate-grid">
           <div><span>P(meta en el plazo)</span><b>${percent(metrics.p_target)}</b></div>

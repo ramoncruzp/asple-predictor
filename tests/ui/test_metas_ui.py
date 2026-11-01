@@ -254,7 +254,11 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
         def plan(self, *_args, **_kwargs):
             return {"engine": {"name": "v2"}, "plan_id": "v2-plan",
                 "expires_in_seconds": 600, "pieces": [], "alternatives": [],
-                "v2": {"metrics": {"p_target": .4, "pnl_mean_usdt": 1.2,
+                "loss_max_usdt": 18,
+                "v2": {"cartera_no_agregadas": [{"symbol": f"SYN{index}USDT",
+                    "strategy": "simple", "reason": "no sube P(meta) al menos 2 pp"}
+                    for index in range(6)],
+                    "metrics": {"p_target": .4, "pnl_mean_usdt": 1.2,
                     "pnl_mean_ci95": [.5, 1.9], "p_loss": .02,
                     "p_loss_ci95": [.01, .03], "cut_slippage_mean_usdt": .2,
                     "cut_slippage_p90_usdt": .4, "cut_slippage_expected_usdt": .004,
@@ -282,8 +286,19 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
     assert "P(terminar con inventario)" in content and "parcial" in content
     assert "pasada_1 + pasada_2" in content
     assert "PEPEUSDT" in content and "sin biblioteca" in content
+    assert "Intentos no agregados (5 de 6)" in content
     assert "Score Scanner" not in content and "Ventanas" not in content
     assert "Probabilidad ajustada" not in content
+    page.click('[data-start-plan]')
+    page.wait_for_selector('#meta-action-dialog:not([hidden])')
+    dialog = page.locator('#meta-action-dialog')
+    assert "Pérdida máxima:" in dialog.inner_text()
+    assert "18" in dialog.inner_text() and "USDT" in dialog.inner_text()
+    dialog.locator("[data-action-cancel]").click()
+    page.locator(f'[data-analysis-slot="{goal["id"]}"] details summary').click()
+    reasons = page.locator(f'[data-analysis-slot="{goal["id"]}"] details').inner_text()
+    assert all(f"SYN{index}USDT" in reasons for index in range(5))
+    assert "SYN5USDT" not in reasons
 
 
 def test_active_meta_with_unknown_valuation_shows_unprotected_banner(metas_page):

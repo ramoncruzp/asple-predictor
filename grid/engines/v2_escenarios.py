@@ -241,6 +241,7 @@ class V2ScenarioEngine(DecisionEngine):
                 "cut_slippage_expected_max_pct", .5)))
         decision_id = uuid.uuid4().hex
         alternatives = []
+        prices_by_symbol = cached.get("symbol_stats") or {}
         for index, candidate in enumerate(ranked):
             source_piece = candidate.get("piece") or {}
             candidate = {"candidate_key": candidate.get("candidate_key") or source_piece.get("candidate_key"),
@@ -252,11 +253,22 @@ class V2ScenarioEngine(DecisionEngine):
             piece = self._to_piece(candidate, capital)
             if piece is None:
                 continue
+            symbol_price = (prices_by_symbol.get(str(piece["symbol"]).upper()) or {}).get("price")
+            try:
+                market_price = float(symbol_price)
+            except (TypeError, ValueError):
+                market_price = 0.0
+            if market_price <= 0:
+                raise EngineUnavailable(
+                    f"la caché no contiene un precio de análisis válido para {piece['symbol']}")
+            piece.update({"mid_at_plan": market_price, "price_source": "scenario_cache",
+                "price_at": cached.get("as_of")})
             metrics = candidate["metrics"]
             probability = float(metrics.get("p_target", 0))
             expected_pnl = float(metrics.get("pnl_mean_usdt", 0))
             alternatives.append({"alternative_id": f"{decision_id}:{index}",
                 "symbol": piece["symbol"], "strategy": piece["strategy"], "pieces": [piece],
+                "price_source": piece["price_source"], "price_at": piece["price_at"],
                 "estimate": {"probability": probability,
                     "probability_replay": probability,
                     "expected_pnl_usdt": expected_pnl,
@@ -348,6 +360,7 @@ class V2ScenarioEngine(DecisionEngine):
             "current_pieces": current_pieces, "estimated_time": (selected_alternative or {}).get("estimate", {}),
             "piece_estimates": [], "target_usdt": float(goal.get("target_usdt", 0)),
             "deadline_days": cached["horizon_days"],
+            "loss_max_usdt": capital * float(profile_config.get("max_loss_pct", 0)) / 100,
             "selection_reason": ("selección por caché de escenarios v2" if selected_pieces else
                 "ninguna geometría factible; conservar capital en USDT"),
             "v2": v2_summary,

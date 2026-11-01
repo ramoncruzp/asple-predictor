@@ -3822,7 +3822,9 @@ class MetaOperator:
                 openability = self._testnet_openability(piece, goal)
                 if not openability["allowed"]:
                     raise ValueError(f"Plan vencido operativamente: alternativa no abrible en Testnet: {openability['reason']}. Solicite un análisis nuevo.")
-        for symbol, planned in self._plan_prices(plan).items():
+        price_check_plan = (plan if planned_engine != "v2" else
+            {"pieces": list(plan.get("pieces") or [])})
+        for symbol, planned in self._plan_prices(price_check_plan).items():
             current = self._book_ticker(symbol)
             mid = (float(current["bid_price"]) + float(current["ask_price"])) / 2
             if abs(mid / planned - 1) * 100 > max_drift:

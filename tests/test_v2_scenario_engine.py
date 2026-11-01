@@ -278,26 +278,30 @@ def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkey
     db, _market_path = engine_databases
     cached = {"run_id": "r", "as_of": datetime.now(timezone.utc).isoformat(),
         "age_seconds": 0, "status": "ok", "horizon_days": 20,
-        "discarded": {}, "skipped_symbols": {}, "trajectory_file": None,
-        "symbol_stats": {"ZROUSDT": {"price": 2.0, "sigma_24h": .04,
+        "discarded": {}, "skipped_symbols": {}, "trajectory_file": "synthetic.npz",
+        "symbol_stats": {"ZROUSDT": {"price": 2.1, "sigma_24h": .04,
             "generated_count": 4, "evaluated_count": 3,
             "discarded": {"filtro": 1}}},
         "candidates": [
             {"candidate_key": "zro100", "symbol": "ZROUSDT", "strategy": "simple",
-                "params": {"low": 1.8, "high": 2.2, "n": 6, "capital": 100},
+                "params": {"low": 1.7, "high": 2.3, "n": 6, "capital": 100},
                 "metrics": {"n": 10, "p_target": .5, "pnl_mean_usdt": 2,
                     "p_loss": 0, "p_loss_ci95": [0, .01], "pnl_mean_ci95": [1, 3],
                     "cut_slippage_mean_usdt": 0, "days_to_target_p50": 7},
                 "objective": {"factible": True, "motivos": [],
                     "clave_orden": [-.5, 7, -2]}},
             {"candidate_key": "zro70", "symbol": "ZROUSDT", "strategy": "simple",
-                "params": {"low": 1.8, "high": 2.2, "n": 6, "capital": 70},
+                "params": {"low": 1.7, "high": 2.3, "n": 6, "capital": 70},
                 "metrics": {"n": 10, "p_target": .4, "pnl_mean_usdt": 1,
                     "p_loss": 0, "p_loss_ci95": [0, .01], "pnl_mean_ci95": [.5, 1.5],
                     "cut_slippage_mean_usdt": 0, "days_to_target_p50": 8},
                 "objective": {"factible": True, "motivos": [],
                     "clave_orden": [-.4, 8, -1]}}]}
     monkeypatch.setattr(V2ScenarioEngine, "_load_cache", lambda *_args, **_kwargs: cached)
+    monkeypatch.setattr("grid.engines.v2_escenarios.greedy_portfolio", lambda *_args, **_kwargs: {
+        "added": [{"candidate_key": "zro70"}], "steps": [],
+        "metrics": {"p_target": .4}, "not_added_reasons": [
+            {"symbol": "PEPEUSDT", "strategy": "simple", "reason": "no sube P(meta)"}]})
     plan = V2ScenarioEngine().plan(SimpleNamespace(db=db),
         {"id": 9, "status": "DRAFT", "profile": "RAPIDO", "capital_initial": 100,
             "target_usdt": 3}, plan_kind="analisis")
@@ -307,6 +311,110 @@ def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkey
     assert plan["candidates"][0]["generated_count"] == 4
     assert plan["candidates"][0]["evaluated_count"] == 3
     assert plan["candidates"][0]["discarded_count"] == 1
+    assert plan["pieces"][0]["mid_at_plan"] == 2.1
+    assert plan["pieces"][0]["price_source"] == "scenario_cache"
+    assert plan["pieces"][0]["price_at"] == cached["as_of"]
+    assert plan["alternatives"][0]["price_source"] == "scenario_cache"
+    assert plan["loss_max_usdt"] == 18
+    assert plan["v2"]["cartera_no_agregadas"][0]["symbol"] == "PEPEUSDT"
+
+
+def _start_plan_fixture(engine_databases, *, engine_name, prices, alternative=True):
+    db, _market_path = engine_databases
+    calls = []
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "status": "DRAFT", "config_snapshot": {"decision_engine": engine_name,
+            "plan_price_drift_pct": 1}}
+    piece = {"symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+        "capital_usdt": 70, "floor": 1.7, "ceiling": 2.3, "n_levels": 6,
+        "mid_at_plan": 2.1, "price_source": "scenario_cache",
+        "price_at": "2026-11-01T00:00:00+00:00"}
+    plan = {"plan_id": "plan", "meta_id": 9, "expires_at": 200,
+        "engine": {"name": engine_name}, "pieces": [piece], "control_plan": {},
+        "alternatives": ([{"symbol": "PEPEUSDT", "pieces": [{"symbol": "PEPEUSDT",
+            "floor": .0009, "ceiling": .0011, "mid_at_plan": .001,
+            "capital_usdt": 30}]}] if alternative else [])}
+    operator = object.__new__(MetaOperator)
+    operator._lock = threading.RLock()
+    operator._plans = {"plan": plan}
+    operator.clock = lambda: 100
+    operator.price_drift_pct = 1
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        _owned_grids=lambda _id: [], _available_usdt=lambda _id: (100, 0),
+        start_goal=lambda _id: calls.append("start"),
+        link_grid=lambda _id, grid_id, _kind: calls.append(("link", grid_id)),
+        _now=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    operator.db = db
+    operator.engine = None
+    operator.scanner = SimpleNamespace(client=SimpleNamespace(get_book_ticker=lambda symbol: {
+        "bid_price": prices[symbol], "ask_price": prices[symbol]}))
+    operator._validate_v2_plan_limits = lambda *_args, **_kwargs: None
+    operator._active_run_id = lambda _id: None
+    operator._ledger = lambda *_args, **_kwargs: None
+    operator.alert = lambda *_args, **_kwargs: None
+    result = operator._start_plan_locked(9, "plan", lambda _piece: {"grid_id": 77})
+    return result, calls
+
+
+def test_start_plan_v2_ignora_deriva_de_alternativas_y_abre_solo_pieza_del_plan(
+        engine_databases):
+    result, calls = _start_plan_fixture(engine_databases, engine_name="v2",
+        prices={"ZROUSDT": 2.1, "PEPEUSDT": .00105})
+    assert [row["symbol"] for row in result["opened"]] == ["ZROUSDT"]
+    assert ("link", 77) in calls
+    assert "start" in calls
+
+
+def test_start_plan_v2_rechaza_deriva_de_su_pieza(engine_databases):
+    db, _market_path = engine_databases
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "status": "DRAFT", "config_snapshot": {"decision_engine": "v2",
+            "plan_price_drift_pct": 1}}
+    operator = object.__new__(MetaOperator)
+    operator._lock = threading.RLock()
+    operator._plans = {"plan": {"plan_id": "plan", "meta_id": 9,
+        "expires_at": 200, "engine": {"name": "v2"}, "pieces": [{
+            "symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 70, "floor": 1.7, "ceiling": 2.3, "n_levels": 6,
+            "mid_at_plan": 2.1}]}}
+    operator.clock = lambda: 100
+    operator.price_drift_pct = 1
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        _available_usdt=lambda _id: (100, 0), start_goal=lambda _id: pytest.fail("no debe iniciar"))
+    operator.db = db
+    operator.engine = None
+    operator.scanner = SimpleNamespace(client=SimpleNamespace(get_book_ticker=lambda _symbol: {
+        "bid_price": 2.13, "ask_price": 2.13}))
+    operator._validate_v2_plan_limits = lambda *_args, **_kwargs: None
+    with pytest.raises(ValueError, match="ZROUSDT se movi\u00f3 m\u00e1s de 1%"):
+        operator._start_plan_locked(9, "plan", lambda _piece: pytest.fail("no debe abrir"))
+
+
+def test_start_plan_v1_sigue_validando_alternativas_y_su_deriva(engine_databases):
+    db, _market_path = engine_databases
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "status": "DRAFT", "config_snapshot": {"decision_engine": "v1",
+            "plan_price_drift_pct": 1}}
+    operator = object.__new__(MetaOperator)
+    operator._lock = threading.RLock()
+    operator._plans = {"plan": {"plan_id": "plan", "meta_id": 9,
+        "expires_at": 200, "engine": {"name": "v1"}, "pieces": [{
+            "symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 70, "floor": 1.7, "ceiling": 2.3, "n_levels": 6,
+            "mid_at_plan": 2.1}], "alternatives": [{"pieces": [{
+                "symbol": "PEPEUSDT", "floor": .0009, "ceiling": .0011,
+                "mid_at_plan": .001}]}]}}
+    operator.clock = lambda: 100
+    operator.price_drift_pct = 1
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        _available_usdt=lambda _id: (100, 0), start_goal=lambda _id: pytest.fail("no debe iniciar"))
+    operator.db = db
+    operator.engine = None
+    operator.scanner = SimpleNamespace(client=SimpleNamespace(get_book_ticker=lambda symbol: {
+        "bid_price": 2.1 if symbol == "ZROUSDT" else .00105,
+        "ask_price": 2.1 if symbol == "ZROUSDT" else .00105}))
+    with pytest.raises(ValueError, match="PEPEUSDT se movi\u00f3 m\u00e1s de 1%"):
+        operator._start_plan_locked(9, "plan", lambda _piece: pytest.fail("no debe abrir"))
 
 
 def test_start_plan_v2_rechaza_exceso_antes_de_tocar_exchange(engine_databases):
