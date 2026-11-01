@@ -17,10 +17,21 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 TIMEOUT_SECONDS = 1500
-MEMORY_LIMIT_BYTES = 600 * 1024 * 1024
+DEFAULT_MEMORY_LIMIT_MB = 900.0
+MEMORY_LIMIT_BYTES = int(DEFAULT_MEMORY_LIMIT_MB * 1024 * 1024)
 POLL_SECONDS = 0.2
 MEMORY_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
     "MALLOC_ARENA_MAX": "2"}
+
+
+def _memory_limit_bytes():
+    try:
+        value = float(os.environ.get("ASPLE_SCENARIO_CACHE_MAX_RSS_MB", DEFAULT_MEMORY_LIMIT_MB))
+        if value <= 0:
+            value = DEFAULT_MEMORY_LIMIT_MB
+    except (TypeError, ValueError):
+        value = DEFAULT_MEMORY_LIMIT_MB
+    return int(value * 1024 * 1024)
 
 
 class ScenarioCacheJob:
@@ -132,7 +143,7 @@ class ScenarioCacheJob:
                 conn.execute("UPDATE scenario_eval_runs SET status='memoria',error=? "
                     "WHERE run_id=(SELECT run_id FROM scenario_eval_runs "
                     "WHERE status='running' ORDER BY as_of DESC LIMIT 1)",
-                    ("RSS del subproceso superó 600 MiB",))
+                    (f"RSS del subproceso superó {_memory_limit_bytes() / (1024 * 1024):g} MiB",))
         except sqlite3.Error:
             logger.exception("No se pudo registrar exceso de memoria de scenario cache")
 
@@ -146,7 +157,7 @@ class ScenarioCacheJob:
             exceeded = False
             while process.poll() is None:
                 rss = self.rss_reader(process.pid)
-                if rss is not None and rss > MEMORY_LIMIT_BYTES:
+                if rss is not None and rss > _memory_limit_bytes():
                     exceeded = True
                     process.kill()
                     break
@@ -164,7 +175,8 @@ class ScenarioCacheJob:
             if exceeded:
                 self._mark_memory()
                 result.returncode = 75
-                result.stderr = (result.stderr or "") + "\nRSS superó 600 MiB; corrida marcada memoria"
+                limit_mb = _memory_limit_bytes() / (1024 * 1024)
+                result.stderr = (result.stderr or "") + f"\nRSS superó {limit_mb:g} MiB; corrida marcada memoria"
             return result
 
     def run_if_enabled(self):

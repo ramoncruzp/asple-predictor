@@ -903,7 +903,7 @@ Pruebas enfocadas: 7 pasaron en 0,19 s; incluye descartes de notional para PEPE 
 
 ### 43f-2 — caché horaria de escenarios
 
-Se añadió `ScenarioCacheJob` a las 00:10 de cada hora UTC, después de MarketSync a las :02. Arranca en modo apagado; al activarse mediante el ajuste GLOBAL, delega el cálculo a `scripts/escenarios_cache.py` en un subproceso de prioridad baja, con timeout de 10 minutos y límite de 600 MiB en POSIX cuando está disponible. No importa numpy desde el módulo del job. La corrida guarda perfiles/meta, métricas y propuestas en `market_data.db`, conserva siete días y registra timeout/fallo. El test de corrida usa SQLite temporal y un evaluador falso, no velas o base reales.
+Se añadió `ScenarioCacheJob` a las 00:10 de cada hora UTC, después de MarketSync a las :02. Arranca en modo apagado; al activarse mediante el ajuste GLOBAL, delega el cálculo a `scripts/escenarios_cache.py` en subprocesos de prioridad baja, uno por contexto, con timeout de 25 minutos total y tope de 900 MiB por defecto, configurable con `ASPLE_SCENARIO_CACHE_MAX_RSS_MB`. No importa numpy desde el módulo del job. La corrida guarda perfiles/meta, métricas y propuestas en `market_data.db`, conserva siete días y registra timeout/fallo. El test de corrida usa SQLite temporal y un evaluador falso, no velas o base reales.
 
 Pruebas exactas: `pytest tests/test_scenario_cache_job.py --basetemp="$env:TEMP/asple-f43f2-cache-20261030-r1"` (3 pasaron en 0,83 s) y la reejecución aislada r2 (4 pasaron en 0,94 s). La llamada real al proceso de escenarios queda sin habilitar por defecto. `scripts/revisar_codificacion.py` informó `HALLAZGOS=0` sobre todos los archivos tocados de esta parte.
 
@@ -927,7 +927,7 @@ Comando exacto: `pytest tests/test_v2_scenario_engine.py tests/test_scenario_cac
 
 #### 43f-3c - aislamiento y contexto de escenarios
 
-El subproceso se inicia con prioridad baja mediante `nice -n 10`. El job vigila RSS y termina la corrida si supera 600 MiB; OpenBLAS y OMP usan un hilo y malloc se limita a dos arenas. Se guardan duración por contexto y RSS máximo. La segunda pasada Smart genera 200 escenarios.
+Cada contexto se inicia con prioridad baja mediante `nice -n 10`. El job vigila RSS y termina la corrida si supera el tope configurado (900 MiB por defecto); OpenBLAS y OMP usan un hilo y malloc se limita a dos arenas. Se guardan duración por contexto, RSS actual y VmHWM, además del RSS por moneda. La segunda pasada Smart genera 200 escenarios.
 
 La caché reconstruye efectivo libre desde fills atribuibles y reservas de compras abiertas; añade el valor de inventario liquidado al último cierre disponible y computa objetivo restante, plazo y holgura del límite de pérdida. Si falta una atribución necesaria, omite el contexto. La valoración usa cierres de velas y comisiones estimadas, no profundidad ejecutable.
 
@@ -963,7 +963,7 @@ El flujo v1 mantiene su plan y acción de revisión: la regresión compara `_bui
 
 43f-6 expone `research.scenarios.recommend_grid` para el futuro uso en 43l. Permanece aislada de Fase 42 y del operador.
 
-Pruebas y mediciones disponibles: regresión v1, **37 pasaron en 2,27 s**; caché de escenarios, **4 pasaron en 0,94 s** en la reejecución reportada de 43f-2; recomendación, **2 pasaron en 0,18 s**. Esos tiempos son de pruebas sintéticas. El test de caché usa un evaluador falso y no informó RSS medido; el subproceso de producción vigila RSS y termina al superar 600 MiB. No se presenta un RSS sintético no medido como resultado.
+Pruebas y mediciones disponibles: regresión v1, **37 pasaron en 2,27 s**; caché de escenarios, **4 pasaron en 0,94 s** en la reejecución reportada de 43f-2; recomendación, **2 pasaron en 0,18 s**. Esos tiempos son de pruebas sintéticas. El test de caché usa un evaluador falso y no informó RSS medido; el subproceso de producción vigila RSS y termina al superar 900 MiB por defecto, configurable mediante `ASPLE_SCENARIO_CACHE_MAX_RSS_MB`. No se presenta un RSS sintético no medido como resultado.
 
 Pasos para S1, después de desplegar desde el PC con `bash deploy/actualizar.sh`:
 
@@ -1057,3 +1057,9 @@ El almacén offline no contiene el mejor bid ni una valoración ejecutable recie
 ### 43h-0a — el operador revisa todas las metas activas
 
 `review_active()` ahora visita las metas `ACTIVE` y `PIECES_BLOCKED` en serie. Un fallo se registra y continúa con la meta siguiente. El ciclo dura como máximo 10 minutos; lo que queda pendiente registra `META_REVIEW_SKIPPED_BUDGET` y se adelanta en la siguiente pasada. El camino de una meta mantiene el resultado legado. Pruebas enfocadas: **17 pasaron en 0,68 s**; comando exacto en `reports/DISCREPANCIAS_FASE43.md`. La regresión completa de watchdog y caché con una meta queda para 43h-0e.
+
+### 43h-0o - memoria de cache y retencion por moneda
+
+El tope por defecto de la cache es 900 MiB; `ASPLE_SCENARIO_CACHE_MAX_RSS_MB` permite configurarlo sin cargar `.env`. El job sigue apagado mientras no se active su interruptor de Laboratorio. El desempaquetado Smart usa la tupla de tres componentes que devuelve `unpack_curve`. El evaluador de perfil procesa lotes de hasta seis piezas y libera sus trayectorias al terminar cada moneda; conserva un maximo de 12 finalistas a traves del contexto y emite `rss_por_moneda`.
+
+La prueba sintetica RAPIDO con cinco monedas, 1.000 escenarios y horizonte de 15 dias midio **631,79 MB VmHWM**, con **2,124 s** para evaluar y archivar 12 finalistas. La prueba de Smart con trayectoria 5m cubre la ruta que fallaba. La regresion v1 contra `776eedf` paso. No se usaron S1, Testnet, `.env`, bases reales ni red.

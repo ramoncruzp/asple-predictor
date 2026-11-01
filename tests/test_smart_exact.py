@@ -34,3 +34,19 @@ def test_smart_exact_matches_direct_runner_and_keeps_restrictions_off():
         target_usdt=3, max_loss_pct=18, replicas=20)
     assert paired["n"] == 1
     assert paired["pnl_usdt"]["mean"] == 0
+
+
+def test_smart_exact_conserva_trayectoria_5m_sin_desempaquetado_invalido():
+    close = np.linspace(100, 102, 60)
+    open_ = np.r_[close[0], close[:-1]]
+    scenarios = {"open": open_[None, :],
+        "high": (np.maximum(open_, close) * 1.002)[None, :],
+        "low": (np.minimum(open_, close) * .998)[None, :],
+        "close": close[None, :]}
+    sigma = np.full((1, 1), .04)
+
+    result = evaluate_smart_scenarios(scenarios, n_levels=6, capital=1000,
+        low=80, high=120, sigma_path=sigma, n_smart=1, workers=1, keep_5m=True)[0]
+
+    assert "curve" in result
+    assert result["metrics"]

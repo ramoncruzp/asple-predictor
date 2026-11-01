@@ -31,7 +31,7 @@ def _one_smart(task):
         "scenario_index": scenario_index}
     if keep_5m:
         from grid.sim.meta_portfolio import unpack_curve
-        timestamps, cash, equity, _capital = unpack_curve(result["curve"])
+        timestamps, cash, equity = unpack_curve(result["curve"])
         close = np.asarray(bars["close"], dtype=np.float64)
         low_prices = np.asarray(bars["low"], dtype=np.float64)
         if len(timestamps) == len(low_prices):

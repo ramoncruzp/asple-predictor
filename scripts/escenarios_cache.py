@@ -33,6 +33,7 @@ from research.scenarios.objective import objective_limits, rank_alternatives_v2
 
 RETENTION_DAYS = 7
 SCENARIO_COUNT = 1000
+DEFAULT_MAX_RSS_MB = 900.0
 MAX_PIECES_PER_BATCH = 6
 ABANDON_AFTER_MINUTES = 30
 
@@ -44,6 +45,14 @@ def _json_safe(value):
 
 def _json_dumps(value, **kwargs):
     return json_dumps_safe(value, **kwargs)
+
+
+def _configured_max_rss_mb():
+    try:
+        value = float(os.environ.get("ASPLE_SCENARIO_CACHE_MAX_RSS_MB", DEFAULT_MAX_RSS_MB))
+        return value if math.isfinite(value) and value > 0 else DEFAULT_MAX_RSS_MB
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RSS_MB
 
 
 class CacheLimitExceeded(Exception):
@@ -453,6 +462,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "lotes_fastsim": 0, "filas_por_lote": [], "segundos_por_lote": []}
     first_rows, failed_candidates = [], {}
     candidate_seconds = {}
+    rss_per_symbol = {}
     retained_live, retained_candidates = {}, []
 
     def retain_trajectory(row):
@@ -565,36 +575,55 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 kwargs["keep_curves"] = False
                 kwargs["keep_5m"] = True
                 kwargs["timings"] = evaluator_timings
-            rows, errors = _evaluate_with_isolation(evaluator, symbol_pieces, **kwargs)
-            if phase_index == 1 and not baseline_failed:
-                baseline_rows = [row for row in first_rows
-                    if (row.get("piece") or {}).get("is_current")]
-                if baseline_rows:
-                    _apply_live_portfolio_metrics(rows, baseline_rows,
-                        capital=capital, target=context["target"],
-                        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
-                        trajectory_sink=retain_trajectory,
-                        loss_confirm_minutes=(context.get("profile_config") or {}).get(
-                            "loss_confirm_minutes", 2))
-            first_rows.extend(rows)
-            failed_candidates.update(errors)
-            if phase_index == 0 and errors:
-                baseline_failed = True
-            progress_state["evaluated_count"] += len(rows)
-            symbol_stats[symbol]["evaluated_count"] += len(rows)
-            for reason in errors.values():
-                label = reason.split(":", 1)[0]
-                progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
-                symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
-            if on_progress and rows:
-                on_progress(rows)
-            del rows, errors, batches, symbol_pieces
+            for batch_start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
+                piece_batch = symbol_pieces[batch_start:batch_start + MAX_PIECES_PER_BATCH]
+                rows, errors = _evaluate_with_isolation(evaluator, piece_batch, **kwargs)
+                if phase_index == 1 and not baseline_failed:
+                    baseline_rows = [row for row in first_rows
+                        if (row.get("piece") or {}).get("is_current")]
+                    if baseline_rows:
+                        _apply_live_portfolio_metrics(rows, baseline_rows,
+                            capital=capital, target=context["target"],
+                            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
+                            trajectory_sink=retain_trajectory,
+                            loss_confirm_minutes=(context.get("profile_config") or {}).get(
+                                "loss_confirm_minutes", 2))
+                    else:
+                        for row in rows:
+                            row["metrics_pieza_sola"] = row.get("metrics")
+                            combined = _portfolio_outcome_metrics([row], capital=capital,
+                                target=context["target"], max_loss_pct=context["max_loss_pct"],
+                                horizon=context["horizon"], loss_confirm_minutes=(
+                                    context.get("profile_config") or {}).get("loss_confirm_minutes", 2))
+                            if combined is not None:
+                                row["metrics"] = combined
+                            retain_trajectory(row)
+                            _drop_outcome_trajectories(row)
+                first_rows.extend(rows)
+                failed_candidates.update(errors)
+                if phase_index == 0 and errors:
+                    baseline_failed = True
+                progress_state["evaluated_count"] += len(rows)
+                symbol_stats[symbol]["evaluated_count"] += len(rows)
+                for reason in errors.values():
+                    label = reason.split(":", 1)[0]
+                    progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+                    symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
+                if on_progress and rows:
+                    on_progress(rows)
+                del rows, errors, piece_batch
+                gc.collect()
+                if check_limits:
+                    check_limits()
+            del batches, symbol_pieces
             gc.collect()
-            if check_limits:
-                check_limits()
             candidate_seconds[symbol] = round(candidate_seconds.get(symbol, 0.0) +
                 time.perf_counter() - symbol_started, 3)
             progress_state["candidate_seconds"] = dict(candidate_seconds)
+            if phase_index == 1:
+                rss_per_symbol[symbol] = {"rss_actual_mb": _rss_current_mb(),
+                    "rss_hwm_mb": _rss_max_mb(), "segundos": candidate_seconds[symbol]}
+                progress_state["rss_por_moneda"] = dict(rss_per_symbol)
             profile_times["simulacion_fastsim_s"] += evaluator_timings.get("fastsim_s", 0.0)
             profile_times["metricas_bootstrap_s"] += evaluator_timings.get("metrics_s", 0.0)
             profile_times["lotes_fastsim"] += evaluator_timings.get("batch_count", 0)
@@ -616,6 +645,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     progress_state["generated_count"] += smart_generated
     progress_state["generated_candidates"] += smart_generated
     second_rows = []
+    live_rows = [row for row in first_rows
+        if (row.get("piece") or {}).get("is_current")]
     for symbol in sorted({str(piece["symbol"]).upper() for piece in smart}):
         smart_started = time.perf_counter()
         symbol_pieces = [piece for piece in smart if str(piece["symbol"]).upper() == symbol]
@@ -645,6 +676,23 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             profile_times["simulacion_smart_s"] += max(0.0,
                 time.perf_counter() - smart_eval_started -
                 (smart_timings.get("metrics_s", 0.0) - metrics_before))
+            if live_rows:
+                _apply_live_portfolio_metrics(rows, live_rows, capital=capital,
+                    target=context["target"], max_loss_pct=context["max_loss_pct"],
+                    horizon=context["horizon"], trajectory_sink=retain_trajectory,
+                    loss_confirm_minutes=(context.get("profile_config") or {}).get(
+                        "loss_confirm_minutes", 2))
+            else:
+                for row in rows:
+                    row["metrics_pieza_sola"] = row.get("metrics")
+                    combined = _portfolio_outcome_metrics([row], capital=capital,
+                        target=context["target"], max_loss_pct=context["max_loss_pct"],
+                        horizon=context["horizon"], loss_confirm_minutes=(
+                            context.get("profile_config") or {}).get("loss_confirm_minutes", 2))
+                    if combined is not None:
+                        row["metrics"] = combined
+                    retain_trajectory(row)
+                    _drop_outcome_trajectories(row)
             second_rows.extend(rows)
             failed_candidates.update(errors)
             progress_state["evaluated_count"] += len(rows)
@@ -666,9 +714,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             progress_state["candidate_seconds"] = dict(candidate_seconds)
         del batches, symbol_pieces
         gc.collect()
+        rss_per_symbol[symbol] = {"rss_actual_mb": _rss_current_mb(),
+            "rss_hwm_mb": _rss_max_mb(), "segundos": candidate_seconds.get(symbol, 0.0)}
+        progress_state["rss_por_moneda"] = dict(rss_per_symbol)
         profile_times["metricas_bootstrap_s"] += smart_timings.get("metrics_s", 0.0)
-    live_rows = [row for row in first_rows
-        if (row.get("piece") or {}).get("is_current")]
     if not baseline_failed:
         if live_rows:
             _apply_live_portfolio_metrics(live_rows, live_rows,
@@ -677,27 +726,6 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             trajectory_sink=retain_trajectory,
             loss_confirm_minutes=(context.get("profile_config") or {}).get(
                 "loss_confirm_minutes", 2))
-            _apply_live_portfolio_metrics(second_rows, live_rows,
-            capital=capital, target=context["target"],
-            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
-            trajectory_sink=retain_trajectory,
-            loss_confirm_minutes=(context.get("profile_config") or {}).get(
-                "loss_confirm_minutes", 2))
-        else:
-            for row in [*first_rows, *second_rows]:
-                row["metrics_pieza_sola"] = row.get("metrics")
-                combined = _portfolio_outcome_metrics([row], capital=capital,
-                    target=context["target"], max_loss_pct=context["max_loss_pct"],
-                    horizon=context["horizon"], loss_confirm_minutes=(
-                        context.get("profile_config") or {}).get("loss_confirm_minutes", 2))
-                if combined is not None:
-                    row["metrics"] = combined
-                retain_trajectory(row)
-                outcomes = row.get("scenario_outcomes") or {}
-                for key in ("trajectory_cash_f32", "trajectory_equity_f32",
-                        "trajectory_timestamps", "trajectory_low_equity_5m_f32",
-                        "trajectory_timestamps_5m"):
-                    outcomes.pop(key, None)
     else:
         for row in second_rows:
             retain_trajectory(row)
@@ -759,7 +787,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "failed_candidates": failed_candidates, "skipped_symbols": skipped,
         "symbol_stats": symbol_stats,
         "trajectory_file": trajectory_file,
-        "candidate_seconds": candidate_seconds,
+        "candidate_seconds": candidate_seconds, "rss_por_moneda": rss_per_symbol,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
         "generated_candidates": len(candidates) + smart_generated,
         "discarded_count": sum(discarded.values()), "profile_times": profile_times,
@@ -780,6 +808,14 @@ def _scenario_metrics(row):
         "p_loss": sum(bool(item["loss_cut"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss_ci95": [0, 1] if pnls else [None, None], "cvar_5_usdt": 0,
         "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0}
+
+
+def _drop_outcome_trajectories(row):
+    outcomes = row.get("scenario_outcomes") or {}
+    for key in ("trajectory_cash_f32", "trajectory_equity_f32",
+            "trajectory_timestamps", "trajectory_low_equity_5m_f32",
+            "trajectory_timestamps_5m"):
+        outcomes.pop(key, None)
 
 
 def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon,
@@ -890,12 +926,7 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
             row["metrics"] = combined
         if trajectory_sink is not None:
             trajectory_sink(row)
-        outcomes = row.get("scenario_outcomes") or {}
-        outcomes.pop("trajectory_cash_f32", None)
-        outcomes.pop("trajectory_equity_f32", None)
-        outcomes.pop("trajectory_timestamps", None)
-        outcomes.pop("trajectory_low_equity_5m_f32", None)
-        outcomes.pop("trajectory_timestamps_5m", None)
+        _drop_outcome_trajectories(row)
 
 
 def _evaluate_with_isolation(evaluator, pieces, **kwargs):
@@ -924,7 +955,7 @@ def _context_priority(context):
 
 
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
-        evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540,
+        evaluator=evaluate_pieces, now=None, max_rss_mb=DEFAULT_MAX_RSS_MB, max_seconds=540,
         max_total_seconds=1500,
         n_scenarios=SCENARIO_COUNT, symbol_filter=None, perfilar=False,
         context_selector=None):
@@ -939,13 +970,18 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             prior_contexts), default=20))
     contexts = sorted(_contexts(app_path, prices), key=_context_priority)
     if context_selector is not None:
-        if str(context_selector).startswith("perfil:"):
-            selected_profile = str(context_selector).split(":", 1)[1].upper()
+        selector = str(context_selector)
+        if selector.startswith("perfil:"):
+            selected_profile = selector.split(":", 1)[1].upper()
             contexts = [row for row in contexts if row.get("goal_id") is None and
                 row["profile"] == selected_profile]
-        else:
-            selected_id = int(context_selector)
+        elif selector.isdigit():
+            selected_id = int(selector)
             contexts = [row for row in contexts if row.get("goal_id") == selected_id]
+        else:
+            selected_profile = selector.upper()
+            contexts = [row for row in contexts if row.get("goal_id") is None and
+                row["profile"] == selected_profile]
     with store._connect() as conn:
         conn.execute("UPDATE scenario_eval_runs SET status='abandonada',error=? "
             "WHERE status='running' AND julianday(as_of) < julianday('now', ?)",
@@ -1047,6 +1083,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "live_pieces": evaluated.get("live_pieces", []),
                             "live_capital_warning": evaluated.get("live_capital_warning"),
                             "symbol_stats": evaluated.get("symbol_stats", {}),
+                            "rss_por_moneda": evaluated.get("rss_por_moneda", {}),
                             "trajectory_file": evaluated.get("trajectory_file"),
                             "failed_candidates": evaluated.get("failed_candidates", {}),
                             "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
@@ -1061,6 +1098,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
                 f"smart_omitido_por_tiempo={evaluated.get('smart_omitido_por_tiempo', 0)} "
                 f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
+                f"rss_por_moneda={json.dumps(evaluated.get('rss_por_moneda', {}), ensure_ascii=False)} "
                 f"segundos={time.perf_counter()-context_started:.3f} "
                 f"rss_actual_mb={_rss_current_mb()} rss_hwm_mb={_rss_max_mb()}")
             if perfilar:
@@ -1119,7 +1157,7 @@ def main(argv=None):
     parser.add_argument("--app-db", required=True)
     parser.add_argument("--market-db", required=True)
     parser.add_argument("--biblioteca", default="data/derived/scenario_lib")
-    parser.add_argument("--max-rss-mb", type=float, default=600)
+    parser.add_argument("--max-rss-mb", type=float, default=_configured_max_rss_mb())
     parser.add_argument("--max-segundos", type=float, default=540)
     parser.add_argument("--max-segundos-total", type=float, default=1500)
     parser.add_argument("--escenarios", type=int, default=SCENARIO_COUNT)

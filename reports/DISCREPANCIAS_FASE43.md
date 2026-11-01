@@ -369,7 +369,7 @@ Comando exacto para verificar el lector de RSS maximo de Windows despues de corr
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'asple-f43e6f-rss-windows-20261030-r5'; if (Test-Path $base) { throw "basetemp ya existe: $base" }; pytest tests/test_scenarios_validate.py --basetemp="$base"
 ```
 
-Resultado: 7 pruebas pasaron en 1,73 s; el helper devolvió RSS máximo no nulo y menor de 600 MB. Medición puntual del proceso local: 40,57 MB; no representa el pico de la validación completa.
+Resultado: 7 pruebas pasaron en 1,73 s; el helper devolvió RSS máximo no nulo y menor de 900 MB. Medición puntual del proceso local: 40,57 MB; no representa el pico de la validación completa. El tope de la caché es ahora 900 MiB por defecto y configurable mediante `ASPLE_SCENARIO_CACHE_MAX_RSS_MB`.
 ## 43e-6i — línea base v1 fiel y paridad de FastSim
 
 La validación anterior no aplicaba la geometría de hoy a las ventanas históricas como v1. Se replica la referencia del precio y el escalado descritos en `grid/meta_operator.py:3236-3250`, ejecutando cada ventana con piso y techo escalados por `open[0]/ref`. Si no existe una ventana v1 válida, el par queda fuera de Brier v1 y se cuenta en `v1_excluded_pairs`; no se inventa un resultado falso.
@@ -462,7 +462,7 @@ Resultado r2: **7 pasaron en 0,19 s**. Los candidatos Smart se generan solo cuan
 
 ## 43f-2 — caché horaria de escenarios
 
-Se añadió el almacenamiento de corridas y resultados en `market_data.db`, con retención de siete días, junto con `ScenarioCacheJob` horario al minuto 10 UTC. El ajuste GLOBAL `scenario_cache_enabled` queda apagado por defecto; el job lanza `scripts/escenarios_cache.py` en un subproceso, con prioridad baja, timeout de 600 s y límite de memoria virtual de 600 MiB en POSIX cuando el sistema permite aplicarlo. Un timeout registra `status=timeout`. La ruta del job importa solo el scheduler y SQLAlchemy, no numpy ni el evaluador de escenarios.
+Se añadió el almacenamiento de corridas y resultados en `market_data.db`, con retención de siete días, junto con `ScenarioCacheJob` horario al minuto 10 UTC. El ajuste GLOBAL `scenario_cache_enabled` queda apagado por defecto; el job lanza `scripts/escenarios_cache.py` en un subproceso, con prioridad baja y timeout por contexto. El tope vigente es 900 MiB por defecto, configurable mediante `ASPLE_SCENARIO_CACHE_MAX_RSS_MB`. Un timeout registra `status=timeout`. La ruta del job importa solo el scheduler y SQLAlchemy, no numpy ni el evaluador de escenarios.
 
 El script contempla metas activas y perfiles configurados para v2; los grids actuales se guardan como aproximaciones etiquetadas `mantener`. Las propuestas incluyen USDT quieto. Sin historia, filtros o biblioteca suficientes el resultado se conserva como omitido con motivo, sin inventar métricas. La caché aún es diagnóstica y no participa en decisiones de v1.
 
@@ -784,7 +784,7 @@ Pruebas enfocadas (comando exacto):
 $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0g-20261101-e'; python -m pytest tests/test_scenario_cache_job.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py --basetemp=$base -q
 ```
 
-Resultado: **53 pruebas pasaron en 9,28 s**; `node --check frontend/lab.js` pasó y `python scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La regresión de motor v1 quedó incluida. La prueba de dos contextos sintéticos terminó en 0,31 s con RSS máximo observado de **205,3 MB** (límite: 600 MB). En el contexto sintético RAPIDO de 5 símbolos, el generador produjo **135 candidatos operables + USDT quieto**, descartó 15 geometrías y tardó **0,0034 s** en construir la biblioteca de candidatos (no incluye carga/generación de escenarios ni simulación). La prueba de corte comparó la trayectoria horaria con `evaluate_portfolio`: P(límite)=1, P(meta)=0 y PnL congelado/desliz coincidentes con tolerancia 1e-9. Se verificó además la transición a `parcial` con 20 resultados de 3 símbolos tras el tope de contexto.
+Resultado: **53 pruebas pasaron en 9,28 s**; `node --check frontend/lab.js` pasó y `python scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La regresión de motor v1 quedó incluida. La prueba de dos contextos sintéticos terminó en 0,31 s con RSS máximo observado de **205,3 MB** (por debajo del tope vigente de 900 MiB). En el contexto sintético RAPIDO de 5 símbolos, el generador produjo **135 candidatos operables + USDT quieto**, descartó 15 geometrías y tardó **0,0034 s** en construir la biblioteca de candidatos (no incluye carga/generación de escenarios ni simulación). La prueba de corte comparó la trayectoria horaria con `evaluate_portfolio`: P(límite)=1, P(meta)=0 y PnL congelado/desliz coincidentes con tolerancia 1e-9. Se verificó además la transición a `parcial` con 20 resultados de 3 símbolos tras el tope de contexto.
 
 ### 43h-0h - JSON estricto para planes de v2
 
@@ -848,3 +848,17 @@ Resultado: **79 pruebas pasaron en 6,70 s**, incluida la regresión v1 contra la
 Repetición final tras ampliar la comprobación del candado para usar `_review_once_locked` real: **79 pruebas pasaron en 6,10 s** con `--basetemp` `pytest-f43h0k-20261101-h`; `node --check frontend/metas.js` pasó y `HALLAZGOS=0`.
 
 Resultado definitivo después de añadir contadores de `place_order`/`cancel_order` al exchange falso para ambas direcciones sombra: **79 pruebas pasaron en 6,82 s** con `--basetemp` `pytest-f43h0k-20261101-i`; cero llamadas de exchange en los escenarios sombra.
+
+### 43h-0o - tope de memoria y liberacion de trayectorias por moneda
+
+La cache y el job aceptan `ASPLE_SCENARIO_CACHE_MAX_RSS_MB`; por defecto usan 900 MiB. El script admite `--contexto RAPIDO` como alias de `perfil:RAPIDO`. En modo Smart con `keep_5m=True`, el fallo venia de desempaquetar cuatro valores de `unpack_curve`, que devuelve tres; se anadio una prueba que ejecuta esa ruta.
+
+El contexto de perfil evalua candidatos por lotes de hasta seis. Tras cada lote convierte las metricas de cartera, conserva solo las trayectorias que siguen entre los 12 finalistas globales y libera las demas antes de avanzar. La salida incluye `rss_por_moneda` con RSS actual, VmHWM y segundos. La prueba sintetica RAPIDO de cinco monedas midio por moneda VmHWM de **400,93 / 458,64 / 516,36 / 574,08 / 631,79 MB**, total **2,124 s**, 15 candidatos evaluados y 12 trayectorias finales.
+
+Comando de verificacion enfocado (PowerShell):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $testBaseTemp=Join-Path $env:TEMP ('asple-pytest-43h0o-'+[guid]::NewGuid().ToString('N')); python -m pytest tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf tests/test_scenario_cache_job.py tests/test_smart_exact.py tests/test_scenario_5m_loss.py -q -s --basetemp="$testBaseTemp"
+```
+
+Resultado: **46 pasaron y 1 se omitio** en 12,99 s; la omitida requiere Linux para demostrar que `VmHWM` de un hijo no hereda el pico del padre. La regresion v1 contra `776eedf` paso. `py_compile`, `git diff --check` y el verificador de codificacion se ejecutan antes del commit.

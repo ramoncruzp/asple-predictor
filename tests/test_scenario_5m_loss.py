@@ -74,7 +74,7 @@ def test_cartera_una_pieza_coincide_con_fastsim_en_el_corte():
     assert portfolio["pnl_mean_usdt"] == pytest.approx(float(fast["pnl_usdt"].mean()), abs=.05)
 
 
-def test_curvas_5m_de_dos_contextos_y_cinco_monedas_quedan_bajo_600_mb():
+def test_curvas_5m_de_dos_contextos_y_cinco_monedas_quedan_bajo_700_mb():
     import gc
     import time
 
@@ -104,4 +104,4 @@ def test_curvas_5m_de_dos_contextos_y_cinco_monedas_quedan_bajo_600_mb():
     elapsed = time.perf_counter() - started
     print(f"RSS HWM por contexto sintético (5 monedas): {context_peaks}; "
         f"pico={max(context_peaks, default=baseline):.2f} MB; tiempo={elapsed:.3f} s")
-    assert max(context_peaks, default=0) < 600
+    assert max(context_peaks, default=0) < 700

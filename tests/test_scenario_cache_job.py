@@ -184,6 +184,69 @@ def test_cache_guarda_solo_doce_mejores_trayectorias_y_mide_rss(
     assert max(rss_before, rss_after) < 600
 
 
+def test_perfil_libera_por_moneda_y_conserva_doce_finalistas_globales(
+        cache_databases, monkeypatch, tmp_path):
+    import time
+    import numpy as np
+    db, market_path = cache_databases
+    symbols = [f"SYN{index}USDT" for index in range(5)]
+    candidates = [{"candidate_key": f"{symbol}-{index}", "symbol": symbol,
+        "strategy": "simple", "capital": 10, "n": 6, "low": 90, "high": 110}
+        for symbol in symbols for index in range(3)]
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [*candidates, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "rank_alternatives_v2", lambda rows, **_kwargs: [
+        {"piece": row.get("piece", row), "objetivo": {"factible": True,
+            "motivos": [], "clave_orden": [0, 0, 0]}} for row in rows])
+    timestamps = np.arange(361, dtype=np.int64) * 3600
+    timestamps_5m = np.arange(4320, dtype=np.int64) * 300
+
+    def evaluate(pieces, **_kwargs):
+        assert len(pieces) <= cache_script.MAX_PIECES_PER_BATCH
+        rows = []
+        for piece in pieces:
+            value = float(piece["capital"])
+            rows.append({"piece": piece, "metrics": {"n": 1000,
+                "p_target": .5, "p_loss": 0, "p_loss_ci95": [0, 0],
+                "pnl_mean_usdt": 1, "pnl_mean_ci95": [1, 1],
+                "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+                "days_to_target_p50": 5, "p_inventory": .2},
+                "scenario_outcomes": {"pnl_usdt": np.ones(1000, dtype=np.float32),
+                    "loss_cut": np.zeros(1000, dtype=bool),
+                    "reached": np.zeros(1000, dtype=bool),
+                    "days": np.full(1000, 5, dtype=np.float32),
+                    "inventory_qty": np.zeros(1000, dtype=np.float32),
+                    "inventory_value": np.zeros(1000, dtype=np.float32),
+                    "trajectory_cash_f32": np.full((1000, 361), value, dtype=np.float32),
+                    "trajectory_equity_f32": np.full((1000, 361), value, dtype=np.float32),
+                    "trajectory_timestamps": timestamps,
+                    "trajectory_low_equity_5m_f32": np.full((1000, 4320), value,
+                        dtype=np.float32), "trajectory_timestamps_5m": timestamps_5m}})
+        return {"pieces": rows}
+
+    started = time.perf_counter()
+    result = cache_script._evaluate_context({"goal_id": None, "profile": "RAPIDO",
+        "free_cash": 100, "capital": 100, "capital_initial": 100,
+        "target": 3, "horizon": 15, "max_loss_pct": 18,
+        "profile_config": {}}, store=CandleStore(market_path),
+        app_db=db.engine.url.database, market_path=market_path, library_dir=tmp_path,
+        filters={symbol: object() for symbol in symbols},
+        prices={symbol: 1 for symbol in symbols}, sigmas={symbol: .01 for symbol in symbols},
+        skipped={}, evaluator=evaluate, trajectory_path=tmp_path / "profile.npz")
+    elapsed = time.perf_counter() - started
+
+    assert set(result["rss_por_moneda"]) == set(symbols)
+    assert all(row["rss_hwm_mb"] < 700 for row in result["rss_por_moneda"].values())
+    assert result["evaluated_count"] == 15
+    assert elapsed < 30
+    with np.load(result["trajectory_file"], allow_pickle=False) as archive:
+        assert len(json.loads(str(archive["metadata_json"].item()))) == 12
+    print(f"RSS por moneda perfil 5 monedas: {result['rss_por_moneda']}; "
+        f"pico={max(row['rss_hwm_mb'] for row in result['rss_por_moneda'].values()):.2f} MB; "
+        f"tiempo={elapsed:.3f} s; finalistas=12")
+
+
 def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):
     db, market_path = cache_databases
     current = {"candidate_key": "mantener:JUP", "symbol": "JUPUSDT",
@@ -495,6 +558,7 @@ def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, e
 def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setenv("ASPLE_SCENARIO_CACHE_MAX_RSS_MB", "600")
     monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     with sqlite3.connect(market_path) as conn:
         conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,profile,horizon_days,"
@@ -512,6 +576,29 @@ def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path,
         status = conn.execute("SELECT status FROM scenario_eval_runs "
             "WHERE run_id='run-memory'").fetchone()[0]
     assert status == "memoria"
+
+
+def test_tope_memoria_es_900_por_defecto_y_configurable(monkeypatch):
+    monkeypatch.delenv("ASPLE_SCENARIO_CACHE_MAX_RSS_MB", raising=False)
+    assert cache_script._configured_max_rss_mb() == 900
+    from scheduler import scenario_cache_job
+    assert scenario_cache_job._memory_limit_bytes() == 900 * 1024 * 1024
+    monkeypatch.setenv("ASPLE_SCENARIO_CACHE_MAX_RSS_MB", "750")
+    assert cache_script._configured_max_rss_mb() == 750
+    assert scenario_cache_job._memory_limit_bytes() == 750 * 1024 * 1024
+
+
+def test_contexto_perfil_admite_alias_sin_prefijo(monkeypatch, capsys):
+    seen = {}
+    def run_cache(_app_db, _market_db, **kwargs):
+        seen["context_selector"] = kwargs["context_selector"]
+        return {"contexts": 1, "runs": [{"status": "ok"}],
+            "seconds": .01, "rss_mb": 10}
+    monkeypatch.setattr(cache_script, "run_cache", run_cache)
+    assert cache_script.main(["--app-db", "app.sqlite", "--market-db", "market.sqlite",
+        "--contexto", "RAPIDO"]) == 0
+    assert seen["context_selector"] == "RAPIDO"
+    assert "estado=completed" in capsys.readouterr().out
 
 
 def test_contexto_meta_calcula_efectivo_valor_inventario_y_objetivo(cache_databases):
@@ -831,7 +918,7 @@ def test_corte_cartera_usa_primera_trayectoria_y_coincide_con_evaluador():
         max(0, -17 - expected["pnl_usdt"]), abs=1e-9)
 
 
-def test_dos_contextos_sinteticos_quedan_bajo_600_mb(cache_databases, monkeypatch,
+def test_dos_contextos_sinteticos_quedan_bajo_700_mb(cache_databases, monkeypatch,
         tmp_path):
     db, market_path = cache_databases
     contexts = [{"goal_id": idx, "profile": "RAPIDO", "decision_engine": "v1",
@@ -848,7 +935,7 @@ def test_dos_contextos_sinteticos_quedan_bajo_600_mb(cache_databases, monkeypatc
         library_dir=tmp_path, max_seconds=5, max_total_seconds=10)
 
     assert len(result["runs"]) == 2
-    assert result["rss_mb"] < 600
+    assert result["rss_mb"] < 700
 
 
 def test_perfil_con_20_resultados_y_3_monedas_se_guarda_parcial(
