@@ -1115,13 +1115,20 @@ class MetaCore:
 
     LEDGER_HIDDEN_BY_DEFAULT = ("META_VALUATION", "META_SURPLUS_VALUATION")
 
-    def ledger_page(self, meta_id, *, page=1, page_size=50, include_valuation=False):
+    def ledger_page(self, meta_id, *, page=1, page_size=50, include_valuation=False,
+            limit=None, offset=None):
         """Bitácora paginada; por defecto oculta META_VALUATION (una fila por
         minuto) para que lo legible (decisiones, aperturas/retiros/cierres,
         alertas) no quede enterrado detrás de ellas."""
         from sqlalchemy import func, select
-        page = max(1, int(page))
-        page_size = max(1, min(200, int(page_size)))
+        if limit is not None or offset is not None:
+            page_size = max(1, min(200, int(limit if limit is not None else page_size)))
+            row_offset = max(0, int(offset or 0))
+            page = row_offset // page_size + 1
+        else:
+            page = max(1, int(page))
+            page_size = max(1, min(200, int(page_size)))
+            row_offset = (page - 1) * page_size
         statement = select(self.db.meta_ledger).where(self.db.meta_ledger.c.meta_id == int(meta_id))
         count_statement = select(func.count()).select_from(self.db.meta_ledger).where(
             self.db.meta_ledger.c.meta_id == int(meta_id))
@@ -1129,15 +1136,17 @@ class MetaCore:
             statement = statement.where(self.db.meta_ledger.c.event_type.notin_(self.LEDGER_HIDDEN_BY_DEFAULT))
             count_statement = count_statement.where(
                 self.db.meta_ledger.c.event_type.notin_(self.LEDGER_HIDDEN_BY_DEFAULT))
-        statement = statement.order_by(self.db.meta_ledger.c.id.desc()).offset(
-            (page - 1) * page_size).limit(page_size)
+        statement = statement.order_by(self.db.meta_ledger.c.id.desc()).offset(row_offset).limit(page_size)
         with self.db.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
             total = conn.execute(count_statement).scalar_one()
         result = [dict(row) for row in rows]
         for row in result:
             row["details"] = json.loads(row["details"] or "{}")
-        return {"events": result, "page": page, "page_size": page_size, "total": int(total)}
+        next_offset = row_offset + len(result)
+        return {"events": result, "page": page, "page_size": page_size, "total": int(total),
+            "offset": row_offset, "limit": page_size, "next_offset": next_offset,
+            "has_more": next_offset < int(total)}
 
     def list_runs(self, meta_id):
         from sqlalchemy import select

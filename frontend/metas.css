@@ -82,3 +82,6 @@
 .meta-learning-readiness{margin:.5rem 0;padding:.55rem;border-left:3px solid #768390;background:rgba(120,130,140,.08)}.meta-learning-readiness.amarillo{border-color:#d29922;background:rgba(210,153,34,.1)}.meta-learning-readiness.verde{border-color:#3fb950;background:rgba(63,185,80,.1)}.meta-learning-readiness p{margin:.35rem 0 0}
 
 .meta-learning-readiness.rojo{border-color:#f85149;background:rgba(248,81,73,.1)}.meta-learning-readiness progress{display:block;width:100%;height:7px}.meta-learning-readiness ul{margin:.4rem 0;padding-left:1.2rem}
+
+.metas-ledger-highlight{background:rgba(235,170,55,.10);font-weight:600}
+.metas-ledger-review summary{cursor:pointer;font-weight:600}

@@ -382,9 +382,10 @@ def valuation(request: Request, meta_id: int):
 
 @router.get("/{meta_id}/ledger")
 def ledger(request: Request, meta_id: int, page: int = 1, page_size: int = 50,
-           include_valuation: bool = False):
+           include_valuation: bool = False, limit: int | None = None,
+           offset: int | None = None):
     return _call(_core(request).ledger_page, meta_id, page=page, page_size=page_size,
-                 include_valuation=include_valuation)
+                 include_valuation=include_valuation, limit=limit, offset=offset)
 
 
 @router.post("/{meta_id}/cancel-plan")

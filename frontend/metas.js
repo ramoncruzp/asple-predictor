@@ -13,7 +13,7 @@
   function saveJob(job) { try { sessionStorage.setItem(JOB_KEY, JSON.stringify(job)); } catch (e) { /* sin almacenamiento */ } }
   function loadJob() { try { return JSON.parse(sessionStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } }
   function clearJob() { try { sessionStorage.removeItem(JOB_KEY); } catch (e) { /* sin almacenamiento */ } }
-  let ledgerState = { page: 1, pageSize: 50, includeValuation: false, type: 'all' };
+  let ledgerState = { page: 0, offset: 0, pageSize: 20, total: 0, events: [], includeValuation: false, type: 'all', actionsOnly: false, loading: false, html: '' };
 
   function esc(value) {
     return String(value ?? '—').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
@@ -359,7 +359,8 @@
       `<li>Paso ${index + 1}: ${esc(step.symbol)} · ${esc(step.strategy)} · ${fmtMoney(step.capital_usdt)} USDT · mejora P(meta) +${fmtMoney(step.p_target_delta_pp)} pp</li>`).join('');
     const discarded = (plan.discarded_alternatives || []).map(row =>
       `<tr><td>${esc(row.symbol)}</td><td>${esc(row.strategy)}</td><td>${percent(row.metrics?.p_target)}</td>
-        <td>${esc(row.reason)}</td></tr>`).join('');
+        <td>${fmtMoney(row.metrics?.cut_slippage_mean_usdt)} / ${fmtMoney(row.metrics?.cut_slippage_p90_usdt)} USDT</td>
+        <td>${percent(row.metrics?.p_loss)}</td><td>${esc(row.reason)}</td></tr>`).join('');
     const warnings = (plan.warnings || []).map(item => `<p>⚠ ${esc(item)}</p>`).join('');
     slot.innerHTML = `
       <div class="metas-plan-section"><h4>Candidatas v2</h4>${candidatesTable(plan.candidates, true)}</div>
@@ -380,7 +381,7 @@
           <div><span>Hora de la caché</span><b>${esc(cacheTime)}</b></div>
         </div>${warnings ? `<div class="metas-warnings">${warnings}</div>` : ''}
       </div>
-      ${discarded ? `<div class="metas-plan-section"><h4>Mejores alternativas descartadas</h4><div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>P(meta)</th><th>Motivo</th></tr></thead><tbody>${discarded}</tbody></table></div></div>` : ''}
+      ${discarded ? `<div class="metas-plan-section"><h4>Mejores alternativas descartadas</h4><div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>P(meta)</th><th>Desliz medio / P90</th><th>P(l\u00edmite)</th><th>Motivo</th></tr></thead><tbody>${discarded}</tbody></table></div></div>` : ''}
       <div class="metas-plan-actions"><button type="button" class="button primary" data-start-plan="${plan.plan_id}" data-meta-id="${metaId}">Iniciar con este plan</button>
         <span class="muted">Este plan vence en <b data-plan-countdown>…</b></span></div>
       <p class="metas-plan-expired hidden">El plan venció; analiza de nuevo.</p>`;
@@ -476,6 +477,17 @@
     alerts: t => ['META_LOSS_WARNING', 'META_UNKNOWN', 'META_UNPROTECTED', 'META_VALUATION_PARTIAL', 'META_VALUATION_RECOVERED', 'META_CORTADA_POR_PERDIDA', 'META_VENCIDA', 'META_CUMPLIDA'].includes(t),
   };
 
+  const LEDGER_ACTION_EVENTS = new Set(['META_STARTED', 'META_PIECE_LINKED', 'META_OPERATOR_OPEN',
+    'META_OPERATOR_WITHDRAW', 'META_OPERATOR_CLOSE', 'META_OPERATOR_RECONFIGURE',
+    'META_OPERATOR_ROTATION', 'META_CORTADA_POR_PERDIDA', 'META_CUMPLIDA', 'META_CANCELLED', 'META_VENCIDA']);
+  const LEDGER_REVIEW_INTERNAL_EVENTS = new Set(['META_OPERATOR_ROTATION_EVALUATED',
+    'META_OPERATOR_COUNTERFACTUAL_STATE', 'META_OPERATOR_NOOP', 'META_OPERATOR_RECONFIGURE_EVALUATED',
+    'META_OPERATOR_ALLOCATION_SHADOW', 'META_BOT_TOUCH_SHADOW', 'META_OPERATOR_REVIEW_SKIPPED']);
+  const LEDGER_HIGHLIGHT_EVENTS = new Set([...LEDGER_ACTION_EVENTS, 'META_CREATED', 'META_OPERATOR_OPEN_FAILED',
+    'META_OPERATOR_OPEN_REJECTED', 'META_OPERATOR_ROTATION_REJECTED', 'META_LOSS_WARNING', 'META_UNKNOWN',
+    'META_UNPROTECTED', 'META_VALUATION_PARTIAL', 'META_VALUATION_RECOVERED', 'META_CLOSE_PENDING',
+    'META_CANCEL_PENDING', 'META_PIECES_BLOCKED', 'META_PIECES_UNBLOCKED', 'META_DECISION_ENGINE_FAILURE']);
+
   function ledgerRow(event) {
     const shadow = event.details?.shadow_decision;
     const details = event.details || {};
@@ -488,7 +500,7 @@
       META_VALUATION_PARTIAL: 'Valoración parcial', META_VALUATION_RECOVERED: 'Valoración recuperada',
       META_LOSS_WARNING: 'Aviso de pérdida', META_CORTADA_POR_PERDIDA: 'Cortada por pérdida',
       META_VENCIDA: 'Meta vencida', META_CUMPLIDA: 'Meta cumplida', META_CANCELLED: 'Meta cancelada' };
-    const actionLabels = { no_hacer_nada: 'No hacer nada', mantener: 'Mantener', abrir: 'Abrir pieza',
+    const actionLabels = { no_hacer_nada: 'No hacer nada', mantener: 'Mantener', agregar: 'Agregar pieza', cambiar: 'Cambiar pieza', abrir: 'Abrir pieza',
       retirar: 'Retirar pieza', reajustar: 'Reajustar pieza', cerrar: 'Cerrar pieza' };
     const label = labels[event.event_type] || 'Evento de Meta';
     const symbol = details.symbol || details.piece?.symbol || '';
@@ -532,36 +544,81 @@
     </tr>`;
   }
 
-  async function renderLedger(container, goalId) {
+  async function renderLedger(container, goalId, loadMore = false) {
     const scope = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
     const slot = scope?.querySelector('[data-ledger-slot]');
-    if (!slot) return;
-    slot.innerHTML = '<p class="muted">Cargando bitácora…</p>';
+    const details = scope?.querySelector('[data-ledger-details]');
+    if (!slot || !details?.open || ledgerState.loading) return;
+    if (!loadMore && ledgerState.page > 0) { slot.innerHTML = ledgerState.html; return; }
+    ledgerState.loading = true;
+    slot.insertAdjacentHTML('beforeend', '<p class="muted" data-ledger-loading>Cargando bit\u00e1cora\u2026</p>');
     try {
-      const query = new URLSearchParams({page: String(ledgerState.page),
-        page_size: String(ledgerState.pageSize), include_valuation: String(ledgerState.includeValuation)});
+      const nextOffset = loadMore ? ledgerState.offset : 0;
+      const requestedValuation = ledgerState.includeValuation;
+      const query = new URLSearchParams({limit: String(ledgerState.pageSize), offset: String(nextOffset),
+        include_valuation: String(requestedValuation)});
       const page = await apiGet(`/api/metas/${goalId}/ledger?${query.toString()}`);
+      if (requestedValuation !== ledgerState.includeValuation) { ledgerState.loading = false; return renderLedger(container, goalId); }
+      ledgerState.page = page.page;
+      ledgerState.offset = page.next_offset;
+      ledgerState.total = page.total;
+      if (nextOffset === 0) ledgerState.events = [];
+      ledgerState.events.push(...page.events);
       const filterFn = LEDGER_TYPE_FILTERS[ledgerState.type] || LEDGER_TYPE_FILTERS.all;
-      const rows = page.events.filter(e => filterFn(e.event_type)).reverse();
-      const totalPages = Math.max(1, Math.ceil(page.total / page.page_size));
-      slot.innerHTML = `<div class="metas-table-scroll"><table class="data-table metas-ledger-table"><thead><tr><th>Hora</th><th>Evento</th><th>Detalle</th></tr></thead>
-        <tbody>${rows.map(ledgerRow).join('') || '<tr><td colspan="3" class="muted">Sin eventos.</td></tr>'}</tbody></table></div>
-        <div class="metas-ledger-pager">
-          <button type="button" class="button secondary" data-ledger-prev ${page.page <= 1 ? 'disabled' : ''}>← Anterior</button>
-          <span>Página ${page.page} de ${totalPages}</span>
-          <button type="button" class="button secondary" data-ledger-next ${page.page >= totalPages ? 'disabled' : ''}>Siguiente →</button>
-        </div>`;
-      slot.querySelector('[data-ledger-prev]')?.addEventListener('click', () => { ledgerState.page -= 1; renderLedger(container, goalId); });
-      slot.querySelector('[data-ledger-next]')?.addEventListener('click', () => { ledgerState.page += 1; renderLedger(container, goalId); });
+      const events = ledgerState.events.filter(event => filterFn(event.event_type) &&
+        (!ledgerState.actionsOnly || LEDGER_ACTION_EVENTS.has(event.event_type) ||
+          (event.event_type === 'META_OPERATOR_REVIEW_DECISION' &&
+            ['abrir', 'agregar', 'cambiar', 'retirar', 'cerrar', 'reajustar'].includes(event.details?.decision?.decision))));
+      const grouped = [];
+      const reviews = events.filter(event => event.event_type === 'META_OPERATOR_REVIEW_DECISION');
+      const internalsByReview = new Map(reviews.map(event => [event.id, []]));
+      const consumed = new Set();
+      for (const other of events) {
+        if (other.event_type === 'META_OPERATOR_REVIEW_DECISION' ||
+            !LEDGER_REVIEW_INTERNAL_EVENTS.has(other.event_type)) continue;
+        const stamp = Date.parse(other.ts);
+        const owner = reviews.map(review => ({review, distance: Math.abs(Date.parse(review.ts) - stamp)}))
+          .filter(row => row.distance <= 5000).sort((a, b) => a.distance - b.distance)[0];
+        if (owner) { internalsByReview.get(owner.review.id).push(other); consumed.add(other.id); }
+      }
+      for (const event of events) {
+        if (consumed.has(event.id)) continue;
+        grouped.push({event, internal: internalsByReview.get(event.id) || []});
+      }
+      const rows = grouped.map(({event, internal}) => {
+        if (!internal.length) {
+          const highlighted = LEDGER_HIGHLIGHT_EVENTS.has(event.event_type) ? ' class="metas-ledger-highlight"' : '';
+          return ledgerRow(event).replace('<tr>', `<tr${highlighted}>`);
+        }
+        const decision = event.details?.decision?.decision || 'sin decisi\u00f3n';
+        const shadow = event.details?.engine_shadow?.decision || event.details?.shadow_decision?.decision || '\u2014';
+        const engine = event.details?.engine?.name || '\u2014';
+        return `<tr class="metas-ledger-review"><td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
+          <td><details><summary>Revisi\u00f3n \u00b7 decisi\u00f3n ${esc(decision)} \u00b7 sombra ${esc(shadow)} \u00b7 motor ${esc(engine)}</summary>
+            <div class="metas-table-scroll"><table class="data-table metas-ledger-table"><tbody>${[event, ...internal].map(ledgerRow).join('')}</tbody></table></div></details></td>
+          <td class="muted">${esc(decision)} \u00b7 ${esc(shadow)} \u00b7 ${esc(engine)}</td></tr>`;
+      }).join('');
+      scope.querySelector('[data-ledger-count]').textContent = `Bit\u00e1cora (${ledgerState.total} eventos)`;
+      slot.innerHTML = `<div class="metas-table-scroll"><table class="data-table metas-ledger-table"><thead><tr><th>Hora</th><th>Evento / revisi\u00f3n</th><th>Decisi\u00f3n activa \u00b7 sombra \u00b7 motor</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="3" class="muted">Sin eventos.</td></tr>'}</tbody></table></div>
+        ${page.has_more ? `<div class="metas-ledger-pager"><button type="button" class="button secondary" data-ledger-more>Ver m\u00e1s</button><span>${ledgerState.events.length} eventos cargados de ${ledgerState.total}</span></div>` : ''}`;
+      ledgerState.html = slot.innerHTML;
+      slot.querySelector('[data-ledger-more]')?.addEventListener('click', () => renderLedger(container, goalId, true));
     } catch (error) { slot.innerHTML = `<p class="metas-error">${esc(error.message)}</p>`; }
+    finally { ledgerState.loading = false; }
   }
 
   function wireLedgerControls(container, goalId) {
     const scope = container.matches?.(`[data-meta-id="${goalId}"]`) ? container : container.querySelector(`.metas-active[data-meta-id="${goalId}"]`);
     const typeSelect = scope?.querySelector('[data-ledger-type]');
     const valSwitch = scope?.querySelector('[data-ledger-valuation]');
-    typeSelect?.addEventListener('change', () => { ledgerState.type = typeSelect.value; ledgerState.page = 1; renderLedger(container, goalId); });
-    valSwitch?.addEventListener('change', () => { ledgerState.includeValuation = valSwitch.checked; ledgerState.page = 1; renderLedger(container, goalId); });
+    const details = scope?.querySelector('[data-ledger-details]');
+    const reset = () => { ledgerState.page = 0; ledgerState.offset = 0; ledgerState.total = 0; ledgerState.events = []; ledgerState.html = ''; if (details?.open) renderLedger(container, goalId); };
+    details?.addEventListener('toggle', () => { if (details.open) renderLedger(container, goalId); });
+    typeSelect?.addEventListener('change', () => { ledgerState.type = typeSelect.value; reset(); });
+    valSwitch?.addEventListener('change', () => { ledgerState.includeValuation = valSwitch.checked; reset(); });
+    scope?.querySelector('[data-ledger-actions]')?.addEventListener('change', event => {
+      ledgerState.actionsOnly = event.currentTarget.checked; reset(); });
   }
 
   function renderActivePanel(goal, valuation, config, lastReview = 'Sin revisiones') {
@@ -583,17 +640,20 @@
       <div class="metas-pieces" data-live-pieces><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
       <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
       <div class="metas-ledger">
-        <h3>Bitácora</h3>
-        <div class="metas-ledger-controls">
-          <select data-ledger-type>
-            <option value="all">Todas</option>
-            <option value="decisions">Decisiones</option>
-            <option value="pieces">Aperturas/retiros/cierres</option>
-            <option value="alerts">Alertas</option>
-          </select>
-          <label><input type="checkbox" data-ledger-valuation> Mostrar valoraciones (una fila por minuto)</label>
-        </div>
-        <div data-ledger-slot></div>
+        <details data-ledger-details>
+          <summary data-ledger-count>Bit\u00e1cora</summary>
+          <div class="metas-ledger-controls">
+            <select data-ledger-type>
+              <option value="all">Todas</option>
+              <option value="decisions">Decisiones</option>
+              <option value="pieces">Aperturas/retiros/cierres</option>
+              <option value="alerts">Alertas</option>
+            </select>
+            <label><input type="checkbox" data-ledger-actions> Solo acciones</label>
+            <label><input type="checkbox" data-ledger-valuation> Mostrar valoraciones</label>
+          </div>
+          <div data-ledger-slot></div>
+        </details>
       </div>
     </div>`;
   }

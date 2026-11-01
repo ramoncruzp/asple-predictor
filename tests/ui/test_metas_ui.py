@@ -10,6 +10,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -319,13 +320,52 @@ def test_active_meta_shows_remaining_time_free_capital_extra_and_spanish_status(
     assert "Plazo restante" in active.locator(".metas-live-facts").inner_text()
     assert "Efectivo libre REAL de la Meta" in active.locator(".metas-live-facts").inner_text()
     assert "Ganancia extra realizada" in active.locator(".metas-live-facts").inner_text()
+    active.locator("[data-ledger-count]").click()
     page.check("[data-ledger-valuation]")
+    page.locator(".metas-ledger-review details summary").click()
     page.wait_for_function("() => { const slot = document.querySelector('[data-ledger-slot]'); return !!slot && slot.innerText.includes('El operador mantuvo las piezas'); }")
     assert "Pieza actual: XRPUSDT" in page.locator("[data-ledger-slot]").inner_text()
     ledger_text = page.locator("[data-ledger-slot]").inner_text()
     assert "No hacer nada" in ledger_text and "evidencia independiente insuficiente" in ledger_text
     assert "Motor: v1" in ledger_text and "Sombra del otro motor: mantener" in ledger_text
     assert "[object Object]" not in ledger_text
+
+
+def test_bitacora_colapsada_agrupa_y_carga_20_eventos_por_pagina(metas_page):
+    page, server = metas_page
+    goal = server.core.create_goal(100, 3, profile="RAPIDO")
+    server.core.start_goal(goal["id"])
+    base = datetime.now(timezone.utc)
+    for review_index in range(62):
+        stamp = base + timedelta(minutes=review_index)
+        server.core._now = lambda stamp=stamp: stamp
+        server.core._ledger(goal["id"], None, "META_OPERATOR_REVIEW_DECISION", {
+            "decision": {"decision": "no_hacer_nada", "reason": "sin mejora"},
+            "engine": {"name": "v1"}, "engine_shadow": {"decision": "mantener"}})
+        for event_type in ("META_OPERATOR_COUNTERFACTUAL_STATE", "META_BOT_TOUCH_SHADOW",
+                "META_OPERATOR_ROTATION_EVALUATED", "META_OPERATOR_COUNTERFACTUAL_STATE",
+                "META_BOT_TOUCH_SHADOW", "META_OPERATOR_NOOP", "META_BOT_TOUCH_SHADOW"):
+            server.core._ledger(goal["id"], None, event_type, {"review": review_index})
+    stamp = base + timedelta(minutes=63)
+    server.core._now = lambda: stamp
+    for event_type in ("META_OPERATOR_OPEN", "META_OPERATOR_CLOSE",
+            "META_CORTADA_POR_PERDIDA", "META_CUMPLIDA"):
+        server.core._ledger(goal["id"], None, event_type, {})
+
+    page.goto(f"{server.url}/#metas")
+    page.wait_for_selector(".metas-active")
+    details = page.locator("[data-ledger-details]")
+    assert details.get_attribute("open") is None
+    started = time.perf_counter()
+    details.locator("summary").click()
+    page.wait_for_function("() => document.querySelector('[data-ledger-slot]')?.innerText.includes('20 eventos cargados de')")
+    elapsed = time.perf_counter() - started
+    assert page.locator("[data-ledger-slot] > .metas-table-scroll > table > tbody > tr").count() <= 20
+    assert page.locator(".metas-ledger-review details summary").count() > 0
+    assert elapsed < 1.0
+    page.locator("[data-ledger-more]").click()
+    page.wait_for_function("() => document.querySelector('[data-ledger-slot]')?.innerText.includes('40 eventos cargados de')")
+    assert page.locator("[data-ledger-slot] > .metas-table-scroll > table > tbody > tr").count() <= 20
 
 
 def test_learning_section_is_global_and_read_only_on_metas_page(metas_page):
