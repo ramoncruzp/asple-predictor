@@ -785,3 +785,17 @@ $env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0g-20261101-e'; py
 ```
 
 Resultado: **53 pruebas pasaron en 9,28 s**; `node --check frontend/lab.js` pasó y `python scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La regresión de motor v1 quedó incluida. La prueba de dos contextos sintéticos terminó en 0,31 s con RSS máximo observado de **205,3 MB** (límite: 600 MB). En el contexto sintético RAPIDO de 5 símbolos, el generador produjo **135 candidatos operables + USDT quieto**, descartó 15 geometrías y tardó **0,0034 s** en construir la biblioteca de candidatos (no incluye carga/generación de escenarios ni simulación). La prueba de corte comparó la trayectoria horaria con `evaluate_portfolio`: P(límite)=1, P(meta)=0 y PnL congelado/desliz coincidentes con tolerancia 1e-9. Se verificó además la transición a `parcial` con 20 resultados de 3 símbolos tras el tope de contexto.
+
+### 43h-0h - JSON estricto para planes de v2
+
+Se conserva `clave_orden` con infinitos durante el ranking interno, y se sanitizan los planes, revisiones y resultados sombra antes de devolverlos (`NaN`/`±inf` pasan a `null`). La serialización de la bitácora Meta y de `engine_shadow_decisions` usa el mismo normalizador compartido y `allow_nan=False`.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0h-20261101-a'; python -m pytest tests/test_v2_scenario_engine.py tests/test_meta_core.py tests/test_meta_engines_regression.py --basetemp=$base -q
+node --check frontend/lab.js
+python scripts/revisar_codificacion.py
+```
+
+Resultado: **68 pruebas pasaron en 6,09 s**, incluida la regresión de v1; el TestClient recibió HTTP 200 y `json.dumps(plan, allow_nan=False)` aceptó el plan con clave de orden serializada como `null`. Se comprobó el mismo orden de ranking (USDT quieto primero, luego las alternativas ordenadas por su clave interna). `node --check frontend/lab.js` pasó y la revisión de codificación informó `HALLAZGOS=0`.

@@ -26,6 +26,7 @@ from grid.sim.runner import run_simulation
 from grid.sim.runner import FILTERS
 from grid.levels import compute_lines, plan_cells, GridConfigError
 from grid.market_book import book_is_two_sided, book_mid
+from grid.json_utils import json_dumps_safe
 from grid.guards import sell_level_conflicts
 from data.exchange_filters import SymbolFilters
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -4271,9 +4272,9 @@ class MetaOperator:
         with self.db.engine.begin() as conn:
             conn.execute(insert(table).values(goal_id=int(goal["id"]), review_at=now,
                 active_engine=str(engine.name),
-                active_decision_json=json.dumps(active_decision or {}, ensure_ascii=False, default=str),
+                active_decision_json=json_dumps_safe(active_decision or {}, ensure_ascii=False, default=str),
                 shadow_engine=str(shadow.get("name") or ("v2" if engine.name == "v1" else "v1")),
-                shadow_decision_json=json.dumps(shadow, ensure_ascii=False, default=str),
+                shadow_decision_json=json_dumps_safe(shadow, ensure_ascii=False, default=str),
                 cache_run_id=str(cache_run_id) if cache_run_id else None))
         return True
 

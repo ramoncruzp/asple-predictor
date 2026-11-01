@@ -62,6 +62,28 @@ def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     assert row["buy_relative"] == pytest.approx(.99)
 
 
+def test_bitacora_meta_y_sombra_persisten_json_estricto(tmp_path):
+    import json
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core._ledger(goal["id"], None, "META_PLAN_EVALUATED", {
+        "nested": {"order_key": [0.2, float("inf"), float("nan")]}})
+    operator = MetaOperator(core, db, None, None, core.settings)
+    operator._persist_engine_shadow_decision(goal, SimpleNamespace(name="v1"),
+        {"metric": float("-inf")}, {"name": "v2", "result": {"metric": float("nan")}}, {})
+
+    with db.engine.connect() as conn:
+        ledger = conn.execute(select(db.meta_ledger.c.details).where(
+            db.meta_ledger.c.event_type == "META_PLAN_EVALUATED")).scalar_one()
+        shadow = conn.execute(select(db.engine_shadow_decisions.c.active_decision_json,
+            db.engine_shadow_decisions.c.shadow_decision_json)).one()
+    assert json.loads(ledger)["nested"]["order_key"] == [.2, None, None]
+    assert json.loads(shadow[0]) == {"metric": None}
+    assert json.loads(shadow[1])["result"]["metric"] is None
+
+
 def test_learning_sample_and_labels_persist_with_source_provenance(tmp_path):
     from sqlalchemy import select
 

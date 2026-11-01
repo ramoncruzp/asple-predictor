@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from data.market_store import CandleStore, market_db_path
 from grid.meta import DEFAULT_PROFILES
+from grid.json_utils import json_dumps_safe, json_safe
 from research.scenarios.candidates import build_candidates, build_smart_candidates
 from research.scenarios.evaluate import (_sigma_estimates, evaluate_pieces,
     prepare_scenario_batches, scenario_source_date_plan)
@@ -38,21 +39,11 @@ _RSS_PEAK_MB = 0.0
 
 def _json_safe(value):
     """Normaliza valores no finitos y tipos numpy para JSON estricto."""
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if hasattr(value, "tolist"):
-        return _json_safe(value.tolist())
-    if hasattr(value, "item"):
-        return _json_safe(value.item())
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
+    return json_safe(value)
 
 
 def _json_dumps(value, **kwargs):
-    return json.dumps(_json_safe(value), allow_nan=False, **kwargs)
+    return json_dumps_safe(value, **kwargs)
 
 
 class CacheLimitExceeded(Exception):

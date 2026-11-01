@@ -182,6 +182,64 @@ def test_plan_usa_corrida_vigente_sin_recalcular(engine_databases):
     assert plan["pieces"][0]["capital_usdt"] == 70
 
 
+def test_plan_v2_con_dias_ausentes_es_json_estricto_y_respeta_ranking(
+        engine_databases):
+    from research.scenarios.objective import rank_alternatives_v2
+
+    ordered = rank_alternatives_v2([
+        {"candidate_key": "sin_dias", "piece": {"strategy": "simple"},
+            "metrics": {"pnl_mean_usdt": 1, "p_target": .35, "p_loss_ci95": [.2, .4],
+                "cut_slippage_mean_usdt": 0, "days_to_target_p50": None}},
+        {"candidate_key": "con_dias", "piece": {"strategy": "simple"},
+            "metrics": {"pnl_mean_usdt": 1, "p_target": .20, "p_loss_ci95": [.2, .4],
+                "cut_slippage_mean_usdt": 0, "days_to_target_p50": 1}},
+    ], perfil="RAPIDO", capital_meta=100)
+    assert [row.get("candidate_key") or row["piece"]["strategy"] for row in ordered] == [
+        "usdt_quieto", "sin_dias", "con_dias"]
+
+    db, market_path = engine_databases
+    _cache_row(market_path)
+    with sqlite3.connect(market_path) as conn:
+        conn.execute("UPDATE scenario_eval_results SET metrics_json=?",
+            (json.dumps({"n": 1000, "pnl_mean_usdt": 1.4, "p_target": .35,
+                "p_loss": .3, "p_loss_ci95": [.2, .4],
+                "cut_slippage_mean_usdt": 0, "days_to_target_p50": None}),))
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100, "target_usdt": 3}
+    engine = V2ScenarioEngine()
+    plan = engine.plan(SimpleNamespace(db=db), goal, plan_kind="analisis")
+
+    encoded = json.dumps(plan, allow_nan=False)
+    assert plan["v2"]["decision"] == "mantener_usdt"
+    assert plan["alternatives"][0]["objective"]["clave_orden"][1] is None
+    assert json.loads(encoded)["alternatives"][0]["objective"]["clave_orden"][1] is None
+
+
+def test_endpoint_analisis_v2_responde_200_con_plan_sin_inf(engine_databases):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routes import metas
+
+    db, market_path = engine_databases
+    _cache_row(market_path)
+    with sqlite3.connect(market_path) as conn:
+        conn.execute("UPDATE scenario_eval_results SET metrics_json=?",
+            (json.dumps({"n": 1000, "pnl_mean_usdt": 1.4, "p_target": .35,
+                "p_loss": .3, "p_loss_ci95": [.2, .4],
+                "cut_slippage_mean_usdt": 0, "days_to_target_p50": None}),))
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100, "target_usdt": 3}
+    plan = V2ScenarioEngine().plan(SimpleNamespace(db=db), goal, plan_kind="analisis")
+    app = FastAPI()
+    app.include_router(metas.router, prefix="/api/metas")
+    app.state.settings = SimpleNamespace(grid_api_token="local-v2-test")
+    app.state.meta_operator = SimpleNamespace(analyze=lambda _meta_id: plan)
+
+    response = TestClient(app, headers={"X-API-Token": "local-v2-test"}).post(
+        "/api/metas/9/analysis")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["alternatives"][0]["objective"]["clave_orden"][1] is None
+
+
 def test_plan_usdt_quieto_no_abre_piezas_y_start_plan_lo_acepta(engine_databases):
     db, market_path = engine_databases
     _cache_row(market_path)

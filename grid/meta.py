@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from grid.json_utils import json_dumps_safe
 
 FEE = Decimal("0.001")
 DEPTH_CACHE_TTL_S = 20
@@ -361,7 +362,8 @@ class MetaCore:
         with self.db.engine.begin() as conn:
             conn.execute(self.db.meta_ledger.insert().values(
                 meta_id=int(meta_id), run_id=run_id, ts=self._now(), event_type=event_type, reason=reason,
-                grid_id=grid_id, level_idx=level_idx, details=json.dumps(details or {}, sort_keys=True, default=str)))
+                grid_id=grid_id, level_idx=level_idx, details=json_dumps_safe(
+                    details or {}, sort_keys=True, default=str)))
         if event_type in {"META_LOSS_WARNING", "META_LOSS_CUT", "META_CORTADA_POR_PERDIDA", "META_VENCIDA", "META_TARGET_MET", "META_EXPIRED"}:
             self.alert(event_type, meta_id, details or {})
 

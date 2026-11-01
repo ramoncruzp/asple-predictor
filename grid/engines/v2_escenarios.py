@@ -8,6 +8,7 @@ import uuid
 from sqlalchemy import select
 
 from grid.engines.base import DecisionEngine, EngineUnavailable
+from grid.json_utils import json_safe
 from research.scenarios.objective import rank_alternatives_v2
 
 
@@ -179,7 +180,7 @@ class V2ScenarioEngine(DecisionEngine):
             "p_inventory": selected_metrics.get("p_inventory"),
             "motivos": (selected.get("objetivo") or {}).get("motivos", []) if selected else [],
             "descartadas": cached["discarded"]}
-        return {"profile": str(goal.get("profile") or "").upper(),
+        return json_safe({"profile": str(goal.get("profile") or "").upper(),
             "decision_id": decision_id, "base_method_version": self.version,
             "engine": {"name": self.name, "version": self.version},
             "cache": {key: cached[key] for key in ("run_id", "as_of", "age_seconds", "status")},
@@ -205,28 +206,28 @@ class V2ScenarioEngine(DecisionEngine):
                 "n_levels": selected_piece["n_levels"]} if selected_piece else {},
             "signals_used": [], "signals_omitted": ["señales v1 fuera del método v2"],
             "shadow_decision": None, "warnings": [],
-            "use_extended_allocation": False}
+            "use_extended_allocation": False})
 
     def review(self, operator, goal, valuation, plan):
         from grid.meta_live_pieces import live_meta_grid_links
         links = live_meta_grid_links(operator.core, int(goal["id"]))
         alternatives = list((plan or {}).get("alternatives") or [])
         if not links:
-            return {"decision": "no_hacer_nada", "reason": "la meta no tiene grids activos"}
+            return json_safe({"decision": "no_hacer_nada", "reason": "la meta no tiene grids activos"})
         for link in links:
             grid_id = str(int(link["grid_id"]))
             current = (plan.get("current_pieces") or {}).get(grid_id)
             if not current:
-                return {"decision": "no_hacer_nada",
+                return json_safe({"decision": "no_hacer_nada",
                     "reason": "la caché no contiene una evaluación mantener para cada grid activo",
-                    "grid_id": int(grid_id)}
+                    "grid_id": int(grid_id)})
             current_est = current.get("estimate") or {}
             current_alt = next((row for row in alternatives
                 if row.get("cache_candidate_key") and row.get("is_current")
                 and int((row.get("pieces") or [{}])[0].get("grid_id") or -1) == int(grid_id)), None)
             if current_alt is None:
-                return {"decision": "no_hacer_nada", "reason": "falta alternativa mantener vigente",
-                    "grid_id": int(grid_id)}
+                return json_safe({"decision": "no_hacer_nada", "reason": "falta alternativa mantener vigente",
+                    "grid_id": int(grid_id)})
             candidates = [row for row in alternatives if not row.get("is_current")
                 and row.get("estimate", {}).get("evidence_sufficient")]
             best = next((row for row in candidates
@@ -262,14 +263,14 @@ class V2ScenarioEngine(DecisionEngine):
             # La rutina existente conserva sus gates de materialidad, persistencia,
             # cooldown, pérdida máxima, límites diarios y cierre verificado.
             result = operator._review_allocations(goal, valuation, plan=reordered)
-            return {**result, "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
+            return json_safe({**result, "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
                 "expected_net_usdt": new_net, "keep_mean_usdt": current_est.get("pnl_mean_usdt"),
                 "keep_standard_error_usdt": standard_error,
                 "realized_loss_usdt": realized_loss, "exit_fee_usdt": exit_fee,
-                "entry_fee_usdt": entry_fee, "cache_run_id": (plan.get("cache") or {}).get("run_id")}}
-        return {"decision": "mantener", "reason":
+                "entry_fee_usdt": entry_fee, "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
+        return json_safe({"decision": "mantener", "reason":
             "ninguna alternativa supera el umbral pareado de probabilidad y ganancia neta",
-            "cache_run_id": (plan.get("cache") or {}).get("run_id")}
+            "cache_run_id": (plan.get("cache") or {}).get("run_id")})
 
     def shadow_review(self, operator, goal, valuation, plan):
         try:
@@ -280,11 +281,11 @@ class V2ScenarioEngine(DecisionEngine):
                 (shadow_plan.get("current_pieces") or {}).values()]
             v2_metrics = (live_metrics[0] if result.get("decision") in {"mantener", "no_hacer_nada"}
                 and live_metrics else shadow_plan.get("estimated_time") or {})
-            return {**result, "reason": result.get("reason") or "revisión en sombra",
+            return json_safe({**result, "reason": result.get("reason") or "revisión en sombra",
                 "cache_run_id": (shadow_plan.get("cache") or {}).get("run_id"),
                 "v2_metrics": v2_metrics,
                 "pieces": shadow_plan.get("pieces", []),
                 "decision_choices": shadow_plan.get("decision_choices", {}),
-                "current_pieces": shadow_plan.get("current_pieces", {})}
+                "current_pieces": shadow_plan.get("current_pieces", {})})
         except EngineUnavailable as exc:
-            return {"decision": "no_disponible", "reason": str(exc)}
+            return json_safe({"decision": "no_disponible", "reason": str(exc)})
