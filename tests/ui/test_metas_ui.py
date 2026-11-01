@@ -238,6 +238,49 @@ def test_analysis_completes_and_start_opens_a_grid(metas_page):
     assert len(linked) == 1
 
 
+def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
+    page, server = metas_page
+    goal = server.core.create_goal(100, 3, profile="RAPIDO")
+    with server.db.engine.begin() as conn:
+        conn.execute(server.db.meta_goals.update().where(
+            server.db.meta_goals.c.id == goal["id"]).values(
+                config_snapshot='{"decision_engine":"v2"}'))
+
+    class ScenarioEngine:
+        name = "v2"
+        version = "2-test"
+
+        def plan(self, *_args, **_kwargs):
+            return {"engine": {"name": "v2"}, "plan_id": "v2-plan",
+                "expires_in_seconds": 600, "pieces": [], "alternatives": [],
+                "v2": {"metrics": {"p_target": .4, "pnl_mean_usdt": 1.2,
+                    "pnl_mean_ci95": [.5, 1.9], "p_loss": .02,
+                    "p_loss_ci95": [.01, .03], "cut_slippage_mean_usdt": .2,
+                    "days_to_target_p50": 8, "p_inventory": .3, "n": 1000}},
+                "cache": {"status": "parcial", "as_of": "2026-10-31T12:00:00+00:00"},
+                "candidates": [{"symbol": "ZROUSDT", "sigma_24h": .03,
+                    "price": 2.4, "generated_count": 24, "evaluated_count": 20,
+                    "discarded_count": 4, "discarded_reason": "filtro",
+                    "best_p_target": .4, "best_pnl_mean_usdt": 1.2},
+                    {"symbol": "PEPEUSDT", "generated_count": 0,
+                        "evaluated_count": 0, "skipped_reason": "sin biblioteca"}],
+                "portfolio": {"steps": []}, "discarded_alternatives": []}
+
+    server.operator._engine_for_goal = lambda _goal: ScenarioEngine()
+    page.goto(f"{server.url}/#metas")
+    page.wait_for_selector(f'[data-analyze="{goal["id"]}"]')
+    page.click(f'[data-analyze="{goal["id"]}"]')
+    page.wait_for_selector('[data-start-plan]', timeout=15000)
+    content = page.locator(f'[data-analysis-slot="{goal["id"]}"]').inner_text()
+
+    assert "P(meta en el plazo)" in content and "40" in content
+    assert "Ganancia media" in content and "P(tocar el límite)" in content
+    assert "P(terminar con inventario)" in content and "parcial" in content
+    assert "PEPEUSDT" in content and "sin biblioteca" in content
+    assert "Score Scanner" not in content and "Ventanas" not in content
+    assert "Probabilidad ajustada" not in content
+
+
 def test_active_meta_with_unknown_valuation_shows_unprotected_banner(metas_page):
     page, server = metas_page
     goal = server.core.create_goal(150, 10, profile="RAPIDO")

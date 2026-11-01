@@ -86,7 +86,9 @@ def build_smart_candidates(top_simple, *, filters_by_symbol=None):
 
 
 def build_candidates(*, symbols, capital_libre, perfil, filters_by_symbol,
-        price_by_symbol, sigma_by_symbol, horizon_days, top_simple=None):
+        price_by_symbol, sigma_by_symbol, horizon_days, top_simple=None,
+        capital_max_by_symbol=None, max_grids=None, max_bots=None,
+        current_grids=0, current_bots=0):
     """Genera grids, bots, hasta dos Smart de segunda pasada y USDT quieto.
 
     Devuelve ``candidates``, ``smart_candidates`` y descartes agrupados por
@@ -94,37 +96,58 @@ def build_candidates(*, symbols, capital_libre, perfil, filters_by_symbol,
     a ``top_simple`` sus dos Simple mejor clasificadas para la pasada Smart.
     """
     profile = DEFAULT_PROFILES[str(perfil).upper()]
-    candidates, discarded = [], {}
+    candidates, discarded, discarded_by_symbol = [], {}, {}
+    def discard(reason, symbol, count=1):
+        discarded[reason] = discarded.get(reason, 0) + count
+        reasons = discarded_by_symbol.setdefault(symbol, {})
+        reasons[reason] = reasons.get(reason, 0) + count
+    grid_slots = (int(profile.get("max_grids", 0)) - int(current_grids)
+        if max_grids is None else int(max_grids) - int(current_grids))
+    bot_slots = (int(profile.get("max_bots", 0)) - int(current_bots)
+        if max_bots is None else int(max_bots) - int(current_bots))
     for raw_symbol in symbols:
         symbol = str(raw_symbol).upper()
         filters = filters_by_symbol.get(symbol)
         if filters is None:
-            discarded["filtros ausentes"] = discarded.get("filtros ausentes", 0) + 1
+            discard("filtros ausentes", symbol)
             continue
         price, sigma = float(price_by_symbol[symbol]), float(sigma_by_symbol[symbol])
         free = _amount(capital_libre, symbol)
+        if capital_max_by_symbol is not None:
+            free = min(free, _amount(capital_max_by_symbol, symbol))
         if price <= 0 or sigma <= 0 or free <= 0:
-            discarded["precio, sigma o capital no positivo"] = discarded.get(
-                "precio, sigma o capital no positivo", 0) + 1
+            reason = ("límite de capital por moneda alcanzado" if
+                capital_max_by_symbol is not None and _amount(capital_max_by_symbol, symbol) <= 0
+                else "precio, sigma o capital no positivo")
+            discard(reason, symbol, 30)
             continue
         for fraction in (1.0, .7, .5):
             capital = free * fraction
-            for levels in (6, 10):
-                for width in (.5, 1.0, 2.0):
+            if capital < 10:
+                discard("capital inferior al mínimo de 10 USDT por pieza", symbol, 10)
+                continue
+            if grid_slots > 0:
+                for levels in (6, 10):
+                    for width in (.5, 1.0, 2.0):
+                        try:
+                            candidates.append(_simple_candidate(symbol, capital, levels, width,
+                                price, sigma, horizon_days, filters))
+                        except (GridConfigError, ValueError, ArithmeticError) as exc:
+                            reason = str(exc).split(":", 1)[0]
+                            discard(reason, symbol)
+            else:
+                discard("máximo de grids del perfil alcanzado", symbol, 18)
+            if bot_slots > 0:
+                for buy_offset, sell_offset in ((-1.5, 1.5), (-1.5, 3.0),
+                        (-3.0, 1.5), (-3.0, 3.0)):
                     try:
-                        candidates.append(_simple_candidate(symbol, capital, levels, width,
-                            price, sigma, horizon_days, filters))
+                        candidates.append(_bot_candidate(symbol, capital, buy_offset,
+                            sell_offset, price, filters, profile))
                     except (GridConfigError, ValueError, ArithmeticError) as exc:
                         reason = str(exc).split(":", 1)[0]
-                        discarded[reason] = discarded.get(reason, 0) + 1
-            for buy_offset, sell_offset in ((-1.5, 1.5), (-1.5, 3.0),
-                    (-3.0, 1.5), (-3.0, 3.0)):
-                try:
-                    candidates.append(_bot_candidate(symbol, capital, buy_offset,
-                        sell_offset, price, filters, profile))
-                except (GridConfigError, ValueError, ArithmeticError) as exc:
-                    reason = str(exc).split(":", 1)[0]
-                    discarded[reason] = discarded.get(reason, 0) + 1
+                        discard(reason, symbol)
+            else:
+                discard("máximo de bots del perfil alcanzado", symbol, 12)
     for candidate in candidates:
         candidate["candidate_key"] = _key({key: value for key, value in candidate.items()
             if key != "candidate_key"})
@@ -132,4 +155,5 @@ def build_candidates(*, symbols, capital_libre, perfil, filters_by_symbol,
         "n": 0, "candidate_key": _key({"strategy": "usdt_quieto"})}
     smart = build_smart_candidates(top_simple)
     return {"candidates": candidates + [quiet], "smart_candidates": smart,
-        "discarded": discarded, "invalid_count": sum(discarded.values())}
+        "discarded": discarded, "discarded_by_symbol": discarded_by_symbol,
+        "invalid_count": sum(discarded.values())}

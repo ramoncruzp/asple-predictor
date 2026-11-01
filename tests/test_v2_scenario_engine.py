@@ -267,6 +267,99 @@ def test_plan_usdt_quieto_no_abre_piezas_y_start_plan_lo_acepta(engine_databases
     assert result["opened"] == []
 
 
+def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkeypatch):
+    db, _market_path = engine_databases
+    cached = {"run_id": "r", "as_of": datetime.now(timezone.utc).isoformat(),
+        "age_seconds": 0, "status": "ok", "horizon_days": 20,
+        "discarded": {}, "skipped_symbols": {}, "trajectory_file": None,
+        "symbol_stats": {"ZROUSDT": {"price": 2.0, "sigma_24h": .04,
+            "generated_count": 4, "evaluated_count": 3,
+            "discarded": {"filtro": 1}}},
+        "candidates": [
+            {"candidate_key": "zro100", "symbol": "ZROUSDT", "strategy": "simple",
+                "params": {"low": 1.8, "high": 2.2, "n": 6, "capital": 100},
+                "metrics": {"n": 10, "p_target": .5, "pnl_mean_usdt": 2,
+                    "p_loss": 0, "p_loss_ci95": [0, .01], "pnl_mean_ci95": [1, 3],
+                    "cut_slippage_mean_usdt": 0, "days_to_target_p50": 7},
+                "objective": {"factible": True, "motivos": [],
+                    "clave_orden": [-.5, 7, -2]}},
+            {"candidate_key": "zro70", "symbol": "ZROUSDT", "strategy": "simple",
+                "params": {"low": 1.8, "high": 2.2, "n": 6, "capital": 70},
+                "metrics": {"n": 10, "p_target": .4, "pnl_mean_usdt": 1,
+                    "p_loss": 0, "p_loss_ci95": [0, .01], "pnl_mean_ci95": [.5, 1.5],
+                    "cut_slippage_mean_usdt": 0, "days_to_target_p50": 8},
+                "objective": {"factible": True, "motivos": [],
+                    "clave_orden": [-.4, 8, -1]}}]}
+    monkeypatch.setattr(V2ScenarioEngine, "_load_cache", lambda *_args, **_kwargs: cached)
+    plan = V2ScenarioEngine().plan(SimpleNamespace(db=db),
+        {"id": 9, "status": "DRAFT", "profile": "RAPIDO", "capital_initial": 100,
+            "target_usdt": 3}, plan_kind="analisis")
+
+    assert [piece["capital_usdt"] for piece in plan["pieces"]] == [70]
+    assert len(plan["candidates"]) == 1
+    assert plan["candidates"][0]["generated_count"] == 4
+    assert plan["candidates"][0]["evaluated_count"] == 3
+    assert plan["candidates"][0]["discarded_count"] == 1
+
+
+def test_start_plan_v2_rechaza_exceso_antes_de_tocar_exchange(engine_databases):
+    db, _market_path = engine_databases
+    calls = []
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "status": "DRAFT", "config_snapshot": {"decision_engine": "v2"}}
+    operator = object.__new__(MetaOperator)
+    operator._lock = threading.RLock()
+    operator._plans = {"bad": {"plan_id": "bad", "meta_id": 9,
+        "expires_at": 200, "engine": {"name": "v2"},
+        "pieces": [{"symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 100, "floor": 1.8, "ceiling": 2.2, "n_levels": 6}]}}
+    operator.clock = lambda: 100
+    operator.price_drift_pct = 5
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        _owned_grids=lambda _id: [], _available_usdt=lambda _id: (100, 0),
+        start_goal=lambda _id: calls.append("start"))
+    operator.db = db
+    operator.engine = None
+    operator._plan_prices = lambda _plan: {}
+    operator._active_run_id = lambda _id: 1
+    operator._ledger = lambda *_args, **_kwargs: calls.append("ledger")
+    operator.alert = lambda *_args, **_kwargs: calls.append("alert")
+
+    with pytest.raises(ValueError, match="límite de capital por moneda"):
+        operator._start_plan_locked(9, "bad", lambda _piece: calls.append("open"))
+    assert calls == []
+
+
+def test_start_plan_v2_abre_y_liga_pieza_dentro_del_tope(engine_databases):
+    db, _market_path = engine_databases
+    linked = []
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "status": "DRAFT", "config_snapshot": {"decision_engine": "v2"}}
+    operator = object.__new__(MetaOperator)
+    operator._lock = threading.RLock()
+    operator._plans = {"good": {"plan_id": "good", "meta_id": 9,
+        "expires_at": 200, "engine": {"name": "v2"}, "control_plan": {},
+        "pieces": [{"symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 70, "floor": 1.8, "ceiling": 2.2, "n_levels": 6}]}}
+    operator.clock = lambda: 100
+    operator.price_drift_pct = 5
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        _owned_grids=lambda _id: [], _available_usdt=lambda _id: (100, 0),
+        start_goal=lambda _id: None, link_grid=lambda _id, grid_id, _kind: linked.append(grid_id),
+        _now=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    operator.db = db
+    operator.engine = None
+    operator._plan_prices = lambda _plan: {}
+    operator._active_run_id = lambda _id: 1
+    operator._ledger = lambda *_args, **_kwargs: None
+    operator.alert = lambda *_args, **_kwargs: None
+
+    result = operator._start_plan_locked(9, "good", lambda _piece: {"grid_id": 77})
+
+    assert linked == [77]
+    assert result["opened"][0]["capital_usdt"] == 70
+
+
 def _review_fixture(*, alt_probability=.5, alt_pnl=.8, current_probability=.4,
         current_pnl=.5, alt_result=None):
     current_piece = {"grid_id": 1, "symbol": "JUPUSDT", "strategy": "simple",
@@ -330,6 +423,25 @@ def test_revision_v2_no_cambia_si_perdida_y_comisiones_superan_beneficio():
 
     assert result["decision"] == "mantener"
     assert calls == []
+
+
+def test_revision_v2_agrega_cartera_voraz_con_frenos_del_operador():
+    operator, goal, valuation, plan = _review_fixture(
+        alt_probability=.4, current_probability=.4)
+    added = []
+    operator._add_piece_from_free_cash = lambda _goal, links, candidate_plan, valuation=None: (
+        added.append((links, candidate_plan, valuation)) or {
+            "decision": "abrir_pieza_con_efectivo_libre"})
+    alternative = plan["alternatives"][0]
+    alternative["estimate"]["probability"] = .4
+    plan["portfolio"] = {"added": [{"candidate_key": "candidate"}],
+        "steps": [{"candidate_key": "candidate", "p_target_delta_pp": 5}]}
+
+    result = V2ScenarioEngine().review(operator, goal, valuation, plan)
+
+    assert result["decision"] == "abrir_pieza_con_efectivo_libre"
+    assert len(added) == 1
+    assert added[0][1]["alternatives"][0]["alternative_id"] == "change"
 
 
 def test_motor_no_usa_cache_vencida_ni_fallback(engine_databases):

@@ -799,3 +799,32 @@ python scripts/revisar_codificacion.py
 ```
 
 Resultado: **68 pruebas pasaron en 6,09 s**, incluida la regresión de v1; el TestClient recibió HTTP 200 y `json.dumps(plan, allow_nan=False)` aceptó el plan con clave de orden serializada como `null`. Se comprobó el mismo orden de ranking (USDT quieto primero, luego las alternativas ordenadas por su clave interna). `node --check frontend/lab.js` pasó y la revisión de codificación informó `HALLAZGOS=0`.
+
+### 43h-0i - Límites de perfil y tarjeta de análisis v2
+
+La generación de candidatos aplica el capital máximo por moneda menos el capital nominal vivo, y reserva candidatos cuando ya se alcanzó el máximo de grids o bots. `start_plan` y las acciones v2 validan el plan completo antes de iniciar la Meta o llamar al abridor. La pantalla v2 agrupa candidatos por moneda y muestra sus métricas de caché, cartera y riesgo sin los campos del análisis v1.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0i-20261031-c'; python -m pytest tests/test_scenarios_candidates.py tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py tests/ui/test_metas_ui.py -q --basetemp=$base
+node --check frontend/metas.js
+python scripts/revisar_codificacion.py
+```
+
+Resultado: **54 pruebas pasaron en 40,29 s**, incluida la regresión de v1 y la prueba Playwright de la tarjeta v2. Se verificaron topes de 70 % (RAPIDO) y 40 % (PRUDENTE), rechazo del plan de 100 USDT antes de iniciar o abrir, y apertura/liga de la pieza de 70 USDT. La tabla presenta una fila por moneda, incluye omisiones y no presenta columnas v1. `node --check frontend/metas.js` pasó; la revisión de codificación se ejecuta antes del commit.
+
+### 43h-0j - Trayectorias y cartera voraz v2
+
+La caché guarda fuera de SQLite las trayectorias horarias `float32` de las piezas vivas y hasta 12 candidatos mejor clasificados por contexto. Los archivos NPZ se borran al superar los siete días de retención. El motor v2 usa esas curvas para construir la cartera paso a paso; cada alta debe mejorar P(meta) por al menos 2 pp y cumplir el objetivo 1 + 3, el efectivo disponible, límites por moneda/perfil y mínimo de 10 USDT. La revisión activa puede agregar una pieza de la cartera propuesta mediante la rutina existente de altas con efectivo libre.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0j-20261031-a'; python -m pytest tests/test_scenario_cache_job.py tests/test_scenario_portfolio.py tests/test_v2_scenario_engine.py -q --basetemp=$base
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0j-20261031-b'; python -m pytest tests/test_scenario_cache_job.py::test_cache_guarda_solo_doce_mejores_trayectorias_y_mide_rss tests/test_scenario_portfolio.py -q -s --basetemp=$base
+node --check frontend/metas.js
+python scripts/revisar_codificacion.py
+```
+
+Resultado: **54 pruebas pasaron en 9,00 s**; la medición focalizada confirmó **205,0 MB RSS al inicio y 205,8 MB al final** mientras se guardaban 12 trayectorias sintéticas de 1.000 escenarios por 480 horas. La cartera voraz con dos incorporaciones tardó **0,0032 s**, por debajo de 2 s. La comparación de métricas horarias contra `evaluate_portfolio` pasó con tolerancia 1e-9. La prueba de revisión activa confirmó que la decisión de agregar se delega al helper existente del operador. `node --check frontend/metas.js` pasó y la revisión de codificación informó `HALLAZGOS=0`.

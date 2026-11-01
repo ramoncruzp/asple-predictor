@@ -275,7 +275,19 @@
     container.querySelector(`[data-reanalyze="${metaId}"]`)?.addEventListener('click', () => startAnalysis(container, metaId));
   }
 
-  function candidatesTable(candidates) {
+  function candidatesTable(candidates, v2 = false) {
+    if (v2) {
+      const rows = (candidates || []).map(c => {
+        if (c.skipped_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="7">No evaluada: ${esc(c.skipped_reason)}</td></tr>`;
+        const reason = c.discarded_reason ? `${c.discarded_count} · ${esc(c.discarded_reason)}` : `${c.discarded_count || 0}`;
+        return `<tr><td>${esc(c.symbol)}</td><td>${c.sigma_24h != null ? fmtPct(Number(c.sigma_24h) * 100, 2) : '—'}</td>
+          <td>${c.price != null ? fmtPrice(c.price) : '—'}</td><td>${esc(c.generated_count ?? 0)}</td>
+          <td>${esc(c.evaluated_count ?? 0)}</td><td>${reason}</td>
+          <td>${c.best_p_target != null ? fmtPct(Number(c.best_p_target) * 100) : '—'}</td>
+          <td>${c.best_pnl_mean_usdt != null ? `${fmtMoney(c.best_pnl_mean_usdt)} USDT` : '—'}</td></tr>`;
+      }).join('');
+      return `<div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>σ 24 h usada</th><th>Precio</th><th>Generados</th><th>Evaluados</th><th>Descartes</th><th>Mejor P(meta)</th><th>Mejor ganancia media</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    }
     const rows = (candidates || []).map(c => {
       if (c.excluded_reason) return `<tr class="metas-candidate-excluded"><td>${esc(c.symbol)}</td><td colspan="4">Excluida: ${esc(c.excluded_reason)}</td></tr>`;
       const sigma = c.sigma_24h_open ?? c.sigma_24h;
@@ -297,7 +309,10 @@
     const slot = container.querySelector(`[data-analysis-slot="${metaId}"]`);
     if (!slot) return;
     const est = plan.estimated_time || {};
-    const expiresAtMs = Date.now() + (plan.expires_in_seconds || 600) * 1000;
+    if (plan.engine?.name === 'v2') {
+      renderV2PlanResult(slot, metaId, plan);
+      return;
+    }
     const warnings = [];
     if (est.low_likelihood) warnings.push('⚠ "Poco probable" (probabilidad bajo 25 %).');
     if (plan.capital_usage?.reason) warnings.push(`ℹ ${esc(plan.capital_usage.reason)}`);
@@ -330,6 +345,50 @@
         <span class="muted">Este plan vence en <b data-plan-countdown>…</b></span>
       </div>
       <p class="metas-plan-expired hidden">El plan venció; analiza de nuevo.</p>`;
+    wirePlanActions(slot, metaId, plan);
+  }
+
+  function renderV2PlanResult(slot, metaId, plan) {
+    const metrics = plan.v2?.metrics || {};
+    const cache = plan.cache || {};
+    const percent = value => value == null ? '—' : fmtPct(Number(value) * 100);
+    const interval = (values, formatter) => Array.isArray(values) && values.length === 2
+      ? `${formatter(values[0])} – ${formatter(values[1])}` : '—';
+    const cacheTime = cache.as_of ? new Date(cache.as_of).toLocaleString('es-ES') : '—';
+    const steps = (plan.portfolio?.steps || []).map((step, index) =>
+      `<li>Paso ${index + 1}: ${esc(step.symbol)} · ${esc(step.strategy)} · ${fmtMoney(step.capital_usdt)} USDT · mejora P(meta) +${fmtMoney(step.p_target_delta_pp)} pp</li>`).join('');
+    const discarded = (plan.discarded_alternatives || []).map(row =>
+      `<tr><td>${esc(row.symbol)}</td><td>${esc(row.strategy)}</td><td>${percent(row.metrics?.p_target)}</td>
+        <td>${esc(row.reason)}</td></tr>`).join('');
+    const warnings = (plan.warnings || []).map(item => `<p>⚠ ${esc(item)}</p>`).join('');
+    slot.innerHTML = `
+      <div class="metas-plan-section"><h4>Candidatas v2</h4>${candidatesTable(plan.candidates, true)}</div>
+      <div class="metas-plan-section"><h4>Cartera v2 propuesta</h4>${piecesTable(plan.pieces)}
+        ${steps ? `<ol class="metas-v2-portfolio-steps">${steps}</ol>` : '<p>No se agregaron piezas; el capital permanece en USDT.</p>'}</div>
+      <div class="metas-plan-section"><h4>Estimación v2 (escenarios, no promesa)</h4>
+        <div class="metas-estimate-grid">
+          <div><span>P(meta en el plazo)</span><b>${percent(metrics.p_target)}</b></div>
+          <div><span>Ganancia media</span><b>${metrics.pnl_mean_usdt == null ? '—' : `${fmtMoney(metrics.pnl_mean_usdt)} USDT`}</b></div>
+          <div><span>IC 95 % de ganancia</span><b>${interval(metrics.pnl_mean_ci95, value => `${fmtMoney(value)} USDT`)}</b></div>
+          <div><span>P(tocar el límite)</span><b>${percent(metrics.p_loss)}</b></div>
+          <div><span>IC 95 % de P(límite)</span><b>${interval(metrics.p_loss_ci95, percent)}</b></div>
+          <div><span>Desliz medio del corte</span><b>${metrics.cut_slippage_mean_usdt == null ? '—' : `${fmtMoney(metrics.cut_slippage_mean_usdt)} USDT`}</b></div>
+          <div><span>Días (mediana)</span><b>${metrics.days_to_target_p50 == null ? '—' : `${fmtMoney(metrics.days_to_target_p50, 1)}`}</b></div>
+          <div><span>P(terminar con inventario)</span><b>${percent(metrics.p_inventory)}</b></div>
+          <div><span>Escenarios</span><b>${esc(metrics.n ?? '—')}</b></div>
+          <div><span>Caché</span><b>${esc(cache.status || '—')}</b></div>
+          <div><span>Hora de la caché</span><b>${esc(cacheTime)}</b></div>
+        </div>${warnings ? `<div class="metas-warnings">${warnings}</div>` : ''}
+      </div>
+      ${discarded ? `<div class="metas-plan-section"><h4>Mejores alternativas descartadas</h4><div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>P(meta)</th><th>Motivo</th></tr></thead><tbody>${discarded}</tbody></table></div></div>` : ''}
+      <div class="metas-plan-actions"><button type="button" class="button primary" data-start-plan="${plan.plan_id}" data-meta-id="${metaId}">Iniciar con este plan</button>
+        <span class="muted">Este plan vence en <b data-plan-countdown>…</b></span></div>
+      <p class="metas-plan-expired hidden">El plan venció; analiza de nuevo.</p>`;
+    wirePlanActions(slot, metaId, plan);
+  }
+
+  function wirePlanActions(slot, metaId, plan) {
+    const expiresAtMs = Date.now() + (plan.expires_in_seconds || 600) * 1000;
     const countdownEl = slot.querySelector('[data-plan-countdown]');
     const startButton = slot.querySelector('[data-start-plan]');
     const expiredNote = slot.querySelector('.metas-plan-expired');
@@ -341,7 +400,8 @@
     planVisible = true;
     const planCountdown = setInterval(tick, 1000);
     tick();
-    startButton.addEventListener('click', () => confirmStart(container, metaId, plan));
+    startButton.addEventListener('click', () => confirmStart(
+      document.getElementById('metas-content'), metaId, plan));
   }
 
   function confirmStart(container, metaId, plan) {

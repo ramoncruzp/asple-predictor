@@ -193,22 +193,27 @@ def _contexts(app_db, prices=None):
                     except ValueError:
                         pass
                 config = json.loads(goal["config_snapshot"] or "{}")
+                profile_config = {**defaults, **(settings.get(profile) or {}), **config}
                 loss_pct = float(config.get("max_loss_pct", defaults["max_loss_pct"]))
                 threshold = initial * (1 - loss_pct / 100)
                 loss_headroom = max(0.0, current_equity - threshold)
                 effective_loss_pct = min(loss_pct, 100 * loss_headroom / current_equity if current_equity > 0 else 0.0)
                 contexts.append({"goal_id": int(goal["id"]), "profile": profile,
                     "decision_engine": str(config.get("decision_engine", "v1")).lower(),
-                    "capital": current_equity, "free_cash": free_cash,
+                    "capital": current_equity, "capital_initial": initial, "free_cash": free_cash,
                     "target": _remaining_target(goal["target_usdt"], current_equity, initial),
                     "horizon": max(1, int(defaults["max_days"]) - elapsed),
-                    "max_loss_pct": effective_loss_pct, "balance_approximate": not balance_known})
+                    "max_loss_pct": effective_loss_pct, "profile_config": profile_config,
+                    "balance_approximate": not balance_known})
         for profile, defaults in DEFAULT_PROFILES.items():
             if str((settings.get(profile) or {}).get("decision_engine", "v1")).lower() == "v2":
                 contexts.append({"goal_id": None, "profile": profile, "capital": 100.0,
+                    "capital_initial": 100.0,
                     "decision_engine": "v2",
                     "free_cash": 100.0, "target": 3.0, "horizon": int(defaults["max_days"]),
-                    "max_loss_pct": float(defaults["max_loss_pct"]), "balance_approximate": False})
+                    "max_loss_pct": float(defaults["max_loss_pct"]),
+                    "profile_config": {**defaults, **(settings.get(profile) or {})},
+                    "balance_approximate": False})
         return contexts
 
 
@@ -377,7 +382,8 @@ def _fit_live_piece_capital(current_pieces, *, capital, free_cash):
 def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         filters, prices, sigmas, skipped, evaluator, check_limits=None,
         on_progress=None, progress_state=None, n_scenarios=SCENARIO_COUNT,
-        symbol_filter=None, perfilar=False, remaining_seconds=None):
+        symbol_filter=None, perfilar=False, remaining_seconds=None,
+        trajectory_path=None):
     progress_state = {} if progress_state is None else progress_state
     if context.get("balance_approximate"):
         return {"status": "skipped", "reason": "efectivo o inventario sin atribución completa"}
@@ -385,24 +391,48 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         return {"status": "skipped", "reason": "ningún símbolo con filtros, velas e historia"}
     free = float(context["free_cash"])
     capital = float(context["capital"])
-    built = build_candidates(symbols=filters, capital_libre=free,
-        perfil=context["profile"], filters_by_symbol=filters,
-        price_by_symbol=prices, sigma_by_symbol=sigmas,
-        horizon_days=context["horizon"])
     current_pieces = _active_grid_pieces(app_db, context["goal_id"], prices, filters)
     live_capital_warning = _fit_live_piece_capital(current_pieces,
         capital=capital, free_cash=free)
+    profile_config = {**DEFAULT_PROFILES[str(context["profile"]).upper()],
+        **(context.get("profile_config") or {})}
+    capital_initial = float(context.get("capital_initial") or capital)
+    coin_limit = capital_initial * float(profile_config.get("capital_per_coin_pct", 0)) / 100
+    live_capital_by_symbol = {}
+    for piece in current_pieces:
+        symbol = str(piece.get("symbol") or "").upper()
+        live_capital_by_symbol[symbol] = live_capital_by_symbol.get(symbol, 0.0) + float(
+            piece.get("capital_nominal", piece.get("capital")) or 0)
+    capital_max_by_symbol = {symbol: max(0.0, coin_limit - live_capital_by_symbol.get(symbol, 0.0))
+        for symbol in filters}
+    current_grids = sum(piece.get("piece_type") != "individual_bot_grid" for piece in current_pieces)
+    current_bots = sum(piece.get("piece_type") == "individual_bot_grid" for piece in current_pieces)
+    built = build_candidates(symbols=filters, capital_libre=free,
+        perfil=context["profile"], filters_by_symbol=filters,
+        price_by_symbol=prices, sigma_by_symbol=sigmas,
+        horizon_days=context["horizon"], capital_max_by_symbol=capital_max_by_symbol,
+        max_grids=profile_config.get("max_grids"), max_bots=profile_config.get("max_bots"),
+        current_grids=current_grids, current_bots=current_bots)
     live_piece_details = [{"grid_id": int(piece["grid_id"]),
         "status": piece["grid_status"]} for piece in current_pieces]
     candidates = current_pieces + built["candidates"][:-1]
     if symbol_filter:
         candidates = [piece for piece in candidates
             if str(piece.get("symbol", "")).upper() == str(symbol_filter).upper()]
+    symbol_stats = {}
+    for symbol in filters:
+        symbol_stats[symbol] = {"symbol": symbol, "price": prices.get(symbol),
+            "sigma_24h": sigmas.get(symbol),
+            "generated_count": (sum(str(piece.get("symbol", "")).upper() == symbol
+                for piece in candidates) + sum(built.get("discarded_by_symbol", {}).get(
+                    symbol, {}).values())), "evaluated_count": 0,
+            "discarded": dict(built.get("discarded_by_symbol", {}).get(symbol, {})),
+            "skipped_reason": skipped.get(symbol)}
     progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
         "generated_candidates": len(candidates), "evaluated_count": 0,
         "discarded": dict(built["discarded"]), "candidate_seconds": {},
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
-        "live_capital_warning": live_capital_warning})
+        "live_capital_warning": live_capital_warning, "symbol_stats": symbol_stats})
     pieces = [dict(row) for row in candidates]
     eval_kwargs = dict(perfil=context["profile"], capital=capital,
         meta=context["target"], horizon_days=context["horizon"],
@@ -415,6 +445,64 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "lotes_fastsim": 0, "filas_por_lote": [], "segundos_por_lote": []}
     first_rows, failed_candidates = [], {}
     candidate_seconds = {}
+    retained_live, retained_candidates = {}, []
+
+    def retain_trajectory(row):
+        piece = row.get("piece") or {}
+        outcomes = row.get("scenario_outcomes") or {}
+        cash = outcomes.get("trajectory_cash_f32")
+        equity = outcomes.get("trajectory_equity_f32")
+        timestamps = outcomes.get("trajectory_timestamps")
+        if cash is None or equity is None or timestamps is None:
+            return
+        entry = {"candidate_key": str(piece.get("candidate_key") or _candidate_key(piece)),
+            "piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
+            "cash": np.asarray(cash, dtype=np.float32).copy(),
+            "equity": np.asarray(equity, dtype=np.float32).copy(),
+            "inventory_qty": np.asarray(outcomes.get("inventory_qty", []), dtype=np.float32).copy(),
+            "inventory_value": np.asarray(outcomes.get("inventory_value", []), dtype=np.float32).copy(),
+            "timestamps": np.asarray(timestamps, dtype=np.int64).copy(),
+            "is_current": bool(piece.get("is_current"))}
+        if entry["is_current"]:
+            retained_live[entry["candidate_key"]] = entry
+            return
+        ranked_row = rank_alternatives_v2([row], perfil=context["profile"],
+            capital_meta=capital)[0]
+        entry["order_key"] = tuple(ranked_row["objetivo"]["clave_orden"])
+        if any(old["candidate_key"] == entry["candidate_key"] for old in retained_candidates):
+            retained_candidates[:] = [old for old in retained_candidates
+                if old["candidate_key"] != entry["candidate_key"]]
+        retained_candidates.append(entry)
+        retained_candidates.sort(key=lambda item: item["order_key"])
+        del retained_candidates[12:]
+
+    def write_trajectory_archive():
+        if trajectory_path is None:
+            return None
+        selected_rows = list(retained_live.values()) + retained_candidates
+        if not selected_rows:
+            return None
+        timestamps = selected_rows[0]["timestamps"]
+        selected_rows = [row for row in selected_rows if np.array_equal(
+            row["timestamps"], timestamps)]
+        if not selected_rows:
+            return None
+        archive = {"timestamps": timestamps.astype(np.int64, copy=False),
+            "metadata_json": np.asarray(_json_dumps([{
+                "candidate_key": row["candidate_key"], "piece": row["piece"],
+                "metrics": row["metrics"], "is_current": row["is_current"]}
+                for row in selected_rows], ensure_ascii=False))}
+        for index, row in enumerate(selected_rows):
+            archive[f"cash_{index}"] = row["cash"]
+            archive[f"equity_{index}"] = row["equity"]
+            archive[f"inventory_qty_{index}"] = row["inventory_qty"]
+            archive[f"inventory_value_{index}"] = row["inventory_value"]
+        output_path = Path(trajectory_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = output_path.with_name(f"{output_path.stem}.tmp.npz")
+        np.savez(temporary_path, **archive)
+        os.replace(temporary_path, output_path)
+        return str(output_path)
     live_symbols = {str(piece["symbol"]).upper() for piece in current_pieces}
     with store._connect() as conn:
         latest = conn.execute("SELECT MAX(open_ts) FROM candles WHERE interval='5m'").fetchone()[0]
@@ -465,9 +553,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 if baseline_rows:
                     _apply_live_portfolio_metrics(rows, baseline_rows,
                         capital=capital, target=context["target"],
-                        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+                        max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
+                        trajectory_sink=retain_trajectory)
                 else:
                     for row in rows:
+                        retain_trajectory(row)
                         outcomes = row.get("scenario_outcomes") or {}
                         for key in ("trajectory_cash_f32", "trajectory_equity_f32",
                                 "trajectory_timestamps"):
@@ -477,9 +567,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             if phase_index == 0 and errors:
                 baseline_failed = True
             progress_state["evaluated_count"] += len(rows)
+            symbol_stats[symbol]["evaluated_count"] += len(rows)
             for reason in errors.values():
                 label = reason.split(":", 1)[0]
                 progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+                symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
             if on_progress and rows:
                 on_progress(rows)
             del rows, errors, batches, symbol_pieces
@@ -541,9 +633,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             second_rows.extend(rows)
             failed_candidates.update(errors)
             progress_state["evaluated_count"] += len(rows)
+            symbol_stats[symbol]["generated_count"] += len(symbol_pieces[start:start + MAX_PIECES_PER_BATCH])
+            symbol_stats[symbol]["evaluated_count"] += len(rows)
             for reason in errors.values():
                 label = reason.split(":", 1)[0]
                 progress_state["discarded"][label] = progress_state["discarded"].get(label, 0) + 1
+                symbol_stats[symbol]["discarded"][label] = symbol_stats[symbol]["discarded"].get(label, 0) + 1
             if on_progress and rows:
                 on_progress(rows)
             del rows, errors
@@ -562,10 +657,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     if not baseline_failed:
         _apply_live_portfolio_metrics(live_rows, live_rows,
             capital=capital, target=context["target"],
-            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
+            trajectory_sink=retain_trajectory)
         _apply_live_portfolio_metrics(second_rows, live_rows,
             capital=capital, target=context["target"],
-            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"])
+            max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
+            trajectory_sink=retain_trajectory)
+    else:
+        for row in second_rows:
+            retain_trajectory(row)
+    trajectory_file = write_trajectory_archive()
     if on_progress and live_rows:
         on_progress([*first_rows, *second_rows])
     results = []
@@ -621,6 +722,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
         "live_capital_warning": live_capital_warning,
         "failed_candidates": failed_candidates, "skipped_symbols": skipped,
+        "symbol_stats": symbol_stats,
+        "trajectory_file": trajectory_file,
         "candidate_seconds": candidate_seconds,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
         "generated_candidates": len(candidates) + smart_generated,
@@ -689,7 +792,7 @@ def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon):
 
 
 def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
-        max_loss_pct, horizon):
+        max_loss_pct, horizon, trajectory_sink=None):
     """Asigna el baseline vivo y las alternativas sobre los mismos índices."""
     if not live_rows:
         return
@@ -702,12 +805,16 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         if piece.get("is_current"):
             row["metrics_pieza_sola"] = row.get("metrics")
             row["metrics"] = baseline
+            if trajectory_sink is not None:
+                trajectory_sink(row)
             continue
         combined = _portfolio_outcome_metrics([*live_rows, row], capital=capital,
             target=target, max_loss_pct=max_loss_pct, horizon=horizon)
         if combined is not None:
             row["metrics_pieza_sola"] = row.get("metrics")
             row["metrics"] = combined
+        if trajectory_sink is not None:
+            trajectory_sink(row)
         outcomes = row.get("scenario_outcomes") or {}
         outcomes.pop("trajectory_cash_f32", None)
         outcomes.pop("trajectory_equity_f32", None)
@@ -763,6 +870,15 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             (f"-{RETENTION_DAYS} days",))
         conn.execute("DELETE FROM scenario_eval_runs WHERE as_of < datetime('now', ?)",
             (f"-{RETENTION_DAYS} days",))
+    trajectory_directory = Path("data/derived/scenario_cache")
+    if trajectory_directory.is_dir():
+        expiration = time.time() - RETENTION_DAYS * 86400
+        for archive_path in trajectory_directory.glob("*.npz"):
+            try:
+                if archive_path.stat().st_mtime < expiration:
+                    archive_path.unlink()
+            except OSError:
+                pass
     watchdog_stop = threading.Event()
     main_thread_id = threading.get_ident()
     active_context_started = [None]
@@ -826,7 +942,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 check_limits=check_context_limits, on_progress=persist_progress,
                 progress_state=progress_state, n_scenarios=n_scenarios,
                 symbol_filter=symbol_filter, perfilar=perfilar,
-                remaining_seconds=remaining_context_seconds)
+                remaining_seconds=remaining_context_seconds,
+                trajectory_path=trajectory_directory / f"{run_id}.npz")
             evaluated.setdefault("profile_times", {})["escritura_bd_s"] = persistence_seconds[0]
             with store._connect() as conn:
                 for row in evaluated.get("results", []):
@@ -843,6 +960,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "live_piece_count": evaluated.get("live_piece_count", 0),
                             "live_pieces": evaluated.get("live_pieces", []),
                             "live_capital_warning": evaluated.get("live_capital_warning"),
+                            "symbol_stats": evaluated.get("symbol_stats", {}),
+                            "trajectory_file": evaluated.get("trajectory_file"),
                             "failed_candidates": evaluated.get("failed_candidates", {}),
                             "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
                             ensure_ascii=False),

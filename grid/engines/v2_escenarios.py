@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 
 from grid.engines.base import DecisionEngine, EngineUnavailable
 from grid.json_utils import json_safe
+from research.scenarios.portfolio import greedy_portfolio
 from research.scenarios.objective import rank_alternatives_v2
 
 
@@ -73,14 +75,22 @@ class V2ScenarioEngine(DecisionEngine):
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
         discarded = {}
+        symbol_stats = {}
+        skipped_symbols = {}
         try:
-            discarded = json.loads(row["error"] or "{}").get("discarded", {})
+            run_details = json.loads(row["error"] or "{}")
+            discarded = run_details.get("discarded", {})
+            symbol_stats = run_details.get("symbol_stats", {})
+            skipped_symbols = run_details.get("skipped", {})
         except (TypeError, ValueError, json.JSONDecodeError):
             discarded = {}
+        trajectory_file = Path("data/derived/scenario_cache") / f"{row['run_id']}.npz"
         return {"run_id": row["run_id"], "as_of": row["as_of"],
             "horizon_days": int(row["horizon_days"]), "age_seconds": age,
             "status": str(row["status"]),
-            "candidates": candidates, "discarded": discarded}
+            "candidates": candidates, "discarded": discarded,
+            "symbol_stats": symbol_stats, "skipped_symbols": skipped_symbols,
+            "trajectory_file": str(trajectory_file) if trajectory_file.is_file() else None}
 
     @staticmethod
     def _to_piece(candidate, capital):
@@ -101,12 +111,91 @@ class V2ScenarioEngine(DecisionEngine):
             "mid_at_plan": float(params.get("mid_at_plan", (low + high) / 2)),
             **({"grid_id": int(params["grid_id"])} if params.get("grid_id") else {})}
 
+    @staticmethod
+    def _profile_config(goal):
+        from grid.meta import DEFAULT_PROFILES
+        profile = str(goal.get("profile") or "").upper()
+        config = dict(DEFAULT_PROFILES.get(profile) or {})
+        snapshot = goal.get("config_snapshot") or {}
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+        config.update(snapshot if isinstance(snapshot, dict) else {})
+        return config
+
+    @staticmethod
+    def _live_profile_usage(operator, goal_id):
+        from grid.meta_live_pieces import live_meta_grid_links
+        core = getattr(operator, "core", None)
+        links = live_meta_grid_links(core, int(goal_id))
+        grids = bots = 0
+        by_symbol = {}
+        for link in links:
+            grid = core.db.get_grid(int(link["grid_id"]))
+            if grid is None:
+                continue
+            if link.get("piece_type") == "individual_bot_grid":
+                bots += 1
+            else:
+                grids += 1
+            symbol = str(grid.get("symbol") or "").upper()
+            by_symbol[symbol] = by_symbol.get(symbol, 0.0) + float(
+                grid.get("capital_total") or 0)
+        return links, grids, bots, by_symbol
+
+    @staticmethod
+    def _candidate_table(cached):
+        grouped = {}
+        for row in cached.get("candidates", []):
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol or row.get("strategy") == "usdt_quieto":
+                continue
+            grouped.setdefault(symbol, []).append(row)
+        output = []
+        stats_by_symbol = cached.get("symbol_stats") or {}
+        for symbol in sorted(set(grouped) | set(stats_by_symbol)):
+            stats = stats_by_symbol.get(symbol, {})
+            rows = grouped.get(symbol, [])
+            best_p_target = max((float((item.get("metrics") or {}).get("p_target") or 0)
+                for item in rows), default=None)
+            best_pnl = max((float((item.get("metrics") or {}).get("pnl_mean_usdt") or 0)
+                for item in rows), default=None)
+            discarded = stats.get("discarded") or {}
+            common_reason = max(discarded, key=discarded.get) if discarded else None
+            output.append({"symbol": symbol, "sigma_24h": stats.get("sigma_24h"),
+                "price": stats.get("price"),
+                "generated_count": int(stats.get("generated_count", len(rows))),
+                "evaluated_count": int(stats.get("evaluated_count", len(rows))),
+                "discarded_count": sum(int(value) for value in discarded.values()),
+                "discarded_reason": common_reason,
+                "best_p_target": best_p_target,
+                "best_pnl_mean_usdt": best_pnl,
+                "skipped_reason": stats.get("skipped_reason")})
+        for symbol, reason in sorted((cached.get("skipped_symbols") or {}).items()):
+            if str(reason).startswith("rol "):
+                continue
+            if symbol not in grouped and symbol not in stats_by_symbol:
+                output.append({"symbol": symbol, "sigma_24h": None, "price": None,
+                    "generated_count": 0, "evaluated_count": 0, "discarded_count": 0,
+                    "discarded_reason": None, "best_p_target": None,
+                    "best_pnl_mean_usdt": None,
+                    "skipped_reason": ("sin tiempo en la corrida parcial"
+                        if cached.get("status") == "parcial" else str(reason))})
+        return output
+
     def plan(self, operator, goal, *, plan_kind, allocation_free_cash=None, record=True,
             require_engine=True):
         from grid.meta_live_pieces import live_meta_grid_ids
         cached = self._load_cache(operator, goal, require_engine=require_engine)
         capital = float(goal.get("capital_initial", 0))
         live_grid_ids = live_meta_grid_ids(getattr(operator, "core", None), int(goal["id"]))
+        profile_config = self._profile_config(goal)
+        _live_links, live_grids, live_bots, used_by_symbol = self._live_profile_usage(
+            operator, int(goal["id"]))
+        coin_cap = capital * float(profile_config.get("capital_per_coin_pct", 0)) / 100
+        is_draft = str(goal.get("status") or "").upper() == "DRAFT"
         candidates = []
         for cached_row in cached["candidates"]:
             if cached_row["strategy"] not in {"simple", "smart", "bot", "usdt_quieto"}:
@@ -115,6 +204,15 @@ class V2ScenarioEngine(DecisionEngine):
                 **cached_row["params"], "candidate_key": cached_row["candidate_key"]}
             if piece.get("is_current") and int(piece.get("grid_id") or -1) not in live_grid_ids:
                 continue
+            if is_draft and not piece.get("is_current") and piece["strategy"] != "usdt_quieto":
+                amount = float(piece.get("capital") or 0)
+                symbol = str(piece.get("symbol") or "").upper()
+                is_bot = piece.get("strategy") == "bot"
+                slot_available = (live_bots < int(profile_config.get("max_bots", 0))
+                    if is_bot else live_grids < int(profile_config.get("max_grids", 0)))
+                if (amount < 10 or not slot_available or
+                        amount > coin_cap - used_by_symbol.get(symbol, 0.0) + 1e-8):
+                    continue
             candidates.append({"piece": piece, "metrics": cached_row["metrics"],
                 "candidate_key": cached_row["candidate_key"]})
         ranked = rank_alternatives_v2(candidates, perfil=goal["profile"], capital_meta=capital)
@@ -160,6 +258,25 @@ class V2ScenarioEngine(DecisionEngine):
             if row.get("cache_candidate_key") == selected_key), None)
         selected_pieces = selected_alternative["pieces"] if selected_alternative else []
         selected_piece = selected_pieces[0] if selected_pieces else None
+        portfolio = None
+        if cached.get("trajectory_file"):
+            portfolio = greedy_portfolio(cached["trajectory_file"],
+                profile=goal["profile"], capital=capital,
+                free_cash=(float(allocation_free_cash) if allocation_free_cash is not None
+                    else capital), target=float(goal.get("target_usdt", 0)),
+                max_loss_pct=float(profile_config.get("max_loss_pct", 0)),
+                horizon_days=cached["horizon_days"], profile_config=profile_config)
+        if is_draft and portfolio is not None:
+            selected_pieces = []
+            for item in portfolio.get("added", []):
+                alternative = next((row for row in alternatives
+                    if row.get("cache_candidate_key") == item.get("candidate_key")), None)
+                if alternative:
+                    selected_pieces.extend(alternative.get("pieces") or [])
+            selected_alternative = next((row for row in alternatives
+                if row.get("cache_candidate_key") == (portfolio.get("added") or [{}])[0].get(
+                    "candidate_key")), None) if portfolio.get("added") else None
+            selected_piece = selected_pieces[0] if selected_pieces else None
         used = sum(float(piece["capital_usdt"]) for piece in selected_pieces)
         current_pieces = {}
         for row in alternatives:
@@ -170,23 +287,38 @@ class V2ScenarioEngine(DecisionEngine):
                     "alternative_id": row["alternative_id"]}
         decision = ("mantener_usdt" if selected is None or not selected_pieces else
             "seleccionar_alternativa")
-        selected_metrics = (selected.get("metrics") or {}) if selected else {}
+        selected_metrics = (portfolio.get("metrics") if is_draft and portfolio is not None
+            else (selected.get("metrics") or {}) if selected else {})
         v2_summary = {"decision": decision,
             "p_target": selected_metrics.get("p_target", 0),
+            "p_target_ci95": selected_metrics.get("p_target_ci95"),
             "pnl_mean_usdt": selected_metrics.get("pnl_mean_usdt", 0),
+            "pnl_mean_ci95": selected_metrics.get("pnl_mean_ci95"),
             "cut_slippage_mean_usdt": selected_metrics.get("cut_slippage_mean_usdt", 0),
             "cut_slippage_p90_usdt": selected_metrics.get("cut_slippage_p90_usdt", 0),
             "p_loss": selected_metrics.get("p_loss", 0),
+            "p_loss_ci95": selected_metrics.get("p_loss_ci95"),
             "p_inventory": selected_metrics.get("p_inventory"),
+            "n": selected_metrics.get("n"), "days_to_target_p50": selected_metrics.get(
+                "days_to_target_p50"),
+            "metrics": selected_metrics,
             "motivos": (selected.get("objetivo") or {}).get("motivos", []) if selected else [],
             "descartadas": cached["discarded"]}
+        discarded_alternatives = [{"symbol": row["symbol"], "strategy": row["strategy"],
+            "metrics": row["metrics"], "reason": "; ".join(
+                (row.get("objective") or {}).get("motivos") or ["no cumple el objetivo 1 + 3"])}
+            for row in alternatives if not (row.get("objective") or {}).get("factible")][:3]
+        if cached.get("trajectory_file") and is_draft and portfolio is not None:
+            v2_summary["motivos"] = (["cartera voraz: cada incorporación mejora P(meta) al menos 2 pp"]
+                if portfolio.get("steps") else ["ninguna pieza mejora P(meta) al menos 2 pp y cumple el objetivo 1 + 3"])
         return json_safe({"profile": str(goal.get("profile") or "").upper(),
             "decision_id": decision_id, "base_method_version": self.version,
             "engine": {"name": self.name, "version": self.version},
             "cache": {key: cached[key] for key in ("run_id", "as_of", "age_seconds", "status")},
-            "candidates": [{"symbol": row["symbol"], "scanner_eligible": True,
-                "eligible": True} for row in cached["candidates"] if row["symbol"]],
+            "candidates": self._candidate_table(cached),
+            "discarded_alternatives": discarded_alternatives,
             "alternatives": alternatives, "pieces": selected_pieces,
+            "portfolio": portfolio,
             "current_pieces": current_pieces, "estimated_time": (selected_alternative or {}).get("estimate", {}),
             "piece_estimates": [], "target_usdt": float(goal.get("target_usdt", 0)),
             "deadline_days": cached["horizon_days"],
@@ -268,6 +400,21 @@ class V2ScenarioEngine(DecisionEngine):
                 "keep_standard_error_usdt": standard_error,
                 "realized_loss_usdt": realized_loss, "exit_fee_usdt": exit_fee,
                 "entry_fee_usdt": entry_fee, "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
+        portfolio = (plan or {}).get("portfolio") or {}
+        added_keys = {str(row.get("candidate_key")) for row in portfolio.get("added", [])}
+        if added_keys:
+            addition = next((row for row in alternatives
+                if str(row.get("cache_candidate_key")) in added_keys
+                and not row.get("is_current")), None)
+            if addition is not None:
+                # La apertura conserva las validaciones de efectivo, perfil y
+                # abribilidad que ya aplica el operador para piezas nuevas.
+                opened = operator._add_piece_from_free_cash(goal, links,
+                    {"alternatives": [addition]}, valuation=valuation)
+                if opened:
+                    return json_safe({**opened, "comparison_v2": {
+                        "portfolio_steps": portfolio.get("steps", []),
+                        "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
         return json_safe({"decision": "mantener", "reason":
             "ninguna alternativa supera el umbral pareado de probabilidad y ganancia neta",
             "cache_run_id": (plan.get("cache") or {}).get("run_id")})

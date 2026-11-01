@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from data.exchange_filters import SymbolFilters
 from research.scenarios.candidates import build_candidates, build_smart_candidates
 from research.scenarios.fastsim import simulate_bot, simulate_simple
@@ -24,6 +26,19 @@ def test_candidate_generator_includes_quiet_and_expected_simple_bot_variants():
     assert sum(row["strategy"] == "bot" for row in rows) == 12
     assert all(row["candidate_key"] for row in rows)
     assert result["invalid_count"] == 3
+
+
+@pytest.mark.parametrize(("profile", "cap"), [("RAPIDO", 70), ("PRUDENTE", 40)])
+def test_candidate_generator_respeta_tope_de_capital_por_moneda(profile, cap):
+    result = build_candidates(symbols=["JUPUSDT"], capital_libre=100,
+        perfil=profile, filters_by_symbol={"JUPUSDT": _filters()},
+        price_by_symbol={"JUPUSDT": .25}, sigma_by_symbol={"JUPUSDT": .04},
+        horizon_days=20, capital_max_by_symbol={"JUPUSDT": cap})
+
+    assert result["candidates"][-1]["strategy"] == "usdt_quieto"
+    assert all(row["capital"] <= cap for row in result["candidates"]
+        if row["strategy"] != "usdt_quieto")
+    assert result["discarded_by_symbol"]["JUPUSDT"]
 
 
 def test_candidate_generator_discards_pepe_grid_below_per_cell_notional():

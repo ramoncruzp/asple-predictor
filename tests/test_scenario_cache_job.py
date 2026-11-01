@@ -131,6 +131,58 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
     assert alternative["metrics"]["metrics_pieza_sola"]["p_target"] == .5
 
 
+def test_cache_guarda_solo_doce_mejores_trayectorias_y_mide_rss(
+        cache_databases, monkeypatch, tmp_path):
+    import numpy as np
+    db, market_path = cache_databases
+    pieces = [{"candidate_key": f"candidate-{index}", "symbol": "XUSDT",
+        "strategy": "simple", "capital": 10, "n": 6, "low": .8, "high": 1.2}
+        for index in range(13)]
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [*pieces, {"strategy": "usdt_quieto"}], "discarded": {}})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    timestamps = np.arange(480, dtype=np.int64) * 3600
+
+    def evaluate(batch, **_kwargs):
+        rows = []
+        for index, piece in enumerate(batch):
+            path = np.full((1000, 480), 10 + index / 100,
+                dtype=np.float32)
+            rows.append({"piece": piece, "metrics": {"n": 1000,
+                "p_target": index / 20, "p_loss": 0,
+                "p_loss_ci95": [0, .01], "pnl_mean_usdt": 1 + index,
+                "pnl_mean_ci95": [.5 + index, 1.5 + index],
+                "cut_slippage_mean_usdt": 0, "days_to_target_p50": 7},
+                "scenario_outcomes": {"pnl_usdt": np.ones(1000),
+                    "loss_cut": np.zeros(1000, dtype=bool),
+                    "reached": np.zeros(1000, dtype=bool),
+                    "days": np.full(1000, 7.0), "inventory_qty": np.zeros(1000),
+                    "inventory_value": np.zeros(1000),
+                    "trajectory_cash_f32": path,
+                    "trajectory_equity_f32": path,
+                    "trajectory_timestamps": timestamps}})
+        return {"pieces": rows}
+
+    rss_before = cache_script._rss_current_mb()
+    result = cache_script._evaluate_context({"goal_id": 77, "profile": "RAPIDO",
+        "capital": 100, "capital_initial": 100, "free_cash": 100,
+        "target": 3, "horizon": 15, "max_loss_pct": 18},
+        store=CandleStore(market_path), app_db=db.engine.url.database,
+        market_path=market_path, library_dir="unused", filters={"XUSDT": object()},
+        prices={"XUSDT": 1}, sigmas={"XUSDT": .02}, skipped={}, evaluator=evaluate,
+        trajectory_path=tmp_path / "run.npz")
+    rss_after = cache_script._rss_current_mb()
+    print(f"RSS durante archivo sintético: inicio {rss_before:.1f} MB, final {rss_after:.1f} MB")
+
+    assert result["trajectory_file"]
+    with np.load(result["trajectory_file"], allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"].item()))
+        assert len(metadata) == 12
+        assert archive["equity_0"].shape == (1000, 480)
+        assert not archive["equity_0"].dtype.hasobject
+    assert max(rss_before, rss_after) < 600
+
+
 def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):
     db, market_path = cache_databases
     current = {"candidate_key": "mantener:JUP", "symbol": "JUPUSDT",

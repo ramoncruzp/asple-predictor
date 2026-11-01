@@ -3802,6 +3802,8 @@ class MetaOperator:
         planned_engine = str((plan.get("engine") or {}).get("name") or "v1").lower()
         if planned_engine != expected_engine:
             raise ValueError("El plan fue calculado con otro motor; vuelve a analizar.")
+        if planned_engine == "v2" and plan.get("pieces"):
+            self._validate_v2_plan_limits(goal, plan)
         if planned_engine == "v2" and not plan.get("pieces"):
             return {"meta": goal, "opened": [], "failed": 0,
                 "status": "USDT_QUIETO", "reason": (plan.get("v2") or {}).get(
@@ -3845,6 +3847,67 @@ class MetaOperator:
                 conn.execute(self.db.meta_runs.update().where(self.db.meta_runs.c.id == run_id).values(status="NO_PIECES", finished_at=self.core._now()))
             raise ValueError("No se pudo abrir ninguna pieza; la meta volvió a DRAFT.")
         return {"meta": self.core.get_goal(meta_id), "opened": opened, "failed": len(plan["pieces"]) - len(opened)}
+
+    def _validate_v2_plan_limits(self, goal, plan, *, replacing_grid_id=None):
+        """Verifica toda la cartera v2 antes de crear grids u órdenes."""
+        from grid.meta_live_pieces import live_meta_grid_links
+        from grid.meta import DEFAULT_PROFILES
+
+        cfg = {**DEFAULT_PROFILES.get(str(goal.get("profile") or "").upper(), {}),
+            **(goal.get("config_snapshot") or {})}
+        coin_cap = float(goal["capital_initial"]) * float(
+            cfg.get("capital_per_coin_pct", 0)) / 100
+        grids = bots = 0
+        by_symbol = {}
+        replaced_capital = 0.0
+        for link in live_meta_grid_links(self.core, int(goal["id"])):
+            grid_id = int(link["grid_id"])
+            grid = self.db.get_grid(grid_id)
+            if not grid:
+                continue
+            amount = float(grid.get("capital_total") or 0)
+            if replacing_grid_id is not None and grid_id == int(replacing_grid_id):
+                replaced_capital = amount
+                continue
+            if link.get("piece_type") == "individual_bot_grid":
+                bots += 1
+            else:
+                grids += 1
+            symbol = str(grid.get("symbol") or "").upper()
+            by_symbol[symbol] = by_symbol.get(symbol, 0.0) + amount
+        pieces = list(plan.get("pieces") or [])
+        total = sum(float(piece.get("capital_usdt") or 0) for piece in pieces)
+        if total > float(goal["capital_initial"]) + 1e-8:
+            raise ValueError("El capital de la cartera v2 supera el capital de la Meta.")
+        for piece in pieces:
+            amount = float(piece.get("capital_usdt") or 0)
+            if amount < 10:
+                raise ValueError("El capital de una pieza v2 debe ser al menos 10 USDT.")
+            kind = piece.get("piece_type", "grid")
+            if kind == "individual_bot_grid":
+                bots += 1
+                limit = int(cfg.get("max_bots", 0))
+            else:
+                grids += 1
+                limit = int(cfg.get("max_grids", 0))
+            if kind == "individual_bot_grid" and bots > limit:
+                raise ValueError("La cartera v2 supera el máximo de bots del perfil.")
+            if kind != "individual_bot_grid" and grids > limit:
+                raise ValueError("La cartera v2 supera el máximo de grids del perfil.")
+            symbol = str(piece.get("symbol") or "").upper()
+            by_symbol[symbol] = by_symbol.get(symbol, 0.0) + amount
+            if by_symbol[symbol] > coin_cap + 1e-8:
+                raise ValueError(f"La cartera v2 supera el límite de capital por moneda: {symbol}.")
+        required_cash = max(0.0, total - replaced_capital)
+        available, _reserved = self.core._available_usdt(int(goal["id"]))
+        if required_cash > float(available) + 1e-8:
+            raise ValueError("El saldo atribuible a la Meta no cubre la cartera v2.")
+
+    def _validate_v2_piece_action(self, goal, piece, *, replacing_grid_id=None):
+        if str((goal.get("config_snapshot") or {}).get("decision_engine", "v1")).lower() != "v2":
+            return
+        self._validate_v2_plan_limits(goal, {"pieces": [piece]},
+            replacing_grid_id=replacing_grid_id)
 
     def _plan_prices(self, plan):
         prices = {}
@@ -4784,6 +4847,9 @@ class MetaOperator:
             if (target_capital > float(grid["capital_total"]) + free_cash + 1e-8
                     or target_capital + other_coin_capital > coin_cap + 1e-8):
                 return None
+        self._validate_v2_piece_action(goal, {"symbol": grid["symbol"],
+            "capital_usdt": target_capital, "piece_type": piece_type},
+            replacing_grid_id=int(grid["id"]))
         if is_bot:
             outcome = self.engine.reposition_meta_bot(int(grid["id"]), piece["floor"],
                 piece["ceiling"], reason=reason)
@@ -4879,6 +4945,7 @@ class MetaOperator:
                                      float((goal.get("config_snapshot") or {}).get("capital_per_coin_pct", 100)) / 100)
         if piece["capital_usdt"] < 5.5:
             raise ValueError("capital libre inferior al mínimo de una pieza")
+        self._validate_v2_piece_action(goal, piece)
         if piece["piece_type"] == "individual_bot_grid":
             grid = self.engine.create_grid(piece["symbol"], piece["floor"], piece["ceiling"], 1,
                 capital=piece["capital_usdt"], strategy="simple", meta_id=int(goal["id"]),
