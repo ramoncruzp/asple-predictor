@@ -18,7 +18,7 @@ def objective_limits(perfil, *, settings_db=None):
         raise ValueError(f"perfil desconocido: {perfil}")
     defaults = {"max_loss_pct": float(DEFAULT_PROFILES[profile_name]["max_loss_pct"]),
         "p_limit_cap": DEFAULT_P_LIMIT_CAP[profile_name], "ev_floor_pct": 1.0,
-        "cut_slippage_max_pct": 2.0}
+        "cut_slippage_expected_max_pct": 0.5}
     if settings_db is None:
         return defaults
     path = Path(settings_db).expanduser().resolve()
@@ -44,7 +44,7 @@ def objective_limits(perfil, *, settings_db=None):
 
 
 def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
-        p_limit_cap=None, ev_floor_pct=1.0, cut_slippage_max_pct=2.0):
+        p_limit_cap=None, ev_floor_pct=1.0, cut_slippage_expected_max_pct=0.5):
     """Evalúa factibilidad; la cota superior del IC de pérdida se usa por seguridad."""
     profile_name = str(perfil).upper()
     if profile_name not in DEFAULT_PROFILES:
@@ -55,7 +55,8 @@ def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
     profile = DEFAULT_PROFILES[profile_name]
     probability_cap = float(DEFAULT_P_LIMIT_CAP[profile_name] if p_limit_cap is None else p_limit_cap)
     mean_pnl = float(metrics["pnl_mean_usdt"])
-    cut_slippage_mean = float(metrics.get("cut_slippage_mean_usdt", float("inf")))
+    cut_slippage_expected = float(metrics.get("cut_slippage_expected_usdt",
+        float(metrics.get("p_loss", 0.0)) * float(metrics.get("cut_slippage_mean_usdt", 0.0))))
     target_probability = float(metrics["p_target"])
     median_days = metrics.get("days_to_target_p50")
     loss_ci = metrics.get("p_loss_ci95")
@@ -68,8 +69,9 @@ def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
         reasons.append("falta el límite superior del IC 95 % de pérdida")
     elif loss_upper > probability_cap / 100:
         reasons.append(f"límite superior de P(pérdida) supera {probability_cap:g}%")
-    if cut_slippage_mean > capital * float(cut_slippage_max_pct) / 100:
-        reasons.append(f"desliz medio del corte supera {float(cut_slippage_max_pct):g}% del capital")
+    if cut_slippage_expected > capital * float(cut_slippage_expected_max_pct) / 100:
+        threshold = f"{float(cut_slippage_expected_max_pct):g}".replace(".", ",")
+        reasons.append(f"desliz esperado del corte supera {threshold} % del capital")
 
     return {"factible": not reasons, "motivos": reasons,
         "clave_orden": (-target_probability,
@@ -77,14 +79,14 @@ def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
 
 
 def rank_alternatives_v2(results, *, perfil, capital_meta, max_loss_pct=None,
-        p_limit_cap=None, ev_floor_pct=1.0, cut_slippage_max_pct=2.0):
+        p_limit_cap=None, ev_floor_pct=1.0, cut_slippage_expected_max_pct=0.5):
     """Ordena primero factibles y, si no hay ninguna, devuelve USDT quieto."""
     ranked = []
     for result in results:
         metrics = result.get("metrics") or {}
         objective = objective_v2(metrics, perfil=perfil, capital_meta=capital_meta,
             max_loss_pct=max_loss_pct, p_limit_cap=p_limit_cap, ev_floor_pct=ev_floor_pct,
-            cut_slippage_max_pct=cut_slippage_max_pct)
+            cut_slippage_expected_max_pct=cut_slippage_expected_max_pct)
         ranked.append({**result, "objetivo": objective})
     feasible = sorted((row for row in ranked if row["objetivo"]["factible"]),
         key=lambda row: row["objetivo"]["clave_orden"])
@@ -96,6 +98,7 @@ def rank_alternatives_v2(results, *, perfil, capital_meta, max_loss_pct=None,
         "metrics": {"pnl_mean_usdt": 0.0, "p_target": 0.0, "p_loss": 0.0,
             "p_loss_ci95": [0.0, 0.0], "cvar_5_usdt": 0.0,
             "cut_slippage_mean_usdt": 0.0, "cut_slippage_p90_usdt": 0.0,
+            "cut_slippage_expected_usdt": 0.0,
             "days_to_target_p50": None},
         "objetivo": {"factible": True, "motivos": [],
             "clave_orden": (0.0, float("inf"), 0.0)}}

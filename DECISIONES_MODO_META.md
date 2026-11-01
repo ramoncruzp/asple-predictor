@@ -459,7 +459,8 @@ El replay Smart experimental apaga préstamos, compound, ADJUST, reespaciado, ni
 
 ### Fase 43f - decisión de v2 y estado
 
-- **F1:** el criterio CVaR 5 % se sustituye por el desliz del corte: media ≤ 2 % del capital de la meta, configurable por perfil. Se conserva CVaR como métrica informativa.
+- **F1 (43h-0p):** el corte por desliz se evalúa como pérdida esperada: `P(límite) × desliz medio de los escenarios cortados ≤ 0,5 %` del capital de la meta por defecto, configurable por perfil en `meta_profile_settings` y leído en solo lectura. Se conservan el desliz medio condicionado a los cortes y su P90 como métricas informativas; el resto del objetivo 1 + 3 no cambia. El criterio anterior de desliz medio ≤ 2 % castigaba casos con cortes muy raros: ZRO con `0,008 × 15,08 = 0,12 USDT` y PEPE con `0,005 × 9,79 = 0,05 USDT` pasan en una meta de 100 USDT.
+- La caché retiene hasta 16 trayectorias finalistas: hasta dos por moneda evaluada, el mejor bot por moneda y, con los espacios restantes, las mejores globales sin duplicar. Si las reservas por moneda superan 16, se prioriza una por moneda y luego la segunda y el bot por clasificación, respetando el tope de memoria.
 - **F2:** el motor queda fijado por meta. En una meta nueva, v2 solo puede operar si el interruptor global **Motor v2 disponible** está encendido, el perfil ya tiene `decision_engine=v2` y la caché contextual está vigente. La configuración inicial conserva v1 y los dos interruptores globales parten apagados. El motor activo no recurre al otro si falla.
 - **F3 / D7:** `recommend_grid` queda como función experimental reutilizable para 43l; no se conecta a grids de Fase 42 en esta entrega.
 - **Mantener:** se aproxima evaluando una pieza nueva con las mismas líneas desde el precio actual; las comisiones de salida de la pieza actual se descuentan al comparar alternativas.

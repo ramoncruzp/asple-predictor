@@ -122,6 +122,7 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
         horizon_days=horizon_days, seed=seed,
         loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
     steps = []
+    last_attempts = []
     while candidates:
         used_cash = sum(row["capital"] for row in selected)
         used_by_symbol = {}
@@ -135,33 +136,53 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
             else:
                 grid_count += 1
         best = None
+        attempts = []
         for candidate in candidates:
             piece = candidate.get("piece") or {}
             amount = float(candidate["capital"])
             symbol = str(piece.get("symbol") or "").upper()
             is_bot = piece.get("piece_type") == "individual_bot_grid" or piece.get("strategy") == "bot"
             if amount < 10 or amount > float(free_cash) - used_cash + 1e-8:
+                attempts.append({"candidate_key": candidate["candidate_key"],
+                    "symbol": symbol, "strategy": piece.get("strategy"),
+                    "reason": "no cabe por el límite de efectivo disponible"})
                 continue
             if used_by_symbol.get(symbol, 0.0) + amount > coin_cap + 1e-8:
+                attempts.append({"candidate_key": candidate["candidate_key"],
+                    "symbol": symbol, "strategy": piece.get("strategy"),
+                    "reason": "no cabe por el límite de capital por moneda"})
                 continue
             if is_bot and bot_count >= max_bots or not is_bot and grid_count >= max_grids:
+                attempts.append({"candidate_key": candidate["candidate_key"],
+                    "symbol": symbol, "strategy": piece.get("strategy"),
+                    "reason": "no cabe por el máximo de piezas del perfil"})
                 continue
             metrics = evaluate_trajectory_portfolio([*current_rows, candidate],
                 timestamps=timestamps, capital=capital, target=target,
                 max_loss_pct=max_loss_pct, horizon_days=horizon_days, seed=seed,
                 loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
             improvement = float(metrics["p_target"]) - float(current_metrics["p_target"])
-            objective = objective_v2(metrics, perfil=profile, capital_meta=capital)
+            objective = objective_v2(metrics, perfil=profile, capital_meta=capital,
+                cut_slippage_expected_max_pct=float(config.get(
+                    "cut_slippage_expected_max_pct", .5)))
             if improvement < .02 - 1e-12 or not objective["factible"]:
+                reason = ("rompe el objetivo 1 + 3: " + "; ".join(objective["motivos"])
+                    if not objective["factible"] else "no sube P(meta) al menos 2 pp")
+                attempts.append({"candidate_key": candidate["candidate_key"],
+                    "symbol": symbol, "strategy": piece.get("strategy"),
+                    "p_target": metrics.get("p_target"), "reason": reason})
                 continue
             score = (improvement, float(metrics["p_target"]),
                 float(metrics["pnl_mean_usdt"]))
             if best is None or score > best[0]:
                 best = (score, candidate, metrics, objective)
         if best is None:
+            last_attempts = sorted(attempts, key=lambda row: (
+                -float(row.get("p_target", 0)), str(row.get("symbol") or "")))[:5]
             break
         _score, candidate, metrics, objective = best
         candidates.remove(candidate)
+        last_attempts = attempts
         selected.append(candidate)
         steps.append({"candidate_key": candidate["candidate_key"],
             "symbol": (candidate.get("piece") or {}).get("symbol"),
@@ -176,5 +197,6 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
             for row in [*live, *selected]],
         "added": [{"candidate_key": row["candidate_key"], "piece": row["piece"]}
             for row in selected], "steps": steps, "metrics": current_metrics,
+        "not_added_reasons": last_attempts,
         "candidate_count": len(candidates) + len(selected),
         "elapsed_seconds": time.perf_counter() - started}

@@ -137,7 +137,7 @@ def main(argv=None):
         ranked = rank_alternatives_v2(result["pieces"], perfil=args.perfil,
             capital_meta=args.capital, max_loss_pct=limits["max_loss_pct"],
             p_limit_cap=limits["p_limit_cap"], ev_floor_pct=limits["ev_floor_pct"],
-            cut_slippage_max_pct=limits["cut_slippage_max_pct"])
+            cut_slippage_expected_max_pct=limits["cut_slippage_expected_max_pct"])
         print("OBJETIVO_V2 | posición | pieza | estado | P(meta) | motivos")
         for position, row in enumerate(ranked, 1):
             name = (row.get("piece") or {}).get("label") or (row.get("piece") or {}).get("symbol") or "USDT quieto"

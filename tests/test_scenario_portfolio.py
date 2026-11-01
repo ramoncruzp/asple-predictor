@@ -66,3 +66,27 @@ def test_metricas_trayectoria_igualan_evaluate_portfolio():
     assert metrics["pnl_mean_usdt"] == pytest.approx(
         sum(row["pnl_usdt"] for row in outcomes) / 4, abs=1e-9)
 
+
+def test_cartera_informa_los_cinco_intentos_no_agregados(tmp_path):
+    timestamps = np.asarray([0, 3600, 7200], dtype=np.int64)
+    metadata = []
+    arrays = {"timestamps": timestamps}
+    rows = [_piece(f"x{index}", f"X{index}USDT", np.full((4, 3), 10), 10)
+        for index in range(5)]
+    for index, row in enumerate(rows):
+        metadata.append({"candidate_key": row["candidate_key"], "piece": row["piece"],
+            "metrics": {}, "is_current": False})
+        for key in ("cash", "equity", "inventory_qty", "inventory_value"):
+            arrays[f"{key}_{index}"] = row[key]
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
+    archive = tmp_path / "no-additions.npz"
+    np.savez(archive, **arrays)
+
+    result = greedy_portfolio(archive, profile="RAPIDO", capital=100, free_cash=80,
+        target=5, max_loss_pct=18, horizon_days=2, profile_config={
+            "capital_per_coin_pct": 70, "max_grids": 8, "max_bots": 8})
+
+    assert len(result["not_added_reasons"]) == 5
+    assert {row["reason"] for row in result["not_added_reasons"]} == {
+        "no sube P(meta) al menos 2 pp"}
+

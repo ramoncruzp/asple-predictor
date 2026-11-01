@@ -112,10 +112,19 @@ class V2ScenarioEngine(DecisionEngine):
             **({"grid_id": int(params["grid_id"])} if params.get("grid_id") else {})}
 
     @staticmethod
-    def _profile_config(goal):
+    def _profile_config(goal, operator=None):
         from grid.meta import DEFAULT_PROFILES
         profile = str(goal.get("profile") or "").upper()
         config = dict(DEFAULT_PROFILES.get(profile) or {})
+        if operator is not None and getattr(operator, "db", None) is not None:
+            table = operator.db.meta_profile_settings
+            with operator.db.engine.connect() as conn:
+                raw = conn.execute(select(table.c.settings).where(
+                    table.c.profile == profile)).scalar_one_or_none()
+            try:
+                config.update(json.loads(raw or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         snapshot = goal.get("config_snapshot") or {}
         if isinstance(snapshot, str):
             try:
@@ -191,7 +200,7 @@ class V2ScenarioEngine(DecisionEngine):
         cached = self._load_cache(operator, goal, require_engine=require_engine)
         capital = float(goal.get("capital_initial", 0))
         live_grid_ids = live_meta_grid_ids(getattr(operator, "core", None), int(goal["id"]))
-        profile_config = self._profile_config(goal)
+        profile_config = self._profile_config(goal, operator)
         _live_links, live_grids, live_bots, used_by_symbol = self._live_profile_usage(
             operator, int(goal["id"]))
         coin_cap = capital * float(profile_config.get("capital_per_coin_pct", 0)) / 100
@@ -213,9 +222,15 @@ class V2ScenarioEngine(DecisionEngine):
                 if (amount < 10 or not slot_available or
                         amount > coin_cap - used_by_symbol.get(symbol, 0.0) + 1e-8):
                     continue
-            candidates.append({"piece": piece, "metrics": cached_row["metrics"],
+            metrics = dict(cached_row["metrics"] or {})
+            metrics.setdefault("cut_slippage_expected_usdt",
+                float(metrics.get("p_loss", 0.0)) *
+                float(metrics.get("cut_slippage_mean_usdt", 0.0)))
+            candidates.append({"piece": piece, "metrics": metrics,
                 "candidate_key": cached_row["candidate_key"]})
-        ranked = rank_alternatives_v2(candidates, perfil=goal["profile"], capital_meta=capital)
+        ranked = rank_alternatives_v2(candidates, perfil=goal["profile"], capital_meta=capital,
+            cut_slippage_expected_max_pct=float(profile_config.get(
+                "cut_slippage_expected_max_pct", .5)))
         decision_id = uuid.uuid4().hex
         alternatives = []
         for index, candidate in enumerate(ranked):
@@ -243,6 +258,7 @@ class V2ScenarioEngine(DecisionEngine):
                     "p_loss_ci95": metrics.get("p_loss_ci95"),
                     "cut_slippage_mean_usdt": metrics.get("cut_slippage_mean_usdt"),
                     "cut_slippage_p90_usdt": metrics.get("cut_slippage_p90_usdt"),
+                    "cut_slippage_expected_usdt": metrics.get("cut_slippage_expected_usdt"),
                     "p_inventory": metrics.get("p_inventory"),
                     "days_p90": metrics.get("days_to_target_p90"),
                     "evidence_sufficient": bool(metrics.get("n")),
@@ -296,6 +312,7 @@ class V2ScenarioEngine(DecisionEngine):
             "pnl_mean_ci95": selected_metrics.get("pnl_mean_ci95"),
             "cut_slippage_mean_usdt": selected_metrics.get("cut_slippage_mean_usdt", 0),
             "cut_slippage_p90_usdt": selected_metrics.get("cut_slippage_p90_usdt", 0),
+            "cut_slippage_expected_usdt": selected_metrics.get("cut_slippage_expected_usdt", 0),
             "p_loss": selected_metrics.get("p_loss", 0),
             "p_loss_ci95": selected_metrics.get("p_loss_ci95"),
             "p_inventory": selected_metrics.get("p_inventory"),
@@ -304,6 +321,7 @@ class V2ScenarioEngine(DecisionEngine):
             "metrics": selected_metrics,
             "motivos": (selected.get("objetivo") or {}).get("motivos", []) if selected else [],
             "descartadas": cached["discarded"]}
+        v2_summary["cartera_no_agregadas"] = (portfolio or {}).get("not_added_reasons", [])
         discarded_alternatives = [{"symbol": row["symbol"], "strategy": row["strategy"],
             "metrics": row["metrics"], "reason": "; ".join(
                 (row.get("objective") or {}).get("motivos") or ["no cumple el objetivo 1 + 3"])}

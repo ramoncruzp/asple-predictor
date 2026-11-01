@@ -30,3 +30,5 @@ def test_cut_slippage_measures_overshoot_only_on_loss_cut_scenarios():
         max_loss_pct=10, horizon_days=1, replicas=20)
     assert result["cut_slippage_mean_usdt"] == 4.0
     assert result["cut_slippage_p90_usdt"] == 4.0
+    assert result["p_loss"] == .5
+    assert result["cut_slippage_expected_usdt"] == 2.0

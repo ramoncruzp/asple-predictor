@@ -33,6 +33,7 @@ from research.scenarios.objective import objective_limits, rank_alternatives_v2
 
 RETENTION_DAYS = 7
 SCENARIO_COUNT = 1000
+MAX_FINALISTS = 16
 DEFAULT_MAX_RSS_MB = 900.0
 MAX_PIECES_PER_BATCH = 6
 ABANDON_AFTER_MINUTES = 30
@@ -455,6 +456,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         meta=context["target"], horizon_days=context["horizon"],
         max_loss_pct=context["max_loss_pct"], n_scenarios=n_scenarios, n_smart=200,
         seed=43, db_path=market_path, library_dir=library_dir, mode="alternativas")
+    cut_slippage_expected_max_pct = float((context.get("profile_config") or {}).get(
+        "cut_slippage_expected_max_pct", .5))
     profile_times = {"carga_biblioteca_s": 0.0, "generacion_escenarios_s": 0.0,
         "simulacion_fastsim_s": 0.0, "simulacion_smart_s": 0.0,
         "metricas_bootstrap_s": 0.0,
@@ -463,7 +466,35 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     first_rows, failed_candidates = [], {}
     candidate_seconds = {}
     rss_per_symbol = {}
-    retained_live, retained_candidates = {}, []
+    retained_live, retained_candidates = {}, {}
+    finalist_meta = {}
+
+    def selected_finalist_keys():
+        """Prioriza diversidad y limita a 16 trayectorias residentes."""
+        by_symbol = {}
+        bots = {}
+        for key, item in finalist_meta.items():
+            by_symbol.setdefault(item["symbol"], []).append((item["order"], key))
+            if item["is_bot"] and (item["symbol"] not in bots or
+                    item["order"] < bots[item["symbol"]][0]):
+                bots[item["symbol"]] = (item["order"], key)
+        for rows in by_symbol.values():
+            rows.sort()
+        chosen = []
+        for rank_index in (0, 1):
+            layer = sorted(rows[rank_index] for rows in by_symbol.values()
+                if len(rows) > rank_index)
+            for _order, key in layer:
+                if key not in chosen and len(chosen) < MAX_FINALISTS:
+                    chosen.append(key)
+        for _order, key in sorted(bots.values()):
+            if key not in chosen and len(chosen) < MAX_FINALISTS:
+                chosen.append(key)
+        for _order, key in sorted((item["order"], key)
+                for key, item in finalist_meta.items()):
+            if key not in chosen and len(chosen) < MAX_FINALISTS:
+                chosen.append(key)
+        return set(chosen)
 
     def retain_trajectory(row):
         piece = row.get("piece") or {}
@@ -475,7 +506,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         timestamps = outcomes.get("trajectory_timestamps")
         if cash is None or equity is None or timestamps is None:
             return
-        entry = {"candidate_key": str(piece.get("candidate_key") or _candidate_key(piece)),
+        candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
+        if bool(piece.get("is_current")):
+            entry = {"candidate_key": candidate_key,
             "piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
             "cash": np.asarray(cash, dtype=np.float32).copy(),
             "equity": np.asarray(equity, dtype=np.float32).copy(),
@@ -486,24 +519,42 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 if low_equity_5m is not None else None),
             "timestamps_5m": (np.asarray(timestamps_5m, dtype=np.int64).copy()
                 if timestamps_5m is not None else None),
-            "is_current": bool(piece.get("is_current"))}
-        if entry["is_current"]:
+            "is_current": True}
             retained_live[entry["candidate_key"]] = entry
             return
         ranked_row = rank_alternatives_v2([row], perfil=context["profile"],
-            capital_meta=capital)[0]
-        entry["order_key"] = tuple(ranked_row["objetivo"]["clave_orden"])
-        if any(old["candidate_key"] == entry["candidate_key"] for old in retained_candidates):
-            retained_candidates[:] = [old for old in retained_candidates
-                if old["candidate_key"] != entry["candidate_key"]]
-        retained_candidates.append(entry)
-        retained_candidates.sort(key=lambda item: item["order_key"])
-        del retained_candidates[12:]
+            capital_meta=capital, cut_slippage_expected_max_pct=float(
+                (context.get("profile_config") or {}).get(
+                    "cut_slippage_expected_max_pct", .5)))[0]
+        objective = ranked_row["objetivo"]
+        order = (not bool(objective["factible"]), *tuple(objective["clave_orden"]))
+        symbol = str(piece.get("symbol") or "").upper()
+        finalist_meta[candidate_key] = {"order": order, "symbol": symbol,
+            "is_bot": piece.get("piece_type") == "individual_bot_grid" or
+                piece.get("strategy") == "bot"}
+        keep = selected_finalist_keys()
+        for old_key in list(retained_candidates):
+            if old_key not in keep:
+                del retained_candidates[old_key]
+        if candidate_key in keep and candidate_key not in retained_candidates:
+            entry = {"candidate_key": candidate_key,
+                "piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
+                "cash": np.asarray(cash, dtype=np.float32).copy(),
+                "equity": np.asarray(equity, dtype=np.float32).copy(),
+                "inventory_qty": np.asarray(outcomes.get("inventory_qty", []), dtype=np.float32).copy(),
+                "inventory_value": np.asarray(outcomes.get("inventory_value", []), dtype=np.float32).copy(),
+                "timestamps": np.asarray(timestamps, dtype=np.int64).copy(),
+                "low_equity_5m": (np.asarray(low_equity_5m, dtype=np.float32)
+                    if low_equity_5m is not None else None),
+                "timestamps_5m": (np.asarray(timestamps_5m, dtype=np.int64).copy()
+                    if timestamps_5m is not None else None),
+                "is_current": False, "order_key": order}
+            retained_candidates[candidate_key] = entry
 
     def write_trajectory_archive():
         if trajectory_path is None:
             return None
-        selected_rows = list(retained_live.values()) + retained_candidates
+        selected_rows = list(retained_live.values()) + list(retained_candidates.values())
         if not selected_rows:
             return None
         timestamps = selected_rows[0]["timestamps"]
@@ -632,7 +683,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     first = {"pieces": first_rows, "skipped_symbols": skipped}
     objective_started = time.perf_counter()
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
-        capital_meta=capital) if first["pieces"] else []
+        capital_meta=capital, cut_slippage_expected_max_pct=
+            cut_slippage_expected_max_pct) if first["pieces"] else []
     profile_times["objetivo_s"] += time.perf_counter() - objective_started
     simple_ranked = [row for row in ranked
         if row.get("piece", {}).get("strategy") == "simple"
@@ -750,7 +802,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
         objective_started = time.perf_counter()
         objective = rank_alternatives_v2([row], perfil=context["profile"],
-            capital_meta=capital)[0]["objetivo"]
+            capital_meta=capital, cut_slippage_expected_max_pct=
+                cut_slippage_expected_max_pct)[0]["objetivo"]
         if row.get("sin_baseline"):
             objective = {**objective, "factible": False,
                 "motivos": [*objective.get("motivos", []), "sin_baseline"]}
@@ -772,7 +825,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "symbol": None, "strategy": "usdt_quieto", "params": {},
         "metrics": {"pnl_mean_usdt": 0, "p_target": 0, "p_loss": 0,
             "p_loss_ci95": [0, 0], "cvar_5_usdt": 0,
-            "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0},
+            "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+            "cut_slippage_expected_usdt": 0},
         "objective": {"factible": True, "motivos": [], "clave_orden": (0, 0, 0)}}
     results.append(quiet)
     discarded = dict(built["discarded"])
@@ -807,7 +861,8 @@ def _scenario_metrics(row):
         "p_target": sum(bool(item["reached"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss": sum(bool(item["loss_cut"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss_ci95": [0, 1] if pnls else [None, None], "cvar_5_usdt": 0,
-        "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0}
+        "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+        "cut_slippage_expected_usdt": 0}
 
 
 def _drop_outcome_trajectories(row):
@@ -1049,7 +1104,9 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     piece = row.get("piece", {})
                     key = str(piece.get("candidate_key") or _candidate_key(piece))
                     ranked_row = rank_alternatives_v2([row], perfil=context["profile"],
-                        capital_meta=float(context["capital"]))[0]
+                        capital_meta=float(context["capital"]),
+                        cut_slippage_expected_max_pct=float((context.get("profile_config") or {}).get(
+                            "cut_slippage_expected_max_pct", .5)))[0]
                     conn.execute("INSERT OR REPLACE INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)",
                         (run_id, key, piece.get("symbol"), piece.get("strategy", "simple"),
                          _json_dumps({k: v for k, v in piece.items()

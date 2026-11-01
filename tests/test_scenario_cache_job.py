@@ -132,7 +132,7 @@ def test_cache_evalua_todas_las_piezas_vivas_antes_de_alternativas(
     assert alternative["metrics"]["metrics_pieza_sola"]["p_target"] == .5
 
 
-def test_cache_guarda_solo_doce_mejores_trayectorias_y_mide_rss(
+def test_cache_guarda_hasta_dieciseis_finalistas_y_mide_rss(
         cache_databases, monkeypatch, tmp_path):
     import numpy as np
     db, market_path = cache_databases
@@ -178,13 +178,13 @@ def test_cache_guarda_solo_doce_mejores_trayectorias_y_mide_rss(
     assert result["trajectory_file"]
     with np.load(result["trajectory_file"], allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata_json"].item()))
-        assert len(metadata) == 12
+        assert len(metadata) == 13
         assert archive["equity_0"].shape == (1000, 480)
         assert not archive["equity_0"].dtype.hasobject
     assert max(rss_before, rss_after) < 600
 
 
-def test_perfil_libera_por_moneda_y_conserva_doce_finalistas_globales(
+def test_perfil_libera_por_moneda_y_conserva_dieciseis_finalistas_diversos(
         cache_databases, monkeypatch, tmp_path):
     import time
     import numpy as np
@@ -192,7 +192,10 @@ def test_perfil_libera_por_moneda_y_conserva_doce_finalistas_globales(
     symbols = [f"SYN{index}USDT" for index in range(5)]
     candidates = [{"candidate_key": f"{symbol}-{index}", "symbol": symbol,
         "strategy": "simple", "capital": 10, "n": 6, "low": 90, "high": 110}
-        for symbol in symbols for index in range(3)]
+        for symbol in symbols for index in range(3)] + [
+        {"candidate_key": f"{symbol}-bot", "symbol": symbol,
+            "strategy": "bot", "capital": 10, "n": 1, "low": 90, "high": 110}
+        for symbol in symbols]
     monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
         "candidates": [*candidates, {"strategy": "usdt_quieto"}], "discarded": {}})
     monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
@@ -237,14 +240,19 @@ def test_perfil_libera_por_moneda_y_conserva_doce_finalistas_globales(
     elapsed = time.perf_counter() - started
 
     assert set(result["rss_por_moneda"]) == set(symbols)
-    assert all(row["rss_hwm_mb"] < 700 for row in result["rss_por_moneda"].values())
-    assert result["evaluated_count"] == 15
+    assert all(row["rss_hwm_mb"] < 900 for row in result["rss_por_moneda"].values())
+    assert result["evaluated_count"] == 20
     assert elapsed < 30
     with np.load(result["trajectory_file"], allow_pickle=False) as archive:
-        assert len(json.loads(str(archive["metadata_json"].item()))) == 12
+        metadata = json.loads(str(archive["metadata_json"].item()))
+        assert len(metadata) == 16
+        assert {row["piece"]["symbol"] for row in metadata
+            if row["piece"]["strategy"] == "bot"} == set(symbols)
+        assert all(sum(row["piece"]["symbol"] == symbol for row in metadata) >= 2
+            for symbol in symbols)
     print(f"RSS por moneda perfil 5 monedas: {result['rss_por_moneda']}; "
         f"pico={max(row['rss_hwm_mb'] for row in result['rss_por_moneda'].values()):.2f} MB; "
-        f"tiempo={elapsed:.3f} s; finalistas=12")
+        f"tiempo={elapsed:.3f} s; finalistas=16")
 
 
 def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):

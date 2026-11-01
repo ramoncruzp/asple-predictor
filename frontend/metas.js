@@ -359,13 +359,16 @@
       `<li>Paso ${index + 1}: ${esc(step.symbol)} · ${esc(step.strategy)} · ${fmtMoney(step.capital_usdt)} USDT · mejora P(meta) +${fmtMoney(step.p_target_delta_pp)} pp</li>`).join('');
     const discarded = (plan.discarded_alternatives || []).map(row =>
       `<tr><td>${esc(row.symbol)}</td><td>${esc(row.strategy)}</td><td>${percent(row.metrics?.p_target)}</td>
-        <td>${fmtMoney(row.metrics?.cut_slippage_mean_usdt)} / ${fmtMoney(row.metrics?.cut_slippage_p90_usdt)} USDT</td>
+        <td>${fmtMoney(row.metrics?.cut_slippage_expected_usdt)} esperado · ${fmtMoney(row.metrics?.cut_slippage_mean_usdt)} / ${fmtMoney(row.metrics?.cut_slippage_p90_usdt)} USDT</td>
         <td>${percent(row.metrics?.p_loss)}</td><td>${esc(row.reason)}</td></tr>`).join('');
     const warnings = (plan.warnings || []).map(item => `<p>⚠ ${esc(item)}</p>`).join('');
+    const notAdded = (plan.v2?.cartera_no_agregadas || []).map(item =>
+      `<li>${esc(item.symbol)} · ${esc(item.strategy)}: ${esc(item.reason)}</li>`).join('');
     slot.innerHTML = `
       <div class="metas-plan-section"><h4>Candidatas v2</h4>${candidatesTable(plan.candidates, true)}</div>
       <div class="metas-plan-section"><h4>Cartera v2 propuesta</h4>${piecesTable(plan.pieces)}
-        ${steps ? `<ol class="metas-v2-portfolio-steps">${steps}</ol>` : '<p>No se agregaron piezas; el capital permanece en USDT.</p>'}</div>
+        ${steps ? `<ol class="metas-v2-portfolio-steps">${steps}</ol>` : '<p>No se agregaron piezas; el capital permanece en USDT.</p>'}
+        ${notAdded ? `<details><summary>Intentos no agregados (${(plan.v2?.cartera_no_agregadas || []).length})</summary><ul>${notAdded}</ul></details>` : ''}</div>
       <div class="metas-plan-section"><h4>Estimación v2 (escenarios, no promesa)</h4>
         <div class="metas-estimate-grid">
           <div><span>P(meta en el plazo)</span><b>${percent(metrics.p_target)}</b></div>
@@ -374,6 +377,7 @@
           <div><span>P(tocar el límite)</span><b>${percent(metrics.p_loss)}</b></div>
           <div><span>IC 95 % de P(límite)</span><b>${interval(metrics.p_loss_ci95, percent)}</b></div>
           <div><span>Desliz medio del corte</span><b>${metrics.cut_slippage_mean_usdt == null ? '—' : `${fmtMoney(metrics.cut_slippage_mean_usdt)} USDT`}</b></div>
+          <div><span>Desliz esperado</span><b>${metrics.cut_slippage_expected_usdt == null ? '—' : `${fmtMoney(metrics.cut_slippage_expected_usdt)} USDT`}</b></div>
           <div><span>Días (mediana)</span><b>${metrics.days_to_target_p50 == null ? '—' : `${fmtMoney(metrics.days_to_target_p50, 1)}`}</b></div>
           <div><span>P(terminar con inventario)</span><b>${percent(metrics.p_inventory)}</b></div>
           <div><span>Escenarios</span><b>${esc(metrics.n ?? '—')}</b></div>
@@ -381,7 +385,7 @@
           <div><span>Hora de la caché</span><b>${esc(cacheTime)}</b></div>
         </div>${warnings ? `<div class="metas-warnings">${warnings}</div>` : ''}
       </div>
-      ${discarded ? `<div class="metas-plan-section"><h4>Mejores alternativas descartadas</h4><div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>P(meta)</th><th>Desliz medio / P90</th><th>P(l\u00edmite)</th><th>Motivo</th></tr></thead><tbody>${discarded}</tbody></table></div></div>` : ''}
+      ${discarded ? `<div class="metas-plan-section"><h4>Mejores alternativas descartadas</h4><div class="metas-table-scroll"><table class="data-table"><thead><tr><th>Moneda</th><th>Tipo</th><th>P(meta)</th><th>Desliz esperado · medio / P90</th><th>P(l\u00edmite)</th><th>Motivo</th></tr></thead><tbody>${discarded}</tbody></table></div></div>` : ''}
       <div class="metas-plan-actions"><button type="button" class="button primary" data-start-plan="${plan.plan_id}" data-meta-id="${metaId}">Iniciar con este plan</button>
         <span class="muted">Este plan vence en <b data-plan-countdown>…</b></span></div>
       <p class="metas-plan-expired hidden">El plan venció; analiza de nuevo.</p>`;

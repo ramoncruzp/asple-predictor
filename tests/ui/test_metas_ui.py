@@ -257,6 +257,7 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
                 "v2": {"metrics": {"p_target": .4, "pnl_mean_usdt": 1.2,
                     "pnl_mean_ci95": [.5, 1.9], "p_loss": .02,
                     "p_loss_ci95": [.01, .03], "cut_slippage_mean_usdt": .2,
+                    "cut_slippage_p90_usdt": .4, "cut_slippage_expected_usdt": .004,
                     "days_to_target_p50": 8, "p_inventory": .3, "n": 1000}},
                 "cache": {"status": "parcial", "as_of": "2026-10-31T12:00:00+00:00"},
                 "candidates": [{"symbol": "ZROUSDT", "sigma_24h": .03,
@@ -276,6 +277,7 @@ def test_analysis_v2_muestra_tarjeta_y_candidatas_v2(metas_page):
 
     assert "P(meta en el plazo)" in content and "40" in content
     assert "Ganancia media" in content and "P(tocar el límite)" in content
+    assert "Desliz esperado" in content
     assert "P(terminar con inventario)" in content and "parcial" in content
     assert "PEPEUSDT" in content and "sin biblioteca" in content
     assert "Score Scanner" not in content and "Ventanas" not in content

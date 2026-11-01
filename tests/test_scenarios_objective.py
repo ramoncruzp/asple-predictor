@@ -7,7 +7,8 @@ from research.scenarios.objective import (objective_limits, objective_v2,
 
 def _metrics(**overrides):
     row = {"pnl_mean_usdt": -.5, "cvar_5_usdt": -5.0,
-        "cut_slippage_mean_usdt": 1.0, "cut_slippage_p90_usdt": 2.0, "p_target": .3,
+        "cut_slippage_mean_usdt": 1.0, "cut_slippage_p90_usdt": 2.0,
+        "cut_slippage_expected_usdt": .01, "p_loss": .01, "p_target": .3,
         "days_to_target_p50": 8.0, "p_loss_ci95": [.01, .04]}
     row.update(overrides)
     return row
@@ -22,12 +23,12 @@ def test_objective_reports_each_infeasibility_reason():
         capital_meta=100, max_loss_pct=18, p_limit_cap=5)
     assert not risk["factible"] and "límite superior" in risk["motivos"][0]
 
-    tail = objective_v2(_metrics(cut_slippage_mean_usdt=2.01), perfil="RAPIDO",
+    tail = objective_v2(_metrics(cut_slippage_expected_usdt=.51), perfil="RAPIDO",
         capital_meta=100, max_loss_pct=18, p_limit_cap=15)
-    assert not tail["factible"] and "desliz medio" in tail["motivos"][0]
+    assert not tail["factible"] and "desliz esperado" in tail["motivos"][0]
 
     cvar_is_informative_only = objective_v2(_metrics(cvar_5_usdt=-99,
-        cut_slippage_mean_usdt=1.0), perfil="RAPIDO", capital_meta=100,
+        cut_slippage_mean_usdt=1.0, cut_slippage_expected_usdt=.01), perfil="RAPIDO", capital_meta=100,
         max_loss_pct=18, p_limit_cap=15)
     assert cvar_is_informative_only["factible"]
 
@@ -69,10 +70,29 @@ def test_objective_limits_read_profile_json_from_sqlite_read_only(tmp_path):
         conn.execute("CREATE TABLE meta_profile_settings(profile TEXT PRIMARY KEY, settings TEXT NOT NULL)")
         conn.execute("INSERT INTO meta_profile_settings VALUES(?,?)",
             ("RAPIDO", json.dumps({"max_loss_pct": 17, "p_limit_cap": 12,
-                "ev_floor_pct": .5})))
+                "ev_floor_pct": .5, "cut_slippage_expected_max_pct": .7})))
     limits = objective_limits("RAPIDO", settings_db=path)
     assert limits == {"max_loss_pct": 17.0, "p_limit_cap": 12.0, "ev_floor_pct": .5,
-        "cut_slippage_max_pct": 2.0}
+        "cut_slippage_expected_max_pct": .7}
     assert objective_limits("PRUDENTE", settings_db=tmp_path / "missing.sqlite") == {
         "max_loss_pct": 8.0, "p_limit_cap": 5.0, "ev_floor_pct": 1.0,
-        "cut_slippage_max_pct": 2.0}
+        "cut_slippage_expected_max_pct": 0.5}
+
+
+def test_desliz_esperado_f1_con_casos_s1_y_sin_cortes():
+    zro = objective_v2(_metrics(pnl_mean_usdt=1, p_loss=.008,
+        cut_slippage_mean_usdt=15.08, cut_slippage_expected_usdt=.008 * 15.08),
+        perfil="RAPIDO", capital_meta=100)
+    pepe = objective_v2(_metrics(pnl_mean_usdt=1, p_loss=.005,
+        cut_slippage_mean_usdt=9.79, cut_slippage_expected_usdt=.005 * 9.79),
+        perfil="RAPIDO", capital_meta=100)
+    high_risk = objective_v2(_metrics(pnl_mean_usdt=1, p_loss=.10,
+        cut_slippage_mean_usdt=8, cut_slippage_expected_usdt=.8),
+        perfil="RAPIDO", capital_meta=100)
+    no_cuts = objective_v2(_metrics(pnl_mean_usdt=1, p_loss=0,
+        cut_slippage_mean_usdt=0, cut_slippage_expected_usdt=0),
+        perfil="RAPIDO", capital_meta=100)
+    assert zro["factible"] and pepe["factible"]
+    assert not high_risk["factible"]
+    assert "desliz esperado del corte supera 0,5 % del capital" in high_risk["motivos"]
+    assert no_cuts["factible"]
