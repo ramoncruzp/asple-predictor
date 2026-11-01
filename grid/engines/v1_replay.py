@@ -26,7 +26,9 @@ class V1ReplayEngine(DecisionEngine):
         state = {}
         def calculate():
             try:
-                state["plan"] = operator._build_plan(goal, record=False)
+                from grid.engines.shadow_guard import shadow_execution_context
+                with shadow_execution_context():
+                    state["plan"] = operator._build_plan(goal, record=False)
             except Exception as exc:
                 state["error"] = f"{type(exc).__name__}: {exc}"
             finally:
@@ -36,6 +38,9 @@ class V1ReplayEngine(DecisionEngine):
             return {"decision": "sin_tiempo", "reason": "el análisis v1 en sombra superó 30 s",
                 "source": "v1_plan_read_only"}
         if "error" in state:
+            if "shadow_violation" in state["error"]:
+                return {"decision": "no_disponible", "reason": state["error"],
+                    "source": "v1_plan_read_only", "shadow_violation": True}
             return {"decision": "error", "reason": state["error"],
                 "source": "v1_plan_read_only"}
         v1_plan = state.get("plan") or {}

@@ -830,3 +830,21 @@ python scripts/revisar_codificacion.py
 Resultado: **54 pruebas pasaron en 9,00 s**; la medición focalizada confirmó **205,0 MB RSS al inicio y 205,8 MB al final** mientras se guardaban 12 trayectorias sintéticas de 1.000 escenarios por 480 horas. La cartera voraz con dos incorporaciones tardó **0,0032 s**, por debajo de 2 s. La comparación de métricas horarias contra `evaluate_portfolio` pasó con tolerancia 1e-9. La prueba de revisión activa confirmó que la decisión de agregar se delega al helper existente del operador. `node --check frontend/metas.js` pasó y la revisión de codificación informó `HALLAZGOS=0`.
 
 Medición repetida tras exponer el tiempo real en el resultado de `greedy_portfolio`: **0,0037 s** para la cartera sintética; RSS **204,8 MB al inicio y 205,4 MB al final**. Pruebas: **3 pasaron en 0,50 s**; `node --check frontend/metas.js` pasó y `HALLAZGOS=0`.
+
+### 43h-0k - Sombra sin efectos y decisión separada de ejecución
+
+Se separó `V2ScenarioEngine.decide` (solo lectura y acción propuesta) de `review` (ejecución bajo los frenos actuales). `shadow_review` usa solo `decide`; `SHADOW_MODE` bloquea aperturas/cierres, órdenes, inicios, enlaces y bitácoras. El plan v1 en sombra mantiene `record=False` y omite la caché persistente durante el contexto sombra. Las violaciones retornan `no_disponible` con `shadow_violation`. Un plan v2 sin piezas inicia la Meta activa conservando el capital en USDT.
+
+Pruebas enfocadas (comando exacto):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $base=Join-Path $env:TEMP 'pytest-f43h0k-20261101-e'; python -m pytest tests/test_v2_scenario_engine.py tests/test_meta_engines_regression.py tests/test_meta_core.py -q --basetemp=$base
+node --check frontend/metas.js
+python scripts/revisar_codificacion.py
+```
+
+Resultado: **79 pruebas pasaron en 6,70 s**, incluida la regresión v1 contra la referencia del proyecto. En las dos sombras v2 de una meta v1 (decisiones “cambiar” y “agregar”), hubo **0 llamadas al exchange**, **0 mutaciones** y deltas de **0** en grids, niveles, enlaces, órdenes y caché; al persistir el resultado externo, los deltas fueron **+1** en `engine_shadow_decisions` y **+1** en `meta_ledger`. La sombra v1 desde una meta v2 tampoco cambió tablas ni cachés. Se verificó la ejecución activa dentro del candado para cambiar/agregar, las guardas de escritura y el inicio activo de una meta con USDT quieto. `node --check frontend/metas.js` pasó y la codificación informó `HALLAZGOS=0`.
+
+Repetición final tras ampliar la comprobación del candado para usar `_review_once_locked` real: **79 pruebas pasaron en 6,10 s** con `--basetemp` `pytest-f43h0k-20261101-h`; `node --check frontend/metas.js` pasó y `HALLAZGOS=0`.
+
+Resultado definitivo después de añadir contadores de `place_order`/`cancel_order` al exchange falso para ambas direcciones sombra: **79 pruebas pasaron en 6,82 s** con `--basetemp` `pytest-f43h0k-20261101-i`; cero llamadas de exchange en los escenarios sombra.

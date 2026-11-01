@@ -340,7 +340,8 @@ class V2ScenarioEngine(DecisionEngine):
             "shadow_decision": None, "warnings": [],
             "use_extended_allocation": False})
 
-    def review(self, operator, goal, valuation, plan):
+    def decide(self, operator, goal, valuation, plan):
+        """Decide y prepara una acción sin ejecutar ni persistir cambios."""
         from grid.meta_live_pieces import live_meta_grid_links
         links = live_meta_grid_links(operator.core, int(goal["id"]))
         alternatives = list((plan or {}).get("alternatives") or [])
@@ -394,8 +395,12 @@ class V2ScenarioEngine(DecisionEngine):
             reordered["alternatives"] = [best, *[row for row in alternatives if row is not best]]
             # La rutina existente conserva sus gates de materialidad, persistencia,
             # cooldown, pérdida máxima, límites diarios y cierre verificado.
-            result = operator._review_allocations(goal, valuation, plan=reordered)
-            return json_safe({**result, "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
+            return json_safe({"decision": "cambiar", "reason":
+                "alternativa con mejora pareada; falta aplicar los frenos de ejecucion",
+                "grid_id": int(grid_id), "alternative_id": best.get("alternative_id"),
+                "proposed_action": {"type": "rotar", "grid_id": int(grid_id),
+                    "alternative": best, "plan": reordered},
+                "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
                 "expected_net_usdt": new_net, "keep_mean_usdt": current_est.get("pnl_mean_usdt"),
                 "keep_standard_error_usdt": standard_error,
                 "realized_loss_usdt": realized_loss, "exit_fee_usdt": exit_fee,
@@ -409,21 +414,44 @@ class V2ScenarioEngine(DecisionEngine):
             if addition is not None:
                 # La apertura conserva las validaciones de efectivo, perfil y
                 # abribilidad que ya aplica el operador para piezas nuevas.
-                opened = operator._add_piece_from_free_cash(goal, links,
-                    {"alternatives": [addition]}, valuation=valuation)
-                if opened:
-                    return json_safe({**opened, "comparison_v2": {
-                        "portfolio_steps": portfolio.get("steps", []),
+                return json_safe({"decision": "agregar", "reason":
+                    "cartera v2 propone agregar una pieza con efectivo libre",
+                    "alternative_id": addition.get("alternative_id"),
+                    "proposed_action": {"type": "agregar", "alternative": addition},
+                    "comparison_v2": {"portfolio_steps": portfolio.get("steps", []),
                         "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
         return json_safe({"decision": "mantener", "reason":
             "ninguna alternativa supera el umbral pareado de probabilidad y ganancia neta",
             "cache_run_id": (plan.get("cache") or {}).get("run_id")})
 
+    def review(self, operator, goal, valuation, plan):
+        """Ejecuta la decision pura mediante los frenos actuales del operador."""
+        decision = self.decide(operator, goal, valuation, plan)
+        action = decision.pop("proposed_action", None)
+        if not action:
+            return json_safe(decision)
+        if action["type"] == "rotar":
+            executed = operator._review_allocations(goal, valuation, plan=action["plan"])
+        elif action["type"] == "agregar":
+            from grid.meta_live_pieces import live_meta_grid_links
+            links = live_meta_grid_links(operator.core, int(goal["id"]))
+            executed = operator._add_piece_from_free_cash(goal, links,
+                {"alternatives": [action["alternative"]]}, valuation=valuation)
+        else:
+            return json_safe({"decision": "no_hacer_nada", "reason": "accion v2 desconocida"})
+        if not executed:
+            return json_safe({"decision": "mantener",
+                "reason": "la ejecucion fue rechazada por los frenos activos",
+                "comparison_v2": decision.get("comparison_v2")})
+        return json_safe({**executed, "comparison_v2": decision.get("comparison_v2")})
+
     def shadow_review(self, operator, goal, valuation, plan):
         try:
-            shadow_plan = self.plan(operator, goal, plan_kind="revision", record=False,
-                require_engine=False)
-            result = self.review(operator, goal, valuation, shadow_plan)
+            from grid.engines.shadow_guard import shadow_execution_context
+            with shadow_execution_context():
+                shadow_plan = self.plan(operator, goal, plan_kind="revision", record=False,
+                    require_engine=False)
+                result = self.decide(operator, goal, valuation, shadow_plan)
             live_metrics = [row.get("estimate") or {} for row in
                 (shadow_plan.get("current_pieces") or {}).values()]
             v2_metrics = (live_metrics[0] if result.get("decision") in {"mantener", "no_hacer_nada"}
@@ -434,5 +462,10 @@ class V2ScenarioEngine(DecisionEngine):
                 "pieces": shadow_plan.get("pieces", []),
                 "decision_choices": shadow_plan.get("decision_choices", {}),
                 "current_pieces": shadow_plan.get("current_pieces", {})})
-        except EngineUnavailable as exc:
+        except Exception as exc:
+            if "shadow_violation" in str(exc):
+                return json_safe({"decision": "no_disponible", "reason": str(exc),
+                    "shadow_violation": True})
+            if not isinstance(exc, EngineUnavailable):
+                raise
             return json_safe({"decision": "no_disponible", "reason": str(exc)})

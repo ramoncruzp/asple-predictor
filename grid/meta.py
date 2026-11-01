@@ -359,6 +359,8 @@ class MetaCore:
         return self.get_goal(goal_id)
 
     def _ledger(self, meta_id, run_id, event_type, details=None, reason=None, grid_id=None, level_idx=None):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("write_meta_ledger")
         with self.db.engine.begin() as conn:
             conn.execute(self.db.meta_ledger.insert().values(
                 meta_id=int(meta_id), run_id=run_id, ts=self._now(), event_type=event_type, reason=reason,
@@ -482,6 +484,8 @@ class MetaCore:
         return available, reserved
 
     def start_goal(self, meta_id):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("start_goal")
         from sqlalchemy import func, select
         self._enabled_testnet()
         goal = self.get_goal(meta_id)
@@ -516,6 +520,8 @@ class MetaCore:
         return self.get_goal(meta_id)
 
     def link_grid(self, meta_id, grid_id, piece_type="grid"):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("link_grid")
         from sqlalchemy import func, select
         self._enabled_testnet()
         if piece_type not in {"grid", "individual_bot_grid"}:
@@ -919,6 +925,8 @@ class MetaCore:
             return results
 
     def _close_owned(self, goal, result_status):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("close_owned_grids")
         if self.engine is None:
             raise RuntimeError("Grid Engine no está disponible para cierre verificado.")
         lock = getattr(self.monitor, "ops_lock", self._lock)
@@ -1059,6 +1067,8 @@ class MetaCore:
                 "choices": ["liquidate", "repository"], "plan_id": token, "expires_in_seconds": 300}
 
     def cancel(self, meta_id, mode, confirm=False, plan_id=None):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("cancel_meta")
         self._enabled_testnet()
         goal = self.get_goal(meta_id)
         if goal["status"] not in {"ACTIVE", "PIECES_BLOCKED", "SURPLUS_WAIT", "CLOSING"}:

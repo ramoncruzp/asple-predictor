@@ -403,6 +403,8 @@ class MetaOperator:
         self.review_cycle_budget_s = META_REVIEW_CYCLE_BUDGET_S
 
     def _ledger(self, meta_id, event, details, **kwargs):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("write_meta_operator_ledger")
         self.core._ledger(meta_id, None, event, details, **kwargs)
 
     @staticmethod
@@ -1372,6 +1374,9 @@ class MetaOperator:
             return None
 
     def _persistent_cache_set(self, kind, payload, value):
+        from grid.engines.shadow_guard import SHADOW_MODE
+        if SHADOW_MODE.get():
+            return
         if kind == "replay":
             return
         if not self.cache_enabled or not self.cache_writes or self.db is None or not hasattr(self.db, "meta_analysis_cache"):
@@ -3790,6 +3795,8 @@ class MetaOperator:
             return self._start_plan_locked(meta_id, plan_id, opener)
 
     def _start_plan_locked(self, meta_id, plan_id, opener):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("start_plan")
         with self._lock:
             plan = self._plans.get(str(plan_id))
         if plan is None or int(plan.get("meta_id", -1)) != int(meta_id):
@@ -3805,9 +3812,10 @@ class MetaOperator:
         if planned_engine == "v2" and plan.get("pieces"):
             self._validate_v2_plan_limits(goal, plan)
         if planned_engine == "v2" and not plan.get("pieces"):
-            return {"meta": goal, "opened": [], "failed": 0,
-                "status": "USDT_QUIETO", "reason": (plan.get("v2") or {}).get(
-                    "selection_reason") or "el plan conserva el capital en USDT"}
+            self.core.start_goal(meta_id)
+            return {"meta": self.core.get_goal(meta_id), "opened": [], "failed": 0,
+                "status": "ACTIVE", "reason": (plan.get("v2") or {}).get(
+                    "selection_reason") or "la meta inicia con el capital en USDT"}
         max_drift = float(cfg.get("plan_price_drift_pct", self.price_drift_pct))
         if self.engine is not None:
             for piece in plan.get("pieces", []):
@@ -4302,7 +4310,9 @@ class MetaOperator:
         started = time.perf_counter()
         def evaluate():
             try:
-                state["result"] = shadow_engine.shadow_review(self, goal, value, plan or {})
+                from grid.engines.shadow_guard import shadow_execution_context
+                with shadow_execution_context():
+                    state["result"] = shadow_engine.shadow_review(self, goal, value, plan or {})
             except Exception as exc:
                 state["error"] = f"{type(exc).__name__}: {exc}"
             finally:
@@ -4314,6 +4324,11 @@ class MetaOperator:
                 "elapsed_s": round(time.perf_counter() - started, 4), "error": None}
         elapsed = round(time.perf_counter() - started, 4)
         if "error" in state:
+            if "shadow_violation" in state["error"]:
+                violation = {"decision": "no_disponible", "reason": state["error"],
+                    "shadow_violation": True}
+                return {"name": shadow_engine.name, **violation,
+                    "elapsed_s": elapsed, "error": state["error"], "result": violation}
             return {"name": shadow_engine.name, "decision": "error", "reason": None,
                 "elapsed_s": elapsed, "error": state["error"]}
         result = state.get("result") or {}
@@ -4323,6 +4338,8 @@ class MetaOperator:
 
     def _persist_engine_shadow_decision(self, goal, engine, active_decision,
             shadow_decision, plan):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("persist_engine_shadow_decision")
         table = getattr(self.db, "engine_shadow_decisions", None)
         if table is None or getattr(self.db, "engine", None) is None:
             return False
@@ -4514,6 +4531,8 @@ class MetaOperator:
 
     def _review_allocations(self, goal, valuation, *, plan=None):
         """Compara alternativa y pieza activa; toda rotación liquida por el cierre verificado."""
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("review_allocations")
         links = self.core._owned_grids(int(goal["id"]))
         try:
             plan = plan if plan is not None else self._build_plan(goal)
@@ -4740,6 +4759,8 @@ class MetaOperator:
 
     def _consider_piece_reconfiguration(self, goal, grid, levels, bid, plan, link, key):
         """Reajusta una pieza Meta solo cuando la simulacion supera materialidad."""
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("reconfigure_piece")
         cfg = goal.get("config_snapshot") or {}
         piece_type = link.get("piece_type", "grid")
         is_bot = piece_type == "individual_bot_grid"
@@ -4878,6 +4899,8 @@ class MetaOperator:
         return details
 
     def _add_piece_from_free_cash(self, goal, links, plan, *, valuation=None):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("add_piece_from_free_cash")
         cfg = goal.get("config_snapshot") or {}
         initial = float(goal["capital_initial"])
         active, used_by_symbol = [], {}
@@ -4940,6 +4963,8 @@ class MetaOperator:
         return None
 
     def _open_replacement(self, goal, alternative, capital):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("open_replacement")
         piece = dict(alternative["pieces"][0])
         piece["capital_usdt"] = min(float(capital), float(goal["capital_initial"]) *
                                      float((goal.get("config_snapshot") or {}).get("capital_per_coin_pct", 100)) / 100)

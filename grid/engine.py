@@ -252,10 +252,17 @@ class GridEngine:
         filters: SymbolFilters,
         avg_price: Decimal,
     ) -> dict[str, Any]:
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("place_order")
         filters.validate_order(side, price, qty, avg_price)
         return self.exchange.place_order(
             symbol, side, qty, price, "LIMIT", client_order_id=client_order_id,
         )
+
+    def _cancel_order(self, symbol, order_id):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("cancel_order")
+        return self.exchange.cancel_order(symbol, order_id)
 
     def create_grid(
         self,
@@ -271,6 +278,8 @@ class GridEngine:
         *, meta_id: int | None = None, meta_piece_type: str | None = None,
         origin_grid_id: int | None = None, origin_level_allocations: list[dict] | None = None,
     ) -> dict:
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("create_grid")
         symbol = str(symbol).replace("/", "").upper()
         if not self._active_coin(symbol):
             raise GridConfigError(f"{symbol} must be an active registered coin")
@@ -488,7 +497,7 @@ class GridEngine:
                         recovered = self.exchange.find_order_by_client_id(symbol, cid)
                         order_id = recovered["order_id"] if recovered else None
                     if order_id is not None:
-                        canceled = self.exchange.cancel_order(symbol, order_id)
+                        canceled = self._cancel_order(symbol, order_id)
                         cancel_status = str(canceled.get("status", "")).upper()
                         if cancel_status not in {"CANCELED", "EXPIRED", "REJECTED"}:
                             pending.append(str(order_id))
@@ -705,7 +714,7 @@ class GridEngine:
             old_order = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
             if str(old_order.get("client_order_id")) != cid:
                 try:
-                    canceled = self.exchange.cancel_order(grid["symbol"], int(old_order_id))
+                    canceled = self._cancel_order(grid["symbol"], int(old_order_id))
                 except Exception:
                     canceled = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
                 if _d(canceled.get("executed_qty", 0)) > 0 or str(canceled.get("status", "")).upper() == "FILLED":
@@ -1460,7 +1469,7 @@ class GridEngine:
                 if order_id is None:
                     self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None, client_order_id=None)
                     continue
-                result = self.exchange.cancel_order(grid["symbol"], int(order_id))
+                result = self._cancel_order(grid["symbol"], int(order_id))
                 status = str(result.get("status", "")).upper()
                 if status in {"CANCELED", "EXPIRED", "REJECTED"}:
                     if self._settle_canceled_buy_partial(grid, level, result, "sync_paused"):
@@ -1759,7 +1768,7 @@ class GridEngine:
             actual_old_cid = None if existing_old is None else existing_old.get("client_order_id")
             if old_order_id is not None and actual_old_cid != cid:
                 try:
-                    canceled = self.exchange.cancel_order(grid["symbol"], int(old_order_id))
+                    canceled = self._cancel_order(grid["symbol"], int(old_order_id))
                 except Exception:
                     canceled = self.exchange.get_order(grid["symbol"], order_id=int(old_order_id))
                 status = str(canceled.get("status", "")).upper()
@@ -1889,7 +1898,7 @@ class GridEngine:
             cell = by_idx[idx]
             if cell.get("order_id") is not None:
                 try:
-                    result = self.exchange.cancel_order(grid["symbol"], int(cell["order_id"]))
+                    result = self._cancel_order(grid["symbol"], int(cell["order_id"]))
                 except Exception:
                     result = self.exchange.get_order(grid["symbol"], order_id=int(cell["order_id"]))
                 status = str(result.get("status", "")).upper()
@@ -2003,7 +2012,7 @@ class GridEngine:
                 order_id = found["order_id"] if found else None
             if order_id is not None:
                 try:
-                    canceled = self.exchange.cancel_order(grid["symbol"], int(order_id))
+                    canceled = self._cancel_order(grid["symbol"], int(order_id))
                 except Exception:
                     canceled = self.exchange.get_order(grid["symbol"], order_id=int(order_id))
                 status = str(canceled.get("status", "")).upper()
@@ -2350,6 +2359,8 @@ class GridEngine:
         return summary
 
     def cancel_grid_orders(self, grid_id: int, *, finalize: bool = True, buy_only: bool = False) -> dict[str, Any]:
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("cancel_grid_orders")
         grid = self.db.get_grid(grid_id)
         if grid is None:
             raise ValueError(f"grid {grid_id} does not exist")
@@ -2421,7 +2432,7 @@ class GridEngine:
                     logger.warning("grid=%s level=%s action=CANCEL_STATUS_UNKNOWN order_id=%s reason=%s", grid_id, level["level_idx"], order_id, exc)
                 continue
             try:
-                result = self.exchange.cancel_order(symbol, int(order_id))
+                result = self._cancel_order(symbol, int(order_id))
                 if level.get("state") == "BUY_OPEN" and _d(result.get("executed_qty", 0)) > 0:
                     if self._settle_canceled_buy_partial(grid, level, result, "cancel_grid_orders",
                                                          place_sell=False):
@@ -2711,7 +2722,7 @@ class GridEngine:
                 self.db.update_level(grid_id, level["level_idx"], state="IDLE", order_id=None)
                 continue
             try:
-                result = self.exchange.cancel_order(symbol, int(order_id))
+                result = self._cancel_order(symbol, int(order_id))
                 status = str(result.get("status", "")).upper()
                 if (self._settle_canceled_buy_partial(grid, level, result, "close_repository")
                         if level.get("state") == "BUY_OPEN" else False):
@@ -2887,6 +2898,8 @@ class GridEngine:
 
     def close_grid(self, grid_id: int, mode: str, *, close_reason: str = "grid_close",
                    meta_id: int | None = None) -> dict:
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("close_grid")
         mode = str(mode).lower()
         if mode not in {"cancel", "liquidate", "repository", "profit_repository"}:
             raise ValueError("mode must be cancel, liquidate, repository, or profit_repository")
@@ -3108,7 +3121,7 @@ class GridEngine:
                     found = self.exchange.find_order_by_client_id(symbol, level["client_order_id"])
                     order_id = found["order_id"] if found else None
                 if order_id is not None:
-                    canceled = self.exchange.cancel_order(symbol, int(order_id))
+                    canceled = self._cancel_order(symbol, int(order_id))
                     result_status = str(canceled.get("status", "")).upper()
                     filled_during_cancel = result_status == "FILLED"
                     if filled_during_cancel:

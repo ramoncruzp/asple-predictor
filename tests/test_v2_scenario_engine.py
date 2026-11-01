@@ -13,6 +13,9 @@ from database.db_manager import DBManager
 from grid.engines.base import EngineUnavailable
 from grid.engines.v2_escenarios import V2ScenarioEngine
 from grid.engines.v1_replay import V1ReplayEngine
+from grid.engines.shadow_guard import ShadowSideEffectError, shadow_execution_context
+from grid.engine import GridEngine
+from grid.meta import MetaCore
 from grid.meta_operator import MetaOperator
 
 
@@ -259,12 +262,15 @@ def test_plan_usdt_quieto_no_abre_piezas_y_start_plan_lo_acepta(engine_databases
     operator = object.__new__(MetaOperator)
     operator._lock = threading.RLock()
     operator.clock = lambda: 100.0
-    operator.core = SimpleNamespace(get_goal=lambda _goal_id: goal)
+    starts = []
+    operator.core = SimpleNamespace(get_goal=lambda _goal_id: goal,
+        start_goal=lambda _goal_id: starts.append(True))
     operator._plans = {"quiet-plan": {**plan, "plan_id": "quiet-plan", "meta_id": 9,
         "expires_at": 200, "engine": {"name": "v2"}}}
     result = operator._start_plan_locked(9, "quiet-plan", None)
-    assert result["status"] == "USDT_QUIETO"
+    assert result["status"] == "ACTIVE"
     assert result["opened"] == []
+    assert starts == [True]
 
 
 def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkeypatch):
@@ -444,6 +450,188 @@ def test_revision_v2_agrega_cartera_voraz_con_frenos_del_operador():
     assert added[0][1]["alternatives"][0]["alternative_id"] == "change"
 
 
+def _shadow_action_plan(action):
+    current_piece = {"grid_id": 13, "symbol": "JUPUSDT", "strategy": "smart",
+        "floor": .20, "ceiling": .30, "capital_usdt": 50, "n_levels": 6,
+        "piece_type": "grid"}
+    alternative_piece = {"symbol": "XRPUSDT", "strategy": "simple", "floor": .5,
+        "ceiling": .7, "capital_usdt": 40, "n_levels": 6, "piece_type": "grid"}
+    current_estimate = {"probability": .4, "pnl_mean_usdt": .5,
+        "pnl_mean_ci95": [.3, .7]}
+    current = {"alternative_id": "keep", "symbol": "JUPUSDT", "strategy": "smart",
+        "pieces": [current_piece], "estimate": current_estimate,
+        "cache_candidate_key": "keep-13", "is_current": True}
+    alt_probability = .6 if action == "cambiar" else .4
+    alternative = {"alternative_id": "alternative", "symbol": "XRPUSDT",
+        "strategy": "simple", "pieces": [alternative_piece],
+        "estimate": {"probability": alt_probability, "pnl_mean_usdt": 1.5,
+            "pnl_mean_ci95": [1.2, 1.8], "evidence_sufficient": True},
+        "objective": {"factible": True}, "cache_candidate_key": "alternative",
+        "is_current": False}
+    return {"alternatives": [alternative, current], "current_pieces": {"13": {
+        "piece": current_piece, "estimate": current_estimate}},
+        "portfolio": ({"added": [{"candidate_key": "alternative"}],
+            "steps": [{"candidate_key": "alternative", "p_target_delta_pp": 10}]}
+            if action == "agregar" else {}), "cache": {"run_id": "shadow-cache"}}
+
+
+@pytest.mark.parametrize("action", ["cambiar", "agregar"])
+def test_sombra_v2_de_meta_v1_no_actua_y_solo_persiste_sombra_y_bitacora(
+        engine_databases, monkeypatch, action):
+    db, _market_path = engine_databases
+    core = _meta_three_live_piece_fixture(db)
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 3, "status": "ACTIVE",
+        "config_snapshot": {"decision_engine": "v1"}}
+    valuation = {"pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}],
+        "symbol_valuations": {"JUPUSDT": {"best_bid": .25}}}
+    plan = _shadow_action_plan(action)
+    monkeypatch.setattr(V2ScenarioEngine, "plan",
+        lambda _self, _operator, _goal, **_kwargs: plan)
+    class CountingExchange:
+        def __init__(self):
+            self.calls = []
+        def place_order(self, *args, **kwargs):
+            self.calls.append(("place_order", args, kwargs))
+        def cancel_order(self, *args, **kwargs):
+            self.calls.append(("cancel_order", args, kwargs))
+    exchange = CountingExchange()
+    mutations = []
+    operator = SimpleNamespace(core=core, db=db,
+        _review_allocations=lambda *_args, **_kwargs: (
+            exchange.cancel_order("JUPUSDT", 13) or mutations.append("rotar")),
+        _add_piece_from_free_cash=lambda *_args, **_kwargs: (
+            exchange.place_order("XRPUSDT", "BUY") or mutations.append("agregar")))
+    before = _shadow_db_counts(db)
+
+    shadow = MetaOperator._run_engine_shadow(operator, goal, valuation, {},
+        SimpleNamespace(name="v1"))
+
+    assert shadow["decision"] == action
+    assert shadow["result"]["proposed_action"]["type"] == (
+        "rotar" if action == "cambiar" else "agregar")
+    assert exchange.calls == [] and mutations == []
+    assert _shadow_db_counts(db) == before
+
+    MetaOperator._persist_engine_shadow_decision(operator, goal,
+        SimpleNamespace(name="v1"), {"decision": "mantener"},
+        {"name": "v2", "decision": action, "result": shadow["result"]}, {})
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_ledger.insert().values(meta_id=9,
+            ts=datetime.now(timezone.utc).replace(tzinfo=None),
+            event_type="META_OPERATOR_REVIEW_DECISION",
+            details=json.dumps({"decision": {"decision": "mantener"},
+                "shadow_decision": shadow})))
+    after = _shadow_db_counts(db)
+    assert after["grids"] == before["grids"]
+    assert after["grid_levels"] == before["grid_levels"]
+    assert after["meta_piece_links"] == before["meta_piece_links"]
+    assert after["orders"] == before["orders"]
+    assert after["meta_analysis_cache"] == before["meta_analysis_cache"]
+    assert after["engine_shadow_decisions"] == before["engine_shadow_decisions"] + 1
+    assert after["meta_ledger"] == before["meta_ledger"] + 1
+
+
+def _shadow_db_counts(db):
+    with db.engine.connect() as conn:
+        counts = {name: conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{name}"').scalar_one()
+            for name in ("grids", "grid_levels", "meta_piece_links", "grid_events",
+                "meta_analysis_cache", "engine_shadow_decisions", "meta_ledger")}
+        counts["orders"] = conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM grid_levels WHERE order_id IS NOT NULL").scalar_one()
+    return counts
+
+
+@pytest.mark.parametrize("action", ["cambiar", "agregar"])
+def test_revision_activa_v2_ejecuta_dentro_del_candado(action):
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 3, "status": "ACTIVE", "result_pct": 0,
+        "config_snapshot": {"decision_engine": "v2", "warning_loss_pct": 20}}
+    valuation = {"status": "KNOWN", "result_pct": 0, "cash_usdt": 40,
+        "pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}],
+        "symbol_valuations": {"JUPUSDT": {"best_bid": .25}}}
+    plan = _shadow_action_plan(action)
+    state = {"held": False, "seen": []}
+
+    class OperationLock:
+        def __enter__(self):
+            state["held"] = True
+            return self
+        def __exit__(self, *_args):
+            state["held"] = False
+
+    operator = object.__new__(MetaOperator)
+    operator._operation_lock = OperationLock()
+    operator.core = SimpleNamespace(get_goal=lambda _goal_id: goal,
+        _owned_grids=lambda _goal_id: [{"grid_id": 13}])
+    engine = SimpleNamespace(name="v2", version="test",
+        plan=lambda *_args, **_kwargs: plan)
+    operator._engine_for_goal = lambda _goal: engine
+    operator._valuation_with_retry = lambda _goal_id: (valuation, [])
+    operator._plan_price_moved = lambda *_args: False
+    operator._touch_bot_shadow_proposals = lambda *_args: []
+    operator._reset_rotation_streaks = lambda *_args: None
+    operator._run_engine_shadow = lambda *_args: {"name": "v1", "decision": "mantener"}
+    operator._persist_engine_shadow_decision = lambda *_args: None
+    operator._safe_active_review_choices = lambda *_args: {"real": {}}
+    operator._ledger = lambda *_args, **_kwargs: None
+    def execute(*_args, **_kwargs):
+        state["seen"].append(state["held"])
+        return {"decision": "ejecutada"}
+    operator._review_allocations = execute
+    operator._add_piece_from_free_cash = execute
+    engine.review = lambda _operator, _goal, _valuation, plan=None: (
+        V2ScenarioEngine().review(_operator, _goal, _valuation, plan))
+
+    result = MetaOperator._review_once_locked(operator, 9)
+
+    assert result["decision"] == "ejecutada"
+    assert state["seen"] == [True]
+
+
+def test_guardas_lanzan_error_si_sombra_intenta_ejecutar():
+    engine = object.__new__(GridEngine)
+    core = object.__new__(MetaCore)
+
+    with shadow_execution_context():
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            engine.create_grid("XRPUSDT", 1, 2, 4)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            engine.close_grid(1, "cancel")
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            engine.cancel_grid_orders(1)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            engine._send_limit("XRPUSDT", "BUY", 1, 1, "shadow", None, 1)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            engine._cancel_order("XRPUSDT", 1)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            core.start_goal(1)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            core.link_grid(1, 1)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            core.cancel(1, "liquidate", confirm=True)
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            MetaOperator._review_allocations(object.__new__(MetaOperator), {}, {})
+        with pytest.raises(ShadowSideEffectError, match="shadow_violation"):
+            MetaOperator._persist_engine_shadow_decision(
+                object.__new__(MetaOperator), {}, {}, {}, {}, {})
+
+
+def test_sombra_v2_convierte_violacion_en_no_disponible(monkeypatch):
+    engine = V2ScenarioEngine()
+    operator = SimpleNamespace(core=SimpleNamespace(_owned_grids=lambda _id: []),
+        _review_allocations=lambda *_args, **_kwargs:
+            MetaOperator._review_allocations(object.__new__(MetaOperator), {}, {}))
+    monkeypatch.setattr(engine, "plan", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(engine, "decide", lambda *_args, **_kwargs:
+        operator._review_allocations({}, {}))
+
+    result = engine.shadow_review(operator, {"id": 9}, {}, {})
+
+    assert result["decision"] == "no_disponible"
+    assert result["shadow_violation"] is True
+
+
 def test_motor_no_usa_cache_vencida_ni_fallback(engine_databases):
     db, market_path = engine_databases
     stale = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()
@@ -494,6 +682,34 @@ def test_sombra_v1_solicita_plan_sin_persistir():
     assert calls == [{"record": False}]
     assert result["source"] == "v1_plan_read_only"
     assert result["alternative_id"] == "v1:0"
+
+
+def test_meta_v2_con_sombra_v1_no_escribe_cache_persistente(engine_databases):
+    db, _market_path = engine_databases
+    operator = object.__new__(MetaOperator)
+    operator.db = db
+    operator.cache_enabled = True
+    operator.cache_writes = True
+    exchange_calls = []
+    operator.exchange = SimpleNamespace(
+        place_order=lambda *args, **kwargs: exchange_calls.append(("place", args, kwargs)),
+        cancel_order=lambda *args, **kwargs: exchange_calls.append(("cancel", args, kwargs)))
+    before = _shadow_db_counts(db)
+
+    def build(_goal, **kwargs):
+        assert kwargs["record"] is False
+        operator._persistent_cache_set("advisor", {"synthetic": "shadow"},
+            {"result": "no persistir"})
+        return {"decision_choices": {"real": {"decision": "mantener"}}}
+    operator._build_plan = build
+
+    result = MetaOperator._run_engine_shadow(operator,
+        {"id": 9, "profile": "RAPIDO", "capital_initial": 100}, {}, {},
+        SimpleNamespace(name="v2"))
+
+    assert result["decision"] == "mantener"
+    assert exchange_calls == []
+    assert _shadow_db_counts(db) == before
 
 
 def test_sombra_v1_respeta_presupuesto_de_30_segundos(monkeypatch):
