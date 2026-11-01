@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from pathlib import Path
@@ -10,6 +11,7 @@ from sqlalchemy import select
 
 from grid.engines.base import DecisionEngine, EngineUnavailable
 from grid.json_utils import json_safe
+from grid.market_book import book_is_two_sided, book_mid
 from research.scenarios.portfolio import greedy_portfolio
 from research.scenarios.objective import rank_alternatives_v2
 
@@ -116,6 +118,66 @@ class V2ScenarioEngine(DecisionEngine):
             "piece_type": "individual_bot_grid" if individual else "grid",
             "mid_at_plan": float(params.get("mid_at_plan", (low + high) / 2)),
             **({"grid_id": int(params["grid_id"])} if params.get("grid_id") else {})}
+
+    @staticmethod
+    def _reanchor_piece(operator, goal, cached, alternative, candidate, *, book_cache=None):
+        """Ancla una geometría seleccionada al libro actual sin mover la geometría v1."""
+        piece = (alternative.get("pieces") or [None])[0]
+        source = candidate.get("piece") or {}
+        if piece is None or source.get("is_current") or source.get("grid_id") is not None:
+            return
+        symbol = str(piece.get("symbol") or "").upper()
+        reader = getattr(operator, "_book_ticker", None)
+        if not callable(reader):
+            raise EngineUnavailable(f"no se pudo leer el libro actual de {symbol}")
+        book_cache = {} if book_cache is None else book_cache
+        try:
+            if symbol not in book_cache:
+                book_cache[symbol] = reader(symbol)
+            book = book_cache[symbol]
+            mid = book_mid(book) if book_is_two_sided(book) else None
+        except Exception as exc:
+            raise EngineUnavailable(f"no se pudo leer un libro válido de {symbol}: {exc}") from exc
+        if mid is None or float(mid) <= 0:
+            raise EngineUnavailable(f"el libro actual de {symbol} no tiene bid/ask válidos")
+        mid = float(mid)
+        stats = (cached.get("symbol_stats") or {}).get(symbol) or {}
+        cache_price = float(stats.get("price") or 0)
+        if cache_price <= 0:
+            raise EngineUnavailable(f"la caché no tiene precio base para {symbol}")
+        movement_pct = (mid / cache_price - 1.0) * 100.0
+        if abs(movement_pct) > 3.0:
+            raise EngineUnavailable(
+                f"la caché está desactualizada para {symbol} (movimiento {movement_pct:+.1f}%); "
+                "espera la próxima corrida o córrela a mano")
+
+        strategy = str(source.get("strategy") or "").lower()
+        if strategy == "bot" and source.get("buy_offset_pct") is not None and \
+                source.get("sell_offset_pct") is not None:
+            low = mid * (1.0 + float(source["buy_offset_pct"]) / 100.0)
+            high = mid * (1.0 + float(source["sell_offset_pct"]) / 100.0)
+        else:
+            width_sigma = source.get("width_sigma")
+            sigma = stats.get("sigma_24h")
+            if width_sigma is not None and sigma is not None and float(sigma) > 0:
+                width = float(width_sigma) * float(sigma) * math.sqrt(
+                    max(1, int(cached.get("horizon_days") or 1)))
+                low, high = mid * math.exp(-width), mid * math.exp(width)
+            else:
+                old_low = float(source.get("low", source.get("buy_price", 0)) or 0)
+                old_high = float(source.get("high", source.get("sell_price", 0)) or 0)
+                if old_low <= 0 or old_high <= old_low:
+                    raise EngineUnavailable(f"la geometría de {symbol} no tiene parámetros relativos")
+                low, high = mid * old_low / cache_price, mid * old_high / cache_price
+        if low <= 0 or high <= low:
+            raise EngineUnavailable(f"la geometría re-anclada de {symbol} no es válida")
+        from datetime import datetime, timezone
+        clock = getattr(operator, "clock", None)
+        price_at = (datetime.fromtimestamp(float(clock()), timezone.utc).isoformat()
+            if callable(clock) else datetime.now(timezone.utc).isoformat())
+        piece.update({"floor": low, "ceiling": high, "mid_at_plan": mid,
+            "price_source": "book", "price_at": price_at})
+        alternative.update({"price_source": "book", "price_at": price_at})
 
     @staticmethod
     def _profile_config(goal, operator=None):
@@ -258,17 +320,15 @@ class V2ScenarioEngine(DecisionEngine):
                 market_price = float(symbol_price)
             except (TypeError, ValueError):
                 market_price = 0.0
-            if market_price <= 0:
-                raise EngineUnavailable(
-                    f"la caché no contiene un precio de análisis válido para {piece['symbol']}")
-            piece.update({"mid_at_plan": market_price, "price_source": "scenario_cache",
-                "price_at": cached.get("as_of")})
+            if market_price > 0:
+                piece.update({"mid_at_plan": market_price, "price_source": "scenario_cache",
+                    "price_at": cached.get("as_of")})
             metrics = candidate["metrics"]
             probability = float(metrics.get("p_target", 0))
             expected_pnl = float(metrics.get("pnl_mean_usdt", 0))
             alternatives.append({"alternative_id": f"{decision_id}:{index}",
                 "symbol": piece["symbol"], "strategy": piece["strategy"], "pieces": [piece],
-                "price_source": piece["price_source"], "price_at": piece["price_at"],
+                "price_source": piece.get("price_source"), "price_at": piece.get("price_at"),
                 "estimate": {"probability": probability,
                     "probability_replay": probability,
                     "expected_pnl_usdt": expected_pnl,
@@ -313,6 +373,29 @@ class V2ScenarioEngine(DecisionEngine):
                 if row.get("cache_candidate_key") == (portfolio.get("added") or [{}])[0].get(
                     "candidate_key")), None) if portfolio.get("added") else None
             selected_piece = selected_pieces[0] if selected_pieces else None
+        selected_piece_ids = {id(piece) for piece in selected_pieces}
+        ranked_by_key = {str(row.get("candidate_key") or
+            (row.get("piece") or {}).get("candidate_key")): row for row in ranked}
+        book_cache = {}
+        for alternative in alternatives:
+            if not any(id(piece) in selected_piece_ids for piece in alternative.get("pieces") or []):
+                continue
+            candidate = ranked_by_key.get(str(alternative.get("cache_candidate_key")))
+            if candidate is not None:
+                self._reanchor_piece(operator, goal, cached, alternative, candidate,
+                    book_cache=book_cache)
+        if is_draft and selected_pieces:
+            validator = getattr(operator, "_validate_v2_plan_limits", None)
+            if callable(validator):
+                validator(goal, {"pieces": selected_pieces})
+            openability = getattr(operator, "_testnet_openability", None)
+            if callable(openability) and getattr(operator, "engine", None) is not None:
+                for piece in selected_pieces:
+                    result = openability(piece, goal)
+                    if not result.get("allowed"):
+                        raise EngineUnavailable(
+                            f"la pieza re-anclada de {piece['symbol']} no cumple filtros: "
+                            f"{result.get('reason') or 'geometría no abrible'}")
         used = sum(float(piece["capital_usdt"]) for piece in selected_pieces)
         current_pieces = {}
         for row in alternatives:

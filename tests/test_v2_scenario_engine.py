@@ -41,10 +41,13 @@ def engine_databases(tmp_path, monkeypatch):
 
 def _cache_row(path, *, as_of=None, status="ok", error=None):
     stamp = as_of or datetime.now(timezone.utc).isoformat()
+    run_details = dict(error or {})
+    run_details.setdefault("symbol_stats", {"JUPUSDT": {"price": .25,
+        "sigma_24h": .03}})
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,goal_id,profile,horizon_days,"
             "n_scenarios,status,error) VALUES('cache-1',?,9,'RAPIDO',20,1000,?,?)",
-            (stamp, status, json.dumps(error or {})))
+            (stamp, status, json.dumps(run_details)))
         conn.execute("INSERT INTO scenario_eval_results VALUES(?,?,?,?,?,?,?)", (
             "cache-1", "piece-1", "JUPUSDT", "simple",
             json.dumps({"low": .20, "high": .30, "n": 6, "capital": 70}),
@@ -54,6 +57,13 @@ def _cache_row(path, *, as_of=None, status="ok", error=None):
                 "p_inventory": .27,
                 "days_to_target_p50": 15, "days_to_target_p90": 18}),
             json.dumps({"factible": True, "motivos": [], "clave_orden": [-.35, 15, -1.4]})))
+
+
+def _plan_operator(db, prices):
+    return SimpleNamespace(db=db, engine=None,
+        _book_ticker=lambda symbol: {"bid_price": prices[symbol],
+            "ask_price": prices[symbol]},
+        _validate_v2_plan_limits=lambda *_args, **_kwargs: None)
 
 
 def _meta_three_live_piece_fixture(db):
@@ -173,7 +183,7 @@ def test_plan_usa_corrida_vigente_sin_recalcular(engine_databases):
     engine = V2ScenarioEngine()
     goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100, "target_usdt": 3}
 
-    plan = engine.plan(SimpleNamespace(db=db), goal, plan_kind="analisis")
+    plan = engine.plan(_plan_operator(db, {"JUPUSDT": .25}), goal, plan_kind="analisis")
 
     assert plan["engine"] == {"name": "v2", "version": engine.version}
     assert plan["cache"]["run_id"] == "cache-1"
@@ -302,7 +312,7 @@ def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkey
         "added": [{"candidate_key": "zro70"}], "steps": [],
         "metrics": {"p_target": .4}, "not_added_reasons": [
             {"symbol": "PEPEUSDT", "strategy": "simple", "reason": "no sube P(meta)"}]})
-    plan = V2ScenarioEngine().plan(SimpleNamespace(db=db),
+    plan = V2ScenarioEngine().plan(_plan_operator(db, {"ZROUSDT": 2.1}),
         {"id": 9, "status": "DRAFT", "profile": "RAPIDO", "capital_initial": 100,
             "target_usdt": 3}, plan_kind="analisis")
 
@@ -312,9 +322,9 @@ def test_plan_v2_respeta_tope_por_moneda_y_agrupa_tabla(engine_databases, monkey
     assert plan["candidates"][0]["evaluated_count"] == 3
     assert plan["candidates"][0]["discarded_count"] == 1
     assert plan["pieces"][0]["mid_at_plan"] == 2.1
-    assert plan["pieces"][0]["price_source"] == "scenario_cache"
-    assert plan["pieces"][0]["price_at"] == cached["as_of"]
-    assert plan["alternatives"][0]["price_source"] == "scenario_cache"
+    assert plan["pieces"][0]["price_source"] == "book"
+    assert plan["pieces"][0]["price_at"]
+    assert plan["alternatives"][0]["price_source"] == "book"
     assert plan["loss_max_usdt"] == 18
     assert plan["v2"]["cartera_no_agregadas"][0]["symbol"] == "PEPEUSDT"
 
@@ -415,6 +425,121 @@ def test_start_plan_v1_sigue_validando_alternativas_y_su_deriva(engine_databases
         "ask_price": 2.1 if symbol == "ZROUSDT" else .00105}))
     with pytest.raises(ValueError, match="PEPEUSDT se movi\u00f3 m\u00e1s de 1%"):
         operator._start_plan_locked(9, "plan", lambda _piece: pytest.fail("no debe abrir"))
+
+
+def test_plan_bot_v2_se_reancla_a_libro_y_arranca_dentro_del_tres_por_ciento(
+        engine_databases, monkeypatch):
+    db, _market_path = engine_databases
+    cached = {"run_id": "r", "as_of": datetime.now(timezone.utc).isoformat(),
+        "age_seconds": 0, "status": "ok", "horizon_days": 20,
+        "discarded": {}, "skipped_symbols": {}, "trajectory_file": None,
+        "symbol_stats": {"ZROUSDT": {"price": 1.904, "sigma_24h": .03}},
+        "candidates": [{"candidate_key": "bot", "symbol": "ZROUSDT",
+            "strategy": "bot", "params": {"buy_price": 1.84688,
+                "sell_price": 1.93256, "buy_offset_pct": -3.0,
+                "sell_offset_pct": 1.5, "capital": 70, "n": 1},
+            "metrics": {"n": 1000, "p_target": .737, "pnl_mean_usdt": 1.2,
+                "p_loss": .01, "p_loss_ci95": [0, .02],
+                "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .2,
+                "p_inventory": .99, "days_to_target_p50": 10},
+            "objective": {"factible": True, "motivos": [],
+                "clave_orden": [-.737, 10, -1.2]}}]}
+    monkeypatch.setattr(V2ScenarioEngine, "_load_cache", lambda *_args, **_kwargs: cached)
+    candidate_piece = {"symbol": "ZROUSDT", "strategy": "bot", "capital": 70,
+        "buy_price": 1.84688, "sell_price": 1.93256, "buy_offset_pct": -3.0,
+        "sell_offset_pct": 1.5, "candidate_key": "bot"}
+    metrics = cached["candidates"][0]["metrics"]
+    monkeypatch.setattr("grid.engines.v2_escenarios.rank_alternatives_v2", lambda *_args,
+        **_kwargs: [{"candidate_key": "bot", "piece": candidate_piece,
+            "metrics": metrics, "objetivo": {"factible": True, "motivos": []}}])
+    checked = []
+    book = {"ZROUSDT": 1.88}
+    goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 3, "status": "DRAFT",
+        "config_snapshot": {"decision_engine": "v2", "plan_price_drift_pct": 1}}
+    operator = object.__new__(MetaOperator)
+    operator.db = db
+    operator.engine = SimpleNamespace(create_grid=lambda *_args, **_kwargs: {"id": 91})
+    operator.price_drift_pct = 1
+    operator.clock = lambda: 1_800_000_000
+    operator._book_ticker = lambda symbol: {"bid_price": book[symbol],
+        "ask_price": book[symbol]}
+    operator._validate_v2_plan_limits = lambda _goal, value: checked.append(
+        ("limits", [dict(piece) for piece in value["pieces"]]))
+    operator._testnet_openability = lambda piece, _goal: checked.append(
+        ("filters", dict(piece))) or {"allowed": True}
+    plan = V2ScenarioEngine().plan(operator, goal, plan_kind="analisis")
+    assert len(plan["pieces"]) == 1
+    assert plan["pieces"][0]["floor"] == pytest.approx(1.88 * .97)
+    assert plan["pieces"][0]["ceiling"] == pytest.approx(1.88 * 1.015)
+    assert plan["pieces"][0]["mid_at_plan"] == 1.88
+    assert plan["pieces"][0]["price_source"] == "book"
+    assert plan["pieces"][0]["price_at"]
+    assert [row[0] for row in checked] == ["limits", "filters"]
+
+    operator._lock = threading.RLock()
+    operator._operation_lock = threading.RLock()
+    operator._plans = {"book-plan": {**plan, "plan_id": "book-plan", "meta_id": 9,
+        "expires_at": 2_000_000_000, "engine": {"name": "v2"}}}
+    opened = []
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal,
+        start_goal=lambda _id: None, link_grid=lambda _id, grid_id, _kind: opened.append(grid_id),
+        _now=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    operator._active_run_id = lambda _id: 1
+    operator._ledger = lambda *_args, **_kwargs: None
+    operator.alert = lambda *_args, **_kwargs: None
+    result = operator.start_plan(9, "book-plan", lambda _piece: {"grid_id": 91})
+    assert [piece["symbol"] for piece in result["opened"]] == ["ZROUSDT"]
+    assert opened == [91]
+
+
+def test_plan_v2_rechaza_cache_con_movimiento_superior_al_tres_por_ciento(
+        engine_databases, monkeypatch):
+    db, _market_path = engine_databases
+    cached = {"run_id": "r", "as_of": datetime.now(timezone.utc).isoformat(),
+        "age_seconds": 0, "status": "ok", "horizon_days": 20,
+        "discarded": {}, "skipped_symbols": {}, "trajectory_file": None,
+        "symbol_stats": {"ZROUSDT": {"price": 1.904, "sigma_24h": .03}},
+        "candidates": [{"candidate_key": "bot", "symbol": "ZROUSDT",
+            "strategy": "bot", "params": {"buy_price": 1.84688,
+                "sell_price": 1.93256, "buy_offset_pct": -3.0,
+                "sell_offset_pct": 1.5, "capital": 70, "n": 1},
+            "metrics": {"n": 1000, "p_target": .737, "pnl_mean_usdt": 1.2,
+                "p_loss": .01, "p_loss_ci95": [0, .02],
+                "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .2,
+                "p_inventory": .99, "days_to_target_p50": 10},
+            "objective": {"factible": True, "motivos": [],
+                "clave_orden": [-.737, 10, -1.2]}}]}
+    monkeypatch.setattr(V2ScenarioEngine, "_load_cache", lambda *_args, **_kwargs: cached)
+    candidate_piece = {"symbol": "ZROUSDT", "strategy": "bot", "capital": 70,
+        "buy_price": 1.84688, "sell_price": 1.93256, "buy_offset_pct": -3.0,
+        "sell_offset_pct": 1.5, "candidate_key": "bot"}
+    monkeypatch.setattr("grid.engines.v2_escenarios.rank_alternatives_v2", lambda *_args,
+        **_kwargs: [{"candidate_key": "bot", "piece": candidate_piece,
+            "metrics": cached["candidates"][0]["metrics"],
+            "objetivo": {"factible": True, "motivos": []}}])
+    operator = SimpleNamespace(db=db, _book_ticker=lambda _symbol: {
+        "bid_price": 1.82, "ask_price": 1.82})
+
+    with pytest.raises(EngineUnavailable, match="caché está desactualizada para ZROUSDT.*-4.4%"):
+        V2ScenarioEngine().plan(operator, {"id": 9, "profile": "RAPIDO",
+            "capital_initial": 100, "target_usdt": 3, "status": "DRAFT"},
+            plan_kind="analisis")
+
+
+def test_reanclaje_grid_sigma_conserva_ancho_relativo(engine_databases):
+    db, _market_path = engine_databases
+    piece = {"symbol": "ZROUSDT", "floor": 80.0, "ceiling": 120.0}
+    alternative = {"pieces": [piece]}
+    candidate = {"piece": {"strategy": "simple", "width_sigma": .5,
+        "low": 80.0, "high": 120.0}}
+    operator = SimpleNamespace(_book_ticker=lambda _symbol: {
+        "bid_price": 99.0, "ask_price": 99.0})
+    V2ScenarioEngine._reanchor_piece(operator, {}, {"horizon_days": 16,
+        "symbol_stats": {"ZROUSDT": {"price": 100.0, "sigma_24h": .02}}},
+        alternative, candidate)
+    assert piece["floor"] == pytest.approx(99.0 * __import__("math").exp(-.04))
+    assert piece["ceiling"] == pytest.approx(99.0 * __import__("math").exp(.04))
 
 
 def test_start_plan_v2_rechaza_exceso_antes_de_tocar_exchange(engine_databases):
