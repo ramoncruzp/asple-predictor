@@ -45,6 +45,7 @@ def test_portfolio_voraz_agrega_segunda_pieza_y_respeta_limites(tmp_path):
     assert [step["p_target_delta_pp"] for step in result["steps"]] == [25, 25]
     assert sum(row["piece"]["capital"] for row in result["selected"]) <= 80
     assert elapsed < 2
+    assert result["elapsed_seconds"] < 2
 
 
 def test_metricas_trayectoria_igualan_evaluate_portfolio():

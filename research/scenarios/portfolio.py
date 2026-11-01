@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -52,6 +53,7 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
 def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
         max_loss_pct, horizon_days, profile_config, seed=43):
     """Agrega piezas si suben P(meta) al menos 2 pp y pasan objetivo 1 + 3."""
+    started = time.perf_counter()
     path = Path(archive_path)
     if not path.is_file():
         return None
@@ -135,4 +137,4 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
         "added": [{"candidate_key": row["candidate_key"], "piece": row["piece"]}
             for row in selected], "steps": steps, "metrics": current_metrics,
         "candidate_count": len(candidates) + len(selected),
-        "elapsed_limit_seconds": 2.0}
+        "elapsed_seconds": time.perf_counter() - started}

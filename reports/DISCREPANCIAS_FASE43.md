@@ -828,3 +828,5 @@ python scripts/revisar_codificacion.py
 ```
 
 Resultado: **54 pruebas pasaron en 9,00 s**; la medición focalizada confirmó **205,0 MB RSS al inicio y 205,8 MB al final** mientras se guardaban 12 trayectorias sintéticas de 1.000 escenarios por 480 horas. La cartera voraz con dos incorporaciones tardó **0,0032 s**, por debajo de 2 s. La comparación de métricas horarias contra `evaluate_portfolio` pasó con tolerancia 1e-9. La prueba de revisión activa confirmó que la decisión de agregar se delega al helper existente del operador. `node --check frontend/metas.js` pasó y la revisión de codificación informó `HALLAZGOS=0`.
+
+Medición repetida tras exponer el tiempo real en el resultado de `greedy_portfolio`: **0,0037 s** para la cartera sintética; RSS **204,8 MB al inicio y 205,4 MB al final**. Pruebas: **3 pasaron en 0,50 s**; `node --check frontend/metas.js` pasó y `HALLAZGOS=0`.
