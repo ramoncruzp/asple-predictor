@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -364,13 +365,15 @@ def test_corrida_persiste_ids_y_estado_de_piezas_vivas(cache_databases, monkeypa
     assert result["runs"][0]["status"] == "ok"
     assert result["runs"][0]["live_piece_count"] == 1
     with sqlite3.connect(market_path) as conn:
-        status, error = conn.execute(
-            "SELECT status,error FROM scenario_eval_runs").fetchone()
+        status, error, rss_current, rss_hwm = conn.execute(
+            "SELECT status,error,rss_current_mb,rss_hwm_mb FROM scenario_eval_runs").fetchone()
     details = json.loads(error)
     assert status == "ok"
     assert details["live_piece_count"] == 1
     assert details["live_pieces"] == [{"grid_id": 31, "status": "PAUSED"}]
     assert details["live_capital_warning"]["capital_aplicado_usdt"] == 44
+    assert rss_current is not None and rss_hwm is not None
+    assert rss_hwm >= rss_current
 
 
 def test_cache_omite_smart_si_quedan_menos_de_120_segundos(
@@ -410,9 +413,10 @@ def test_cache_omite_smart_si_quedan_menos_de_120_segundos(
     assert result["smart_omitido_por_tiempo"] == 2
 
 
-def test_timeout_queda_registrado_en_la_corrida(cache_databases):
+def test_timeout_queda_registrado_en_la_corrida(cache_databases, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     with sqlite3.connect(market_path) as conn:
         conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,profile,horizon_days,"
             "n_scenarios,status) VALUES('run-timeout','2026-10-30T00:00:00+00:00',"
@@ -439,9 +443,10 @@ def test_importar_job_no_importa_numpy_ni_evaluador_en_servicio():
     assert result.returncode == 0, result.stderr
 
 
-def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases):
+def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     captured = {}
 
     def run(args, **kwargs):
@@ -456,14 +461,16 @@ def test_job_fija_hilos_y_no_usa_rlimit_ni_preexec(cache_databases):
     assert captured["env"]["OMP_NUM_THREADS"] == "1"
     assert captured["env"]["MALLOC_ARENA_MAX"] == "2"
     assert "preexec_fn" not in captured
-    assert captured["args"][captured["args"].index("--max-segundos-total") + 1] == "1500"
+    assert float(captured["args"][captured["args"].index("--max-segundos-total") + 1]) > 1498
+    assert captured["args"][captured["args"].index("--contexto") + 1] == "1"
     assert "RLIMIT_AS" not in open("scheduler/scenario_cache_job.py", encoding="utf-8").read()
 
 
 @pytest.mark.parametrize(("returncode", "expected"), [(3, "memoria"), (4, "timeout")])
-def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected):
+def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     def run(args, **_kwargs):
         return subprocess.CompletedProcess(args, returncode, "", "límite del script")
 
@@ -473,9 +480,10 @@ def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, e
 
 
 @pytest.mark.parametrize(("returncode", "expected"), [(3, "memoria"), (4, "timeout")])
-def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected):
+def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, expected, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     def run(args, **_kwargs):
         return subprocess.CompletedProcess(args, returncode, "", "límite del script")
 
@@ -484,9 +492,10 @@ def test_job_conserva_estado_de_limite_del_script(cache_databases, returncode, e
     assert result["status"] == expected
 
 
-def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path):
+def test_rss_superior_al_limite_marca_corrida_memoria(cache_databases, tmp_path, monkeypatch):
     db, market_path = cache_databases
     _set_enabled(db, True)
+    monkeypatch.setattr(ScenarioCacheJob, "_context_selectors", lambda _self: ["1"])
     with sqlite3.connect(market_path) as conn:
         conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,profile,horizon_days,"
             "n_scenarios,status) VALUES('run-memory','2026-10-30T00:00:00+00:00',"
@@ -660,6 +669,84 @@ def test_cache_prioriza_v2_antes_v1_y_deja_perfiles_al_final():
         {"goal_id": None, "profile": "RAPIDO"},
         {"goal_id": 1, "decision_engine": "v1"},
     ]
+
+
+def test_job_inicia_un_subproceso_por_contexto_en_orden(cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    _set_enabled(db, True)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "GLOBAL").values(
+                settings=json.dumps({"max_active": 3, "scenario_cache_enabled": True})))
+        conn.execute(db.meta_profile_settings.update().where(
+            db.meta_profile_settings.c.profile == "RAPIDO").values(
+                settings=json.dumps({"decision_engine": "v2"})))
+        goal_ids = []
+        for engine in ("v1", "v2"):
+            goal_ids.append(conn.execute(db.meta_goals.insert().values(
+                capital_initial=100, target_usdt=3, target_input_type="USDT",
+                target_input_value=3, profile="RAPIDO", status="ACTIVE",
+                environment="testnet", created_at=now, started_at=now,
+                config_snapshot=json.dumps({"decision_engine": engine}))).inserted_primary_key[0])
+    calls = []
+    def run(args, **_kwargs):
+        calls.append(args[args.index("--contexto") + 1])
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+    result = ScenarioCacheJob(db, market_path, run=run).run_if_enabled()
+    assert result["contexts"] == 3
+    assert calls == [str(goal_ids[1]), str(goal_ids[0]), "perfil:RAPIDO"]
+
+
+def test_script_manual_orquesta_un_proceso_por_contexto(monkeypatch, capsys):
+    contexts = [
+        {"goal_id": 7, "profile": "RAPIDO", "decision_engine": "v1"},
+        {"goal_id": 3, "profile": "RAPIDO", "decision_engine": "v2"},
+    ]
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: contexts)
+    calls = []
+    def run(args, **_kwargs):
+        calls.append(args[args.index("--contexto") + 1])
+        return subprocess.CompletedProcess(args, 0, "hijo\n", "")
+    monkeypatch.setattr(cache_script.subprocess, "run", run)
+    result = cache_script.main(["--app-db", "app.sqlite", "--market-db", "market.sqlite"])
+    assert result == 0
+    assert calls == ["3", "7"]
+    assert "estado=completed contextos=2" in capsys.readouterr().out
+
+
+def test_contexto_perfil_se_omite_con_maximo_de_activas(cache_databases):
+    db, _market_path = cache_databases
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        for profile, values in (("GLOBAL", {"max_active": 2}),
+                ("RAPIDO", {"decision_engine": "v2"})):
+            conn.execute(db.meta_profile_settings.update().where(
+                db.meta_profile_settings.c.profile == profile).values(settings=json.dumps(values)))
+        for _ in range(2):
+            conn.execute(db.meta_goals.insert().values(capital_initial=100,
+                target_usdt=3, target_input_type="USDT", target_input_value=3,
+                profile="RAPIDO", status="ACTIVE", environment="testnet",
+                created_at=now, started_at=now, config_snapshot=json.dumps({"decision_engine": "v2"})))
+    contexts = cache_script._contexts(db.engine.url.database, {})
+    assert len([row for row in contexts if row.get("goal_id") is not None]) == 2
+    assert not [row for row in contexts if row.get("goal_id") is None]
+    assert len(ScenarioCacheJob(db, _market_path)._context_selectors()) == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="VmHWM separado del padre se verifica en Linux")
+def test_vmhwm_del_hijo_no_hereda_pico_del_padre():
+    import subprocess
+    import sys
+    parent_memory = bytearray(160 * 1024 * 1024)
+    for index in range(0, len(parent_memory), 4096):
+        parent_memory[index] = 1
+    code = "from scripts.escenarios_cache import _rss_max_mb; print(_rss_max_mb())"
+    child = subprocess.run([sys.executable, "-c", code], capture_output=True,
+        text=True, check=True)
+    assert float(child.stdout.strip()) < 100
     assert sorted(contexts, key=cache_script._context_priority) == [
         contexts[1], contexts[3], contexts[0], contexts[2]]
 
@@ -854,7 +941,8 @@ def test_main_devuelve_codigo_de_salida_del_limite(monkeypatch, capsys, status, 
     monkeypatch.setattr(cache_script, "run_cache", lambda *_args, **_kwargs: {
         "contexts": 1, "runs": [{"status": status}], "seconds": 1.0, "rss_mb": 50.0})
 
-    result = cache_script.main(["--app-db", "temporal.sqlite", "--market-db", "market.sqlite"])
+    result = cache_script.main(["--app-db", "temporal.sqlite", "--market-db", "market.sqlite",
+        "--contexto", "1"])
 
     assert result == exit_code
     assert f"estado={status}" in capsys.readouterr().out

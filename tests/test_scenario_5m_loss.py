@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import numpy as np
 import pytest
@@ -76,8 +76,11 @@ def test_cartera_una_pieza_coincide_con_fastsim_en_el_corte():
 
 def test_curvas_5m_de_dos_contextos_y_cinco_monedas_quedan_bajo_600_mb():
     import gc
+    import time
 
     baseline = cache_script._rss_max_mb() or 0
+    started = time.perf_counter()
+    context_peaks = []
     for _context in range(2):
         rows = []
         timestamps = np.arange(15 * 288, dtype=np.int64) * 300
@@ -97,4 +100,8 @@ def test_curvas_5m_de_dos_contextos_y_cinco_monedas_quedan_bajo_600_mb():
         assert metrics["n"] == 1000
         del rows, metrics
         gc.collect()
-    assert (cache_script._rss_max_mb() or 0) < 600
+        context_peaks.append(cache_script._rss_max_mb() or 0)
+    elapsed = time.perf_counter() - started
+    print(f"RSS HWM por contexto sintético (5 monedas): {context_peaks}; "
+        f"pico={max(context_peaks, default=baseline):.2f} MB; tiempo={elapsed:.3f} s")
+    assert max(context_peaks, default=0) < 600

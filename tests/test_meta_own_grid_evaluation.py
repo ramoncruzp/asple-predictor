@@ -283,6 +283,9 @@ def test_v1_plan_y_review_son_identicos_a_776eedf(monkeypatch):
     monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex="plan-v1-fijo"))
     current, _, goal, _, _ = plan_setup(owner="manual")
     reference, _, _, _, _ = plan_setup(owner="manual")
+    for operator in (current, reference):
+        operator._testnet_book_status = lambda _symbol: {"state": "two_sided", "reason": None}
+        operator._testnet_openability = lambda *_args, **_kwargs: {"allowed": True, "reason": None}
     reference._build_plan = MethodType(namespace["_build_plan"], reference)
     reference._review_allocations = MethodType(namespace["_review_allocations"], reference)
 

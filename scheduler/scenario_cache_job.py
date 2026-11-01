@@ -90,6 +90,32 @@ class ScenarioCacheJob:
             raise ValueError("la caché de escenarios requiere una BD app persistente")
         return str(Path(value).resolve())
 
+    def _context_selectors(self):
+        uri = Path(self._app_db_path()).as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            settings = {row["profile"]: json.loads(row["settings"] or "{}")
+                for row in conn.execute("SELECT profile,settings FROM meta_profile_settings")}
+            active = conn.execute("SELECT id,profile,config_snapshot FROM meta_goals "
+                "WHERE status IN ('ACTIVE','PIECES_BLOCKED')").fetchall()
+            drafts = conn.execute("SELECT profile,config_snapshot FROM meta_goals "
+                "WHERE status='DRAFT'").fetchall()
+        active_rows = [(int(row["id"]), str(row["profile"]).upper(),
+            str(json.loads(row["config_snapshot"] or "{}").get("decision_engine", "v1")).lower())
+            for row in active]
+        active_rows.sort(key=lambda row: (0 if row[2] == "v2" else 1, row[0]))
+        selectors = [str(row[0]) for row in active_rows]
+        max_active = int((settings.get("GLOBAL") or {}).get("max_active", 1))
+        active_profiles = {str(row[1]).upper() for row in drafts
+            if str(json.loads(row["config_snapshot"] or "{}").get("decision_engine", "v1")).lower() == "v2"}
+        if len(active_rows) < max_active or active_profiles:
+            for profile, values in sorted(settings.items()):
+                if profile == "GLOBAL" or str(values.get("decision_engine", "v1")).lower() != "v2":
+                    continue
+                if len(active_rows) < max_active or profile in active_profiles:
+                    selectors.append(f"perfil:{profile}")
+        return selectors
+
     def _mark_timeout(self):
         try:
             with sqlite3.connect(self.market_db_path, timeout=5) as conn:
@@ -110,10 +136,10 @@ class ScenarioCacheJob:
         except sqlite3.Error:
             logger.exception("No se pudo registrar exceso de memoria de scenario cache")
 
-    def _run_monitored(self, args, env):
+    def _run_monitored(self, args, env, timeout=TIMEOUT_SECONDS):
         if self.run_process is not None:
             return self.run_process(args, capture_output=True, text=True,
-                timeout=TIMEOUT_SECONDS, check=False, env=env)
+                timeout=timeout, check=False, env=env)
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(args, stdout=stdout_file, stderr=stderr_file, env=env)
             started = self.clock()
@@ -124,10 +150,10 @@ class ScenarioCacheJob:
                     exceeded = True
                     process.kill()
                     break
-                if self.clock() - started > TIMEOUT_SECONDS:
+                if self.clock() - started > timeout:
                     process.kill()
                     process.wait()
-                    raise subprocess.TimeoutExpired(args, TIMEOUT_SECONDS)
+                    raise subprocess.TimeoutExpired(args, timeout)
                 time.sleep(POLL_SECONDS)
             process.wait()
             stdout_file.seek(0)
@@ -147,27 +173,35 @@ class ScenarioCacheJob:
             elapsed = self.clock() - started
             logger.info("SCENARIO_CACHE estado=apagado duración_s=%.3f", elapsed)
             return {"status": "disabled", "duration_s": elapsed}
-        args = [sys.executable, str(self.script_path), "--app-db", self._app_db_path(),
-            "--market-db", str(self.market_db_path), "--max-segundos-total",
-            str(TIMEOUT_SECONDS)]
         env = os.environ.copy()
         env.update(MEMORY_ENV)
-        if os.name == "posix":
-            args = ["nice", "-n", "10", *args]
         try:
-            result = self._run_monitored(args, env)
+            selectors = self._context_selectors()
+            outputs = []
+            for selector in selectors:
+                remaining = TIMEOUT_SECONDS - (self.clock() - started)
+                if remaining <= 0:
+                    break
+                args = [sys.executable, str(self.script_path), "--app-db", self._app_db_path(),
+                    "--market-db", str(self.market_db_path), "--max-segundos-total",
+                    str(remaining), "--max-segundos", "540", "--contexto", selector]
+                if os.name == "posix":
+                    args = ["nice", "-n", "10", *args]
+                result = self._run_monitored(args, env, timeout=remaining)
+                outputs.append(result.stdout or "")
+                elapsed = self.clock() - started
+                if result.returncode:
+                    status = ("memoria" if result.returncode in {3, 75} else
+                        "timeout" if result.returncode == 4 else "failed")
+                    logger.error("SCENARIO_CACHE estado=%s duracion_s=%.3f stderr=%s",
+                        status, elapsed, (result.stderr or "")[-2000:])
+                    return {"status": status, "duration_s": elapsed,
+                        "reason": (result.stderr or "subproceso fallo")[-2000:],
+                        "stdout": "".join(outputs)}
             elapsed = self.clock() - started
-            if result.returncode:
-                status = ("memoria" if result.returncode in {3, 75} else
-                    "timeout" if result.returncode == 4 else "failed")
-                logger.error("SCENARIO_CACHE estado=failed duración_s=%.3f stderr=%s",
-                    elapsed, (result.stderr or "")[-2000:])
-                return {"status": status, "duration_s": elapsed,
-                    "reason": (result.stderr or "subproceso falló")[-2000:]}
-            logger.info("SCENARIO_CACHE estado=completed duración_s=%.3f salida=%s",
-                elapsed, (result.stdout or "")[-2000:])
             return {"status": "completed", "duration_s": elapsed,
-                "stdout": result.stdout or ""}
+                "stdout": "".join(outputs), "contexts": len(outputs),
+                "pending": selectors[len(outputs):]}
         except subprocess.TimeoutExpired:
             self._mark_timeout()
             elapsed = self.clock() - started

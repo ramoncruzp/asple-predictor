@@ -7,6 +7,7 @@ import gc
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -34,7 +35,6 @@ RETENTION_DAYS = 7
 SCENARIO_COUNT = 1000
 MAX_PIECES_PER_BATCH = 6
 ABANDON_AFTER_MINUTES = 30
-_RSS_PEAK_MB = 0.0
 
 
 def _json_safe(value):
@@ -65,9 +65,10 @@ class CacheTimeoutExceeded(CacheLimitExceeded):
 def _rss_current_mb():
     try:
         if os.name == "posix":
-            with open("/proc/self/statm", encoding="ascii") as stream:
-                resident = int(stream.read().split()[1])
-            return resident * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+            with open("/proc/self/status", encoding="ascii") as stream:
+                resident_kb = next(float(line.split()[1]) for line in stream
+                    if line.startswith("VmRSS:"))
+            return resident_kb / 1024
         import ctypes
         from ctypes import wintypes
         class MemoryCounters(ctypes.Structure):
@@ -102,11 +103,11 @@ def _check_limits(started, max_rss_mb, max_seconds):
 
 
 def _rss_max_mb():
-    global _RSS_PEAK_MB
     try:
         if os.name == "posix":
-            import resource
-            measured = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / 1024
+            with open("/proc/self/status", encoding="ascii") as stream:
+                measured = next(float(line.split()[1]) / 1024 for line in stream
+                    if line.startswith("VmHWM:"))
         else:
             import ctypes
             from ctypes import wintypes
@@ -127,8 +128,7 @@ def _rss_max_mb():
             if not reader(process, ctypes.byref(counters), counters.cb):
                 return None
             measured = counters.PeakWorkingSetSize / (1024 * 1024)
-        _RSS_PEAK_MB = max(_RSS_PEAK_MB, measured)
-        return round(_RSS_PEAK_MB, 2)
+        return round(measured, 2)
     except (ImportError, OSError, AttributeError):
         return None
 
@@ -205,8 +205,15 @@ def _contexts(app_db, prices=None):
                     "horizon": max(1, int(defaults["max_days"]) - elapsed),
                     "max_loss_pct": effective_loss_pct, "profile_config": profile_config,
                     "balance_approximate": not balance_known})
+        global_settings = settings.get("GLOBAL") or {}
+        active_count = len(contexts)
+        max_active = int(global_settings.get("max_active", 1))
+        drafts = conn.execute("SELECT profile,config_snapshot FROM meta_goals WHERE status='DRAFT'").fetchall() if "meta_goals" in table_names else []
+        draft_v2_profiles = {str(row["profile"]).upper() for row in drafts
+            if str(json.loads(row["config_snapshot"] or "{}").get("decision_engine", "v1")).lower() == "v2"}
         for profile, defaults in DEFAULT_PROFILES.items():
-            if str((settings.get(profile) or {}).get("decision_engine", "v1")).lower() == "v2":
+            profile_v2 = str((settings.get(profile) or {}).get("decision_engine", "v1")).lower() == "v2"
+            if profile_v2 and (profile in draft_v2_profiles or active_count < max_active):
                 contexts.append({"goal_id": None, "profile": profile, "capital": 100.0,
                     "capital_initial": 100.0,
                     "decision_engine": "v2",
@@ -336,7 +343,8 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
 def _insert_run(conn, context, as_of, n_scenarios=SCENARIO_COUNT):
     run_id = str(uuid.uuid4())
     conn.execute("INSERT INTO scenario_eval_runs(run_id,as_of,goal_id,profile,horizon_days,"
-        "n_scenarios,seconds,rss_mb,status,error) VALUES(?,?,?,?,?,?,0,NULL,'running',NULL)",
+        "n_scenarios,seconds,rss_mb,rss_current_mb,rss_hwm_mb,status,error) "
+        "VALUES(?,?,?,?,?,?,0,NULL,NULL,NULL,'running',NULL)",
         (run_id, as_of, context["goal_id"], context["profile"], context["horizon"], int(n_scenarios)))
     return run_id
 
@@ -918,7 +926,8 @@ def _context_priority(context):
 def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
         evaluator=evaluate_pieces, now=None, max_rss_mb=600, max_seconds=540,
         max_total_seconds=1500,
-        n_scenarios=SCENARIO_COUNT, symbol_filter=None, perfilar=False):
+        n_scenarios=SCENARIO_COUNT, symbol_filter=None, perfilar=False,
+        context_selector=None):
     started = time.perf_counter()
     app_path = Path(app_db).resolve()
     market_path = market_db_path(market_db)
@@ -929,6 +938,14 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
         library_dir=library_dir, horizon_days=max((int(row["horizon"]) for row in
             prior_contexts), default=20))
     contexts = sorted(_contexts(app_path, prices), key=_context_priority)
+    if context_selector is not None:
+        if str(context_selector).startswith("perfil:"):
+            selected_profile = str(context_selector).split(":", 1)[1].upper()
+            contexts = [row for row in contexts if row.get("goal_id") is None and
+                row["profile"] == selected_profile]
+        else:
+            selected_id = int(context_selector)
+            contexts = [row for row in contexts if row.get("goal_id") == selected_id]
     with store._connect() as conn:
         conn.execute("UPDATE scenario_eval_runs SET status='abandonada',error=? "
             "WHERE status='running' AND julianday(as_of) < julianday('now', ?)",
@@ -1021,8 +1038,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                          _json_dumps(row["params"], ensure_ascii=False),
                          _json_dumps(row["metrics"], ensure_ascii=False),
                          _json_dumps(row["objective"], ensure_ascii=False)))
-                conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
-                    "WHERE run_id=?", (evaluated["status"],
+                conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=?,"
+                    "rss_current_mb=?,rss_hwm_mb=? WHERE run_id=?", (evaluated["status"],
                         _json_dumps({"skipped": evaluated.get("skipped_symbols", skipped),
                             "discarded": evaluated.get("discarded", {}),
                             "evaluated_count": evaluated.get("evaluated_count", 0),
@@ -1034,7 +1051,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "failed_candidates": evaluated.get("failed_candidates", {}),
                             "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
                             ensure_ascii=False),
-                        time.perf_counter() - context_started, _rss_max_mb(), run_id))
+                        time.perf_counter() - context_started, _rss_max_mb(), _rss_current_mb(),
+                        _rss_max_mb(), run_id))
             results_summary.append({"run_id": run_id, "context_seconds":
                 time.perf_counter() - context_started, **evaluated})
             print(f"SCENARIO_CACHE contexto={context['goal_id'] or context['profile']} "
@@ -1043,7 +1061,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
                 f"smart_omitido_por_tiempo={evaluated.get('smart_omitido_por_tiempo', 0)} "
                 f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
-                f"segundos={time.perf_counter()-context_started:.3f} rss_max_mb={_rss_max_mb()}")
+                f"segundos={time.perf_counter()-context_started:.3f} "
+                f"rss_actual_mb={_rss_current_mb()} rss_hwm_mb={_rss_max_mb()}")
             if perfilar:
                 print(f"SCENARIO_CACHE perfil={symbol_filter or 'todos'} "
                     f"tiempos={_json_dumps(evaluated.get('profile_times', {}), ensure_ascii=False)}")
@@ -1052,10 +1071,10 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
             error_details = {"motivo": str(exc), **progress_state}
             error_details["discarded_count"] = sum(progress_state.get("discarded", {}).values())
             with store._connect() as conn:
-                conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=? "
-                    "WHERE run_id=?", (status, _json_dumps(error_details, ensure_ascii=False),
-                        time.perf_counter() - started,
-                        _rss_max_mb(), run_id))
+                conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=?,"
+                    "rss_current_mb=?,rss_hwm_mb=? WHERE run_id=?", (status, _json_dumps(error_details, ensure_ascii=False),
+                        time.perf_counter() - context_started,
+                        _rss_max_mb(), _rss_current_mb(), _rss_max_mb(), run_id))
             if isinstance(exc, CacheLimitExceeded):
                 with store._connect() as conn:
                     count = conn.execute("SELECT COUNT(*) FROM scenario_eval_results WHERE run_id=?",
@@ -1091,7 +1110,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
     watcher.join(timeout=2)
     return {"contexts": len(contexts), "runs": results_summary,
         "skipped_contexts": skipped_contexts,
-        "seconds": time.perf_counter() - started, "rss_mb": _rss_max_mb()}
+        "seconds": time.perf_counter() - started, "rss_mb": _rss_max_mb(),
+        "rss_current_mb": _rss_current_mb(), "rss_hwm_mb": _rss_max_mb()}
 
 
 def main(argv=None):
@@ -1105,6 +1125,7 @@ def main(argv=None):
     parser.add_argument("--escenarios", type=int, default=SCENARIO_COUNT)
     parser.add_argument("--perfilar", action="store_true")
     parser.add_argument("--symbol")
+    parser.add_argument("--contexto", help="ID de meta o perfil:<NOMBRE>")
     args = parser.parse_args(argv)
     if os.name == "posix":
         try:
@@ -1113,10 +1134,46 @@ def main(argv=None):
             pass
     started = time.perf_counter()
     try:
+        if args.contexto is None:
+            app_path = Path(args.app_db).resolve()
+            market_path = market_db_path(args.market_db)
+            lightweight_contexts = sorted(_contexts(app_path, {}), key=_context_priority)
+            selectors = [str(row["goal_id"]) if row.get("goal_id") is not None else
+                f"perfil:{row['profile']}" for row in lightweight_contexts]
+            completed = []
+            for selector in selectors:
+                remaining = args.max_segundos_total - (time.perf_counter() - started)
+                if remaining <= 0:
+                    break
+                command = [sys.executable, str(Path(__file__).resolve()), "--app-db",
+                    str(app_path), "--market-db", str(market_path), "--biblioteca",
+                    args.biblioteca, "--max-rss-mb", str(args.max_rss_mb),
+                    "--max-segundos", str(args.max_segundos), "--max-segundos-total",
+                    str(remaining), "--escenarios", str(args.escenarios), "--contexto", selector]
+                if args.perfilar:
+                    command.append("--perfilar")
+                if args.symbol:
+                    command.extend(["--symbol", args.symbol])
+                if os.name == "posix":
+                    command = ["nice", "-n", "10", *command]
+                child = subprocess.run(command, capture_output=True, text=True,
+                    check=False, timeout=remaining)
+                print(child.stdout or "", end="")
+                if child.stderr:
+                    print(child.stderr, file=sys.stderr, end="")
+                completed.append(child.returncode)
+                if child.returncode:
+                    return child.returncode
+            if len(completed) < len(selectors):
+                print(f"SCENARIO_CACHE contextos_pendientes={json.dumps(selectors[len(completed):])}")
+            print(f"SCENARIO_CACHE estado=completed contextos={len(completed)} "
+                f"segundos={time.perf_counter()-started:.3f}")
+            return 0
         result = run_cache(args.app_db, args.market_db, library_dir=args.biblioteca,
             max_rss_mb=args.max_rss_mb, max_seconds=args.max_segundos,
             max_total_seconds=args.max_segundos_total,
-            n_scenarios=args.escenarios, symbol_filter=args.symbol, perfilar=args.perfilar)
+            n_scenarios=args.escenarios, symbol_filter=args.symbol, perfilar=args.perfilar,
+            context_selector=args.contexto)
         limit_status = next((row.get("status") for row in result["runs"]
             if row.get("status") in {"memoria", "timeout"}), None)
         if limit_status:

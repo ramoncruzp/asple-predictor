@@ -86,6 +86,10 @@ class CandleStore:
                 CREATE INDEX IF NOT EXISTS ix_market_candles_ts
                     ON candles(symbol_id, interval, open_ts);
             """)
+            run_columns = {row[1] for row in conn.execute("PRAGMA table_info(scenario_eval_runs)")}
+            for column in ("rss_current_mb", "rss_hwm_mb"):
+                if column not in run_columns:
+                    conn.execute(f"ALTER TABLE scenario_eval_runs ADD COLUMN {column} REAL")
 
     @contextmanager
     def _connect(self):
