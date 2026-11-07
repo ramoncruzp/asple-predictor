@@ -81,6 +81,8 @@ def test_pieza_vacia_de_meta_final_se_cierra_y_libera_solo_tras_verificar_exchan
         conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
             run_id=run_id, grid_id=grid_id, piece_type="individual_bot_grid",
             origin_grid_id=grid_id, created_at=now))
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="CUMPLIDA", finished_at=now))
 
     from scripts.reparar_piezas_meta_cerrada import listar
     preview = listar(tmp_path / "meta.sqlite")
