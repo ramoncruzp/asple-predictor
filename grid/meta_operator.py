@@ -398,6 +398,8 @@ class MetaOperator:
         self._thread = None
         self._opener = None
         self._engine_failure_alert_at = {}
+        self._shadow_running_lock = threading.Lock()
+        self._shadow_running_meta_ids = set()
         self.scheduler = BackgroundScheduler(timezone="UTC")
         self._operation_lock = getattr(getattr(self.core, "monitor", None), "ops_lock", None) or threading.RLock()
         self.review_cycle_budget_s = META_REVIEW_CYCLE_BUDGET_S
@@ -4308,6 +4310,17 @@ class MetaOperator:
 
     def _run_engine_shadow(self, goal, value, plan, engine, *, active_decision=None):
         from grid.engines import get_engine
+        meta_id = int(goal.get("id"))
+        with self._shadow_running_lock:
+            if meta_id in self._shadow_running_meta_ids:
+                result = {"name": "v1" if engine.name == "v2" else "v2",
+                    "decision": "shadow_skipped_running",
+                    "reason": "ya hay una evaluación sombra en curso para esta meta",
+                    "error": None}
+                self._ledger(meta_id, "META_ENGINE_SHADOW_SKIPPED_RUNNING",
+                    {"active_engine": engine.name, "shadow_engine": result["name"]})
+                return result
+            self._shadow_running_meta_ids.add(meta_id)
         shadow_engine = get_engine("v2" if engine.name == "v1" else "v1")
         done = threading.Event()
         state = {}
@@ -4328,7 +4341,7 @@ class MetaOperator:
                         done.set()
                 if deferred:
                     result = state.get("result") or {"decision": "error",
-                        "reason": state.get("error") or "la sombra no devolvio decision"}
+                        "reason": state.get("error") or "la sombra no devolvió decisión"}
                     shadow = {"name": shadow_engine.name,
                         "decision": result.get("decision", "error"),
                         "reason": result.get("reason"),
@@ -4340,7 +4353,9 @@ class MetaOperator:
                     except Exception:
                         logging.getLogger(__name__).exception(
                             "No se pudo guardar la sombra diferida de Meta %s", goal.get("id"))
-                    done.set()
+                with self._shadow_running_lock:
+                    self._shadow_running_meta_ids.discard(meta_id)
+                done.set()
 
         threading.Thread(target=evaluate, daemon=True,
             name=f"meta-shadow-{goal.get('id')}").start()
@@ -4349,7 +4364,7 @@ class MetaOperator:
                 if not done.is_set():
                     state["deferred"] = True
                     return {"name": shadow_engine.name, "decision": "budget_exceeded",
-                        "reason": "la evaluacion sombra continua en segundo plano",
+                        "reason": "la evaluación sombra continúa en segundo plano",
                         "elapsed_s": round(time.perf_counter() - started, 4),
                         "error": None, "deferred": True}
         elapsed = round(time.perf_counter() - started, 4)

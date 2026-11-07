@@ -92,16 +92,72 @@ def test_pieza_vacia_de_meta_final_se_cierra_y_libera_solo_tras_verificar_exchan
     class Engine:
         exchange = SimpleNamespace(get_open_orders=lambda symbol: [])
         def close_grid(self, grid_id, mode, **kwargs):
-            db.update_grid(grid_id, status="CLOSED")
-            return {"status": "CLOSED"}
+            db.update_grid(grid_id, status="CANCELLED")
+            return {"status": "CANCELLED"}
 
     core.engine = Engine()
     core._finalize_empty_piece_links(goal["id"])
     with db.engine.connect() as conn:
         link = conn.execute(select(db.meta_piece_links).where(
             db.meta_piece_links.c.grid_id == grid_id)).mappings().one()
-    assert db.get_grid(grid_id)["status"] == "CLOSED"
+    assert db.get_grid(grid_id)["status"] == "CANCELLED"
     assert link["released_at"] is not None
+
+
+@pytest.mark.parametrize("orders, should_release", [
+    ([], True), ([{"order_id": 77, "client_order_id": "old-buy"}], False),
+])
+def test_grid_cancelled_verifica_exchange_antes_de_liberar_enlace(tmp_path, orders, should_release):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1,
+            range_high=2, n_levels=1, capital_total=20, reserve=0, status="CANCELLED",
+            created_at=now, environment="testnet", strategy="bot", params="{}",
+            dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
+            price=1, capital=20, state="DONE", held_qty=0, order_id=77,
+            cycles_completed=1, pnl=3, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="COMPLETED", started_at=now, finished_at=now,
+            realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=run_id, grid_id=grid_id, piece_type="individual_bot_grid",
+            origin_grid_id=grid_id, created_at=now))
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="CUMPLIDA", finished_at=now))
+
+    class Exchange:
+        def get_open_orders(self, symbol): return orders
+    class Engine:
+        exchange = Exchange()
+        def close_grid(self, *_args, **_kwargs): raise AssertionError("un terminal no se cierra de nuevo")
+    core.engine = Engine()
+    result = core._finalize_empty_piece_links(goal["id"])
+    with db.engine.connect() as conn:
+        link = conn.execute(select(db.meta_piece_links.c.released_at).where(
+            db.meta_piece_links.c.grid_id == grid_id)).scalar_one()
+    assert (link is not None) is should_release
+    assert result["pending"] == ([] if should_release else [
+        {"grid_id": grid_id, "reason": "orden_exchange_viva"}])
+
+
+def test_reparador_reporta_pendientes_y_devuelve_error(tmp_path, monkeypatch, capsys):
+    from scripts import reparar_piezas_meta_cerrada as repair
+    db_path = tmp_path / "app.sqlite"
+    db_path.write_bytes(b"sqlite-placeholder")
+    monkeypatch.setattr(repair, "reparar", lambda _path: {
+        "released": [], "pending": [{"meta_id": 5, "grid_id": 17,
+            "reason": "orden_exchange_viva"}]})
+
+    result = repair.main(["--db", str(db_path), "--confirmar"])
+    output = capsys.readouterr().out
+    assert result != 0
+    assert "Pendientes: 1" in output
+    assert "grid #17: orden_exchange_viva" in output
 
 
 def test_tunel_binance_alerta_tras_tres_minutos_y_recuperacion(tmp_path):

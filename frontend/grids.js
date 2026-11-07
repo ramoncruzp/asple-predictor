@@ -458,6 +458,8 @@
     const cells = detail.cells;
     const metaLink = (metaLinks || []).find(row => Number(row.grid_id) === Number(summary.id));
     const metaOwned = Boolean(metaLink);
+    const metaFinal = ['CUMPLIDA','CERRADA','DESCARTADA','CANCELADA','CORTADA_POR_PERDIDA','VENCIDA']
+      .includes(String(metaLink?.meta_status || '').toUpperCase());
     const intelEnabled = detail.config?.intel_apply_enabled === true;
     const intelActor = detail.config?.intel_apply_actor || '';
     const intelChangedAt = detail.config?.intel_apply_changed_at || '';
@@ -470,7 +472,7 @@
     const intelSwitchCard = !metaOwned && ['ACTIVE', 'PAUSED'].includes(summary.status) && ['smart','simple'].includes(String(summary.strategy).toLowerCase())
       ? `<section class="card grid-intelligence-switch"><h3>Inteligencia de este grid</h3><p>Interruptor: <b>${intelEnabled ? 'ENCENDIDO' : 'APAGADO'}</b>. El sistema solo aplica una recomendación tras dos horas iguales, seis horas de espera y un máximo de dos cambios diarios.</p><p>${intelActor ? `Último cambio por ${esc(intelActor)} · ${esc(intelChangedAt)}` : 'Sin cambios anteriores.'}</p><p>${intelEvidence}</p><button type="button" class="button secondary" data-intel-switch="${intelEnabled ? 'off' : 'on'}" data-grid-intel-id="${summary.id}" ${intelEnabled ? '' : (summary.status !== 'ACTIVE' || ((Object.values(gridIntel?.mature_labels?.readiness_by_action || {}).some(x => x.state === 'Listo para encender')) ? '' : 'disabled'))}>${intelEnabled ? 'Apagar aplicación automática' : 'Encender para este grid'}</button><a href="#intelligence">Ver evidencia en Inteligencia</a></section>` : '';
     const metaManagedNote = metaOwned
-      ? `<div class="card metas-grid-managed-warning"><b>Esta pieza la gestiona la Meta #${esc(metaLink.meta_id)}.</b> Los cambios manuales pueden chocar con el operador. La Meta decide los reajustes de rango, niveles y margen; los eventos de dirección son informativos. Revisa sus decisiones en <a href="#metas">Metas</a>; para cancelar, usa la opción de la Meta.</div>` : '';
+      ? `<div class="card metas-grid-managed-warning"><b>Esta pieza pertenece a la Meta #${esc(metaLink.meta_id)}${metaFinal ? ' finalizada' : ''}.</b> ${metaFinal ? 'Puedes cerrar manualmente el grid con los modos de cierre habituales.' : 'Los cambios manuales pueden chocar con el operador. La Meta decide los reajustes de rango, niveles y margen; los eventos de dirección son informativos. Revisa sus decisiones en'} <a href="#metas/${esc(metaLink.meta_id)}">${metaFinal ? 'Ver historial de la Meta' : 'Metas'}</a>${metaFinal ? '' : '; para cancelar, usa la opción de la Meta.'}</div>` : '';
     const recovery = summary.recovery_mode === true
       ? '<div class="recovery-banner">El precio est\u00e1 bajo todos los niveles de venta con posici\u00f3n abierta: las '
         + 'posiciones esperan su precio de venta. El sistema puede cerrar por p\u00e9rdida m\u00e1xima, meta o plazo si '
@@ -572,10 +574,10 @@
           ${summary.compound_enabled ? '<span class="badge-compound">compuesto</span>' : ''}${metaBadgeHtml(summary.id, metaLinks)}</div>
         <div class="grid-detail-price">${summary.price === null ? 'sin precio' : fmtMoney(summary.price, 6)}
           ${summary.price_as_of ? `<small class="muted">al ${esc(window.ASPLEFormat?.formatDateTime(summary.price_as_of) ?? summary.price_as_of)}</small>` : '<small class="muted">sin precio actual</small>'}</div>
-        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-meta-owned="${metaOwned}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
+        <div class="grid-detail-controls" data-grid-controls="${summary.id}" data-meta-owned="${metaOwned}" data-meta-final="${metaFinal}" data-status="${esc(summary.status)}" data-low="${detail.range_low}" data-high="${detail.range_high}" data-strategy="${esc(summary.strategy)}" data-compound-enabled="${summary.compound_enabled}" data-compound-ratio="${summary.compound_ratio}" data-compound-cap="${summary.compound_max_growth_pct}">
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="pause">Pausar</button>' : ''}
           ${summary.status === 'PAUSED' ? '<button class="button secondary" data-grid-action="resume">Reanudar</button>' : ''}
-          ${['ACTIVE','PAUSED'].includes(summary.status) ? (metaOwned ? '<a class="button danger" href="#metas">Cancelar desde Meta</a>' : '<button class="button danger" data-grid-action="close">Cerrar</button>') : ''}
+          ${['ACTIVE','PAUSED'].includes(summary.status) ? (metaOwned && !metaFinal ? '<a class="button danger" href="#metas">Cancelar desde Meta</a>' : '<button class="button danger" data-grid-action="close">Cerrar</button>') : ''}
           ${summary.status === 'ACTIVE' ? '<button class="button secondary" data-grid-action="adjust">Reubicar rango</button>' : ''}
           ${!['CLOSED','ERROR'].includes(summary.status) ? '<button class="button secondary" data-grid-action="sweep-dust">Barrer polvo</button>' : ''}
           ${['ACTIVE','PAUSED'].includes(summary.status) ? '<button class="button secondary" data-grid-action="params">Editar meta/plazo</button><button class="button secondary" data-grid-action="compound">Inter\u00e9s compuesto</button>' : ''}
@@ -745,7 +747,7 @@
       compound_ratio: Number(controls?.dataset.compoundRatio),
       compound_max_growth_pct: Number(controls?.dataset.compoundCap) };
     const parent = document.getElementById('grids-content');
-    if (controls?.dataset.metaOwned === 'true'
+    if (controls?.dataset.metaOwned === 'true' && controls?.dataset.metaFinal !== 'true'
         && !window.confirm('Esta pieza pertenece a una Meta. El operador puede reajustarla en su próxima revisión. ¿Quieres continuar con este cambio manual?')) return;
     button.disabled = true;
     controlFlow(gridId, button.dataset.gridAction, summary, parent).catch(error => showActionDialog(parent, 'Error de acción', `<p>${esc(error.message)}</p>`));

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
+import pytest
 
 from fastapi import FastAPI
 
@@ -338,3 +339,64 @@ def test_invalid_parameter_value_is_audited(tmp_path):
     assert malformed.status_code == 422
     assert len(db.events) == 2
     assert db.events[-1]["details"]["reason"] == "request validation failed"
+
+
+@pytest.mark.parametrize("meta_status, expected", [("CUMPLIDA", 200), ("ACTIVE", 409)])
+def test_cierre_manual_api_solo_para_meta_final(tmp_path, meta_status, expected):
+    from datetime import datetime
+    from database.db_manager import DBManager
+    from grid.meta import MetaCore
+
+    db = DBManager(f"sqlite:///{tmp_path / 'meta-close-api.sqlite'}")
+    settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=1,
+        alerts_enabled=False, grid_api_token="")
+    exchange = FakeControlExchange()
+    core = MetaCore(db, exchange, settings=settings)
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status=meta_status, finished_at=now if meta_status != "ACTIVE" else None))
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=90,
+            range_high=110, n_levels=1, capital_total=20, reserve=0, status="PAUSED",
+            created_at=now, environment="testnet", strategy="simple", params="{}",
+            dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
+            price=90, capital=20, state="DONE", held_qty=0, cycles_completed=1,
+            pnl=0, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="COMPLETED", started_at=now, finished_at=now,
+            realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=run_id, grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id,
+            created_at=now))
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def close_grid(self, grid_id, mode, **kwargs):
+            self.calls.append((grid_id, mode))
+            db.update_grid(grid_id, status="CANCELLED")
+            return {"status": "CANCELLED"}
+    engine = Engine()
+    core.engine = engine
+    app = FastAPI()
+    app.include_router(grid_control.router, prefix="/api/grids")
+    app.state.db, app.state.settings = db, settings
+    app.state.testnet_client, app.state.grid_engine = exchange, engine
+    app.state.grid_monitor, app.state.meta_core = None, core
+    from tests.test_grid_status_api import LocalClient
+    client = LocalClient(app)
+    response = client.post(f"/api/grids/{grid_id}/close", json={
+        "mode": "cancel", "dry_run": False, "confirm": True})
+    assert response.status_code == expected
+    if meta_status == "CUMPLIDA":
+        from sqlalchemy import select
+        with db.engine.connect() as conn:
+            released = conn.execute(select(db.meta_piece_links.c.released_at).where(
+                db.meta_piece_links.c.grid_id == grid_id)).scalar_one()
+        assert released is not None
+        assert engine.calls == [(grid_id, "cancel")]
+        assert any(row["event_type"] == "META_PIECE_MANUALLY_CLOSED"
+            for row in core.ledger(goal["id"]))
+    else:
+        assert engine.calls == []

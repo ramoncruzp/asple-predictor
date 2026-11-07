@@ -123,6 +123,14 @@ def test_repr_does_not_disclose_credentials():
     assert "private-secret-sentinel" not in repr(client)
 
 
+def test_testnet_client_hereda_configuracion_de_proxy_del_entorno():
+    from types import SimpleNamespace
+    fake = FakeTestnetHTTP()
+    fake.session = SimpleNamespace(trust_env=False)
+    make_client(fake)
+    assert fake.session.trust_env is True
+
+
 def test_limit_order_sends_expected_parameters_and_normalizes_result():
     fake = FakeTestnetHTTP()
     client = make_client(fake)

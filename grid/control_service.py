@@ -76,6 +76,24 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
         raise HTTPException(404, "Grid no existe.")
     levels = db.get_grid_levels(int(grid_id))
     status = str(grid.get("status", "")).upper()
+    final_meta_link = None
+    if action == "close" and getattr(db, "meta_piece_links", None) is not None:
+        from sqlalchemy import select
+        with db.engine.connect() as conn:
+            final_meta_link = conn.execute(select(db.meta_piece_links.c.id,
+                db.meta_piece_links.c.meta_id, db.meta_goals.c.status.label("meta_status")
+                ).select_from(db.meta_piece_links.join(db.meta_goals,
+                    db.meta_piece_links.c.meta_id == db.meta_goals.c.id)).where(
+                    db.meta_piece_links.c.grid_id == int(grid_id),
+                    db.meta_piece_links.c.released_at.is_(None)).order_by(
+                    db.meta_piece_links.c.id.desc())).mappings().first()
+        if final_meta_link is not None and str(final_meta_link["meta_status"]).upper() not in {
+                "CUMPLIDA", "CERRADA", "DESCARTADA", "CANCELADA", "CORTADA_POR_PERDIDA", "VENCIDA"}:
+            reject_message = "El cierre manual de una pieza ligada a una Meta activa debe hacerse desde la Meta."
+            db.add_grid_event(run_id=None, source="CLI", grid_id=grid_id,
+                event_type="GRID_ACTION_REJECTED", reason=action,
+                details={"who": "api", "action": action, "reason": reject_message})
+            raise HTTPException(409, reject_message)
     params = dict(body)
     dry_run, confirm = params.pop("dry_run", True), params.pop("confirm", False)
     confirm_text = params.pop("confirm_text", None)
@@ -258,12 +276,21 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
                 raise RuntimeError(result.get("reason") or "acción rechazada por el motor")
             after = (db.get_grid(grid_id) or {}).get("status")
             errors = result.get("errors") if isinstance(result, dict) else None
-            expected = {"pause": "PAUSED", "resume": "ACTIVE", "close": "CLOSED",
+            expected = {"pause": "PAUSED", "resume": "ACTIVE", "close": {"CLOSED", "CANCELLED", "DONE"},
                         "adjust": "ACTIVE", "sweep-dust": status, "params": status}[action]
             partial = bool(errors) or str(after or "").upper() == "CLOSING" or (
                 isinstance(result, dict) and str(result.get("status", "")).upper() == "CLOSING") or (
-                after is not None and str(after).upper() != expected)
+                after is not None and (str(after).upper() not in expected if isinstance(expected, set)
+                    else str(after).upper() != expected))
             outcome = "partial" if partial else "completed"
+            if action == "close" and final_meta_link is not None and not partial:
+                released, reason = _release_final_meta_link(request, db, client, grid, final_meta_link)
+                if not released:
+                    errors = list(errors or []) + [{"reason": reason}]
+                    partial, outcome = True, "partial"
+                    db.add_grid_event(run_id=None, source="CLI", grid_id=grid_id,
+                        event_type="GRID_ACTION_REJECTED", reason="meta_piece_release_pending",
+                        details={"meta_id": int(final_meta_link["meta_id"]), "reason": reason})
             db.add_grid_event(run_id=None, source="CLI", grid_id=grid_id, event_type="GRID_ACTION_API",
                               reason=action, details={"who": "api", "action": action, "parameters": params,
                               "before": before, "after": after, "status_after": after, "outcome": outcome,
@@ -279,3 +306,38 @@ def _run_action_locked(request, grid_id: int, action: str, body: dict) -> dict:
             raise HTTPException(409, "El motor rechazó la acción; revisa el estado actual del grid.") from None
     finally:
         lock.release()
+
+
+def _release_final_meta_link(request, db, client, grid, link):
+    """Libera la pieza cerrada solo si no quedan activos ni inventario ni órdenes propias."""
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    grid_id = int(grid["id"])
+    levels = db.get_grid_levels(grid_id)
+    if any(_d(row.get("held_qty")) > 0 or row.get("state") in {"BUY_OPEN", "SELL_OPEN"}
+            for row in levels):
+        return False, "queda inventario o una orden abierta en los niveles"
+    try:
+        open_orders = client.get_open_orders(grid["symbol"])
+    except Exception as exc:
+        return False, f"no se pudieron verificar las órdenes de Testnet: {exc}"
+    own_ids = {int(row["order_id"]) for row in levels if row.get("order_id") is not None}
+    own_clients = {str(row[key]) for row in levels for key in
+        ("client_order_id", "buy_client_order_id") if row.get(key)}
+    for order in open_orders:
+        oid = order.get("order_id")
+        client_id = str(order.get("client_order_id") or order.get("orig_client_order_id") or "")
+        if (oid is not None and int(oid) in own_ids) or client_id in own_clients:
+            return False, "queda una orden propia abierta en Testnet"
+    now = getattr(getattr(request.app.state, "meta_core", None), "_now", None)
+    released_at = now() if callable(now) else datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.update().where(
+            db.meta_piece_links.c.id == int(link["id"]),
+            db.meta_piece_links.c.released_at.is_(None)).values(released_at=released_at))
+    core = getattr(request.app.state, "meta_core", None)
+    if core is not None:
+        core._ledger(int(link["meta_id"]), None, "META_PIECE_MANUALLY_CLOSED",
+            {"grid_id": grid_id, "grid_status": db.get_grid(grid_id).get("status")},
+            grid_id=grid_id)
+    return True, None

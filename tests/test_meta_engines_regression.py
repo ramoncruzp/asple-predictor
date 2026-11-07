@@ -168,22 +168,31 @@ def test_sombra_v1_lenta_no_bloquea_y_persiste_al_terminar(monkeypatch):
 
     finished = threading.Event()
     persisted = threading.Event()
+    calls = []
+    skipped_events = []
     class SlowShadow:
         name = "v1"
         def shadow_review(self, *_args):
+            calls.append(1)
             time.sleep(.15)
             finished.set()
             return {"decision": "mantener", "reason": "sin mejora"}
     monkeypatch.setattr(grid.engines, "get_engine", lambda _name: SlowShadow())
     operator = MetaOperator(None, None, None, None, None)
     operator._persist_engine_shadow_decision = lambda *_args: persisted.set()
+    operator._ledger = lambda *args, **kwargs: skipped_events.append((args, kwargs))
     active = type("Engine", (), {"name": "v2"})()
     started = time.perf_counter()
     result = operator._run_engine_shadow({"id": 1}, {}, {}, active,
         active_decision={"decision": "mantener"})
     elapsed = time.perf_counter() - started
+    second = operator._run_engine_shadow({"id": 1}, {}, {}, active,
+        active_decision={"decision": "mantener"})
     assert elapsed < .12
     assert result["decision"] == "budget_exceeded"
     assert result["deferred"] is True
+    assert second["decision"] == "shadow_skipped_running"
+    assert len(calls) == 1
+    assert skipped_events[0][0][1] == "META_ENGINE_SHADOW_SKIPPED_RUNNING"
     assert finished.wait(1)
     assert persisted.wait(1)

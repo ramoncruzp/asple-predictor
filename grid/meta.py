@@ -1097,12 +1097,13 @@ class MetaCore:
 
     def _finalize_empty_piece_links(self, meta_id):
         """Cierra y libera solo piezas vacías confirmadas contra el exchange."""
-        from sqlalchemy import select
         if self.engine is None:
-            self._ledger(meta_id, None, "META_FINAL_PIECES_REMAIN",
-                {"reason": "engine_no_disponible", "grids": [int(row["grid_id"])
-                    for row in self._owned_grids(meta_id)]})
-            return
+            pending = [{"grid_id": int(row["grid_id"]), "reason": "engine_no_disponible"}
+                for row in self._owned_grids(meta_id)]
+            result = {"released_grid_ids": [], "pending": pending}
+            self._ledger(meta_id, None, "META_FINAL_PIECES_CLEANUP", result)
+            return result
+        terminal = {"CLOSED", "CANCELLED", "DONE"}
         pending, released = [], []
         lock = getattr(self.monitor, "ops_lock", self._lock)
         with lock:
@@ -1113,6 +1114,12 @@ class MetaCore:
                     pending.append({"grid_id": grid_id, "reason": "grid_eliminado"})
                     continue
                 levels = self.db.get_grid_levels(grid_id)
+                repo_id = link.get("repository_grid_id")
+                if repo_id is not None:
+                    level_map = json.loads(link.get("repository_level_map") or "{}")
+                    repo_indices = {int(value) for value in level_map.values()}
+                    levels = [*levels, *(row for row in self.db.get_grid_levels(int(repo_id))
+                        if int(row["level_idx"]) in repo_indices)]
                 local_ids = {int(row["order_id"]) for row in levels if row.get("order_id") is not None}
                 client_ids = {str(row[key]) for row in levels for key in
                     ("client_order_id", "buy_client_order_id") if row.get(key)}
@@ -1131,14 +1138,14 @@ class MetaCore:
                 if owned_open:
                     pending.append({"grid_id": grid_id, "reason": "orden_exchange_viva"})
                     continue
-                if grid.get("status") != "CLOSED":
+                if str(grid.get("status") or "").upper() not in terminal:
                     try:
                         outcome = self.engine.close_grid(grid_id, "cancel",
                             close_reason="meta_terminal_sin_inventario", meta_id=int(meta_id))
                     except Exception as exc:
                         pending.append({"grid_id": grid_id, "reason": f"cierre_fallido: {exc}"})
                         continue
-                    if outcome.get("status") != "CLOSED":
+                    if str(outcome.get("status") or "").upper() not in terminal:
                         pending.append({"grid_id": grid_id, "reason": "cierre_no_confirmado",
                             "status": outcome.get("status")})
                         continue
@@ -1147,8 +1154,9 @@ class MetaCore:
                         self.db.meta_piece_links.c.id == int(link["id"]),
                         self.db.meta_piece_links.c.released_at.is_(None)).values(released_at=self._now()))
                 released.append(grid_id)
-        self._ledger(meta_id, None, "META_FINAL_PIECES_CLEANUP",
-            {"released_grid_ids": released, "pending": pending})
+        result = {"released_grid_ids": released, "pending": pending}
+        self._ledger(meta_id, None, "META_FINAL_PIECES_CLEANUP", result)
+        return result
 
     def cancellation_plan(self, meta_id):
         valuation = self.valuation(meta_id)

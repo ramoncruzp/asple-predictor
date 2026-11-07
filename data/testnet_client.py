@@ -57,6 +57,11 @@ class TestnetClient:
             raise ValueError("Testnet API key must differ from the production API key.")
 
         self.client = client if client is not None else Client(key, secret, testnet=True)
+        # Requests debe heredar HTTPS_PROXY/NO_PROXY del servicio también en
+        # herramientas CLI que construyen este cliente.
+        session = getattr(self.client, "session", None)
+        if session is not None:
+            session.trust_env = True
         # python-binance never rewrites Client.API_URL for testnet=True; it only
         # swaps the URL per-request inside _create_api_uri() based on the
         # boolean `testnet` attribute. That attribute is the only reliable signal.

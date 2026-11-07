@@ -60,8 +60,15 @@ def reparar(db_path: Path):
     with db.engine.connect() as conn:
         goals = conn.execute(select(db.meta_goals.c.id).where(
             db.meta_goals.c.status.in_(FINAL))).scalars().all()
+    released, pending = [], []
     for goal_id in goals:
         core._finalize_empty_piece_links(int(goal_id))
+        last = next((row for row in reversed(core.ledger(int(goal_id)))
+            if row.get("event_type") == "META_FINAL_PIECES_CLEANUP"), None)
+        details = (last or {}).get("details") or {}
+        released.extend((int(goal_id), int(grid_id)) for grid_id in details.get("released_grid_ids", []))
+        pending.extend({"meta_id": int(goal_id), **row} for row in details.get("pending", []))
+    return {"released": released, "pending": pending}
 
 
 def main(argv=None):
@@ -72,8 +79,24 @@ def main(argv=None):
     if not args.db.is_file():
         parser.error(f"no existe la BD: {args.db}")
     if args.confirmar:
-        reparar(args.db)
-        print("Reparación verificada y aplicada; vuelve a ejecutar sin --confirmar para revisar el resultado.")
+        try:
+            result = reparar(args.db)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            lowered = detail.lower()
+            if any(token in lowered for token in ("proxy", "connection", "connect", "timeout",
+                    "timed out", "tunnel", "restricted location")):
+                print(f"Error: no se pudo conectar con Binance (¿túnel caído?): {detail}")
+            else:
+                print(f"Error: reparación no completada: {detail}")
+            return 2
+        print(f"Enlaces liberados: {len(result['released'])}")
+        for meta_id, grid_id in result["released"]:
+            print(f"  Meta #{meta_id} · grid #{grid_id}")
+        print(f"Pendientes: {len(result['pending'])}")
+        for row in result["pending"]:
+            print(f"  Meta #{row['meta_id']} · grid #{row['grid_id']}: {row['reason']}")
+        return 1 if result["pending"] else 0
     else:
         rows = listar(args.db)
         if not rows:
@@ -83,7 +106,7 @@ def main(argv=None):
             print(f"Meta #{row['meta_id']} {row['meta_status']} · grid #{row['grid_id']} "
                 f"{row['symbol']} {row['status']} · {marca}")
         print("Modo lectura: no se escribió en la BD ni se consultó Testnet.")
-    return 0
+        return 0
 
 
 if __name__ == "__main__":

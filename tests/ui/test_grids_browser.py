@@ -1406,3 +1406,17 @@ def test_advisor_uses_45_second_timeout_and_other_gets_keep_default(live_server,
         return seen;
     }""")
     assert timeouts == [45000, 10000]
+
+
+def test_grid_de_meta_final_muestra_cierre_normal(live_server, ui_page):
+    meta_id = 42
+    ui_page.route("**/api/metas/piece-links", lambda route: route.fulfill(json={"links": [{
+        "grid_id": live_server.grid_id, "meta_id": meta_id,
+        "piece_type": "grid", "meta_status": "CUMPLIDA"}]}))
+    ui_page.goto(f"{live_server.url}/#grids/{live_server.grid_id}")
+    expect(ui_page.locator('[data-grid-action="close"]')).to_be_visible()
+    expect(ui_page.get_by_role("link", name="Cancelar desde Meta")).to_have_count(0)
+    expect(ui_page.get_by_text("Meta #42 finalizada", exact=False)).to_be_visible()
+    _close_button(ui_page).click()
+    expect(ui_page.get_by_role("dialog")).to_be_visible()
+    expect(ui_page.locator(".grid-close-modes")).to_be_visible()
