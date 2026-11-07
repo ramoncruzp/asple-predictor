@@ -159,3 +159,31 @@ def test_shadow_exception_is_recorded_without_changing_v1_decision(monkeypatch):
     event = next(args[0][3] for args in core.events if args[0][2] == "META_OPERATOR_REVIEW_DECISION")
     assert result == {"decision": "no_hacer_nada", "reason": "sin cambio"}
     assert event["engine_shadow"]["error"] == "ValueError: fallo sombra"
+
+
+def test_sombra_v1_lenta_no_bloquea_y_persiste_al_terminar(monkeypatch):
+    import threading
+    import time
+    import grid.engines
+
+    finished = threading.Event()
+    persisted = threading.Event()
+    class SlowShadow:
+        name = "v1"
+        def shadow_review(self, *_args):
+            time.sleep(.15)
+            finished.set()
+            return {"decision": "mantener", "reason": "sin mejora"}
+    monkeypatch.setattr(grid.engines, "get_engine", lambda _name: SlowShadow())
+    operator = MetaOperator(None, None, None, None, None)
+    operator._persist_engine_shadow_decision = lambda *_args: persisted.set()
+    active = type("Engine", (), {"name": "v2"})()
+    started = time.perf_counter()
+    result = operator._run_engine_shadow({"id": 1}, {}, {}, active,
+        active_decision={"decision": "mantener"})
+    elapsed = time.perf_counter() - started
+    assert elapsed < .12
+    assert result["decision"] == "budget_exceeded"
+    assert result["deferred"] is True
+    assert finished.wait(1)
+    assert persisted.wait(1)
