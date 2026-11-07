@@ -438,7 +438,8 @@
   function valuationBlock(goal, valuation) {
     const status = valuation.status;
     let banner = '';
-    if (status === 'DESCONOCIDO') banner = `<p class="metas-unprotected">🔴 SIN PROTECCIÓN DE PÉRDIDA — el libro no tiene compradores o la lectura es vieja.</p>`;
+    if (status === 'DESCONOCIDO' && valuation.connection_error) banner = `<p class="metas-unprotected">🔴 SIN CONEXIÓN CON BINANCE — revisa el túnel de la tablet; sin protección de pérdida mientras dure.</p>`;
+    else if (status === 'DESCONOCIDO') banner = `<p class="metas-unprotected">🔴 SIN PROTECCIÓN DE PÉRDIDA — el libro no tiene compradores o la lectura es vieja.</p>`;
     else if (status === 'PARCIAL') banner = `<p class="metas-partial">⚠ Parte del inventario no tiene comprador ahora mismo.</p>`;
     return `<div class="metas-valuation">
       <div class="metas-valuation-row"><span>Mejor bid</span><b>${fmtMoney(valuation.value_best_bid)} USDT</b></div>

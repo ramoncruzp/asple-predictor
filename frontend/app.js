@@ -205,6 +205,13 @@ async function refreshOperationalHealth() {
     }
     try { renderLatestAlert(await api.get('/api/alerts/status')); }
     catch (_) { setHealthIndicator($('#last-alert-indicator'), 'unknown', 'Última alerta: sin datos'); }
+    try {
+      const connection = await api.get('/api/binance/status');
+      const downAt = connection?.down_since ? ` desde ${new Date(connection.down_since).toLocaleTimeString()}` : '';
+      const offline = connection?.status === 'offline';
+      setHealthIndicator($('#binance-chip'), offline ? 'red' : connection?.status === 'connected' ? 'ok' : 'unknown',
+        offline ? `Binance: sin conexión${downAt}` : connection?.status === 'connected' ? 'Binance: conectado' : 'Binance: sin datos');
+    } catch (_) { setHealthIndicator($('#binance-chip'), 'unknown', 'Binance: sin datos'); }
   } finally { APP.operationalHealthInFlight = false; }
 }
 function setupMobileMenu() {

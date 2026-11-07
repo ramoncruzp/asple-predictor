@@ -387,6 +387,13 @@ async def health(request: Request):
     started = getattr(request.app.state, "started_at", PROCESS_STARTED_AT)
     return {"status": "ok", "uptime_s": max(0, int(time.monotonic() - started))}
 
+@app.get("/api/binance/status")
+async def binance_status(request: Request):
+    core = getattr(request.app.state, "meta_core", None)
+    state = core.db.get_alert_state("binance_connectivity") if core is not None else None
+    state = state or {"status": "unknown", "down_since": None}
+    return {"status": state.get("status", "unknown"), "down_since": state.get("down_since")}
+
 @app.get("/api/candles")
 def candles(symbol: str = ACTIVE_SYMBOL, interval: str = ACTIVE_INTERVAL):
     normalized_symbol = symbol.strip().upper().replace("/", "")
