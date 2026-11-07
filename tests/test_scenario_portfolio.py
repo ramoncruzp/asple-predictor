@@ -67,6 +67,26 @@ def test_metricas_trayectoria_igualan_evaluate_portfolio():
         sum(row["pnl_usdt"] for row in outcomes) / 4, abs=1e-9)
 
 
+def test_horizonte_restante_recorta_y_alinea_trayectorias_5m_con_horarias():
+    timestamps = np.arange(433, dtype=np.int64) * 3600
+    timestamps_5m = np.arange(20 * 24 * 12 + 1, dtype=np.int64) * 300
+    hourly = np.full((1, len(timestamps)), 100, dtype=np.float32)
+    low = np.full((1, len(timestamps_5m)), 100, dtype=np.float32)
+    low[0, 10 * 24 * 12] = 80
+    row = {"candidate_key": "larga", "piece": {"symbol": "XUSDT"},
+        "capital": 100, "cash": hourly, "equity": hourly,
+        "inventory_qty": np.zeros(1, dtype=np.float32),
+        "inventory_value": np.zeros(1, dtype=np.float32),
+        "timestamps_5m": timestamps_5m, "low_equity_5m": low}
+
+    metrics = evaluate_trajectory_portfolio([row], timestamps=timestamps,
+        capital=100, target=3, max_loss_pct=18, horizon_days=1.5)
+
+    assert metrics["p_loss"] == 0
+    assert metrics["p_target"] == 0
+    assert metrics["pnl_mean_usdt"] == pytest.approx(0)
+
+
 def test_cartera_informa_los_cinco_intentos_no_agregados(tmp_path):
     timestamps = np.asarray([0, 3600, 7200], dtype=np.int64)
     metadata = []

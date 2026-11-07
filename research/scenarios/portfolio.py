@@ -15,6 +15,15 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
         horizon_days, seed=43, loss_confirm_minutes=2):
     """Suma trayectorias float32 y aplica el primer toque de meta o límite."""
     times = np.asarray(timestamps, dtype=np.int64)
+    # La caché puede cubrir más días que los que le quedan a la meta. Recorta
+    # por tiempo antes de combinar series; nunca se deben reutilizar índices
+    # de una resolución para indexar otra.
+    if len(times) and horizon_days is not None:
+        end_at = int(times[0] + max(0.0, float(horizon_days)) * 86400)
+        hourly_mask = times <= end_at
+        times = times[hourly_mask]
+    else:
+        hourly_mask = slice(None)
     count = (len(rows[0]["cash"]) if rows else 1)
     used = sum(float(row["capital"]) for row in rows)
     idle = float(capital) - used
@@ -23,20 +32,25 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
     inventory_qty = np.zeros(count, dtype=np.float64)
     inventory_value = np.zeros(count, dtype=np.float64)
     for row in rows:
-        cash += np.asarray(row["cash"], dtype=np.float64)
-        equity += np.asarray(row["equity"], dtype=np.float64)
+        cash += np.asarray(row["cash"], dtype=np.float64)[:, hourly_mask]
+        equity += np.asarray(row["equity"], dtype=np.float64)[:, hourly_mask]
         inventory_qty += np.asarray(row.get("inventory_qty", np.zeros(count)), dtype=np.float64)
         inventory_value += np.asarray(row.get("inventory_value", np.zeros(count)), dtype=np.float64)
     low_rows = [row.get("low_equity_5m") for row in rows]
     has_low_path = bool(rows) and all(value is not None for value in low_rows)
     if has_low_path:
         timestamps_5m = np.asarray(rows[0].get("timestamps_5m"), dtype=np.int64)
+        if len(times) and horizon_days is not None:
+            low_mask = (timestamps_5m >= times[0]) & (timestamps_5m <= end_at)
+            timestamps_5m = timestamps_5m[low_mask]
+        else:
+            low_mask = slice(None)
         has_low_path = bool(len(timestamps_5m)) and all(np.array_equal(timestamps_5m,
-            np.asarray(row.get("timestamps_5m"), dtype=np.int64)) for row in rows[1:])
+            np.asarray(row.get("timestamps_5m"), dtype=np.int64)[low_mask]) for row in rows[1:])
     if has_low_path:
         low_equity = np.full((count, len(timestamps_5m)), idle, dtype=np.float64)
         for values in low_rows:
-            low_equity += np.asarray(values, dtype=np.float64)
+            low_equity += np.asarray(values, dtype=np.float64)[:, low_mask]
     hit_mask = cash >= float(capital) + float(target)
     hit_exists = hit_mask.any(axis=1)
     hit = np.where(hit_exists, hit_mask.argmax(axis=1), len(times))
@@ -68,7 +82,14 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
         loss_exists = np.zeros(count, dtype=bool)
         loss = np.full(count, len(times), dtype=int)
         cut = np.zeros(count, dtype=bool)
-    end = np.where(cut, loss, len(times) - 1)
+    if has_low_path and max_loss_pct is not None and float(max_loss_pct) > 0:
+        cut_at = timestamps_5m[np.minimum(loss, len(timestamps_5m) - 1)]
+        # Punto horario correspondiente al corte, para inventario y métricas
+        # que usan la trayectoria horaria. El PnL de corte usa el low exacto.
+        hourly_cut = np.maximum(0, np.searchsorted(times, cut_at, side="right") - 1)
+        end = np.where(cut, hourly_cut, len(times) - 1)
+    else:
+        end = np.where(cut, loss, len(times) - 1)
     if has_low_path and max_loss_pct is not None and float(max_loss_pct) > 0:
         cut_equity = low_equity[np.arange(count), np.minimum(loss, len(timestamps_5m) - 1)]
         pnl = np.where(cut, cut_equity, equity[np.arange(count), end]) - float(capital)
