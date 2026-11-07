@@ -245,7 +245,10 @@
     const link = (metaLinks || []).find(row => Number(row.grid_id) === Number(gridId));
     // span, no <a>: estos badges viven dentro de la tarjeta-enlace del grid y un
     // <a> anidado rompería el enlace exterior; la navegación se hace por delegación.
-    return link ? `<span class="status-badge meta-piece-badge" data-meta-badge="${esc(link.meta_id)}" title="Esta pieza pertenece a una meta activa; ir a Metas">Meta #${esc(link.meta_id)}</span>` : '';
+    const status = String(link?.meta_status || '').toUpperCase();
+    const finalStatus = ['CUMPLIDA','CERRADA','DESCARTADA','CANCELADA','CORTADA_POR_PERDIDA','VENCIDA'].includes(status);
+    const label = finalStatus ? `Meta #${link.meta_id} (${status.toLowerCase()})` : `Meta #${link?.meta_id}`;
+    return link ? `<span class="status-badge meta-piece-badge" data-meta-badge="${esc(link.meta_id)}" title="${finalStatus ? 'Meta finalizada; abrir historial' : 'Pieza ligada a una meta; ir a Metas'}">${esc(label)}</span>` : '';
   }
 
   function gridRowHtml(grid, switchLine, metaLinks) {
@@ -712,7 +715,7 @@
 
   document.addEventListener('click', (event) => {
     const badge = event.target.closest('[data-meta-badge]');
-    if (badge) { event.preventDefault(); event.stopPropagation(); location.hash = '#metas'; return; }
+    if (badge) { event.preventDefault(); event.stopPropagation(); location.hash = `#metas/${badge.dataset.metaBadge}`; return; }
     const intelButton = event.target.closest('[data-intel-switch]');
     if (intelButton) {
       event.preventDefault(); event.stopPropagation();

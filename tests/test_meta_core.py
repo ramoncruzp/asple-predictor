@@ -62,6 +62,67 @@ def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     assert row["buy_relative"] == pytest.approx(.99)
 
 
+def test_pieza_vacia_de_meta_final_se_cierra_y_libera_solo_tras_verificar_exchange(tmp_path):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1,
+            range_high=2, n_levels=1, capital_total=20, reserve=0, status="PAUSED",
+            created_at=now, environment="testnet", strategy="bot", params="{}",
+            dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
+            price=1, capital=20, state="DONE", held_qty=0, cycles_completed=1,
+            pnl=3, fee_paid=0, updated_at=now))
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=run_id, grid_id=grid_id, piece_type="individual_bot_grid",
+            origin_grid_id=grid_id, created_at=now))
+
+    from scripts.reparar_piezas_meta_cerrada import listar
+    preview = listar(tmp_path / "meta.sqlite")
+    assert len(preview) == 1 and preview[0]["eligible_local"] is True
+    assert db.get_grid(grid_id)["status"] == "PAUSED"
+
+    class Engine:
+        exchange = SimpleNamespace(get_open_orders=lambda symbol: [])
+        def close_grid(self, grid_id, mode, **kwargs):
+            db.update_grid(grid_id, status="CLOSED")
+            return {"status": "CLOSED"}
+
+    core.engine = Engine()
+    core._finalize_empty_piece_links(goal["id"])
+    with db.engine.connect() as conn:
+        link = conn.execute(select(db.meta_piece_links).where(
+            db.meta_piece_links.c.grid_id == grid_id)).mappings().one()
+    assert db.get_grid(grid_id)["status"] == "CLOSED"
+    assert link["released_at"] is not None
+
+
+def test_tunel_binance_alerta_tras_tres_minutos_y_recuperacion(tmp_path):
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    core.clock = lambda: now[0]
+    failed = {"status": "DESCONOCIDO", "symbol_valuations": {
+        "XRPUSDT": {"read_error": "ProxyError: ConnectionRefusedError"}}}
+
+    core._update_binance_connectivity(failed, 1)
+    now[0] += timedelta(minutes=2, seconds=59)
+    core._update_binance_connectivity(failed, 1)
+    assert alerts == []
+    now[0] += timedelta(seconds=1)
+    core._update_binance_connectivity(failed, 1)
+    assert alerts[0][0] == "BINANCE_CONEXION_CAIDA"
+    assert db.get_alert_state("binance_connectivity")["status"] == "offline"
+    core._update_binance_connectivity({"status": "KNOWN", "symbol_valuations": {}}, 1)
+    assert alerts[-1][0] == "BINANCE_CONEXION_RESTABLECIDA"
+    assert db.get_alert_state("binance_connectivity")["status"] == "connected"
+
+
 def test_bitacora_meta_y_sombra_persisten_json_estricto(tmp_path):
     import json
     from sqlalchemy import select

@@ -404,9 +404,12 @@ class MetaCore:
         from sqlalchemy import select
         with self.db.engine.connect() as conn:
             rows = conn.execute(select(self.db.meta_piece_links.c.grid_id, self.db.meta_piece_links.c.meta_id,
-                self.db.meta_piece_links.c.piece_type).where(
+                self.db.meta_piece_links.c.piece_type, self.db.meta_goals.c.status.label("meta_status")
+                ).select_from(self.db.meta_piece_links.join(self.db.meta_goals,
+                    self.db.meta_piece_links.c.meta_id == self.db.meta_goals.c.id)).where(
                     self.db.meta_piece_links.c.released_at.is_(None))).all()
-        return [{"grid_id": int(row[0]), "meta_id": int(row[1]), "piece_type": row[2]} for row in rows]
+        return [{"grid_id": int(row[0]), "meta_id": int(row[1]), "piece_type": row[2],
+            "meta_status": row[3]} for row in rows]
 
     def _owned_grids(self, meta_id):
         from sqlalchemy import select
@@ -733,7 +736,12 @@ class MetaCore:
                         self.db.meta_runs.c.id.desc())).mappings().first()
             reasons = [f"{symbol}: {item['reason']}" for symbol, item in symbol_diagnostics.items()
                 if item["status"] == "DESCONOCIDO" and item.get("reason")]
+            connection_error = any(any(token in str(item.get("read_error") or "").lower()
+                for token in ("proxyerror", "connectionrefused", "connection refused",
+                    "connecttimeout", "readtimeout", "timed out", "timeout", "tunnel"))
+                for item in symbol_diagnostics.values())
             return {"status": status, "reason": "; ".join(reasons) if reasons else None,
+                    "connection_error": connection_error,
                     "symbol_valuations": symbol_diagnostics,
                     "cash_usdt": str(cash), "free_capital_usdt": str(free_capital),
                     "realized_extra_usdt": str(_d(run.get("realized_extra_usdt")) if run else Decimal(0)),
@@ -749,7 +757,11 @@ class MetaCore:
                            if self.db.get_grid(int(link["grid_id"]))), "UNKNOWN")
             self._update_valuation_state(meta_id, [(symbol, {"status": "DESCONOCIDO", "reason": str(exc),
                 "missing_qty": "0", "missing_value_est": None})], self._profile_settings().get(goal["profile"], {}))
-            return {"status": "DESCONOCIDO", "symbol": symbol, "reason": str(exc), "value_best_bid": None,
+            connection_error = any(token in str(exc).lower() for token in
+                ("proxyerror", "connectionrefused", "connection refused", "connecttimeout",
+                 "readtimeout", "timed out", "timeout", "tunnel"))
+            return {"status": "DESCONOCIDO", "symbol": symbol, "reason": str(exc),
+                    "connection_error": connection_error, "value_best_bid": None,
                     "value_executable": None, "result_pct": None, "pieces": []}
 
     def _update_valuation_state(self, meta_id, states, cfg):
@@ -839,6 +851,7 @@ class MetaCore:
                     results.append({"meta_id": goal["id"], "status": "CLOSING_RETRIED"})
                     continue
                 valuation = self.valuation(goal["id"])
+                self._update_binance_connectivity(valuation, int(goal["id"]))
                 if valuation["status"] == "DESCONOCIDO":
                     with self.db.engine.begin() as conn:
                         conn.execute(self.db.meta_runs.update().where(
@@ -897,6 +910,7 @@ class MetaCore:
                         with self.db.engine.begin() as conn:
                             conn.execute(self.db.meta_goals.update().where(
                                 self.db.meta_goals.c.id == goal["id"]).values(status="CUMPLIDA", finished_at=self._now()))
+                        self._finalize_empty_piece_links(goal["id"])
                         self._ledger(goal["id"], None, "META_SURPLUS_FINISHED", {})
                     results.append({"meta_id": goal["id"], "valuation": valuation, "surplus_wait": True})
                     continue
@@ -923,6 +937,44 @@ class MetaCore:
                     self._close_owned(goal, "VENCIDA")
                 results.append({"meta_id": goal["id"], "valuation": valuation})
             return results
+
+    def _update_binance_connectivity(self, valuation, meta_id):
+        """Persiste caída/restablecimiento del túnel y limita las alertas."""
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        diagnostics = valuation.get("symbol_valuations") or {}
+        errors = [str(item.get("read_error") or item.get("reason") or "")
+            for item in diagnostics.values()]
+        connection_error = any(any(token in error.lower() for token in
+            ("proxyerror", "proxy error", "connectionrefused", "connection refused",
+             "connecttimeout", "readtimeout", "timed out", "timeout", "tunnel"))
+            for error in errors)
+        state = self.db.get_alert_state("binance_connectivity") or {}
+        if connection_error:
+            down_since = state.get("down_since") or now.isoformat()
+            previous_alert = state.get("last_alert_at")
+            state = {"status": "offline", "down_since": down_since,
+                "last_alert_at": previous_alert}
+            start = datetime.fromisoformat(down_since)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            last = datetime.fromisoformat(previous_alert) if previous_alert else None
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if (now - start).total_seconds() >= 180 and (last is None or
+                    (now - last).total_seconds() >= 1800):
+                self.alert("BINANCE_CONEXION_CAIDA", meta_id,
+                    {"down_since": down_since, "reason": next((e for e in errors if e), "error de conexión")})
+                state["last_alert_at"] = now.isoformat()
+        elif valuation.get("status") in {"KNOWN", "PARCIAL"} and state.get("status") == "offline":
+            self.alert("BINANCE_CONEXION_RESTABLECIDA", meta_id,
+                {"down_since": state.get("down_since"), "restored_at": now.isoformat()})
+            state = {"status": "connected", "restored_at": now.isoformat(), "down_since": None}
+        elif not state:
+            state = {"status": "connected" if valuation.get("status") in {"KNOWN", "PARCIAL"}
+                else "unknown", "down_since": None}
+        self.db.set_alert_state("binance_connectivity", state)
 
     def _close_owned(self, goal, result_status):
         from grid.engines.shadow_guard import reject_shadow_side_effect
@@ -1040,6 +1092,63 @@ class MetaCore:
             conn.execute(self.db.meta_runs.update().where(self.db.meta_runs.c.meta_id == int(meta_id),
                 self.db.meta_runs.c.status == "ACTIVE").values(status=status, finished_at=now))
         self._ledger(meta_id, None, "META_" + status, {"surplus_wait": keep_surplus})
+        if not keep_surplus:
+            self._finalize_empty_piece_links(meta_id)
+
+    def _finalize_empty_piece_links(self, meta_id):
+        """Cierra y libera solo piezas vacías confirmadas contra el exchange."""
+        from sqlalchemy import select
+        if self.engine is None:
+            self._ledger(meta_id, None, "META_FINAL_PIECES_REMAIN",
+                {"reason": "engine_no_disponible", "grids": [int(row["grid_id"])
+                    for row in self._owned_grids(meta_id)]})
+            return
+        pending, released = [], []
+        lock = getattr(self.monitor, "ops_lock", self._lock)
+        with lock:
+            for link in self._owned_grids(meta_id):
+                grid_id = int(link["grid_id"])
+                grid = self.db.get_grid(grid_id)
+                if grid is None:
+                    pending.append({"grid_id": grid_id, "reason": "grid_eliminado"})
+                    continue
+                levels = self.db.get_grid_levels(grid_id)
+                local_ids = {int(row["order_id"]) for row in levels if row.get("order_id") is not None}
+                client_ids = {str(row[key]) for row in levels for key in
+                    ("client_order_id", "buy_client_order_id") if row.get(key)}
+                if any(_d(row.get("held_qty")) > 0 or row.get("state") in {"BUY_OPEN", "SELL_OPEN"}
+                        for row in levels):
+                    pending.append({"grid_id": grid_id, "reason": "inventario_o_orden_local_viva"})
+                    continue
+                try:
+                    open_orders = self.engine.exchange.get_open_orders(grid["symbol"])
+                except Exception as exc:
+                    pending.append({"grid_id": grid_id, "reason": f"verificacion_exchange_fallida: {exc}"})
+                    continue
+                owned_open = [order for order in open_orders if
+                    (order.get("order_id") is not None and int(order["order_id"]) in local_ids)
+                    or str(order.get("client_order_id") or order.get("orig_client_order_id") or "") in client_ids]
+                if owned_open:
+                    pending.append({"grid_id": grid_id, "reason": "orden_exchange_viva"})
+                    continue
+                if grid.get("status") != "CLOSED":
+                    try:
+                        outcome = self.engine.close_grid(grid_id, "cancel",
+                            close_reason="meta_terminal_sin_inventario", meta_id=int(meta_id))
+                    except Exception as exc:
+                        pending.append({"grid_id": grid_id, "reason": f"cierre_fallido: {exc}"})
+                        continue
+                    if outcome.get("status") != "CLOSED":
+                        pending.append({"grid_id": grid_id, "reason": "cierre_no_confirmado",
+                            "status": outcome.get("status")})
+                        continue
+                with self.db.engine.begin() as conn:
+                    conn.execute(self.db.meta_piece_links.update().where(
+                        self.db.meta_piece_links.c.id == int(link["id"]),
+                        self.db.meta_piece_links.c.released_at.is_(None)).values(released_at=self._now()))
+                released.append(grid_id)
+        self._ledger(meta_id, None, "META_FINAL_PIECES_CLEANUP",
+            {"released_grid_ids": released, "pending": pending})
 
     def cancellation_plan(self, meta_id):
         valuation = self.valuation(meta_id)
