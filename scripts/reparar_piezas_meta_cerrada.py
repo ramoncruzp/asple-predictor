@@ -43,6 +43,7 @@ def reparar(db_path: Path):
     # comando de inspección no necesite configuración ni pueda escribir.
     from config.settings import Settings
     from data.testnet_client import TestnetClient
+    from data.proxy_config import resolve_binance_proxy
     from database.db_manager import DBManager
     from grid.engine import GridEngine
     from grid.meta import MetaCore
@@ -54,6 +55,9 @@ def reparar(db_path: Path):
     settings.database_url = f"sqlite:///{db_path.resolve().as_posix()}"
     db = DBManager(settings.database_url)
     exchange = TestnetClient(key, secret, production_api_key=settings.binance_api_key)
+    proxy, _source = resolve_binance_proxy()
+    if proxy and getattr(exchange.client, "session", None) is not None:
+        exchange.client.session.proxies.update({"http": proxy, "https": proxy})
     engine = GridEngine(db, exchange, settings)
     core = MetaCore(db, exchange, engine, settings=settings)
     from sqlalchemy import select
@@ -79,6 +83,9 @@ def main(argv=None):
     if not args.db.is_file():
         parser.error(f"no existe la BD: {args.db}")
     if args.confirmar:
+        from data.proxy_config import proxy_label, resolve_binance_proxy
+        proxy, proxy_source = resolve_binance_proxy()
+        print(proxy_label(proxy, proxy_source))
         try:
             result = reparar(args.db)
         except Exception as exc:
