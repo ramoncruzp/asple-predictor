@@ -3,7 +3,8 @@ from decimal import Decimal
 import pytest
 
 from data.exchange_filters import SymbolFilters
-from research.scenarios.candidates import build_candidates, build_smart_candidates
+from research.scenarios.candidates import (build_candidates, build_reconversion_candidates,
+    build_smart_candidates)
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 
 
@@ -98,3 +99,22 @@ def test_smart_candidates_are_limited_to_two_simple_geometries():
     smart = build_smart_candidates(simple)
     assert len(smart) == 2
     assert all(row["strategy"] == "smart" and row["n"] == 6 for row in smart)
+
+
+def test_reconversion_de_bot_con_inventario_genera_geometrias_y_liquida():
+    result = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
+        "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
+        "capital": 70, "has_inventory": True}],
+        price_by_symbol={"ZROUSDT": 1.63}, sigma_by_symbol={"ZROUSDT": .08},
+        wide_range_by_symbol={"ZROUSDT": (1.5, 1.9)},
+        filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=10)
+
+    assert {row["n"] for row in result} == {6, 8, 10}
+    assert {row["reconversion_geometry"] for row in result} == {"sigma_1", "sigma_2", "rango_7d"}
+    assert all(row["reconvert_from_grid_id"] == 18 and
+        row["reconversion_variant"] == "vender_inventario_a_mercado" for row in result)
+    assert not build_reconversion_candidates(live_pieces=[{"grid_id": 19,
+        "piece_type": "individual_bot_grid", "symbol": "ZROUSDT", "capital": 70,
+        "has_inventory": False}], price_by_symbol={"ZROUSDT": 1.63},
+        sigma_by_symbol={"ZROUSDT": .05}, wide_range_by_symbol={},
+        filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=10)

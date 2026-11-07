@@ -27,7 +27,8 @@ if str(ROOT) not in sys.path:
 from data.market_store import CandleStore, market_db_path
 from grid.meta import DEFAULT_PROFILES
 from grid.json_utils import json_dumps_safe, json_safe
-from research.scenarios.candidates import build_candidates, build_smart_candidates
+from research.scenarios.candidates import (build_candidates, build_reconversion_candidates,
+    build_smart_candidates)
 from research.scenarios.evaluate import (_sigma_estimates, evaluate_pieces,
     prepare_scenario_batches, scenario_source_date_plan)
 from research.scenarios.metrics import summarize_outcomes
@@ -360,7 +361,7 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
                 'initial_cells': {'cells': cell_rows, 'cash_usdt': piece_cash,
                     'wait_outside_range': status == 'PAUSED'},
                 'n': int(grid['n_levels']), 'grid_id': grid_id, 'grid_status': status,
-                'piece_type': str(grid['piece_type']), 'is_current': True,
+                'piece_type': str(grid['piece_type']), 'has_inventory': held_qty > 0, 'is_current': True,
                 'candidate_key': f"mantener:{goal_id}:{grid_id}:{symbol}:{grid['n_levels']}:{grid['range_low']}:{grid['range_high']}",
                 'valuation_warning': ('mejor bid no disponible en la cach\u00e9 offline; se usa el cierre '
                     'm\u00e1s reciente como aproximaci\u00f3n' if held_qty > 0 else None)}
@@ -452,9 +453,22 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         horizon_days=context["horizon"], capital_max_by_symbol=capital_max_by_symbol,
         max_grids=profile_config.get("max_grids"), max_bots=profile_config.get("max_bots"),
         current_grids=current_grids, current_bots=current_bots)
+    wide_range_by_symbol = {}
+    for symbol in {str(piece.get("symbol") or "").upper() for piece in current_pieces
+            if piece.get("piece_type") == "individual_bot_grid" and piece.get("has_inventory")}:
+        try:
+            closes = np.asarray(store.load(symbol, "5m").close[-7 * 288:], dtype=float)
+            if closes.size:
+                wide_range_by_symbol[symbol] = (float(np.min(closes)), float(np.max(closes)))
+        except (KeyError, OSError, ValueError):
+            pass
+    reconversions = build_reconversion_candidates(live_pieces=current_pieces,
+        price_by_symbol=prices, sigma_by_symbol=sigmas,
+        wide_range_by_symbol=wide_range_by_symbol, filters_by_symbol=filters,
+        horizon_days=context["horizon"])
     live_piece_details = [{"grid_id": int(piece["grid_id"]),
         "status": piece["grid_status"]} for piece in current_pieces]
-    candidates = current_pieces + built["candidates"][:-1]
+    candidates = current_pieces + built["candidates"][:-1] + reconversions
     if symbol_filter:
         candidates = [piece for piece in candidates
             if str(piece.get("symbol", "")).upper() == str(symbol_filter).upper()]
@@ -1145,7 +1159,12 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
             if trajectory_sink is not None:
                 trajectory_sink(row)
             continue
-        combined = _portfolio_outcome_metrics([*live_rows, row], capital=capital,
+        baseline_rows = live_rows
+        if piece.get("reconvert_from_grid_id") is not None:
+            baseline_rows = [live for live in live_rows
+                if int((live.get("piece") or {}).get("grid_id") or -1) !=
+                    int(piece["reconvert_from_grid_id"])]
+        combined = _portfolio_outcome_metrics([*baseline_rows, row], capital=capital,
             target=target, max_loss_pct=max_loss_pct, horizon=horizon,
             loss_confirm_minutes=loss_confirm_minutes)
         if combined is not None:

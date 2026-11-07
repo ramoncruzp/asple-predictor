@@ -44,6 +44,53 @@ def _simple_candidate(symbol, capital, levels, width_sigma, price, sigma, horizo
         "high": float(high), "candidate_key": None}
 
 
+def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symbol,
+        wide_range_by_symbol, filters_by_symbol, horizon_days):
+    """Genera grids de reemplazo para bots vivos; la variante liquida inventario a mercado."""
+    output = []
+    for live in live_pieces:
+        if live.get("piece_type") != "individual_bot_grid" or not live.get("has_inventory"):
+            continue
+        symbol = str(live.get("symbol") or "").upper()
+        filters = filters_by_symbol.get(symbol)
+        price = float(price_by_symbol.get(symbol) or 0)
+        sigma = float(sigma_by_symbol.get(symbol) or 0)
+        capital = float(live.get("capital") or 0)
+        if filters is None or price <= 0 or sigma <= 0 or capital < 10:
+            continue
+        widths = [("sigma_1", sigma), ("sigma_2", 2 * sigma)]
+        wide = wide_range_by_symbol.get(symbol)
+        if wide and float(wide[0]) > 0 and float(wide[1]) > float(wide[0]):
+            widths.append(("rango_7d", None))
+        for n in (6, 8, 10):
+            for label, width_sigma in widths:
+                try:
+                    if width_sigma is None:
+                        low, high = map(float, wide)
+                        lines = compute_lines(str(low), str(high), n, filters)
+                        plans = plan_cells(lines, str(capital), _market(price), filters,
+                            {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
+                        for plan in plans:
+                            net_qty = filters.round_qty_down(plan.qty * Decimal("0.999"))
+                            if net_qty < filters.min_qty or net_qty * plan.sell_price < filters.min_notional:
+                                raise ValueError(f"level {plan.level_idx} net sell does not meet quantity/notional filters")
+                        candidate = {"symbol": symbol, "strategy": "simple", "capital": capital,
+                            "n": n, "low": low, "high": high, "width_sigma": 0.0}
+                    else:
+                        candidate = _simple_candidate(symbol, capital, n, width_sigma, price,
+                            sigma, horizon_days, filters)
+                    candidate.update({"reconversion": True,
+                        "reconversion_variant": "vender_inventario_a_mercado",
+                        "reconvert_from_grid_id": int(live["grid_id"]),
+                        "reconversion_geometry": label, "piece_type": "grid"})
+                    candidate["candidate_key"] = _key({key: value for key, value in candidate.items()
+                        if key != "candidate_key"})
+                    output.append(candidate)
+                except (GridConfigError, ValueError, ArithmeticError):
+                    continue
+    return output
+
+
 def _bot_candidate(symbol, capital, buy_offset, sell_offset, price, filters, profile):
     buy = float(price) * (1 + float(buy_offset) / 100)
     sell = float(price) * (1 + float(sell_offset) / 100)
