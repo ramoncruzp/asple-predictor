@@ -22,7 +22,11 @@ def resolve_binance_proxy(*, environ=None, runner=subprocess.run, unit=SERVICE_U
     if proxy:
         return proxy, "entorno"
     try:
-        result = runner(["systemctl", "show", str(unit), "-p", "Environment", "--value"],
+        # Filtra antes de devolver stdout al proceso: no se leen otras variables
+        # de Environment aunque la propiedad de systemd contenga secretos.
+        command = (f"systemctl show {shlex.quote(str(unit))} -p Environment --value "
+            "| grep -oE '(^|[[:space:]])(HTTPS_PROXY|HTTP_PROXY)=[^[:space:]]+'").strip()
+        result = runner(["bash", "-lc", command],
             capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None, None

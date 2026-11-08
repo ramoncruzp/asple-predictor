@@ -500,3 +500,15 @@ La validación deja las geometrías sin variación predictiva y observada en su 
 La validación de candidatos Simple verifica compra y venta neta con redondeo de cantidad, comisión de 0,1 %, `min_qty` y `min_notional`; el bot usa los filtros del simulador. Los escenarios se generan una vez por moneda y se reutilizan para lotes de hasta seis piezas; el evaluador no devuelve curvas cuando la caché solo necesita métricas. La bisección opera dentro del lote y reutiliza los escenarios.
 
 El proceso aplica `--max-rss-mb=600` y `--max-segundos=540` por defecto, mide RSS cada 2 s, guarda resultados completados y devuelve 3 (`memoria`) o 4 (`timeout`). Las corridas `running` mayores de 30 minutos se marcan `abandonada`. Medición sintética: cinco monedas, 1.000 escenarios, 15 días, `ok`, 204,09 MB y 223,71 s. Los interruptores de caché, motor v2 y marcador de sombra continúan apagados por defecto; la regresión conserva la decisión v1 de `776eedf`.
+
+### 43h-0u2 y 43h-0v ? proxy de scripts y exploraci?n v2
+
+El script de reparaci?n resuelve el proxy en este orden: `HTTPS_PROXY`/`HTTP_PROXY` del entorno; si faltan, filtra `Environment=` de la unidad systemd `asple-predictor` para recibir ?nicamente esas dos claves. No lee `.env` ni imprime otras variables; la etiqueta solo muestra host y puerto. Sin proxy configurado avisa que desde S1 puede fallar.
+
+G1 compara la ganancia esperada nueva neta de comisiones de salida y entrada; la p?rdida realizada ya est? recogida en el patrimonio y no se vuelve a restar cuando el interruptor de exploraci?n est? activo. G2 cambia a `modo=exploracion` si ninguna alternativa ni pieza vigente tiene P(meta) de al menos 5 %: maximiza EV y desempata por ciclos esperados, sin piso de EV, conservando los topes de P(l?mite) y desliz esperado; agregar exige mejorar EV de cartera en al menos 0,2 USDT y pasar los mismos frenos de riesgo.
+
+G3 persiste en la decisi?n y expone en bit?cora y tarjeta la comparaci?n mantener/alternativa, geometr?a, capital, P(meta), EV, P(l?mite), desliz esperado, modo y motivo. G4 usa dos revisiones consecutivas iguales separadas al menos 15 minutos, seis horas de enfriamiento por pieza y m?ximo dos cambios/agregados por meta en 24 horas. La ejecuci?n activa v2 conserva el candado, validaci?n de l?mites, abribilidad y cierre verificado; no pasa por los filtros de materialidad/racha de v1. Las guardas de sombra contin?an bloqueando efectos.
+
+La reconversi?n genera grids Simple de 6/8/10 niveles con bandas de 1?, 2? y rango observado de siete d?as. En esta versi?n solo est? implementada la variante de vender el inventario a mercado y abrir con el capital liquidable. La variante de transferir inventario requiere que la ruta de apertura/restauraci?n acepte celdas con inventario inicial, capacidad que el mecanismo actual no expone.
+
+El interruptor `v2 modo exploraci?n (Testnet)` se predetermina encendido cuando la instalaci?n tiene Testnet configurado; un valor expl?cito puede apagarlo. Esto no enciende el motor global ni la cach?: ambos siguen apagados por defecto y el perfil contin?a en v1. Con el interruptor apagado, v2 conserva las rutas de ejecuci?n previas.

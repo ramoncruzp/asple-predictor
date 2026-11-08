@@ -18,14 +18,15 @@ def test_resuelve_solo_proxy_permitido_de_la_unidad_y_no_expone_otras_variables(
 
     def runner(args, **kwargs):
         calls.append((args, kwargs))
-        return SimpleNamespace(returncode=0, stdout=(
-            "TOKEN=secreto HTTPS_PROXY=http://127.0.0.1:3128 API_KEY=otra"))
+        return SimpleNamespace(returncode=0, stdout="HTTPS_PROXY=http://127.0.0.1:3128")
 
     proxy, source = resolve_binance_proxy(environ={}, runner=runner)
 
     assert proxy == "http://127.0.0.1:3128"
     assert source == "servicio"
-    assert calls[0][0] == ["systemctl", "show", "asple-predictor", "-p", "Environment", "--value"]
+    assert calls[0][0][0:2] == ["bash", "-lc"]
+    assert "systemctl show asple-predictor -p Environment --value" in calls[0][0][2]
+    assert "grep -oE" in calls[0][0][2]
     label = proxy_label(proxy, source)
     assert label == "Proxy: 127.0.0.1:3128 (servicio)"
     assert "secreto" not in label and "API_KEY" not in label

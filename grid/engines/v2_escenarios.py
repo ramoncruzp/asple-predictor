@@ -609,6 +609,7 @@ class V2ScenarioEngine(DecisionEngine):
         from contextlib import nullcontext
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
+        exploration_enabled = bool((plan or {}).get("exploration_enabled"))
         action_key = None
         subject = None
         grid_id = None
@@ -619,17 +620,26 @@ class V2ScenarioEngine(DecisionEngine):
             subject = str(grid_id) if grid_id is not None else str(
                 alternative.get("cache_candidate_key") or piece.get("symbol") or "")
             action_key = f"{action.get('type')}:{subject}:{alternative.get('cache_candidate_key') or alternative.get('alternative_id')}"
-        brake = self._v2_brake(operator, goal, action_key=action_key,
-            subject=subject, grid_id=grid_id)
-        if brake:
-            return json_safe({"decision": "mantener", "modo": decision.get("modo", "meta"),
-                "reason": brake, "comparison_v2": decision.get("comparison_v2"),
-                "freno": brake})
+        if exploration_enabled:
+            brake = self._v2_brake(operator, goal, action_key=action_key,
+                subject=subject, grid_id=grid_id)
+            if brake:
+                return json_safe({"decision": "mantener", "modo": decision.get("modo", "meta"),
+                    "reason": brake, "comparison_v2": decision.get("comparison_v2"),
+                    "freno": brake})
         if not action:
             return json_safe(decision)
         lock = getattr(operator, "_operation_lock", None)
         with lock if lock is not None else nullcontext():
-            if action["type"] == "rotar":
+            if not exploration_enabled and action["type"] == "rotar":
+                executed = operator._review_allocations(goal, valuation,
+                    plan=action.get("plan") or plan)
+            elif not exploration_enabled and action["type"] == "agregar":
+                from grid.meta_live_pieces import live_meta_grid_links
+                links = live_meta_grid_links(operator.core, int(goal["id"]))
+                executed = operator._add_piece_from_free_cash(goal, links,
+                    {"alternatives": [action["alternative"]]}, valuation=valuation)
+            elif action["type"] == "rotar":
                 executed = self._execute_rotation_v2(operator, goal, action)
             elif action["type"] == "agregar":
                 from grid.meta_live_pieces import live_meta_grid_links

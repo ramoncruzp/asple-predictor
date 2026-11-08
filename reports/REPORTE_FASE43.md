@@ -1063,3 +1063,9 @@ El almacén offline no contiene el mejor bid ni una valoración ejecutable recie
 El tope por defecto de la cache es 900 MiB; `ASPLE_SCENARIO_CACHE_MAX_RSS_MB` permite configurarlo sin cargar `.env`. El job sigue apagado mientras no se active su interruptor de Laboratorio. El desempaquetado Smart usa la tupla de tres componentes que devuelve `unpack_curve`. El evaluador de perfil procesa lotes de hasta seis piezas y libera sus trayectorias al terminar cada moneda; conserva un maximo de 12 finalistas a traves del contexto y emite `rss_por_moneda`.
 
 La prueba sintetica RAPIDO con cinco monedas, 1.000 escenarios y horizonte de 15 dias midio **631,79 MB VmHWM**, con **2,124 s** para evaluar y archivar 12 finalistas. La prueba de Smart con trayectoria 5m cubre la ruta que fallaba. La regresion v1 contra `776eedf` paso. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+### 43h-0u2 y 43h-0v ? proxy y modo exploraci?n v2
+
+Se a?adi? resoluci?n segura del proxy del servicio para el script de reparaci?n. El v2 incorpora reconversi?n de bot a grid con venta del inventario, objetivo G1/G2, exploraci?n condicionada por interruptor, frenos G4 propios y auditor?a G3 visible. El camino v1 y las guardas de sombra se conservaron. La variante de transferencia directa del inventario queda pendiente porque el mecanismo actual de apertura no acepta estado inicial de celdas.
+
+El interruptor de exploraci?n se predetermina encendido solo con Testnet configurado; el motor v2 global y la cach? permanecen apagados por defecto. Con el interruptor apagado, se conservan las rutas de ejecuci?n de 43h-0u. Validaci?n final: 62 pruebas enfocadas pasaron; `node --check frontend/metas.js` pas? y el verificador de codificaci?n termin? con cero hallazgos. No se usaron S1, Testnet, `.env`, bases reales ni red.

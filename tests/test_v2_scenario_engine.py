@@ -639,6 +639,7 @@ def test_revision_v2_mantiene_si_no_supera_umbral():
 def test_revision_v2_cambia_solo_tras_comparacion_neta_y_delega_frenos():
     calls = []
     operator, goal, valuation, plan = _review_fixture()
+    plan["exploration_enabled"] = True
     engine = V2ScenarioEngine()
     engine._execute_rotation_v2 = lambda _operator, _goal, action: calls.append(action) or {
         "decision": "cerrar_y_reasignar"}
@@ -721,6 +722,7 @@ def test_sombra_v2_de_meta_v1_no_actua_y_solo_persiste_sombra_y_bitacora(
     valuation = {"pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}],
         "symbol_valuations": {"JUPUSDT": {"best_bid": .25}}}
     plan = _shadow_action_plan(action)
+    plan["exploration_enabled"] = True
     monkeypatch.setattr(V2ScenarioEngine, "plan",
         lambda _self, _operator, _goal, **_kwargs: plan)
     class CountingExchange:
@@ -786,6 +788,7 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action, monkeypatch):
         "pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}],
         "symbol_valuations": {"JUPUSDT": {"best_bid": .25}}}
     plan = _shadow_action_plan(action)
+    plan["exploration_enabled"] = True
     state = {"held": False, "seen": [], "ledger": [], "now": 1000.0}
 
     class OperationLock:
@@ -1094,3 +1097,94 @@ def test_bitacora_compacta_conserva_auditoria_v2():
         "comparison_v2": comparison, "freno": None})
     assert compact["modo"] == "exploracion"
     assert compact["comparison_v2"] == comparison
+
+
+def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
+    from threading import RLock
+    now = {"value": 10_000.0}
+    ledger = []
+    calls = []
+    goal = {"id": 77, "profile": "RAPIDO", "capital_initial": 100,
+        "target_usdt": 10, "status": "ACTIVE",
+        "config_snapshot": {"decision_engine": "v2", "warning_loss_pct": 20}}
+    keep_piece = {"grid_id": 18, "symbol": "ZROUSDT", "strategy": "bot",
+        "floor": 1.58, "ceiling": 1.87, "capital_usdt": 70, "n_levels": 1,
+        "piece_type": "individual_bot_grid"}
+    convert_piece = {"symbol": "ZROUSDT", "strategy": "simple",
+        "floor": 1.42, "ceiling": 1.91, "capital_usdt": 70, "n_levels": 8,
+        "piece_type": "grid", "reconversion": True}
+    keep_est = {"probability": .01, "pnl_mean_usdt": -8,
+        "pnl_mean_ci95": [-9, -7], "evidence_sufficient": True}
+    alt_est = {"probability": .02, "pnl_mean_usdt": 1.2,
+        "pnl_mean_ci95": [.8, 1.6], "p_loss": .01,
+        "p_loss_ci95": [0, .02], "cut_slippage_expected_usdt": .1,
+        "p_target": .02, "evidence_sufficient": True}
+    keep = {"alternative_id": "keep-18", "symbol": "ZROUSDT",
+        "strategy": "bot", "pieces": [keep_piece], "estimate": keep_est,
+        "cache_candidate_key": "keep-18", "is_current": True,
+        "objective": {"factible": True}}
+    candidate = {"alternative_id": "reconvert-18", "symbol": "ZROUSDT",
+        "strategy": "simple", "pieces": [convert_piece], "estimate": alt_est,
+        "metrics": {**alt_est, "cycles_expected": 2.4},
+        "cache_candidate_key": "reconvert-18", "is_current": False,
+        "objective": {"factible": False, "motivos": ["piso de EV"]}}
+    plan = {"alternatives": [candidate, keep], "current_pieces": {"18": {
+        "piece": keep_piece, "estimate": keep_est, "alternative_id": "keep-18"}},
+        "exploration_enabled": True, "profile_config": {"p_limit_cap": 15,
+            "cut_slippage_expected_max_pct": .5}, "cache": {"run_id": "synthetic"}}
+    class Exchange:
+        def close_grid(self, grid_id, mode, **kwargs):
+            calls.append(("close", grid_id, mode))
+            return {"status": "CLOSED", "realized_pnl_usdt": -8}
+    operator = SimpleNamespace(core=SimpleNamespace(_owned_grids=lambda _id: [
+            {"grid_id": 18, "piece_type": "individual_bot_grid"}]),
+        db=SimpleNamespace(get_grid=lambda _id: {"id": 18, "symbol": "ZROUSDT",
+            "status": "ACTIVE", "capital_total": 70},
+            get_grid_levels=lambda _id: [{"held_qty": 39.12}]),
+        engine=Exchange(), _operation_lock=RLock(), clock=lambda: now["value"],
+        _meta_ledger_rows=lambda _id: list(ledger),
+        _ledger=lambda _id, event, details, **kwargs: ledger.append({
+            "event_type": event, "details": details, "grid_id": kwargs.get("grid_id")}),
+        _validate_v2_plan_limits=lambda *_args, **_kwargs: calls.append(("validate",)),
+        _testnet_openability=lambda *_args, **_kwargs: {"allowed": True},
+        _open_replacement=lambda _goal, _alternative, _capital: (
+            calls.append(("open", "ZROUSDT", 8)) or {"grid_id": 19}))
+    engine = V2ScenarioEngine()
+    decision = engine.decide(operator, goal, {"pieces": [{"grid_id": 18,
+        "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}],
+        "symbol_valuations": {}}]}, plan)
+    assert decision["decision"] == "cambiar"
+    assert decision["modo"] == "exploracion"
+    assert decision["proposed_action"]["alternative"]["alternative_id"] == "reconvert-18"
+    first = engine.review(operator, goal, {}, plan)
+    assert first["decision"] == "mantener" and not calls
+    now["value"] += 901
+    second = engine.review(operator, goal, {"pieces": [{"grid_id": 18,
+        "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}],
+        "symbol_valuations": {}}]}, plan)
+    assert second["decision"] == "rotar_v2"
+    assert [row[0] for row in calls if row[0] in {"close", "open"}] == ["close", "open"]
+    now["value"] += 901
+    third = engine.review(operator, goal, {}, plan)
+    assert third["decision"] == "mantener" and "6 horas" in third["reason"]
+    assert [row[0] for row in calls if row[0] == "close"] == ["close"]
+
+
+def test_interruptor_exploracion_apagado_conserva_no_cambiar():
+    operator, goal, valuation, plan = _review_fixture(alt_probability=.02,
+        current_probability=.01, alt_pnl=1.2, current_pnl=-8)
+    valuation["pieces"][0]["levels"] = [{"held_qty": 39.12, "entry_price": 1.789}]
+    valuation["symbol_valuations"] = {"ZROUSDT": {"best_bid": 1.63}}
+    plan["exploration_enabled"] = False
+    result = V2ScenarioEngine().decide(operator, goal, valuation, plan)
+    assert result["decision"] == "mantener"
+
+
+def test_interruptor_exploracion_apagado_delega_en_comportamiento_previo():
+    operator, goal, valuation, plan = _review_fixture()
+    calls = []
+    operator._review_allocations = lambda _goal, _value, plan=None: (
+        calls.append(plan) or {"decision": "cerrar_y_reasignar"})
+    result = V2ScenarioEngine().review(operator, goal, valuation, plan)
+    assert result["decision"] == "cerrar_y_reasignar"
+    assert len(calls) == 1

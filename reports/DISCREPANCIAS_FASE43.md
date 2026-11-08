@@ -862,3 +862,13 @@ $env:ASPLE_OFFLINE='1'; $testBaseTemp=Join-Path $env:TEMP ('asple-pytest-43h0o-'
 ```
 
 Resultado: **46 pasaron y 1 se omitio** en 12,99 s; la omitida requiere Linux para demostrar que `VmHWM` de un hijo no hereda el pico del padre. La regresion v1 contra `776eedf` paso. `py_compile`, `git diff --check` y el verificador de codificacion se ejecutan antes del commit.
+
+### 43h-0u2 y 43h-0v ? evidencia local
+
+Comando enfocado final (PowerShell):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; pytest -q tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf tests/test_v2_scenario_engine.py tests/test_scenarios_objective.py tests/test_scenario_portfolio.py tests/test_proxy_config.py tests/test_scenarios_candidates.py --basetemp=.pytest_tmp
+```
+
+Resultado: 62 pasaron en 8,20 s. Incluye el caso sint?tico Meta #7, la reconversi?n, modo exploraci?n y G1/G2, frenos G4, proxy de servicio, persistencia de auditor?a, guardas de sombra, comportamiento previo con el interruptor apagado y regresi?n v1 contra `776eedf`. `node --check frontend/metas.js` pas?. En el caso sint?tico hubo cero llamadas al exchange en la primera revisi?n; la segunda, tras 15 minutos, cerr? el bot y abri? el grid; el freno de seis horas impidi? repetir la acci?n. No se consult? red, S1, Testnet, `.env` ni BD real.
