@@ -349,6 +349,9 @@ class V2ScenarioEngine(DecisionEngine):
                     "median_progress_pct": metrics.get("median_progress_pct")},
                 "objective": candidate["objective"], "metrics": metrics,
                 "cache_candidate_key": candidate["candidate_key"],
+                "relative_params": {key: candidate["params"].get(key) for key in (
+                    "width_sigma", "buy_offset_pct", "sell_offset_pct", "range_type", "band")
+                    if candidate["params"].get(key) is not None},
                 "is_current": bool(candidate["params"].get("is_current"))})
         selected = ranked[0] if ranked else None
         selected_key = (selected.get("candidate_key") or
@@ -607,6 +610,7 @@ class V2ScenarioEngine(DecisionEngine):
     def review(self, operator, goal, valuation, plan):
         """Ejecuta una decisión v2 con sus propios frenos y validaciones comunes."""
         from contextlib import nullcontext
+        review_at_s = self._operator_now(operator)
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
         exploration_enabled = bool((plan or {}).get("exploration_enabled"))
@@ -619,10 +623,10 @@ class V2ScenarioEngine(DecisionEngine):
             grid_id = action.get("grid_id")
             subject = str(grid_id) if grid_id is not None else str(
                 alternative.get("cache_candidate_key") or piece.get("symbol") or "")
-            action_key = f"{action.get('type')}:{subject}:{alternative.get('cache_candidate_key') or alternative.get('alternative_id')}"
+            action_key = self._stable_action_key(action, alternative, piece, grid_id)
         if exploration_enabled:
             brake = self._v2_brake(operator, goal, action_key=action_key,
-                subject=subject, grid_id=grid_id)
+                subject=subject, grid_id=grid_id, review_at_s=review_at_s)
             if brake:
                 return json_safe({"decision": "mantener", "modo": decision.get("modo", "meta"),
                     "reason": brake, "comparison_v2": decision.get("comparison_v2"),
@@ -665,7 +669,7 @@ class V2ScenarioEngine(DecisionEngine):
             "action_key": action_key, "subject": subject,
             "action_type": action["type"], "grid_id": grid_id,
             "alternative_id": action.get("alternative", {}).get("alternative_id"),
-            "review_at_s": self._operator_now(operator), "result": executed}, grid_id=grid_id)
+            "review_at_s": review_at_s, "result": executed}, grid_id=grid_id)
         return json_safe({**executed, "modo": decision.get("modo", "meta"),
             "comparison_v2": decision.get("comparison_v2")})
 
@@ -675,23 +679,50 @@ class V2ScenarioEngine(DecisionEngine):
         clock = getattr(operator, "clock", None)
         return float(clock()) if callable(clock) else time.time()
 
+    @staticmethod
+    def _stable_action_key(action, alternative, piece, grid_id):
+        """Construye la identidad de una acción con geometría relativa, sin precios."""
+        action_type = str(action.get("type") or "")
+        symbol = str(piece.get("symbol") or alternative.get("symbol") or "").upper()
+        strategy = ("bot" if piece.get("piece_type") == "individual_bot_grid" else
+            str(alternative.get("strategy") or piece.get("strategy") or "").lower())
+        levels = int(piece.get("n_levels", piece.get("n", 1)) or 1)
+        params = alternative.get("relative_params") or alternative.get("params") or piece
+        if strategy == "bot":
+            width = "bot:" + ":".join(str(params.get(name, "")) for name in
+                ("buy_offset_pct", "sell_offset_pct"))
+        else:
+            width_value = params.get("width_sigma")
+            if width_value is None:
+                width_value = params.get("band") or params.get("width") or params.get("range_type") or ""
+            width = str(width_value)
+        grid = str(grid_id if grid_id is not None else "-")
+        return f"{action_type}:grid={grid}|{symbol}:{strategy}:{levels}:{width}"
+
     @classmethod
-    def _v2_brake(cls, operator, goal, *, action_key, subject, grid_id):
+    def _v2_brake(cls, operator, goal, *, action_key, subject, grid_id, review_at_s=None):
         rows_reader = getattr(operator, "_meta_ledger_rows", None)
         ledger = getattr(operator, "_ledger", None)
         if not callable(rows_reader) or not callable(ledger):
             return None
         rows = list(rows_reader(int(goal["id"]))) if callable(rows_reader) else []
         prior_reviews = [row for row in rows if row.get("event_type") == "META_V2_REVIEW"]
-        prior = prior_reviews[-1].get("details", {}) if prior_reviews else {}
-        now = cls._operator_now(operator)
+        now = cls._operator_now(operator) if review_at_s is None else float(review_at_s)
         review = {"action_key": action_key, "subject": subject, "grid_id": grid_id,
             "review_at_s": now}
         ledger(int(goal["id"]), "META_V2_REVIEW", review, grid_id=grid_id)
         if not action_key:
             return None
-        if prior.get("action_key") != action_key or now - float(prior.get("review_at_s") or 0) < 900:
-            reason = "persistencia v2: se requieren dos revisiones consecutivas separadas por 15 minutos"
+        previous_streak = []
+        for row in reversed(prior_reviews):
+            details = row.get("details", {})
+            if details.get("action_key") != action_key:
+                break
+            previous_streak.append(details)
+        first_at = (min(float(item.get("review_at_s") or now) for item in previous_streak)
+            if previous_streak else None)
+        if first_at is None or now - first_at < 840:
+            reason = "persistencia v2: se requieren dos revisiones consecutivas separadas por 14 minutos"
             ledger(int(goal["id"]), "META_V2_FRENO", {**review, "reason": reason},
                 grid_id=grid_id)
             return reason

@@ -1043,7 +1043,7 @@ def test_engine_shadow_decision_se_persiste_en_tabla_temporal(engine_databases):
     assert history["events"][0]["shadow_outcome"] is None
 
 
-def test_interruptor_exploracion_por_defecto_encendido_solo_con_testnet(engine_databases):
+def test_interruptor_exploracion_por_defecto_encendido_y_respeta_valor_guardado(engine_databases):
     db, _market_path = engine_databases
     operator = object.__new__(MetaOperator)
     operator.db = db
@@ -1053,6 +1053,10 @@ def test_interruptor_exploracion_por_defecto_encendido_solo_con_testnet(engine_d
     assert status["enabled"] is True
     assert status["defaulted"] is True
     assert status["environment"] == "testnet"
+    operator.core.settings.testnet_api_key = None
+    status = MetaOperator.v2_exploration_status(operator)
+    assert status["enabled"] is True
+    assert status["defaulted"] is True
     MetaOperator.set_v2_exploration_enabled(operator, False, confirm=True, actor="prueba")
     assert MetaOperator.v2_exploration_status(operator)["enabled"] is False
 
@@ -1087,6 +1091,70 @@ def test_frenos_v2_persistencia_cooldown_y_limite_diario():
     brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
         action_key="rotar:8:candidate", subject="8", grid_id=8)
     assert "dos cambios" in brake
+
+
+def test_freno_v2_persistencia_tolera_897s_y_revisiones_extra_de_la_misma_accion():
+    now = {"value": 20_000.0}
+    rows = []
+    operator = SimpleNamespace(clock=lambda: now["value"],
+        _meta_ledger_rows=lambda _goal_id: list(rows),
+        _ledger=lambda _goal_id, event_type, details, **_kwargs: rows.append({
+            "event_type": event_type, "details": details}))
+    key = "rotar:grid=8|ZROUSDT:simple:8:1.0"
+    assert V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+        subject="8", grid_id=8) is not None
+    now["value"] += 897
+    assert V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+        subject="8", grid_id=8) is None
+
+    rows.clear()
+    now["value"] = 30_000.0
+    assert V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+        subject="8", grid_id=8) is not None
+    now["value"] += 400
+    assert V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+        subject="8", grid_id=8) is not None
+    now["value"] += 497
+    assert V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+        subject="8", grid_id=8) is None
+
+
+def test_clave_accion_v2_es_relativa_y_cambia_con_la_geometria():
+    action = {"type": "agregar"}
+    alternative = {"params": {"width_sigma": 1.0}}
+    piece_a = {"symbol": "ZROUSDT", "strategy": "simple", "n_levels": 8,
+        "floor": 1.5, "ceiling": 2.1, "mid_at_plan": 1.8}
+    piece_b = {**piece_a, "floor": 1.6, "ceiling": 2.24, "mid_at_plan": 1.92}
+    key_a = V2ScenarioEngine._stable_action_key(action, alternative, piece_a, None)
+    key_b = V2ScenarioEngine._stable_action_key(action, alternative, piece_b, None)
+    assert key_a == key_b
+    changed = V2ScenarioEngine._stable_action_key(action,
+        {"params": {"width_sigma": 2.0}}, piece_b, None)
+    assert changed != key_b
+    bot_piece_a = {"symbol": "ZROUSDT", "strategy": "simple",
+        "piece_type": "individual_bot_grid", "floor": 1.7, "ceiling": 1.9}
+    bot_piece_b = {**bot_piece_a, "floor": 1.8, "ceiling": 2.0}
+    bot_params = {"buy_offset_pct": -1.5, "sell_offset_pct": 1.5}
+    bot_key_a = V2ScenarioEngine._stable_action_key(action,
+        {"strategy": "bot", "relative_params": bot_params}, bot_piece_a, None)
+    bot_key_b = V2ScenarioEngine._stable_action_key(action,
+        {"strategy": "bot", "relative_params": bot_params}, bot_piece_b, None)
+    assert bot_key_a == bot_key_b
+
+
+def test_cambio_de_clave_reinicia_persistencia_v2():
+    now = {"value": 20_000.0}
+    rows = []
+    operator = SimpleNamespace(clock=lambda: now["value"],
+        _meta_ledger_rows=lambda _goal_id: list(rows),
+        _ledger=lambda _goal_id, event_type, details, **_kwargs: rows.append({
+            "event_type": event_type, "details": details}))
+    for key, elapsed in (("acción-a", 0), ("acción-b", 900)):
+        now["value"] = 20_000.0 + elapsed
+        brake = V2ScenarioEngine._v2_brake(operator, {"id": 3}, action_key=key,
+            subject="ZROUSDT", grid_id=None)
+    assert brake is not None
+    assert "persistencia" in brake
 
 
 def test_bitacora_compacta_conserva_auditoria_v2():

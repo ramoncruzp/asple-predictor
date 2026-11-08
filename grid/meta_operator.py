@@ -1053,22 +1053,17 @@ class MetaOperator:
             enabled, confirm=confirm, actor=actor)
 
     def v2_exploration_status(self):
-        from sqlalchemy import select
         with self.db.engine.connect() as conn:
+            from sqlalchemy import select
             raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
                 self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
             values = json.loads(raw or "{}")
         explicit = "v2_exploration_enabled" in values
         testnet = bool(getattr(getattr(self, "core", None), "settings", None) and
             getattr(self.core.settings, "testnet_api_key", None))
-        if not testnet:
-            try:
-                testnet = bool(self.core.db.meta_goals.select().limit(1).execute().first())
-            except Exception:
-                testnet = True
         result = self._global_switch_status("v2_exploration_enabled",
             "v2_exploration_switch_events")
-        result["enabled"] = bool(values.get("v2_exploration_enabled", testnet))
+        result["enabled"] = bool(values.get("v2_exploration_enabled", True))
         result["defaulted"] = not explicit
         result["environment"] = "testnet" if testnet else "unknown"
         return result
