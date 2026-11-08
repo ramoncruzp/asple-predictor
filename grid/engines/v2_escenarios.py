@@ -593,25 +593,129 @@ class V2ScenarioEngine(DecisionEngine):
             "cache_run_id": (plan.get("cache") or {}).get("run_id")})
 
     def review(self, operator, goal, valuation, plan):
-        """Ejecuta la decision pura mediante los frenos actuales del operador."""
+        """Ejecuta una decisión v2 con sus propios frenos y validaciones comunes."""
+        from contextlib import nullcontext
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
+        action_key = None
+        subject = None
+        grid_id = None
+        if action:
+            alternative = action.get("alternative") or {}
+            piece = (alternative.get("pieces") or [{}])[0]
+            grid_id = action.get("grid_id")
+            subject = str(grid_id) if grid_id is not None else str(
+                alternative.get("cache_candidate_key") or piece.get("symbol") or "")
+            action_key = f"{action.get('type')}:{subject}:{alternative.get('cache_candidate_key') or alternative.get('alternative_id')}"
+        brake = self._v2_brake(operator, goal, action_key=action_key,
+            subject=subject, grid_id=grid_id)
+        if brake:
+            return json_safe({"decision": "mantener", "modo": decision.get("modo", "meta"),
+                "reason": brake, "comparison_v2": decision.get("comparison_v2"),
+                "freno": brake})
         if not action:
             return json_safe(decision)
-        if action["type"] == "rotar":
-            executed = operator._review_allocations(goal, valuation, plan=action["plan"])
-        elif action["type"] == "agregar":
-            from grid.meta_live_pieces import live_meta_grid_links
-            links = live_meta_grid_links(operator.core, int(goal["id"]))
-            executed = operator._add_piece_from_free_cash(goal, links,
-                {"alternatives": [action["alternative"]]}, valuation=valuation)
-        else:
-            return json_safe({"decision": "no_hacer_nada", "reason": "accion v2 desconocida"})
-        if not executed:
+        lock = getattr(operator, "_operation_lock", None)
+        with lock if lock is not None else nullcontext():
+            if action["type"] == "rotar":
+                executed = self._execute_rotation_v2(operator, goal, action)
+            elif action["type"] == "agregar":
+                from grid.meta_live_pieces import live_meta_grid_links
+                links = live_meta_grid_links(operator.core, int(goal["id"]))
+                validator = getattr(operator, "_validate_v2_plan_limits", None)
+                if callable(validator):
+                    validator(goal, {"pieces": action["alternative"].get("pieces", [])})
+                executed = operator._add_piece_from_free_cash(goal, links,
+                    {"alternatives": [action["alternative"]]}, valuation=valuation)
+            else:
+                return json_safe({"decision": "no_hacer_nada", "reason": "acción v2 desconocida"})
+        if not executed or (isinstance(executed, dict) and
+                executed.get("decision") == "no_hacer_nada"):
+            if isinstance(executed, dict):
+                return json_safe({**executed,
+                    "comparison_v2": decision.get("comparison_v2")})
             return json_safe({"decision": "mantener",
-                "reason": "la ejecucion fue rechazada por los frenos activos",
+                "reason": "la ejecución v2 no se completó",
                 "comparison_v2": decision.get("comparison_v2")})
+        ledger = getattr(operator, "_ledger", None)
+        if callable(ledger):
+            ledger(int(goal["id"]), "META_V2_ACTION", {
+            "action_key": action_key, "subject": subject,
+            "action_type": action["type"], "grid_id": grid_id,
+            "alternative_id": action.get("alternative", {}).get("alternative_id"),
+            "review_at_s": self._operator_now(operator), "result": executed}, grid_id=grid_id)
         return json_safe({**executed, "comparison_v2": decision.get("comparison_v2")})
+
+    @staticmethod
+    def _operator_now(operator):
+        import time
+        clock = getattr(operator, "clock", None)
+        return float(clock()) if callable(clock) else time.time()
+
+    @classmethod
+    def _v2_brake(cls, operator, goal, *, action_key, subject, grid_id):
+        rows_reader = getattr(operator, "_meta_ledger_rows", None)
+        ledger = getattr(operator, "_ledger", None)
+        if not callable(rows_reader) or not callable(ledger):
+            return None
+        rows = list(rows_reader(int(goal["id"]))) if callable(rows_reader) else []
+        prior_reviews = [row for row in rows if row.get("event_type") == "META_V2_REVIEW"]
+        prior = prior_reviews[-1].get("details", {}) if prior_reviews else {}
+        now = cls._operator_now(operator)
+        review = {"action_key": action_key, "subject": subject, "grid_id": grid_id,
+            "review_at_s": now}
+        ledger(int(goal["id"]), "META_V2_REVIEW", review, grid_id=grid_id)
+        if not action_key:
+            return None
+        if prior.get("action_key") != action_key or now - float(prior.get("review_at_s") or 0) < 900:
+            reason = "persistencia v2: se requieren dos revisiones consecutivas separadas por 15 minutos"
+            ledger(int(goal["id"]), "META_V2_FRENO", {**review, "reason": reason},
+                grid_id=grid_id)
+            return reason
+        actions = [row.get("details", {}) for row in rows
+            if row.get("event_type") == "META_V2_ACTION"]
+        recent_day = [item for item in actions if now - float(item.get("review_at_s") or 0) < 86400]
+        if len(recent_day) >= 2:
+            reason = "límite v2: máximo dos cambios o agregados por meta en 24 horas"
+        elif any(item.get("subject") == subject and
+                now - float(item.get("review_at_s") or 0) < 6 * 3600 for item in actions):
+            reason = "enfriamiento v2: esta pieza ya tuvo una acción en las últimas 6 horas"
+        else:
+            return None
+        ledger(int(goal["id"]), "META_V2_FRENO", {**review, "reason": reason},
+            grid_id=grid_id)
+        return reason
+
+    @staticmethod
+    def _execute_rotation_v2(operator, goal, action):
+        grid_id = int(action["grid_id"])
+        grid = operator.db.get_grid(grid_id)
+        if grid is None or str(grid.get("status") or "").upper() not in {"ACTIVE", "PAUSED", "HOLDING"}:
+            raise ValueError("la pieza v2 ya no está activa")
+        alternative = action["alternative"]
+        piece = dict((alternative.get("pieces") or [{}])[0])
+        levels = operator.db.get_grid_levels(grid_id)
+        operator._validate_v2_plan_limits(goal, {"pieces": [piece]},
+            replacing_grid_id=grid_id)
+        openability = operator._testnet_openability(piece, goal,
+            replacing_grid_id=grid_id)
+        if not openability.get("allowed"):
+            raise ValueError(f"alternativa no abrible: {openability.get('reason')}")
+        has_inventory = any(float(row.get("held_qty") or 0) > 0 for row in levels)
+        mode = "liquidate" if has_inventory else "cancel"
+        closed = operator.engine.close_grid(grid_id, mode,
+            close_reason="META_V2_ROTATION")
+        if str((closed or {}).get("status") or "").upper() not in {"CLOSED", "CANCELLED", "DONE"}:
+            return {"decision": "no_hacer_nada", "reason": "cierre v2 no verificado",
+                "grid_id": grid_id, "close": closed}
+        opened = operator._open_replacement(goal, alternative,
+            float(piece.get("capital_usdt") or grid.get("capital_total") or 0))
+        operator._ledger(int(goal["id"]), "META_V2_ROTATION", {
+            "grid_id": grid_id, "closed": closed, "opened": opened,
+            "alternative_id": alternative.get("alternative_id"),
+            "openability": openability}, grid_id=grid_id)
+        return {"decision": "rotar_v2", "grid_id": grid_id, "closed": closed,
+            "opened": opened, "alternative_id": alternative.get("alternative_id")}
 
     def shadow_review(self, operator, goal, valuation, plan):
         try:

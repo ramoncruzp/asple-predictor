@@ -638,17 +638,16 @@ def test_revision_v2_mantiene_si_no_supera_umbral():
 
 def test_revision_v2_cambia_solo_tras_comparacion_neta_y_delega_frenos():
     calls = []
-    operator, goal, valuation, plan = _review_fixture(
-        alt_result={"decision": "no_hacer_nada", "reason": "cooldown vigente"})
-    operator._review_allocations = lambda _goal, _value, plan=None: calls.append(plan) or {
-        "decision": "no_hacer_nada", "reason": "cooldown vigente"}
+    operator, goal, valuation, plan = _review_fixture()
+    engine = V2ScenarioEngine()
+    engine._execute_rotation_v2 = lambda _operator, _goal, action: calls.append(action) or {
+        "decision": "cerrar_y_reasignar"}
 
-    result = V2ScenarioEngine().review(operator, goal, valuation, plan)
+    result = engine.review(operator, goal, valuation, plan)
 
     assert len(calls) == 1
-    assert calls[0]["alternatives"][0]["alternative_id"] == "change"
-    assert result["decision"] == "no_hacer_nada"
-    assert result["reason"] == "cooldown vigente"
+    assert calls[0]["alternative"]["alternative_id"] == "change"
+    assert result["decision"] == "cerrar_y_reasignar"
     assert result["comparison_v2"]["probability_improvement_pp"] == pytest.approx(10)
 
 
@@ -657,13 +656,13 @@ def test_revision_v2_con_interruptor_exploracion_no_castiga_perdida_realizada():
     valuation["pieces"][0]["levels"] = [{"held_qty": 100, "entry_price": 1.0}]
     valuation["symbol_valuations"] = {"JUPUSDT": {"best_bid": .8}}
     calls = []
-    operator._review_allocations = lambda *_args, **_kwargs: calls.append(True)
+    engine = V2ScenarioEngine()
+    engine._execute_rotation_v2 = lambda *_args: calls.append(True) or {"decision": "rotar_v2"}
     plan["exploration_enabled"] = True
 
-    result = V2ScenarioEngine().review(operator, goal, valuation, plan)
+    result = engine.review(operator, goal, valuation, plan)
 
-    assert result["decision"] == "mantener"
-    assert "ejecuci" in result["reason"]
+    assert result["decision"] == "rotar_v2"
     assert calls == [True]
 
 
@@ -779,7 +778,7 @@ def _shadow_db_counts(db):
 
 
 @pytest.mark.parametrize("action", ["cambiar", "agregar"])
-def test_revision_activa_v2_ejecuta_dentro_del_candado(action):
+def test_revision_activa_v2_ejecuta_dentro_del_candado(action, monkeypatch):
     goal = {"id": 9, "profile": "RAPIDO", "capital_initial": 100,
         "target_usdt": 3, "status": "ACTIVE", "result_pct": 0,
         "config_snapshot": {"decision_engine": "v2", "warning_loss_pct": 20}}
@@ -787,7 +786,7 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action):
         "pieces": [{"grid_id": 13, "symbol": "JUPUSDT", "levels": []}],
         "symbol_valuations": {"JUPUSDT": {"best_bid": .25}}}
     plan = _shadow_action_plan(action)
-    state = {"held": False, "seen": []}
+    state = {"held": False, "seen": [], "ledger": [], "now": 1000.0}
 
     class OperationLock:
         def __enter__(self):
@@ -811,14 +810,27 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action):
     operator._persist_engine_shadow_decision = lambda *_args: None
     operator._safe_active_review_choices = lambda *_args: {"real": {}}
     operator._ledger = lambda *_args, **_kwargs: None
+    def record(_meta_id, event_type, details, *, grid_id=None):
+        state["ledger"].append({"event_type": event_type, "details": details,
+            "grid_id": grid_id})
+    operator._ledger = record
+    operator._meta_ledger_rows = lambda _meta_id: list(state["ledger"])
+    operator.clock = lambda: state["now"]
+    operator._validate_v2_plan_limits = lambda *_args, **_kwargs: None
     def execute(*_args, **_kwargs):
         state["seen"].append(state["held"])
         return {"decision": "ejecutada"}
-    operator._review_allocations = execute
+    operator._review_allocations = lambda *_args, **_kwargs: pytest.fail(
+        "v2 no debe entrar a los frenos v1")
     operator._add_piece_from_free_cash = execute
+    monkeypatch.setattr(V2ScenarioEngine, "_execute_rotation_v2",
+        staticmethod(lambda _operator, _goal, _action: execute()))
     engine.review = lambda _operator, _goal, _valuation, plan=None: (
         V2ScenarioEngine().review(_operator, _goal, _valuation, plan))
 
+    first = MetaOperator._review_once_locked(operator, 9)
+    assert first["decision"] == "mantener"
+    state["now"] += 901
     result = MetaOperator._review_once_locked(operator, 9)
 
     assert result["decision"] == "ejecutada"
@@ -1040,3 +1052,35 @@ def test_interruptor_exploracion_por_defecto_encendido_solo_con_testnet(engine_d
     assert status["environment"] == "testnet"
     MetaOperator.set_v2_exploration_enabled(operator, False, confirm=True, actor="prueba")
     assert MetaOperator.v2_exploration_status(operator)["enabled"] is False
+
+
+def test_frenos_v2_persistencia_cooldown_y_limite_diario():
+    now = {"value": 5000.0}
+    rows = []
+    operator = SimpleNamespace(clock=lambda: now["value"],
+        _meta_ledger_rows=lambda _goal_id: list(rows),
+        _ledger=lambda _goal_id, event_type, details, **_kwargs: rows.append({
+            "event_type": event_type, "details": details}))
+    brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
+        action_key="rotar:8:candidate", subject="8", grid_id=8)
+    assert "dos revisiones" in brake
+    now["value"] += 901
+    brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
+        action_key="rotar:8:candidate", subject="8", grid_id=8)
+    assert brake is None
+    rows.append({"event_type": "META_V2_ACTION", "details": {
+        "subject": "8", "review_at_s": now["value"] - 100}})
+    now["value"] += 901
+    brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
+        action_key="rotar:8:candidate", subject="8", grid_id=8)
+    assert "6 horas" in brake
+    rows.extend([{"event_type": "META_V2_ACTION", "details": {
+        "subject": "otro", "review_at_s": now["value"] - 500}},
+        {"event_type": "META_V2_ACTION", "details": {
+        "subject": "otro2", "review_at_s": now["value"] - 600}}])
+    rows.append({"event_type": "META_V2_REVIEW", "details": {
+        "action_key": "rotar:8:candidate", "review_at_s": now["value"] - 901}})
+    now["value"] += 901
+    brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
+        action_key="rotar:8:candidate", subject="8", grid_id=8)
+    assert "dos cambios" in brake
