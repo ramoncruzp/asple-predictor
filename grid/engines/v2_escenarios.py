@@ -557,7 +557,14 @@ class V2ScenarioEngine(DecisionEngine):
                 "keep_standard_error_usdt": standard_error,
                 "realized_loss_usdt": 0.0 if exploration_enabled else realized_loss,
                 "exit_fee_usdt": exit_fee,
-                "entry_fee_usdt": entry_fee, "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
+                "entry_fee_usdt": entry_fee,
+                "modo": mode,
+                "keep": {"symbol": (current_alt.get("pieces") or [{}])[0].get("symbol"),
+                    "strategy": (current_alt.get("pieces") or [{}])[0].get("strategy"),
+                    "piece": (current_alt.get("pieces") or [{}])[0], "estimate": current_est},
+                "alternative": {"symbol": best.get("symbol"), "strategy": best.get("strategy"),
+                    "piece": new_piece, "estimate": best_est},
+                "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
         portfolio = (plan or {}).get("portfolio") or {}
         added_keys = {str(row.get("candidate_key")) for row in portfolio.get("added", [])}
         if added_keys:
@@ -587,6 +594,11 @@ class V2ScenarioEngine(DecisionEngine):
                     "alternative_id": addition.get("alternative_id"),
                     "proposed_action": {"type": "agregar", "alternative": addition},
                     "comparison_v2": {"portfolio_steps": portfolio.get("steps", []),
+                        "modo": mode,
+                        "alternative": {"symbol": addition.get("symbol"),
+                            "strategy": addition.get("strategy"),
+                            "piece": (addition.get("pieces") or [{}])[0],
+                            "estimate": addition.get("estimate") or {}},
                         "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
         return json_safe({"decision": "mantener", "modo": mode, "reason":
             "ninguna alternativa supera el umbral pareado de probabilidad y ganancia neta",
@@ -644,7 +656,8 @@ class V2ScenarioEngine(DecisionEngine):
             "action_type": action["type"], "grid_id": grid_id,
             "alternative_id": action.get("alternative", {}).get("alternative_id"),
             "review_at_s": self._operator_now(operator), "result": executed}, grid_id=grid_id)
-        return json_safe({**executed, "comparison_v2": decision.get("comparison_v2")})
+        return json_safe({**executed, "modo": decision.get("modo", "meta"),
+            "comparison_v2": decision.get("comparison_v2")})
 
     @staticmethod
     def _operator_now(operator):

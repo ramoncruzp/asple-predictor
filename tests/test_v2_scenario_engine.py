@@ -1084,3 +1084,13 @@ def test_frenos_v2_persistencia_cooldown_y_limite_diario():
     brake = V2ScenarioEngine._v2_brake(operator, {"id": 3},
         action_key="rotar:8:candidate", subject="8", grid_id=8)
     assert "dos cambios" in brake
+
+
+def test_bitacora_compacta_conserva_auditoria_v2():
+    comparison = {"modo": "exploracion", "keep": {"symbol": "ZROUSDT"},
+        "alternative": {"symbol": "ZROUSDT", "estimate": {"p_loss": .02}}}
+    compact = MetaOperator._compact_review_result({"decision": "rotar_v2",
+        "modo": "exploracion", "reason": "mejora esperada",
+        "comparison_v2": comparison, "freno": None})
+    assert compact["modo"] == "exploracion"
+    assert compact["comparison_v2"] == comparison

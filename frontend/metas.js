@@ -535,6 +535,13 @@
     const improvement = details.estimated_probability_improvement_pp == null ? ''
       : ` · mejora estimada ${fmtMoney(details.estimated_probability_improvement_pp, 1)} puntos`;
     const currentEstimate = details.decision_choices?.current_piece_estimate;
+    const v2Audit = review?.comparison_v2;
+    const auditPiece = item => {
+      if (!item) return '';
+      const p = item.piece || {}, e = item.estimate || {};
+      return `${item.strategy || p.strategy || 'pieza'} ${item.symbol || p.symbol || ''} · n=${p.n_levels ?? p.n ?? '—'} · ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${fmtMoney(p.capital_usdt ?? p.capital)} USDT · P(meta) ${fmtMoney(Number(e.probability || 0) * 100, 1)}% · EV ${fmtMoney(e.pnl_mean_usdt ?? e.expected_pnl_usdt)} USDT · P(límite) ${fmtMoney(Number(e.p_loss || 0) * 100, 1)}% · desliz esperado ${fmtMoney(e.cut_slippage_expected_usdt)} USDT`;
+    };
+    const v2AuditLine = v2Audit ? `Modo ${review?.modo || v2Audit.modo || 'meta'} · mantener: ${auditPiece(v2Audit.keep)} · alternativa: ${auditPiece(v2Audit.alternative)} · motivo: ${review?.freno || review?.reason || ''}` : '';
     const currentPieceLine = currentEstimate ? (() => {
       const p = currentEstimate.piece || {}, e = currentEstimate.estimate || {};
       return `Pieza actual: ${p.symbol || ''} · ${fmtMoney(p.capital_usdt)} USDT · rango ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${p.n_levels ?? '—'} niveles · probabilidad histórica ${fmtMoney(Number(e.probability_replay || 0) * 100, 1)} % · ajustada ${fmtMoney(Number(e.probability_adjusted || e.probability || 0) * 100, 1)} % · avance mediano ${fmtMoney(e.median_progress_pct, 1)} %`;
@@ -543,7 +550,7 @@
       ? `Capital_usage es de la mejor cartera propuesta desde cero · efectivo libre REAL de la Meta ${fmtMoney(details.real_free_cash_usdt)} USDT` : '';
     const decisionText = [decision || '', reasonText].filter(Boolean).join(' · ');
     const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
-      oldNew, decisionText, engineText, shadowText, improvement, currentPieceLine, allocationLine].filter(Boolean).join(' · ');
+      oldNew, decisionText, engineText, shadowText, improvement, currentPieceLine, allocationLine, v2AuditLine].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
       <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
@@ -628,7 +635,7 @@
       ledgerState.actionsOnly = event.currentTarget.checked; reset(); });
   }
 
-  function renderActivePanel(goal, valuation, config, lastReview = 'Sin revisiones') {
+  function renderActivePanel(goal, valuation, config, lastReview = null) {
     const profile = (config.profiles || {})[goal.profile] || {};
     const statusNote = goal.status === 'PIECES_BLOCKED'
       ? `<p class="metas-blocked-note">⏸ Piezas bloqueadas: ${valuation.status === 'DESCONOCIDO' ? 'valoración DESCONOCIDO' : 'aviso del 75 % del límite de pérdida'}.</p>` : '';
@@ -642,7 +649,8 @@
       <div class="metas-live-facts" data-live-facts><span>Plazo restante <b>${remainingDays(goal, profile) == null ? 'No disponible' : `${fmtMoney(remainingDays(goal, profile), 1)} días`}</b></span>
         <span>Efectivo libre REAL de la Meta para nuevas piezas <b>${fmtMoney(valuation.free_capital_usdt)} USDT</b></span>
         <span>Ganancia extra realizada <b>${fmtMoney(valuation.realized_extra_usdt)} USDT</b></span>
-        <span>Última revisión <b>${esc(lastReview)}</b></span></div>
+        <span>Última revisión <b>${esc(lastReview?.ts || 'Sin revisiones')}</b></span></div>
+      ${lastReview?.details?.decision?.comparison_v2 ? `<section class="metas-v2-audit"><h3>Última decisión v2 · ${esc(lastReview.details.decision.modo || 'meta')}</h3><p>${esc(lastReview.details.decision.reason || '')}</p><p>Mantener: ${esc(lastReview.details.decision.comparison_v2.keep?.symbol || '—')} · P(meta) ${fmtMoney(Number(lastReview.details.decision.comparison_v2.keep?.estimate?.probability || 0) * 100, 1)}% · EV ${fmtMoney(lastReview.details.decision.comparison_v2.keep?.estimate?.pnl_mean_usdt)} USDT · P(límite) ${fmtMoney(Number(lastReview.details.decision.comparison_v2.keep?.estimate?.p_loss || 0) * 100, 1)}%</p><p>Alternativa: ${esc(lastReview.details.decision.comparison_v2.alternative?.symbol || '')} · ${esc(lastReview.details.decision.comparison_v2.alternative?.strategy || '')} · P(meta) ${fmtMoney(Number(lastReview.details.decision.comparison_v2.alternative?.estimate?.probability || 0) * 100, 1)}% · EV ${fmtMoney(lastReview.details.decision.comparison_v2.alternative?.estimate?.pnl_mean_usdt)} USDT · P(límite) ${fmtMoney(Number(lastReview.details.decision.comparison_v2.alternative?.estimate?.p_loss || 0) * 100, 1)}% · desliz esperado ${fmtMoney(lastReview.details.decision.comparison_v2.alternative?.estimate?.cut_slippage_expected_usdt)} USDT</p></section>` : ''}
       <div data-live-progress>${progressBars(goal, valuation, profile)}</div>
       <div class="metas-pieces" data-live-pieces><h3>Piezas</h3>${piecesLinkList(valuation)}</div>
       <section class="metas-recent-adjustments"><h3>Reajustes recientes</h3><ul data-recent-adjustments><li class="muted">Cargando…</li></ul></section>
@@ -976,7 +984,7 @@
       const query = new URLSearchParams({page: '1', page_size: '50', include_valuation: 'false'});
       const page = await apiGet(`/api/metas/${metaId}/ledger?${query.toString()}`);
       const event = (page.events || []).find(row => row.event_type === 'META_OPERATOR_REVIEW_DECISION');
-      return event?.ts || 'Sin revisiones';
+      return event || null;
     } catch (_) { return 'No disponible'; }
   }
 

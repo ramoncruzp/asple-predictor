@@ -2477,6 +2477,7 @@ class MetaOperator:
     def _compact_review_result(result):
         """Serializa el resultado de revisión sin volver a anidar plan o alternativas."""
         allowed = ("decision", "reason", "grid_id", "meta_id", "symbol", "alternative_id",
+            "modo", "comparison_v2", "freno",
             "probability", "loss_usdt", "expected_gain_usdt", "close_fee_usdt", "reopen_fee_usdt",
             "estimated_gain_usdt", "estimated_realized_loss_usdt", "estimated_close_fee_usdt",
             "actual_costs", "reallocation_allowed_after_verified_close", "closed_grid_id",
