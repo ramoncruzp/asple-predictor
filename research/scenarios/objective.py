@@ -63,7 +63,7 @@ def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
     loss_upper = float(loss_ci[1]) if isinstance(loss_ci, (list, tuple)) and len(loss_ci) == 2 else None
 
     reasons = []
-    if mean_pnl < -capital * float(ev_floor_pct) / 100:
+    if ev_floor_pct is not None and mean_pnl < -capital * float(ev_floor_pct) / 100:
         reasons.append(f"ganancia esperada menor que -{float(ev_floor_pct):g}% del capital")
     if loss_upper is None:
         reasons.append("falta el límite superior del IC 95 % de pérdida")
@@ -76,6 +76,14 @@ def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
     return {"factible": not reasons, "motivos": reasons,
         "clave_orden": (-target_probability,
             float("inf") if median_days is None else float(median_days), -mean_pnl)}
+
+
+def exploration_objective_v2(metrics, *, perfil, capital_meta, p_limit_cap=None,
+        cut_slippage_expected_max_pct=0.5):
+    """Aplica en exploración los frenos de riesgo sin piso de ganancia esperada."""
+    return objective_v2(metrics, perfil=perfil, capital_meta=capital_meta,
+        p_limit_cap=p_limit_cap, ev_floor_pct=None,
+        cut_slippage_expected_max_pct=cut_slippage_expected_max_pct)
 
 
 def rank_alternatives_v2(results, *, perfil, capital_meta, max_loss_pct=None,

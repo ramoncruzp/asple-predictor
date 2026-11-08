@@ -652,17 +652,19 @@ def test_revision_v2_cambia_solo_tras_comparacion_neta_y_delega_frenos():
     assert result["comparison_v2"]["probability_improvement_pp"] == pytest.approx(10)
 
 
-def test_revision_v2_no_cambia_si_perdida_y_comisiones_superan_beneficio():
+def test_revision_v2_con_interruptor_exploracion_no_castiga_perdida_realizada():
     operator, goal, valuation, plan = _review_fixture()
     valuation["pieces"][0]["levels"] = [{"held_qty": 100, "entry_price": 1.0}]
     valuation["symbol_valuations"] = {"JUPUSDT": {"best_bid": .8}}
     calls = []
     operator._review_allocations = lambda *_args, **_kwargs: calls.append(True)
+    plan["exploration_enabled"] = True
 
     result = V2ScenarioEngine().review(operator, goal, valuation, plan)
 
     assert result["decision"] == "mantener"
-    assert calls == []
+    assert "ejecuci" in result["reason"]
+    assert calls == [True]
 
 
 def test_revision_v2_agrega_cartera_voraz_con_frenos_del_operador():
@@ -805,7 +807,7 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action):
     operator._plan_price_moved = lambda *_args: False
     operator._touch_bot_shadow_proposals = lambda *_args: []
     operator._reset_rotation_streaks = lambda *_args: None
-    operator._run_engine_shadow = lambda *_args: {"name": "v1", "decision": "mantener"}
+    operator._run_engine_shadow = lambda *_args, **_kwargs: {"name": "v1", "decision": "mantener"}
     operator._persist_engine_shadow_decision = lambda *_args: None
     operator._safe_active_review_choices = lambda *_args: {"real": {}}
     operator._ledger = lambda *_args, **_kwargs: None
@@ -1024,3 +1026,17 @@ def test_engine_shadow_decision_se_persiste_en_tabla_temporal(engine_databases):
     history = operator.engine_shadow_history(limit=10)
     assert history["events"][0]["active_decision"]["decision"] == "mantener"
     assert history["events"][0]["shadow_outcome"] is None
+
+
+def test_interruptor_exploracion_por_defecto_encendido_solo_con_testnet(engine_databases):
+    db, _market_path = engine_databases
+    operator = object.__new__(MetaOperator)
+    operator.db = db
+    operator.core = SimpleNamespace(settings=SimpleNamespace(
+        testnet_api_key="clave-configurada"))
+    status = MetaOperator.v2_exploration_status(operator)
+    assert status["enabled"] is True
+    assert status["defaulted"] is True
+    assert status["environment"] == "testnet"
+    MetaOperator.set_v2_exploration_enabled(operator, False, confirm=True, actor="prueba")
+    assert MetaOperator.v2_exploration_status(operator)["enabled"] is False

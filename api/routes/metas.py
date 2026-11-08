@@ -269,6 +269,17 @@ def update_v2_engine_switch(request: Request, body: ScenarioCacheSwitch):
         confirm=body.confirm, actor=body.actor)
 
 
+@router.get("/v2-exploration")
+def v2_exploration_status(request: Request):
+    return _operator(request).v2_exploration_status()
+
+
+@router.put("/v2-exploration/switch")
+def update_v2_exploration_switch(request: Request, body: ScenarioCacheSwitch):
+    return _call(_operator(request).set_v2_exploration_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
 @router.put("/learning/switch")
 def update_learning_switch(request: Request, body: LearningSwitch):
     result = _call(_operator(request).set_learning_switch, body.profile, body.enabled,

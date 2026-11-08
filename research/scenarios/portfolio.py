@@ -106,7 +106,7 @@ def evaluate_trajectory_portfolio(rows, *, timestamps, capital, target, max_loss
 
 
 def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
-        max_loss_pct, horizon_days, profile_config, seed=43):
+        max_loss_pct, horizon_days, profile_config, seed=43, exploration=False):
     """Agrega piezas si suben P(meta) al menos 2 pp y pasan objetivo 1 + 3."""
     started = time.perf_counter()
     path = Path(archive_path)
@@ -142,6 +142,9 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
         capital=capital, target=target, max_loss_pct=max_loss_pct,
         horizon_days=horizon_days, seed=seed,
         loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
+    baseline_metrics = current_metrics
+    exploration_mode = bool(exploration and max((float(row.get("metrics", {}).get(
+        "p_target") or 0) for row in rows), default=0.0) < .05)
     steps = []
     last_attempts = []
     while candidates:
@@ -184,17 +187,24 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
                 loss_confirm_minutes=config.get("loss_confirm_minutes", 2))
             improvement = float(metrics["p_target"]) - float(current_metrics["p_target"])
             objective = objective_v2(metrics, perfil=profile, capital_meta=capital,
+                ev_floor_pct=None if exploration_mode else 1.0,
                 cut_slippage_expected_max_pct=float(config.get(
                     "cut_slippage_expected_max_pct", .5)))
-            if improvement < .02 - 1e-12 or not objective["factible"]:
-                reason = ("rompe el objetivo 1 + 3: " + "; ".join(objective["motivos"])
-                    if not objective["factible"] else "no sube P(meta) al menos 2 pp")
+            pnl_improvement = float(metrics["pnl_mean_usdt"]) - float(current_metrics["pnl_mean_usdt"])
+            below_threshold = (pnl_improvement < .2 - 1e-12 if exploration_mode else
+                improvement < .02 - 1e-12)
+            if below_threshold or not objective["factible"]:
+                reason = ("rompe los lÃ­mites de riesgo: " + "; ".join(objective["motivos"])
+                    if not objective["factible"] else
+                    "no sube la ganancia esperada al menos 0,2 USDT" if exploration_mode else
+                    "no sube P(meta) al menos 2 pp")
                 attempts.append({"candidate_key": candidate["candidate_key"],
                     "symbol": symbol, "strategy": piece.get("strategy"),
                     "p_target": metrics.get("p_target"), "reason": reason})
                 continue
-            score = (improvement, float(metrics["p_target"]),
-                float(metrics["pnl_mean_usdt"]))
+            score = ((pnl_improvement, float(metrics.get("cycles_expected") or 0))
+                if exploration_mode else (improvement, float(metrics["p_target"]),
+                    float(metrics["pnl_mean_usdt"])))
             if best is None or score > best[0]:
                 best = (score, candidate, metrics, objective)
         if best is None:
@@ -218,6 +228,7 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
             for row in [*live, *selected]],
         "added": [{"candidate_key": row["candidate_key"], "piece": row["piece"]}
             for row in selected], "steps": steps, "metrics": current_metrics,
-        "not_added_reasons": last_attempts,
+        "not_added_reasons": last_attempts, "metrics_before": baseline_metrics,
+        "mode": "exploracion" if exploration_mode else "meta",
         "candidate_count": len(candidates) + len(selected),
         "elapsed_seconds": time.perf_counter() - started}

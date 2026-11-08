@@ -271,6 +271,9 @@ class V2ScenarioEngine(DecisionEngine):
         capital = float(goal.get("capital_initial", 0))
         live_grid_ids = live_meta_grid_ids(getattr(operator, "core", None), int(goal["id"]))
         profile_config = self._profile_config(goal, operator)
+        exploration_status = getattr(operator, "v2_exploration_status", None)
+        exploration_enabled = bool(exploration_status().get("enabled")) if callable(
+            exploration_status) else False
         _live_links, live_grids, live_bots, used_by_symbol = self._live_profile_usage(
             operator, int(goal["id"]))
         coin_cap = capital * float(profile_config.get("capital_per_coin_pct", 0)) / 100
@@ -361,7 +364,8 @@ class V2ScenarioEngine(DecisionEngine):
                 free_cash=(float(allocation_free_cash) if allocation_free_cash is not None
                     else capital), target=float(goal.get("target_usdt", 0)),
                 max_loss_pct=float(profile_config.get("max_loss_pct", 0)),
-                horizon_days=cached["horizon_days"], profile_config=profile_config)
+                horizon_days=cached["horizon_days"], profile_config=profile_config,
+                exploration=exploration_enabled)
         if is_draft and portfolio is not None:
             selected_pieces = []
             for item in portfolio.get("added", []):
@@ -436,6 +440,7 @@ class V2ScenarioEngine(DecisionEngine):
             "decision_id": decision_id, "base_method_version": self.version,
             "engine": {"name": self.name, "version": self.version},
             "cache": {key: cached[key] for key in ("run_id", "as_of", "age_seconds", "status")},
+            "profile_config": profile_config, "exploration_enabled": exploration_enabled,
             "candidates": self._candidate_table(cached),
             "discarded_alternatives": discarded_alternatives,
             "alternatives": alternatives, "pieces": selected_pieces,
@@ -467,6 +472,13 @@ class V2ScenarioEngine(DecisionEngine):
         from grid.meta_live_pieces import live_meta_grid_links
         links = live_meta_grid_links(operator.core, int(goal["id"]))
         alternatives = list((plan or {}).get("alternatives") or [])
+        exploration_enabled = bool((plan or {}).get("exploration_enabled"))
+        probability_values = [float((row.get("estimate") or {}).get("probability") or 0)
+            for row in alternatives]
+        probability_values.extend(float((row.get("estimate") or {}).get("probability") or 0)
+            for row in (plan or {}).get("current_pieces", {}).values())
+        mode = "exploracion" if exploration_enabled and max(probability_values or [0]) < .05 else "meta"
+        profile_config = (plan or {}).get("profile_config") or {}
         if not links:
             return json_safe({"decision": "no_hacer_nada", "reason": "la meta no tiene grids activos"})
         for link in links:
@@ -485,8 +497,24 @@ class V2ScenarioEngine(DecisionEngine):
                     "grid_id": int(grid_id)})
             candidates = [row for row in alternatives if not row.get("is_current")
                 and row.get("estimate", {}).get("evidence_sufficient")]
-            best = next((row for row in candidates
-                if row.get("objective", {}).get("factible")), None)
+            if mode == "exploracion":
+                from research.scenarios.objective import exploration_objective_v2
+                for row in candidates:
+                    row["objective_exploracion"] = exploration_objective_v2(
+                        row.get("metrics") or row.get("estimate") or {},
+                        perfil=goal["profile"],
+                        capital_meta=float(goal.get("capital_initial") or 1),
+                        p_limit_cap=profile_config.get("p_limit_cap"),
+                        cut_slippage_expected_max_pct=float(profile_config.get(
+                            "cut_slippage_expected_max_pct", .5)))
+                safe = [row for row in candidates
+                    if row["objective_exploracion"].get("factible")]
+                best = max(safe, key=lambda row: (
+                    float((row.get("estimate") or {}).get("pnl_mean_usdt") or 0),
+                    float((row.get("metrics") or {}).get("cycles_expected") or 0)), default=None)
+            else:
+                best = next((row for row in candidates
+                    if row.get("objective", {}).get("factible")), None)
             if best is None:
                 continue
             best_est = best.get("estimate") or {}
@@ -509,15 +537,17 @@ class V2ScenarioEngine(DecisionEngine):
                 float(level.get("current_bid") or current_bid) * .001 for level in levels)
             new_piece = (best.get("pieces") or [{}])[0]
             entry_fee = float(new_piece.get("capital_usdt") or 0) * .001
-            new_net = float(best_est.get("pnl_mean_usdt") or 0) - realized_loss - exit_fee - entry_fee
+            new_net = float(best_est.get("pnl_mean_usdt") or 0) - exit_fee - entry_fee
+            if not exploration_enabled:
+                new_net -= realized_loss
             keep_floor = float(current_est.get("pnl_mean_usdt") or 0) - standard_error
-            if probability_delta_pp < 5 or new_net < keep_floor:
+            if (mode != "exploracion" and probability_delta_pp < 5) or new_net < keep_floor:
                 continue
             reordered = dict(plan)
             reordered["alternatives"] = [best, *[row for row in alternatives if row is not best]]
             # La rutina existente conserva sus gates de materialidad, persistencia,
             # cooldown, pérdida máxima, límites diarios y cierre verificado.
-            return json_safe({"decision": "cambiar", "reason":
+            return json_safe({"decision": "cambiar", "modo": mode, "reason":
                 "alternativa con mejora pareada; falta aplicar los frenos de ejecucion",
                 "grid_id": int(grid_id), "alternative_id": best.get("alternative_id"),
                 "proposed_action": {"type": "rotar", "grid_id": int(grid_id),
@@ -525,7 +555,8 @@ class V2ScenarioEngine(DecisionEngine):
                 "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
                 "expected_net_usdt": new_net, "keep_mean_usdt": current_est.get("pnl_mean_usdt"),
                 "keep_standard_error_usdt": standard_error,
-                "realized_loss_usdt": realized_loss, "exit_fee_usdt": exit_fee,
+                "realized_loss_usdt": 0.0 if exploration_enabled else realized_loss,
+                "exit_fee_usdt": exit_fee,
                 "entry_fee_usdt": entry_fee, "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
         portfolio = (plan or {}).get("portfolio") or {}
         added_keys = {str(row.get("candidate_key")) for row in portfolio.get("added", [])}
@@ -536,13 +567,28 @@ class V2ScenarioEngine(DecisionEngine):
             if addition is not None:
                 # La apertura conserva las validaciones de efectivo, perfil y
                 # abribilidad que ya aplica el operador para piezas nuevas.
-                return json_safe({"decision": "agregar", "reason":
+                if mode == "exploracion":
+                    before = portfolio.get("metrics_before") or {}
+                    after = portfolio.get("metrics") or {}
+                    from research.scenarios.objective import exploration_objective_v2
+                    add_objective = exploration_objective_v2(after, perfil=goal["profile"],
+                        capital_meta=float(goal.get("capital_initial") or 1),
+                        cut_slippage_expected_max_pct=float(profile_config.get(
+                            "cut_slippage_expected_max_pct", .5)))
+                    if (float(after.get("pnl_mean_usdt") or 0) -
+                            float(before.get("pnl_mean_usdt") or 0) < .2 or
+                            not add_objective.get("factible")):
+                        return json_safe({"decision": "mantener", "modo": mode,
+                            "reason": "agregar no mejora la ganancia esperada en 0,2 USDT o incumple riesgo",
+                            "comparison_v2": {"metrics_before": before,
+                                "metrics_after": after, "objective": add_objective}})
+                return json_safe({"decision": "agregar", "modo": mode, "reason":
                     "cartera v2 propone agregar una pieza con efectivo libre",
                     "alternative_id": addition.get("alternative_id"),
                     "proposed_action": {"type": "agregar", "alternative": addition},
                     "comparison_v2": {"portfolio_steps": portfolio.get("steps", []),
                         "cache_run_id": (plan.get("cache") or {}).get("run_id")}})
-        return json_safe({"decision": "mantener", "reason":
+        return json_safe({"decision": "mantener", "modo": mode, "reason":
             "ninguna alternativa supera el umbral pareado de probabilidad y ganancia neta",
             "cache_run_id": (plan.get("cache") or {}).get("run_id")})
 

@@ -1052,6 +1052,31 @@ class MetaOperator:
         return self._set_global_switch("v2_engine_enabled", "v2_engine_switch_events",
             enabled, confirm=confirm, actor=actor)
 
+    def v2_exploration_status(self):
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+            values = json.loads(raw or "{}")
+        explicit = "v2_exploration_enabled" in values
+        testnet = bool(getattr(getattr(self, "core", None), "settings", None) and
+            getattr(self.core.settings, "testnet_api_key", None))
+        if not testnet:
+            try:
+                testnet = bool(self.core.db.meta_goals.select().limit(1).execute().first())
+            except Exception:
+                testnet = True
+        result = self._global_switch_status("v2_exploration_enabled",
+            "v2_exploration_switch_events")
+        result["enabled"] = bool(values.get("v2_exploration_enabled", testnet))
+        result["defaulted"] = not explicit
+        result["environment"] = "testnet" if testnet else "unknown"
+        return result
+
+    def set_v2_exploration_enabled(self, enabled, *, confirm, actor):
+        return self._set_global_switch("v2_exploration_enabled",
+            "v2_exploration_switch_events", enabled, confirm=confirm, actor=actor)
+
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
         from grid.engines import get_engine
@@ -4311,6 +4336,11 @@ class MetaOperator:
     def _run_engine_shadow(self, goal, value, plan, engine, *, active_decision=None):
         from grid.engines import get_engine
         meta_id = int(goal.get("id"))
+        # Algunas pruebas y herramientas construyen el operador sin __init__;
+        # el guard sigue siendo por-meta también en esos contextos aislados.
+        if not hasattr(self, "_shadow_running_lock"):
+            self._shadow_running_lock = threading.Lock()
+            self._shadow_running_meta_ids = set()
         with self._shadow_running_lock:
             if meta_id in self._shadow_running_meta_ids:
                 result = {"name": "v1" if engine.name == "v2" else "v2",

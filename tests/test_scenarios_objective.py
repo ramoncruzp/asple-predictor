@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from research.scenarios.objective import (objective_limits, objective_v2,
+from research.scenarios.objective import (exploration_objective_v2, objective_limits, objective_v2,
     rank_alternatives_v2)
 
 
@@ -96,3 +96,14 @@ def test_desliz_esperado_f1_con_casos_s1_y_sin_cortes():
     assert not high_risk["factible"]
     assert "desliz esperado del corte supera 0,5 % del capital" in high_risk["motivos"]
     assert no_cuts["factible"]
+
+
+def test_objetivo_exploracion_quita_piso_ev_y_conserva_frenos_de_riesgo():
+    metrics = {"pnl_mean_usdt": -0.5, "p_target": 0.01,
+        "p_loss_ci95": [0.0, 0.01], "cut_slippage_expected_usdt": .1}
+    result = exploration_objective_v2(metrics, perfil="RAPIDO", capital_meta=100)
+    assert result["factible"]
+    metrics["p_loss_ci95"] = [0.0, .2]
+    rejected = exploration_objective_v2(metrics, perfil="RAPIDO", capital_meta=100)
+    assert not rejected["factible"]
+    assert any("P(p" in reason for reason in rejected["motivos"])
