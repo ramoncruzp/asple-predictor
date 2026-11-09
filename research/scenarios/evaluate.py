@@ -64,7 +64,8 @@ def _piece_geometry(piece, *, symbol, price, sigma24, horizon, profile):
     """Resuelve la geometría de una pieza con las mismas reglas del evaluador."""
     strategy = str(piece["strategy"]).lower()
     low, high = piece.get("low"), piece.get("high")
-    if piece.get("width_sigma") is not None:
+    has_explicit_range = piece.get("low") is not None and piece.get("high") is not None
+    if not has_explicit_range and piece.get("width_sigma") is not None:
         width = _log_width_from_sigma_24h(sigma24, horizon, piece["width_sigma"])
         low, high = price * np.exp(-width), price * np.exp(width)
     if strategy == "bot" and piece.get("buy_offset_pct") is not None:

@@ -45,9 +45,10 @@ def _simple_candidate(symbol, capital, levels, width_sigma, price, sigma, horizo
 
 
 def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symbol,
-        wide_range_by_symbol, filters_by_symbol, horizon_days):
+        wide_range_by_symbol, filters_by_symbol, horizon_days, stats_by_symbol=None):
     """Genera grids de reemplazo para bots vivos; la variante liquida inventario a mercado."""
     output = []
+    stats_by_symbol = stats_by_symbol if stats_by_symbol is not None else {}
     for live in live_pieces:
         if live.get("piece_type") != "individual_bot_grid" or not live.get("has_inventory"):
             continue
@@ -58,6 +59,7 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
         capital = float(live.get("capital") or 0)
         if filters is None or price <= 0 or sigma <= 0 or capital < 10:
             continue
+        stats = stats_by_symbol.setdefault(symbol, {"generated": 0, "discarded": {}})
         widths = [("sigma_1", sigma), ("sigma_2", 2 * sigma)]
         wide = wide_range_by_symbol.get(symbol)
         if wide and float(wide[0]) > 0 and float(wide[1]) > float(wide[0]):
@@ -67,7 +69,16 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
                 try:
                     if width_sigma is None:
                         low, high = map(float, wide)
+                        step = (high - low) / n
+                        if price - low < step:
+                            low = price - (high - price) / (n - 1)
+                        step = (high - low) / n
+                        if high - price < step:
+                            high = price + (price - low) / (n - 1)
+                        if not low < price < high:
+                            raise ValueError("precio fuera del rango 7d sin margen de un paso")
                         lines = compute_lines(str(low), str(high), n, filters)
+                        _validate_reconversion_steps(lines, filters)
                         plans = plan_cells(lines, str(capital), _market(price), filters,
                             {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
                         for plan in plans:
@@ -75,7 +86,8 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
                             if net_qty < filters.min_qty or net_qty * plan.sell_price < filters.min_notional:
                                 raise ValueError(f"level {plan.level_idx} net sell does not meet quantity/notional filters")
                         candidate = {"symbol": symbol, "strategy": "simple", "capital": capital,
-                            "n": n, "low": low, "high": high, "width_sigma": 0.0}
+                            "n": n, "low": low, "high": high,
+                            "range_type": "rango_7d"}
                     else:
                         candidate = _simple_candidate(symbol, capital, n, width_sigma, price,
                             sigma, horizon_days, filters)
@@ -86,9 +98,20 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
                     candidate["candidate_key"] = _key({key: value for key, value in candidate.items()
                         if key != "candidate_key"})
                     output.append(candidate)
-                except (GridConfigError, ValueError, ArithmeticError):
-                    continue
+                    stats["generated"] += 1
+                except (GridConfigError, ValueError, ArithmeticError) as exc:
+                    reason = ("reconvertir: paso menor al m\u00ednimo" if
+                        "GRID_MIN_STEP_PCT" in str(exc) or "step is below" in str(exc)
+                        else f"reconvertir: {str(exc).split(':', 1)[0]}")
+                    stats["discarded"][reason] = stats["discarded"].get(reason, 0) + 1
     return output
+
+
+def _validate_reconversion_steps(lines, filters, minimum_pct=.003):
+    """Descarta en construcci\u00f3n los anchos incompatibles con el paso m\u00ednimo."""
+    for index, (buy_price, sell_price) in enumerate(zip(lines, lines[1:])):
+        if (sell_price - buy_price) / buy_price < Decimal(str(minimum_pct)):
+            raise GridConfigError(f"level {index} step is below GRID_MIN_STEP_PCT")
 
 
 def _bot_candidate(symbol, capital, buy_offset, sell_offset, price, filters, profile):

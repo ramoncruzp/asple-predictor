@@ -462,10 +462,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 wide_range_by_symbol[symbol] = (float(np.min(closes)), float(np.max(closes)))
         except (KeyError, OSError, ValueError):
             pass
+    reconversion_stats = {}
     reconversions = build_reconversion_candidates(live_pieces=current_pieces,
         price_by_symbol=prices, sigma_by_symbol=sigmas,
         wide_range_by_symbol=wide_range_by_symbol, filters_by_symbol=filters,
-        horizon_days=context["horizon"])
+        horizon_days=context["horizon"], stats_by_symbol=reconversion_stats)
     live_piece_details = [{"grid_id": int(piece["grid_id"]),
         "status": piece["grid_status"]} for piece in current_pieces]
     candidates = current_pieces + built["candidates"][:-1] + reconversions
@@ -477,15 +478,26 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         free_cash=free, capital_max_by_symbol=capital_max_by_symbol)
     symbol_stats = {}
     for symbol in filters:
+        reconversion_info = reconversion_stats.get(symbol, {})
+        reconversion_discarded = reconversion_info.get("discarded", {})
+        for reason, count in reconversion_discarded.items():
+            built["discarded"][reason] = built["discarded"].get(reason, 0) + count
+            symbol_discarded = built.setdefault("discarded_by_symbol", {}).setdefault(symbol, {})
+            symbol_discarded[reason] = symbol_discarded.get(reason, 0) + count
         symbol_stats[symbol] = {"symbol": symbol, "price": prices.get(symbol),
             "sigma_24h": sigmas.get(symbol),
             "generated_count": (sum(str(piece.get("symbol", "")).upper() == symbol
                 for piece in candidates) + sum(built.get("discarded_by_symbol", {}).get(
                     symbol, {}).values())), "evaluated_count": 0,
             "discarded": dict(built.get("discarded_by_symbol", {}).get(symbol, {})),
+            "reconvertir_generados": int(reconversion_info.get("generated", 0)),
+            "reconvertir_evaluados": 0,
+            "reconvertir_fallidos": int(reconversion_info.get("failed", 0)),
             "skipped_reason": skipped.get(symbol), "pasada": "sin_tiempo",
             "pasada_1_completa": False}
-    progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)),
+    reconversion_invalid = sum(sum(int(count) for count in
+        (info.get("discarded") or {}).values()) for info in reconversion_stats.values())
+    progress_state.update({"generated_count": len(candidates) + int(built.get("invalid_count", 0)) + reconversion_invalid,
         "generated_candidates": len(candidates), "evaluated_count": 0,
         "discarded": dict(built["discarded"]), "candidate_seconds": {},
         "live_piece_count": len(live_piece_details), "live_pieces": live_piece_details,
@@ -967,6 +979,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     parallel_rss_bound = round(_rss_max_mb() + sum(child_peaks[:2]), 2)
     if on_progress and live_rows:
         on_progress([*first_rows, *second_rows])
+    reconversion_keys = {str(piece.get("candidate_key")): str(piece.get("symbol") or "").upper()
+        for piece in reconversions}
+    evaluated_reconversion_keys = {str((row.get("piece") or {}).get("candidate_key"))
+        for row in [*first_rows, *second_rows]
+        if str((row.get("piece") or {}).get("candidate_key")) in reconversion_keys}
+    for symbol, stats in symbol_stats.items():
+        stats["reconvertir_evaluados"] = sum(
+            reconversion_keys.get(key) == symbol for key in evaluated_reconversion_keys)
+        stats["reconvertir_fallidos"] = int(stats.get("reconvertir_fallidos", 0)) + sum(
+            reconversion_keys.get(key) == symbol for key in failed_candidates)
     results = []
     by_key = {str(row.get("candidate_key")): row for row in candidates}
     evaluated_keys = {str((row.get("piece") or {}).get("candidate_key"))
@@ -1230,6 +1252,10 @@ def _evaluate_currency_worker(payload):
             single_metrics = row.get("metrics") or {}
             row["metrics_pieza_sola"] = single_metrics
             current_rows = payload.get("live_rows") or []
+            if piece.get("reconvert_from_grid_id") is not None:
+                current_rows = [live for live in current_rows
+                    if int((live.get("piece") or {}).get("grid_id") or -1) !=
+                    int(piece["reconvert_from_grid_id"])]
             combined = _portfolio_outcome_metrics([*current_rows, row],
                 capital=payload["capital"], target=payload["target"],
                 max_loss_pct=payload["max_loss_pct"], horizon=payload["horizon"],

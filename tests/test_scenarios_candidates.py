@@ -5,6 +5,7 @@ import pytest
 from data.exchange_filters import SymbolFilters
 from research.scenarios.candidates import (build_candidates, build_reconversion_candidates,
     build_smart_candidates)
+from research.scenarios.evaluate import _piece_geometry
 from research.scenarios.fastsim import simulate_bot, simulate_simple
 
 
@@ -108,7 +109,6 @@ def test_reconversion_de_bot_con_inventario_genera_geometrias_y_liquida():
         price_by_symbol={"ZROUSDT": 1.63}, sigma_by_symbol={"ZROUSDT": .08},
         wide_range_by_symbol={"ZROUSDT": (1.5, 1.9)},
         filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=10)
-
     assert {row["n"] for row in result} == {6, 8, 10}
     assert {row["reconversion_geometry"] for row in result} == {"sigma_1", "sigma_2", "rango_7d"}
     assert all(row["reconvert_from_grid_id"] == 18 and
@@ -118,3 +118,41 @@ def test_reconversion_de_bot_con_inventario_genera_geometrias_y_liquida():
         "has_inventory": False}], price_by_symbol={"ZROUSDT": 1.63},
         sigma_by_symbol={"ZROUSDT": .05}, wide_range_by_symbol={},
         filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=10)
+
+
+def test_reconversion_zro_expone_geometrias_validas_y_filtra_paso_minimo():
+    stats = {}
+    rows = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
+        "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
+        "capital": 53, "has_inventory": True}],
+        price_by_symbol={"ZROUSDT": 1.556}, sigma_by_symbol={"ZROUSDT": .0595},
+        wide_range_by_symbol={"ZROUSDT": (1.54, 1.61)},
+        filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=17,
+        stats_by_symbol=stats)
+
+    assert len(rows) >= 6
+    assert stats["ZROUSDT"]["generated"] == len(rows)
+    assert stats["ZROUSDT"].get("failed", 0) == 0
+    assert stats["ZROUSDT"]["discarded"].get("reconvertir: paso menor al mínimo", 0) >= 1
+    assert all("width_sigma" not in row for row in rows if row.get("range_type") == "rango_7d")
+    for row in rows:
+        low, high = _piece_geometry(row, symbol="ZROUSDT", price=1.556,
+            sigma24=.0595, horizon=17, profile={"min_margin_pct": .3})
+        assert low == row["low"]
+        assert high == row["high"]
+
+
+@pytest.mark.parametrize("price", [1.2, 2.0])
+def test_reconversion_rango_7d_se_amplia_para_dejar_margen_de_un_paso(price):
+    rows = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
+        "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
+        "capital": 53, "has_inventory": True}],
+        price_by_symbol={"ZROUSDT": price}, sigma_by_symbol={"ZROUSDT": .0595},
+        wide_range_by_symbol={"ZROUSDT": (1.5, 1.9)},
+        filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=17)
+    ranges = [row for row in rows if row.get("range_type") == "rango_7d"]
+    assert ranges
+    assert all(row["low"] + (row["high"] - row["low"]) / row["n"] <= price + 1e-9
+        and row["high"] - (row["high"] - row["low"]) / row["n"] >= price - 1e-9
+        for row in ranges)
+
