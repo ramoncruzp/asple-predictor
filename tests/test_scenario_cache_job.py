@@ -787,6 +787,26 @@ def test_alternativa_usa_cartera_pareada_con_pieza_viva():
     assert candidate["metrics"]["pnl_mean_usdt"] == pytest.approx(2)
 
 
+def test_mantener_guarda_metricas_propias_y_cartera_por_separado(monkeypatch):
+    own = {"p_target": .25, "pnl_mean_usdt": -1.0}
+    portfolio = {"p_target": .1, "pnl_mean_usdt": -4.0}
+    candidate_own = {"p_target": .8, "pnl_mean_usdt": 3.0}
+    candidate_portfolio = {"p_target": .35, "pnl_mean_usdt": 1.0}
+    def outcome_metrics(rows, **_kwargs):
+        return portfolio if rows and rows[0] is current else candidate_portfolio
+
+    monkeypatch.setattr(cache_script, "_portfolio_outcome_metrics", outcome_metrics)
+    current = {"piece": {"grid_id": 18, "is_current": True}, "metrics": own}
+    candidate = {"piece": {"reconvert_from_grid_id": 18}, "metrics": candidate_own}
+    cache_script._apply_live_portfolio_metrics([current, candidate], [current],
+        capital=100, target=10, max_loss_pct=18, horizon=17)
+
+    assert current["metrics"] is own
+    assert current["portfolio_metrics"] == portfolio
+    assert candidate["metrics_pieza_sola"] is candidate_own
+    assert candidate["metrics"] == candidate_portfolio
+
+
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,
         monkeypatch):
     db, market_path = cache_databases

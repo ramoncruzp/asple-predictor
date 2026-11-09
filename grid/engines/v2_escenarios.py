@@ -339,6 +339,7 @@ class V2ScenarioEngine(DecisionEngine):
                     "pnl_mean_ci95": metrics.get("pnl_mean_ci95"),
                     "p_loss": metrics.get("p_loss"),
                     "p_loss_ci95": metrics.get("p_loss_ci95"),
+                    "portfolio_metrics": metrics.get("portfolio_metrics"),
                     "cut_slippage_mean_usdt": metrics.get("cut_slippage_mean_usdt"),
                     "cut_slippage_p90_usdt": metrics.get("cut_slippage_p90_usdt"),
                     "cut_slippage_expected_usdt": metrics.get("cut_slippage_expected_usdt"),
@@ -410,6 +411,7 @@ class V2ScenarioEngine(DecisionEngine):
             if row.get("is_current") and piece.get("grid_id") is not None:
                 current_pieces[str(piece["grid_id"])] = {
                     "piece": piece, "estimate": row["estimate"],
+                    "portfolio_estimate": row["estimate"].get("portfolio_metrics") or {},
                     "alternative_id": row["alternative_id"]}
         decision = ("mantener_usdt" if selected is None or not selected_pieces else
             "seleccionar_alternativa")
@@ -488,16 +490,13 @@ class V2ScenarioEngine(DecisionEngine):
             grid_id = str(int(link["grid_id"]))
             current = (plan.get("current_pieces") or {}).get(grid_id)
             if not current:
-                return json_safe({"decision": "no_hacer_nada",
-                    "reason": "la caché no contiene una evaluación mantener para cada grid activo",
-                    "grid_id": int(grid_id)})
+                continue
             current_est = current.get("estimate") or {}
             current_alt = next((row for row in alternatives
                 if row.get("cache_candidate_key") and row.get("is_current")
                 and int((row.get("pieces") or [{}])[0].get("grid_id") or -1) == int(grid_id)), None)
             if current_alt is None:
-                return json_safe({"decision": "no_hacer_nada", "reason": "falta alternativa mantener vigente",
-                    "grid_id": int(grid_id)})
+                continue
             candidates = [row for row in alternatives if not row.get("is_current")
                 and row.get("estimate", {}).get("evidence_sufficient")]
             if mode == "exploracion":
@@ -521,9 +520,11 @@ class V2ScenarioEngine(DecisionEngine):
             if best is None:
                 continue
             best_est = best.get("estimate") or {}
+            current_portfolio_est = current.get("portfolio_estimate") or current_est
             probability_delta_pp = (float(best_est.get("probability") or 0) -
-                float(current_est.get("probability") or 0)) * 100
-            current_ci = current_est.get("pnl_mean_ci95")
+                float(current_portfolio_est.get("probability",
+                    current_portfolio_est.get("p_target", 0)) or 0)) * 100
+            current_ci = current_portfolio_est.get("pnl_mean_ci95")
             if not isinstance(current_ci, (list, tuple)) or len(current_ci) != 2:
                 continue
             standard_error = abs(float(current_ci[1]) - float(current_ci[0])) / (2 * 1.96)
@@ -543,7 +544,7 @@ class V2ScenarioEngine(DecisionEngine):
             new_net = float(best_est.get("pnl_mean_usdt") or 0) - exit_fee - entry_fee
             if not exploration_enabled:
                 new_net -= realized_loss
-            keep_floor = float(current_est.get("pnl_mean_usdt") or 0) - standard_error
+            keep_floor = float(current_portfolio_est.get("pnl_mean_usdt") or 0) - standard_error
             if (mode != "exploracion" and probability_delta_pp < 5) or new_net < keep_floor:
                 continue
             reordered = dict(plan)
@@ -556,7 +557,7 @@ class V2ScenarioEngine(DecisionEngine):
                 "proposed_action": {"type": "rotar", "grid_id": int(grid_id),
                     "alternative": best, "plan": reordered},
                 "comparison_v2": {"probability_improvement_pp": probability_delta_pp,
-                "expected_net_usdt": new_net, "keep_mean_usdt": current_est.get("pnl_mean_usdt"),
+                "expected_net_usdt": new_net, "keep_mean_usdt": current_portfolio_est.get("pnl_mean_usdt"),
                 "keep_standard_error_usdt": standard_error,
                 "realized_loss_usdt": 0.0 if exploration_enabled else realized_loss,
                 "exit_fee_usdt": exit_fee,
@@ -564,7 +565,8 @@ class V2ScenarioEngine(DecisionEngine):
                 "modo": mode,
                 "keep": {"symbol": (current_alt.get("pieces") or [{}])[0].get("symbol"),
                     "strategy": (current_alt.get("pieces") or [{}])[0].get("strategy"),
-                    "piece": (current_alt.get("pieces") or [{}])[0], "estimate": current_est},
+                    "piece": (current_alt.get("pieces") or [{}])[0],
+                    "estimate": current_est, "portfolio_estimate": current_portfolio_est},
                 "alternative": {"symbol": best.get("symbol"), "strategy": best.get("strategy"),
                     "piece": new_piece, "estimate": best_est},
                 "cache_run_id": (plan.get("cache") or {}).get("run_id")}})

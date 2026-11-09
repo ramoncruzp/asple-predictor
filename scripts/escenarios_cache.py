@@ -1014,6 +1014,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 "motivos": [*objective.get("motivos", []), "sin_baseline"]}
         profile_times["objetivo_s"] += time.perf_counter() - objective_started
         metrics = row.get("metrics") or _scenario_metrics(row)
+        if row.get("portfolio_metrics") is not None:
+            metrics = {**metrics, "portfolio_metrics": row["portfolio_metrics"]}
         if row.get("sin_baseline"):
             metrics = {**metrics, "sin_baseline": True}
         if row.get("error"):
@@ -1176,8 +1178,7 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
     for row in rows:
         piece = row.get("piece") or {}
         if piece.get("is_current"):
-            row["metrics_pieza_sola"] = row.get("metrics")
-            row["metrics"] = baseline
+            row["portfolio_metrics"] = baseline
             if trajectory_sink is not None:
                 trajectory_sink(row)
             continue

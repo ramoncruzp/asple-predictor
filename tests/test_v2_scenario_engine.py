@@ -636,6 +636,18 @@ def test_revision_v2_mantiene_si_no_supera_umbral():
     assert "alternativa" in result["reason"]
 
 
+def test_revision_v2_compara_reconversion_con_metricas_de_cartera_actual():
+    operator, goal, valuation, plan = _review_fixture(
+        alt_probability=.50, current_probability=.10)
+    plan["current_pieces"]["1"]["portfolio_estimate"] = {
+        "probability": .49, "pnl_mean_usdt": .7,
+        "pnl_mean_ci95": [.6, .8]}
+
+    result = V2ScenarioEngine().decide(operator, goal, valuation, plan)
+
+    assert result["decision"] == "mantener"
+
+
 def test_revision_v2_cambia_solo_tras_comparacion_neta_y_delega_frenos():
     calls = []
     operator, goal, valuation, plan = _review_fixture()
