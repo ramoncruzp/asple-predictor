@@ -1268,7 +1268,30 @@ def test_bitacora_compacta_conserva_auditoria_v2():
 
 
 def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
+    from decimal import Decimal
     from threading import RLock
+    from data.exchange_filters import SymbolFilters
+    from research.scenarios.candidates import build_reconversion_candidates
+
+    # El generador real alimenta las alternativas que representan los
+    # resultados de una corrida de caché sintética para el caso ZRO de S1.
+    filters = SymbolFilters(tick_size=Decimal("0.00000001"),
+        min_price=Decimal("0.00000001"), max_price=Decimal("100000"),
+        step_size=Decimal("0.00000001"), min_qty=Decimal("0.00000001"),
+        max_qty=Decimal("100000000"), min_notional=Decimal("5"),
+        apply_min_to_market=True, max_num_orders=None)
+    reconversion_stats = {}
+    reconversions = build_reconversion_candidates(live_pieces=[{
+        "grid_id": 18, "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
+        "capital": 53, "has_inventory": True}],
+        price_by_symbol={"ZROUSDT": 1.556},
+        sigma_by_symbol={"ZROUSDT": .0595},
+        wide_range_by_symbol={"ZROUSDT": (1.54, 1.61)},
+        filters_by_symbol={"ZROUSDT": filters}, horizon_days=17,
+        stats_by_symbol=reconversion_stats)
+    assert len(reconversions) >= 6
+    reconversion_evaluated = reconversions[0]
+
     now = {"value": 10_000.0}
     ledger = []
     calls = []
@@ -1276,11 +1299,14 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
         "target_usdt": 10, "status": "ACTIVE",
         "config_snapshot": {"decision_engine": "v2", "warning_loss_pct": 20}}
     keep_piece = {"grid_id": 18, "symbol": "ZROUSDT", "strategy": "bot",
-        "floor": 1.58, "ceiling": 1.87, "capital_usdt": 70, "n_levels": 1,
+        "floor": 1.58, "ceiling": 1.87, "capital_usdt": 53, "n_levels": 1,
         "piece_type": "individual_bot_grid"}
     convert_piece = {"symbol": "ZROUSDT", "strategy": "simple",
-        "floor": 1.42, "ceiling": 1.91, "capital_usdt": 70, "n_levels": 8,
-        "piece_type": "grid", "reconversion": True}
+        "floor": reconversion_evaluated["low"], "ceiling": reconversion_evaluated["high"],
+        "capital_usdt": reconversion_evaluated["capital"],
+        "n_levels": reconversion_evaluated["n"], "piece_type": "grid",
+        "reconversion": True, "reconversion_geometry": reconversion_evaluated[
+            "reconversion_geometry"]}
     keep_est = {"probability": .01, "pnl_mean_usdt": -8,
         "pnl_mean_ci95": [-9, -7], "evidence_sufficient": True}
     alt_est = {"probability": .02, "pnl_mean_usdt": 1.2,
@@ -1291,10 +1317,10 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
         "strategy": "bot", "pieces": [keep_piece], "estimate": keep_est,
         "cache_candidate_key": "keep-18", "is_current": True,
         "objective": {"factible": True}}
-    candidate = {"alternative_id": "reconvert-18", "symbol": "ZROUSDT",
+    candidate = {"alternative_id": reconversion_evaluated["candidate_key"], "symbol": "ZROUSDT",
         "strategy": "simple", "pieces": [convert_piece], "estimate": alt_est,
         "metrics": {**alt_est, "cycles_expected": 2.4},
-        "cache_candidate_key": "reconvert-18", "is_current": False,
+        "cache_candidate_key": reconversion_evaluated["candidate_key"], "is_current": False,
         "objective": {"factible": False, "motivos": ["piso de EV"]}}
     plan = {"alternatives": [candidate, keep], "current_pieces": {"18": {
         "piece": keep_piece, "estimate": keep_est, "alternative_id": "keep-18"}},
@@ -1307,7 +1333,7 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
     operator = SimpleNamespace(core=SimpleNamespace(_owned_grids=lambda _id: [
             {"grid_id": 18, "piece_type": "individual_bot_grid"}]),
         db=SimpleNamespace(get_grid=lambda _id: {"id": 18, "symbol": "ZROUSDT",
-            "status": "ACTIVE", "capital_total": 70},
+            "status": "ACTIVE", "capital_total": 53},
             get_grid_levels=lambda _id: [{"held_qty": 39.12}]),
         engine=Exchange(), _operation_lock=RLock(), clock=lambda: now["value"],
         _meta_ledger_rows=lambda _id: list(ledger),
@@ -1321,11 +1347,15 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
                 (on_opened({"grid_id": 19}) if on_opened else None) or {"grid_id": 19}))
     engine = V2ScenarioEngine()
     decision = engine.decide(operator, goal, {"pieces": [{"grid_id": 18,
-        "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}],
-        "symbol_valuations": {}}]}, plan)
+        "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}]}],
+        "symbol_valuations": {"ZROUSDT": {"best_bid": 1.63}}}, plan)
     assert decision["decision"] == "cambiar"
     assert decision["modo"] == "exploracion"
-    assert decision["proposed_action"]["alternative"]["alternative_id"] == "reconvert-18"
+    assert decision["proposed_action"]["alternative"]["alternative_id"] == reconversion_evaluated[
+        "candidate_key"]
+    assert decision["comparison_v2"]["realized_loss_usdt"] == 0
+    assert decision["comparison_v2"]["expected_net_usdt"] == pytest.approx(
+        1.2 - 39.12 * 1.63 * .001 - 53 * .001)
     first = engine.review(operator, goal, {}, plan)
     assert first["decision"] == "mantener" and not calls
     now["value"] += 901
@@ -1333,6 +1363,8 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
         "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}],
         "symbol_valuations": {}}]}, plan)
     assert second["decision"] == "rotar_v2"
+    assert any(row["event_type"] == "META_V2_ACTION" for row in ledger)
+    assert any(row["event_type"] == "META_V2_ROTATION" for row in ledger)
     assert [row[0] for row in calls if row[0] in {"close", "open"}] == ["close", "open"]
     now["value"] += 901
     third = engine.review(operator, goal, {}, plan)

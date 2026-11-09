@@ -871,4 +871,52 @@ Comando enfocado final (PowerShell):
 $env:ASPLE_OFFLINE='1'; pytest -q tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf tests/test_v2_scenario_engine.py tests/test_scenarios_objective.py tests/test_scenario_portfolio.py tests/test_proxy_config.py tests/test_scenarios_candidates.py --basetemp=.pytest_tmp
 ```
 
-Resultado: 62 pasaron en 8,20 s. Incluye el caso sint?tico Meta #7, la reconversi?n, modo exploraci?n y G1/G2, frenos G4, proxy de servicio, persistencia de auditor?a, guardas de sombra, comportamiento previo con el interruptor apagado y regresi?n v1 contra `776eedf`. `node --check frontend/metas.js` pas?. En el caso sint?tico hubo cero llamadas al exchange en la primera revisi?n; la segunda, tras 15 minutos, cerr? el bot y abri? el grid; el freno de seis horas impidi? repetir la acci?n. No se consult? red, S1, Testnet, `.env` ni BD real.
+Resultado de 43h-0u2/0v: 62 pasaron en 8,20 s; incluye reconversión, modo exploración, G1/G2, frenos G4, proxy de servicio, auditoría, guardas de sombra y regresión v1 contra `776eedf`. `node --check frontend/metas.js` pasó. El caso sintético cerró el bot y abrió el grid en la segunda revisión, y el freno de seis horas impidió repetir la acción. Sin S1, Testnet, `.env`, BD real ni red.
+
+### 43h-0v7a — reconversión evaluable
+
+Comando:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0v7a-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_scenarios_candidates.py --basetemp="$basetemp"
+```
+
+Resultado: 11 pasaron en 0,19 s. Fixture ZRO (1,556; σ 0,0595; 17 días; capital 53 USDT): ocho reconversiones válidas generadas y una descartada por paso mínimo; la prueba de geometría no registró fallos de simulación.
+
+### 43h-0v7b — métricas de mantener por pieza
+
+Comando:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0v7b-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_scenario_cache_job.py::test_mantener_guarda_metricas_propias_y_cartera_por_separado tests/test_scenario_cache_job.py::test_alternativa_usa_cartera_pareada_con_pieza_viva tests/test_v2_scenario_engine.py::test_revision_sigue_evaluando_otra_pieza_si_falta_mantener_de_la_nueva tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf --basetemp="$basetemp"
+```
+
+Resultado: 5 pasaron en 1,00 s; cada pieza conserva métricas propias y la cartera se registra aparte.
+
+### 43h-0v7c — registro robusto de acciones
+
+Comando:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0v7c-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_v2_scenario_engine.py tests/test_scenario_cache_job.py::test_mantener_guarda_metricas_propias_y_cartera_por_separado tests/test_scenario_cache_job.py::test_alternativa_usa_cartera_pareada_con_pieza_viva tests/test_meta_operator.py::test_review_can_add_one_piece_using_only_free_goal_cash tests/test_meta_operator.py::test_free_cash_after_realized_loss_uses_attributable_cash_amount tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf --basetemp="$basetemp"
+```
+
+Resultado: 53 pasaron en 3,89 s (un aviso de obsolescencia de Starlette). Se verificó registro previo al vínculo, freno G4 con historial `META_OPERATOR_OPEN`, evaluación de otras piezas y regresión v1.
+
+### 43h-0v7d — caso sintético Meta #7 de extremo a extremo
+
+Comando:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0v7d-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_v2_scenario_engine.py::test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos --basetemp="$basetemp"
+```
+
+Resultado enfocado: 2 pasaron en 1,33 s. El subcaso de caché ejecuta `_evaluate_context` con fixture ZRO y evaluador sintético: generó y evaluó ocho reconversiones, con cero fallos de simulación. El subcaso de decisión usa esas geometrías, y las métricas sintéticas favorecieron reconvertir: P(meta) 2 % frente a 1 %, ganancia media +1,20 frente a −8,00 USDT. En exploración la pérdida realizada de 8 USDT no se resta a la comparación forward; se descuentan 0,0638 USDT de comisión de salida y 0,053 USDT de entrada, para +1,0832 USDT netos esperados. La rotación confirmó `META_V2_ACTION` y `META_V2_ROTATION`; la revisión siguiente fue detenida por el freno de seis horas.
+
+Comprobación final (incluye toda la suite enfocada del motor v2, caché sintética y regresión v1):
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0v7d-final-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_scenario_cache_job.py::test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva tests/test_v2_scenario_engine.py::test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf tests/test_v2_scenario_engine.py --basetemp="$basetemp"
+```
+
+Resultado: 51 pasaron en 5,14 s; un aviso de obsolescencia de Starlette. No se usaron S1, Testnet, `.env`, bases reales ni red. Los interruptores globales de v2 y de caché mantienen su valor apagado por defecto; no se alteró la ruta de decisión v1.

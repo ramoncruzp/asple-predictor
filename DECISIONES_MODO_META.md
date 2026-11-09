@@ -511,4 +511,12 @@ G3 persiste en la decisi?n y expone en bit?cora y tarjeta la comparaci?n mantene
 
 La reconversi?n genera grids Simple de 6/8/10 niveles con bandas de 1?, 2? y rango observado de siete d?as. En esta versi?n solo est? implementada la variante de vender el inventario a mercado y abrir con el capital liquidable. La variante de transferir inventario requiere que la ruta de apertura/restauraci?n acepte celdas con inventario inicial, capacidad que el mecanismo actual no expone.
 
-El interruptor `v2 modo exploraci?n (Testnet)` se predetermina encendido cuando la instalaci?n tiene Testnet configurado; un valor expl?cito puede apagarlo. Esto no enciende el motor global ni la cach?: ambos siguen apagados por defecto y el perfil contin?a en v1. Con el interruptor apagado, v2 conserva las rutas de ejecuci?n previas.
+El interruptor `v2 modo exploración (Testnet)` se predetermina encendido cuando la instalación tiene Testnet configurado; un valor explícito puede apagarlo. Esto no enciende el motor global ni la caché: ambos siguen apagados por defecto y el perfil continúa en v1. Con el interruptor apagado, v2 conserva las rutas de ejecución previas.
+
+### Fase 43h-0v7 — reconversión, auditoría y métricas por pieza
+
+La construcción de reconversiones para bots con inventario usa `low`/`high` explícitos, amplía el rango de siete días si el precio queda fuera o cerca del borde y descarta durante la generación los pasos menores al mínimo. La caché expone por símbolo `reconvertir_generados`, `reconvertir_evaluados` y `reconvertir_fallidos`. Las métricas de cada pieza viva se mantienen separadas de `portfolio_metrics`; una reconversión se compara contra la cartera con esa pieza reemplazada.
+
+La acción v2 se registra en `META_V2_ACTION` en cuanto el exchange confirma el cierre o la apertura, antes de vincular la pieza. Los frenos G4 también reconocen aperturas y rotaciones históricas que no tengan ese evento, y una pieza recién abierta sin fila «mantener» no bloquea la revisión de las demás. El modo de exploración no resta la pérdida realizada de la estimación forward, pero sí contabiliza las comisiones de salida y entrada.
+
+El caso sintético Meta #7 conecta el generador real de reconversiones ZRO (1,556; σ 0,0595; 17 días; 53 USDT) con métricas de caché sintéticas, decisión, dos revisiones separadas por más de 14 minutos, rotación simulada y freno de seis horas. El resultado y el comando de prueba quedan registrados en `reports/DISCREPANCIAS_FASE43.md`. Es una validación local sintética; la medición en S1 sigue pendiente.

@@ -816,6 +816,63 @@ def test_mantener_guarda_metricas_propias_y_cartera_por_separado(monkeypatch):
     assert candidate["metrics"] == candidate_portfolio
 
 
+def test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva(
+        cache_databases, monkeypatch):
+    from decimal import Decimal
+    from data.exchange_filters import SymbolFilters
+
+    db, market_path = cache_databases
+    store = CandleStore(market_path)
+    from types import SimpleNamespace
+    import numpy as np
+    store.load = lambda _symbol, _interval: SimpleNamespace(
+        close=np.asarray([1.54, 1.61], dtype=float))
+    current = {"candidate_key": "mantener:18", "grid_id": 18,
+        "grid_status": "ACTIVE", "symbol": "ZROUSDT", "strategy": "bot",
+        "piece_type": "individual_bot_grid", "capital": 53, "capital_nominal": 53,
+        "has_inventory": True, "is_current": True}
+    monkeypatch.setattr(cache_script, "_active_grid_pieces", lambda *_args: [dict(current)])
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [{"strategy": "usdt_quieto"}], "discarded": {},
+        "discarded_by_symbol": {}, "invalid_count": 0})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    filters = SymbolFilters(tick_size=Decimal("0.00000001"),
+        min_price=Decimal("0.00000001"), max_price=Decimal("100000"),
+        step_size=Decimal("0.00000001"), min_qty=Decimal("0.00000001"),
+        max_qty=Decimal("100000000"), min_notional=Decimal("5"),
+        apply_min_to_market=True, max_num_orders=None)
+
+    def evaluate(pieces, **_kwargs):
+        rows = []
+        for piece in pieces:
+            is_current = bool(piece.get("is_current"))
+            rows.append({"piece": piece, "metrics": {
+                "n": 100, "p_target": .01 if is_current else .02,
+                "p_loss": 0, "p_loss_ci95": [0, .01],
+                "pnl_mean_usdt": -8 if is_current else 1.2,
+                "pnl_mean_ci95": [-9, -7] if is_current else [1.0, 1.4],
+                "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+                "cut_slippage_expected_usdt": 0, "days_to_target_p50": 10,
+                "evidence_sufficient": True}})
+        return {"pieces": rows}
+
+    result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
+        "free_cash": 9, "capital": 100, "capital_initial": 100,
+        "target": 10, "horizon": 17, "max_loss_pct": 18,
+        "profile_config": {"capital_per_coin_pct": 70}},
+        store=store, app_db=db.engine.url.database, market_path=market_path,
+        library_dir="unused", filters={"ZROUSDT": filters},
+        prices={"ZROUSDT": 1.556}, sigmas={"ZROUSDT": .0595}, skipped={},
+        evaluator=evaluate)
+
+    reconversion_rows = [row for row in result["results"]
+        if row["params"].get("reconversion")]
+    assert result["status"] == "ok"
+    assert len(reconversion_rows) == 8
+    assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] == 8
+    assert result["symbol_stats"]["ZROUSDT"]["reconvertir_fallidos"] == 0
+
+
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,
         monkeypatch):
     db, market_path = cache_databases

@@ -1068,4 +1068,10 @@ La prueba sintetica RAPIDO con cinco monedas, 1.000 escenarios y horizonte de 15
 
 Se a?adi? resoluci?n segura del proxy del servicio para el script de reparaci?n. El v2 incorpora reconversi?n de bot a grid con venta del inventario, objetivo G1/G2, exploraci?n condicionada por interruptor, frenos G4 propios y auditor?a G3 visible. El camino v1 y las guardas de sombra se conservaron. La variante de transferencia directa del inventario queda pendiente porque el mecanismo actual de apertura no acepta estado inicial de celdas.
 
-El interruptor de exploraci?n se predetermina encendido solo con Testnet configurado; el motor v2 global y la cach? permanecen apagados por defecto. Con el interruptor apagado, se conservan las rutas de ejecuci?n de 43h-0u. Validaci?n final: 62 pruebas enfocadas pasaron; `node --check frontend/metas.js` pas? y el verificador de codificaci?n termin? con cero hallazgos. No se usaron S1, Testnet, `.env`, bases reales ni red.
+El interruptor de exploración se predetermina encendido solo con Testnet configurado; el motor v2 global y la caché permanecen apagados por defecto. Con el interruptor apagado, se conservan las rutas de ejecución de 43h-0u. Validación de esa parte: 62 pruebas enfocadas pasaron; `node --check frontend/metas.js` pasó y el verificador de codificación terminó con cero hallazgos. No se usaron S1, Testnet, `.env`, bases reales ni red.
+
+### 43h-0v7 — reconversión ZRO, registro v2 y mantener por pieza
+
+Se corrigió la construcción de geometrías de reconversión para que el precio inicial quede dentro del rango con margen de un paso, y las geometrías con pasos inferiores al mínimo se descarten antes de simular. La caché separa las métricas de cada pieza viva de las métricas de cartera. Las acciones de v2 quedan registradas al confirmarse en el exchange y los frenos G4 reconocen aperturas/rotaciones aunque falte el evento nuevo.
+
+Validación local: generador real de reconversión ZRO con fixture de precio 1,556, σ 0,0595, horizonte 17 días y capital 53 USDT; salida de métricas sintéticas conectada a decisión y rotación con exchange falso. Sin consultas a S1, Testnet, `.env`, bases reales ni red. El detalle numérico y los comandos se consignan en `reports/DISCREPANCIAS_FASE43.md`.
