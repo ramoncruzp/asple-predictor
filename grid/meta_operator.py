@@ -4534,10 +4534,13 @@ class MetaOperator:
         review_id = str(plan.get("decision_id") or uuid.uuid4().hex)
         prior = evaluations[-1] if evaluations else None
         prior_details = prior.get("details") or {} if prior else {}
+        already_logged = any((row.get("details") or {}).get("review_id") == review_id
+            for row in evaluations)
         streak = (int(prior_details.get("streak") or 0) + 1
             if prior and prior_details.get("alternative_key") == key and prior_details.get("material")
                 and prior_details.get("review_id") != review_id and material else 1 if material else 0)
-        self._ledger(goal["id"], "META_OPERATOR_ROTATION_EVALUATED", {
+        if not already_logged:
+            self._ledger(goal["id"], "META_OPERATOR_ROTATION_EVALUATED", {
             "review_id": review_id, "alternative_key": key, "material": material,
             "streak": streak, "probability_improvement_pp": probability_delta,
             "progress_improvement_pct": progress_delta,
@@ -4547,7 +4550,7 @@ class MetaOperator:
                 "symbol": ((own_piece or {}).get("piece") or {}).get("symbol") or (current_alternative or {}).get("symbol"),
                 "strategy": ((own_piece or {}).get("piece") or {}).get("strategy") or (current_alternative or {}).get("strategy"),
                 "estimate": old_est},
-            "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
+                "shadow_decision": plan.get("shadow_decision")}, grid_id=int(grid["id"]))
         required_reviews = max(2, int(cfg.get("rotation_persistence_reviews", 2)))
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
         opened_at = self._as_utc(link.get("created_at") or grid.get("created_at"))
@@ -4600,7 +4603,8 @@ class MetaOperator:
                 "review_id": review_id, "alternative_key": None, "material": False,
                 "streak": 0, "reason": reason}, grid_id=int(link["grid_id"]))
 
-    def _review_allocations(self, goal, valuation, *, plan=None):
+    def _review_allocations(self, goal, valuation, *, plan=None, v2_on_opened=None,
+            v2_action_id=None):
         """Compara alternativa y pieza activa; toda rotación liquida por el cierre verificado."""
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("review_allocations")
@@ -4686,6 +4690,9 @@ class MetaOperator:
                     "decision": "cancelar_compras_conservar_ventas",
                     "alternative": best, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 self.alert("META_OPERATOR_WITHDRAW", goal["id"], {"symbol": grid["symbol"], "reason": reason})
+                if v2_on_opened is not None:
+                    v2_on_opened({"grid_id": int(grid["id"]), "close": close,
+                        "_v2_close_confirmation": True})
                 self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
                     "alternative": best, "testnet_openability": openability}, grid_id=int(grid["id"]))
                 return {"decision": "retirar_con_ventas_vivas", "reason": reason,
@@ -4715,7 +4722,12 @@ class MetaOperator:
                     "scanner": scan_row, "price_bid": bid}, grid_id=int(grid["id"]))
                 self.alert("META_OPERATOR_WITHDRAW", goal["id"], {"symbol": grid["symbol"], "reason": reason})
                 try:
-                    opened = self._open_replacement(goal, replacement, float(grid["capital_total"]))
+                    if v2_on_opened is None:
+                        opened = self._open_replacement(goal, replacement, float(grid["capital_total"]))
+                    else:
+                        opened = self._open_replacement(goal, replacement,
+                            float(grid["capital_total"]), on_opened=v2_on_opened,
+                            v2_action_id=v2_action_id)
                 except Exception as exc:
                     self._ledger(goal["id"], "META_OPERATOR_OPEN_FAILED", {"reason": reason,
                         "piece": replacement.get("pieces", [None])[0], "error": str(exc)}, grid_id=int(grid["id"]))
@@ -4740,6 +4752,9 @@ class MetaOperator:
                 if close.get("status") != "CLOSED":
                     return {"decision": "no_hacer_nada", "reason": "cierre verificado pendiente",
                             "grid_id": int(grid["id"]), "close": close}
+                if v2_on_opened is not None:
+                    v2_on_opened({"grid_id": int(grid["id"]), "close": close,
+                        "_v2_close_confirmation": True})
                 actual_allowed, actual_costs = actual_close_reallocation_allowed(expected, close, reopen_fee)
                 self._ledger(goal["id"], "META_OPERATOR_ROTATION", {"reason": reason,
                     "alternative": best, "testnet_openability": openability,
@@ -4759,7 +4774,12 @@ class MetaOperator:
                             "alternative_id": best.get("alternative_id"), "symbol": best.get("symbol"),
                             "actual_costs": actual_costs, "expected_gain_usdt": expected}
                 try:
-                    opened = self._open_replacement(goal, best, float(grid["capital_total"]))
+                    if v2_on_opened is None:
+                        opened = self._open_replacement(goal, best, float(grid["capital_total"]))
+                    else:
+                        opened = self._open_replacement(goal, best,
+                            float(grid["capital_total"]), on_opened=v2_on_opened,
+                            v2_action_id=v2_action_id)
                 except Exception as exc:
                     self._ledger(goal["id"], "META_OPERATOR_OPEN_FAILED", {"reason": reason,
                         "piece": best.get("pieces", [None])[0], "error": str(exc)}, grid_id=int(grid["id"]))
@@ -4817,11 +4837,20 @@ class MetaOperator:
                                 "reason": reason, "piece": piece, "testnet_openability": openability})
                             return {"decision": "no_hacer_nada", "reason": reason}
                         chosen = dict(alternative, pieces=[piece], reason=allocation.get("reason"))
-                        opened = self._open_replacement(goal, chosen, piece["capital_usdt"])
+                        if v2_on_opened is None:
+                            opened = self._open_replacement(goal, chosen, piece["capital_usdt"])
+                        else:
+                            opened = self._open_replacement(goal, chosen,
+                                piece["capital_usdt"], on_opened=v2_on_opened,
+                                v2_action_id=v2_action_id)
                         return {"decision": "abrir_pieza_con_asignacion_ampliada",
                             "reason": allocation.get("reason"), "opened": opened}
                 return {"decision": "no_hacer_nada", "reason": allocation.get("reason")}
-        added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation)
+        if v2_on_opened is None:
+            added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation)
+        else:
+            added = self._add_piece_from_free_cash(goal, links, plan, valuation=valuation,
+                on_opened=v2_on_opened, v2_action_id=v2_action_id)
         if added is not None:
             return added
         return {"decision": "no_hacer_nada", "reason": "ninguna alternativa supera los límites de reasignación",
@@ -4969,7 +4998,8 @@ class MetaOperator:
         self._ledger(goal["id"], "META_OPERATOR_RECONFIGURE", details, grid_id=int(grid["id"]))
         return details
 
-    def _add_piece_from_free_cash(self, goal, links, plan, *, valuation=None):
+    def _add_piece_from_free_cash(self, goal, links, plan, *, valuation=None,
+            on_opened=None, v2_action_id=None):
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("add_piece_from_free_cash")
         cfg = goal.get("config_snapshot") or {}
@@ -5020,7 +5050,11 @@ class MetaOperator:
                     "reason": f"alternativa no abrible en Testnet: {openability['reason']}",
                     "piece": piece, "testnet_openability": openability})
                 continue
-            opened = self._open_replacement(goal, alternative, needed)
+            if on_opened is None:
+                opened = self._open_replacement(goal, alternative, needed)
+            else:
+                opened = self._open_replacement(goal, alternative, needed,
+                    on_opened=on_opened, v2_action_id=v2_action_id)
             decision = {"decision": "abrir_pieza_con_efectivo_libre",
                 "alternative_id": alternative.get("alternative_id"), "symbol": piece.get("symbol"),
                 "reason": "revisión de 15 minutos; hay capital atribuible libre",
@@ -5028,12 +5062,15 @@ class MetaOperator:
                 "allocated_reserve_free_usdt": allocatable, "piece": opened,
                 "profile_limits": {"capital_per_coin_pct": cfg.get("capital_per_coin_pct"),
                     "max_grids": cfg.get("max_grids"), "max_bots": cfg.get("max_bots")}}
+            if v2_action_id is not None:
+                decision["v2_action_id"] = str(v2_action_id)
             self._ledger(goal["id"], "META_OPERATOR_OPEN", decision, grid_id=opened["grid_id"])
             self.alert("META_OPERATOR_OPEN", goal["id"], {"symbol": piece["symbol"], "reason": decision["reason"]})
             return decision
         return None
 
-    def _open_replacement(self, goal, alternative, capital):
+    def _open_replacement(self, goal, alternative, capital, *, on_opened=None,
+            v2_action_id=None):
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("open_replacement")
         piece = dict(alternative["pieces"][0])
@@ -5060,11 +5097,18 @@ class MetaOperator:
                 piece["n_levels"], capital=piece["capital_usdt"], strategy=piece["strategy"],
                 params=params, meta_id=int(goal["id"]))
             grid_id = int(grid["id"])
+        opened = {**piece, "grid_id": grid_id}
+        if on_opened is not None:
+            on_opened(opened)
         self.core.link_grid(int(goal["id"]), grid_id, piece["piece_type"])
-        self._ledger(goal["id"], "META_OPERATOR_OPEN", {"piece": piece, "grid_id": grid_id,
-            "reason": alternative.get("reason")}, grid_id=grid_id)
-        self.alert("META_OPERATOR_OPEN", goal["id"], {"symbol": piece["symbol"], "reason": alternative["reason"]})
-        return {**piece, "grid_id": grid_id}
+        details = {"piece": piece, "grid_id": grid_id,
+            "reason": alternative.get("reason") or "pieza seleccionada por el motor de meta"}
+        if v2_action_id is not None:
+            details["v2_action_id"] = str(v2_action_id)
+        self._ledger(goal["id"], "META_OPERATOR_OPEN", details, grid_id=grid_id)
+        self.alert("META_OPERATOR_OPEN", goal["id"], {"symbol": piece["symbol"],
+            "reason": details["reason"]})
+        return opened
 
     @staticmethod
     def _recenter_alternative(alternative, grid, price):

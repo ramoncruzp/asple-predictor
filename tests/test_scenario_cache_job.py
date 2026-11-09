@@ -789,20 +789,29 @@ def test_alternativa_usa_cartera_pareada_con_pieza_viva():
 
 def test_mantener_guarda_metricas_propias_y_cartera_por_separado(monkeypatch):
     own = {"p_target": .25, "pnl_mean_usdt": -1.0}
+    own_without_inventory = {"p_target": .05, "pnl_mean_usdt": .2}
     portfolio = {"p_target": .1, "pnl_mean_usdt": -4.0}
     candidate_own = {"p_target": .8, "pnl_mean_usdt": 3.0}
     candidate_portfolio = {"p_target": .35, "pnl_mean_usdt": 1.0}
     def outcome_metrics(rows, **_kwargs):
-        return portfolio if rows and rows[0] is current else candidate_portfolio
+        return portfolio if rows and all((row.get("piece") or {}).get("is_current")
+            for row in rows) else candidate_portfolio
 
     monkeypatch.setattr(cache_script, "_portfolio_outcome_metrics", outcome_metrics)
-    current = {"piece": {"grid_id": 18, "is_current": True}, "metrics": own}
+    current = {"piece": {"grid_id": 18, "is_current": True, "has_inventory": True},
+        "metrics": own}
+    current_without_inventory = {"piece": {"grid_id": 21, "is_current": True,
+        "has_inventory": False}, "metrics": own_without_inventory}
     candidate = {"piece": {"reconvert_from_grid_id": 18}, "metrics": candidate_own}
-    cache_script._apply_live_portfolio_metrics([current, candidate], [current],
+    cache_script._apply_live_portfolio_metrics([current, current_without_inventory, candidate],
+        [current, current_without_inventory],
         capital=100, target=10, max_loss_pct=18, horizon=17)
 
     assert current["metrics"] is own
+    assert current_without_inventory["metrics"] is own_without_inventory
+    assert current["metrics"] != current_without_inventory["metrics"]
     assert current["portfolio_metrics"] == portfolio
+    assert current_without_inventory["portfolio_metrics"] == portfolio
     assert candidate["metrics_pieza_sola"] is candidate_own
     assert candidate["metrics"] == candidate_portfolio
 

@@ -1178,6 +1178,7 @@ def test_review_can_add_one_piece_using_only_free_goal_cash():
     class Core:
         def __init__(self): self.events = []
         def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
+        def _available_usdt(self, _meta_id): return 100, 0
 
     class DB:
         def get_grid(self, _grid_id):
@@ -1932,6 +1933,7 @@ def test_free_cash_after_realized_loss_uses_attributable_cash_amount():
         def __init__(self): self.events = []
         def _ledger(self, *args, **kwargs): self.events.append((args, kwargs))
         def valuation(self, _meta_id): return {"cash_usdt": "99.9186"}
+        def _available_usdt(self, _meta_id): return 99.9186, 0
 
     class DB:
         def get_grid(self, _grid_id):

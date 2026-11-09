@@ -623,8 +623,7 @@ class V2ScenarioEngine(DecisionEngine):
             alternative = action.get("alternative") or {}
             piece = (alternative.get("pieces") or [{}])[0]
             grid_id = action.get("grid_id")
-            subject = str(grid_id) if grid_id is not None else str(
-                alternative.get("cache_candidate_key") or piece.get("symbol") or "")
+            subject = str(grid_id) if grid_id is not None else str(piece.get("symbol") or "")
             action_key = self._stable_action_key(action, alternative, piece, grid_id)
         if exploration_enabled:
             brake = self._v2_brake(operator, goal, action_key=action_key,
@@ -635,18 +634,45 @@ class V2ScenarioEngine(DecisionEngine):
                     "freno": brake})
         if not action:
             return json_safe(decision)
+        action_id = uuid.uuid4().hex
+        ledger = getattr(operator, "_ledger", None)
+        action_recorded = {"value": False}
+
+        def record_confirmed_open(opened):
+            if not callable(ledger) or action_recorded["value"]:
+                return
+            opened = dict(opened or {})
+            closing_only = bool(opened.pop("_v2_close_confirmation", False))
+            opened_grid_id = int(opened.get("grid_id") or 0) or None
+            ledger(int(goal["id"]), "META_V2_ACTION", {
+                "v2_action_id": action_id, "action_key": action_key,
+                "subject": subject, "action_type": action["type"],
+                "grid_id": grid_id if grid_id is not None else opened_grid_id,
+                "opened_grid_id": opened_grid_id,
+                "alternative_id": alternative.get("alternative_id"),
+                "review_at_s": review_at_s,
+                "result": {"exchange_open_confirmed": not closing_only,
+                    "exchange_close_confirmed": closing_only,
+                    "opened": None if closing_only else opened,
+                    "closed": opened.get("close") if closing_only else None}},
+                grid_id=grid_id if grid_id is not None else opened_grid_id)
+            action_recorded["value"] = True
+
         lock = getattr(operator, "_operation_lock", None)
         with lock if lock is not None else nullcontext():
             if not exploration_enabled and action["type"] == "rotar":
                 executed = operator._review_allocations(goal, valuation,
-                    plan=action.get("plan") or plan)
+                    plan=action.get("plan") or plan, v2_on_opened=record_confirmed_open,
+                    v2_action_id=action_id)
             elif not exploration_enabled and action["type"] == "agregar":
                 from grid.meta_live_pieces import live_meta_grid_links
                 links = live_meta_grid_links(operator.core, int(goal["id"]))
                 executed = operator._add_piece_from_free_cash(goal, links,
-                    {"alternatives": [action["alternative"]]}, valuation=valuation)
+                    {"alternatives": [action["alternative"]]}, valuation=valuation,
+                    on_opened=record_confirmed_open, v2_action_id=action_id)
             elif action["type"] == "rotar":
-                executed = self._execute_rotation_v2(operator, goal, action)
+                executed = self._execute_rotation_v2(operator, goal, action,
+                    on_opened=record_confirmed_open, v2_action_id=action_id)
             elif action["type"] == "agregar":
                 from grid.meta_live_pieces import live_meta_grid_links
                 links = live_meta_grid_links(operator.core, int(goal["id"]))
@@ -654,7 +680,8 @@ class V2ScenarioEngine(DecisionEngine):
                 if callable(validator):
                     validator(goal, {"pieces": action["alternative"].get("pieces", [])})
                 executed = operator._add_piece_from_free_cash(goal, links,
-                    {"alternatives": [action["alternative"]]}, valuation=valuation)
+                    {"alternatives": [action["alternative"]]}, valuation=valuation,
+                    on_opened=record_confirmed_open, v2_action_id=action_id)
             else:
                 return json_safe({"decision": "no_hacer_nada", "reason": "acción v2 desconocida"})
         if not executed or (isinstance(executed, dict) and
@@ -665,13 +692,6 @@ class V2ScenarioEngine(DecisionEngine):
             return json_safe({"decision": "mantener",
                 "reason": "la ejecución v2 no se completó",
                 "comparison_v2": decision.get("comparison_v2")})
-        ledger = getattr(operator, "_ledger", None)
-        if callable(ledger):
-            ledger(int(goal["id"]), "META_V2_ACTION", {
-            "action_key": action_key, "subject": subject,
-            "action_type": action["type"], "grid_id": grid_id,
-            "alternative_id": action.get("alternative", {}).get("alternative_id"),
-            "review_at_s": review_at_s, "result": executed}, grid_id=grid_id)
         return json_safe({**executed, "modo": decision.get("modo", "meta"),
             "comparison_v2": decision.get("comparison_v2")})
 
@@ -728,8 +748,49 @@ class V2ScenarioEngine(DecisionEngine):
             ledger(int(goal["id"]), "META_V2_FRENO", {**review, "reason": reason},
                 grid_id=grid_id)
             return reason
-        actions = [row.get("details", {}) for row in rows
-            if row.get("event_type") == "META_V2_ACTION"]
+        action_rows = [row for row in rows if row.get("event_type") == "META_V2_ACTION"]
+        known_action_ids = {str((row.get("details") or {}).get("v2_action_id"))
+            for row in action_rows if (row.get("details") or {}).get("v2_action_id")}
+        actions = []
+
+        def event_seconds(row):
+            details = row.get("details") or {}
+            value = details.get("review_at_s") or details.get("action_at_s") or row.get("ts")
+            if value is None:
+                return now
+            if hasattr(value, "timestamp"):
+                return float(value.timestamp())
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                try:
+                    from datetime import datetime
+                    stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    return float(stamp.timestamp())
+                except (TypeError, ValueError):
+                    return now
+
+        for row in action_rows:
+            details = dict(row.get("details") or {})
+            details["review_at_s"] = event_seconds(row)
+            actions.append(details)
+        represented_times = [item["review_at_s"] for item in actions]
+        for row in rows:
+            if row.get("event_type") not in {"META_OPERATOR_OPEN", "META_V2_ROTATION"}:
+                continue
+            details = dict(row.get("details") or {})
+            action_id = details.get("v2_action_id")
+            if action_id is not None and str(action_id) in known_action_ids:
+                continue
+            stamp = event_seconds(row)
+            if any(abs(stamp - previous) <= 60 for previous in represented_times):
+                continue
+            piece = details.get("piece") or {}
+            details["subject"] = (details.get("subject") or details.get("symbol") or
+                piece.get("symbol") or str(details.get("grid_id") or row.get("grid_id") or ""))
+            details["review_at_s"] = stamp
+            actions.append(details)
+            represented_times.append(stamp)
         recent_day = [item for item in actions if now - float(item.get("review_at_s") or 0) < 86400]
         if len(recent_day) >= 2:
             reason = "límite v2: máximo dos cambios o agregados por meta en 24 horas"
@@ -743,7 +804,7 @@ class V2ScenarioEngine(DecisionEngine):
         return reason
 
     @staticmethod
-    def _execute_rotation_v2(operator, goal, action):
+    def _execute_rotation_v2(operator, goal, action, *, on_opened=None, v2_action_id=None):
         grid_id = int(action["grid_id"])
         grid = operator.db.get_grid(grid_id)
         if grid is None or str(grid.get("status") or "").upper() not in {"ACTIVE", "PAUSED", "HOLDING"}:
@@ -764,12 +825,23 @@ class V2ScenarioEngine(DecisionEngine):
         if str((closed or {}).get("status") or "").upper() not in {"CLOSED", "CANCELLED", "DONE"}:
             return {"decision": "no_hacer_nada", "reason": "cierre v2 no verificado",
                 "grid_id": grid_id, "close": closed}
-        opened = operator._open_replacement(goal, alternative,
-            float(piece.get("capital_usdt") or grid.get("capital_total") or 0))
-        operator._ledger(int(goal["id"]), "META_V2_ROTATION", {
+        if on_opened is not None:
+            on_opened({"grid_id": grid_id, "close": closed,
+                "_v2_close_confirmation": True})
+        if on_opened is None:
+            opened = operator._open_replacement(goal, alternative,
+                float(piece.get("capital_usdt") or grid.get("capital_total") or 0))
+        else:
+            opened = operator._open_replacement(goal, alternative,
+                float(piece.get("capital_usdt") or grid.get("capital_total") or 0),
+                on_opened=on_opened, v2_action_id=v2_action_id)
+        rotation_details = {
             "grid_id": grid_id, "closed": closed, "opened": opened,
             "alternative_id": alternative.get("alternative_id"),
-            "openability": openability}, grid_id=grid_id)
+            "openability": openability}
+        if v2_action_id is not None:
+            rotation_details["v2_action_id"] = str(v2_action_id)
+        operator._ledger(int(goal["id"]), "META_V2_ROTATION", rotation_details, grid_id=grid_id)
         return {"decision": "rotar_v2", "grid_id": grid_id, "closed": closed,
             "opened": opened, "alternative_id": alternative.get("alternative_id")}
 

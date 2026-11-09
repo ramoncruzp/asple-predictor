@@ -653,7 +653,7 @@ def test_revision_v2_cambia_solo_tras_comparacion_neta_y_delega_frenos():
     operator, goal, valuation, plan = _review_fixture()
     plan["exploration_enabled"] = True
     engine = V2ScenarioEngine()
-    engine._execute_rotation_v2 = lambda _operator, _goal, action: calls.append(action) or {
+    engine._execute_rotation_v2 = lambda _operator, _goal, action, **_kwargs: calls.append(action) or {
         "decision": "cerrar_y_reasignar"}
 
     result = engine.review(operator, goal, valuation, plan)
@@ -670,7 +670,7 @@ def test_revision_v2_con_interruptor_exploracion_no_castiga_perdida_realizada():
     valuation["symbol_valuations"] = {"JUPUSDT": {"best_bid": .8}}
     calls = []
     engine = V2ScenarioEngine()
-    engine._execute_rotation_v2 = lambda *_args: calls.append(True) or {"decision": "rotar_v2"}
+    engine._execute_rotation_v2 = lambda *_args, **_kwargs: calls.append(True) or {"decision": "rotar_v2"}
     plan["exploration_enabled"] = True
 
     result = engine.review(operator, goal, valuation, plan)
@@ -683,7 +683,7 @@ def test_revision_v2_agrega_cartera_voraz_con_frenos_del_operador():
     operator, goal, valuation, plan = _review_fixture(
         alt_probability=.4, current_probability=.4)
     added = []
-    operator._add_piece_from_free_cash = lambda _goal, links, candidate_plan, valuation=None: (
+    operator._add_piece_from_free_cash = lambda _goal, links, candidate_plan, valuation=None, **_kwargs: (
         added.append((links, candidate_plan, valuation)) or {
             "decision": "abrir_pieza_con_efectivo_libre"})
     alternative = plan["alternatives"][0]
@@ -839,7 +839,7 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action, monkeypatch):
         "v2 no debe entrar a los frenos v1")
     operator._add_piece_from_free_cash = execute
     monkeypatch.setattr(V2ScenarioEngine, "_execute_rotation_v2",
-        staticmethod(lambda _operator, _goal, _action: execute()))
+        staticmethod(lambda _operator, _goal, _action, **_kwargs: execute()))
     engine.review = lambda _operator, _goal, _valuation, plan=None: (
         V2ScenarioEngine().review(_operator, _goal, _valuation, plan))
 
@@ -1169,6 +1169,94 @@ def test_cambio_de_clave_reinicia_persistencia_v2():
     assert "persistencia" in brake
 
 
+def test_freno_v2_cuenta_apertura_historial_sin_meta_v2_action():
+    now = {"value": 50_000.0}
+    rows = [{"event_type": "META_V2_REVIEW", "details": {
+        "action_key": "agregar:grid=-|ZROUSDT:bot:1:bot:-1.5:1.5",
+        "subject": "ZROUSDT", "review_at_s": 49_100.0}},
+        {"event_type": "META_OPERATOR_OPEN", "grid_id": 21, "details": {
+            "piece": {"symbol": "ZROUSDT"}, "grid_id": 21,
+            "review_at_s": 49_940.0}}]
+    operator = SimpleNamespace(clock=lambda: now["value"],
+        _meta_ledger_rows=lambda _goal_id: list(rows),
+        _ledger=lambda _goal_id, event_type, details, **_kwargs: rows.append({
+            "event_type": event_type, "details": details}))
+
+    brake = V2ScenarioEngine._v2_brake(operator, {"id": 7},
+        action_key="agregar:grid=-|ZROUSDT:bot:1:bot:-1.5:1.5",
+        subject="ZROUSDT", grid_id=None, review_at_s=now["value"])
+
+    assert brake is not None
+    assert "6 horas" in brake
+
+
+def test_apertura_v2_registra_accion_antes_de_vincular_y_admite_alternativa_sin_reason():
+    events = []
+    operator = object.__new__(MetaOperator)
+    operator.engine = SimpleNamespace(create_grid=lambda *_args, **_kwargs:
+        events.append("exchange_open") or {"id": 71})
+    operator._opener = None
+    operator._validate_v2_piece_action = lambda *_args: None
+    operator.core = SimpleNamespace(link_grid=lambda *_args: events.append("link"))
+    operator._ledger = lambda _meta_id, event_type, details, **_kwargs: events.append(
+        ("ledger", event_type, details))
+    operator.alert = lambda *_args: events.append("alert")
+    goal = {"id": 7, "capital_initial": 100,
+        "config_snapshot": {"capital_per_coin_pct": 70}}
+    alternative = {"alternative_id": "reconvert-zro", "pieces": [{
+        "symbol": "ZROUSDT", "strategy": "simple", "piece_type": "grid",
+        "floor": 1.4, "ceiling": 1.9, "n_levels": 8, "capital_usdt": 50}]}
+
+    opened = MetaOperator._open_replacement(operator, goal, alternative, 50,
+        on_opened=lambda piece: events.append(("confirmed", piece)),
+        v2_action_id="action-7")
+
+    assert opened["grid_id"] == 71
+    assert [row if isinstance(row, str) else row[0] for row in events] == [
+        "exchange_open", "confirmed", "link", "ledger", "alert"]
+    open_event = next(row for row in events if isinstance(row, tuple) and row[0] == "ledger")
+    assert open_event[2]["v2_action_id"] == "action-7"
+
+
+def test_revision_sigue_evaluando_otra_pieza_si_falta_mantener_de_la_nueva():
+    operator, goal, valuation, plan = _review_fixture()
+    operator.core._owned_grids = lambda _goal_id: [{"grid_id": 21}, {"grid_id": 1}]
+
+    result = V2ScenarioEngine().decide(operator, goal, valuation, plan)
+
+    assert result["decision"] == "cambiar"
+    assert result["grid_id"] == 1
+
+
+def test_revision_v1_registra_una_evaluacion_por_grid_y_revision():
+    operator = object.__new__(MetaOperator)
+    rows = []
+    operator.clock = lambda: 100_000.0
+    operator._meta_ledger_rows = lambda _meta_id: list(rows)
+    operator._ledger = lambda _meta_id, event_type, details, **kwargs: rows.append({
+        "event_type": event_type, "details": details, "grid_id": kwargs.get("grid_id")})
+    goal = {"id": 7, "config_snapshot": {}}
+    grid = {"id": 18, "capital_total": 50, "created_at": None}
+    link = {"created_at": None}
+    current_piece = {"grid_id": 18, "symbol": "ZROUSDT", "piece_type": "individual_bot_grid",
+        "strategy": "bot", "floor": 1.5, "ceiling": 1.9, "capital_usdt": 50,
+        "n_levels": 1}
+    current = {"symbol": "ZROUSDT", "strategy": "bot", "pieces": [current_piece],
+        "estimate": {"probability": .1, "median_progress_pct": 10}}
+    alternative = {"symbol": "ZROUSDT", "strategy": "simple", "pieces": [{
+        "symbol": "ZROUSDT", "piece_type": "grid", "strategy": "simple",
+        "floor": 1.4, "ceiling": 2.0, "capital_usdt": 50, "n_levels": 8}],
+        "estimate": {"probability": .3, "median_progress_pct": 50}}
+    plan = {"decision_id": "revision-18"}
+
+    MetaOperator._rotation_gate(operator, goal, grid, link, alternative, current, plan)
+    MetaOperator._rotation_gate(operator, goal, grid, link, alternative, current, plan)
+
+    rows_for_review = [row for row in rows if row["event_type"] == "META_OPERATOR_ROTATION_EVALUATED"
+        and row["details"].get("review_id") == "revision-18"]
+    assert len(rows_for_review) == 1
+
+
 def test_bitacora_compacta_conserva_auditoria_v2():
     comparison = {"modo": "exploracion", "keep": {"symbol": "ZROUSDT"},
         "alternative": {"symbol": "ZROUSDT", "estimate": {"p_loss": .02}}}
@@ -1227,8 +1315,10 @@ def test_meta_sintetica_v2_explora_reconvierte_bot_y_aplica_frenos(monkeypatch):
             "event_type": event, "details": details, "grid_id": kwargs.get("grid_id")}),
         _validate_v2_plan_limits=lambda *_args, **_kwargs: calls.append(("validate",)),
         _testnet_openability=lambda *_args, **_kwargs: {"allowed": True},
-        _open_replacement=lambda _goal, _alternative, _capital: (
-            calls.append(("open", "ZROUSDT", 8)) or {"grid_id": 19}))
+        _open_replacement=lambda _goal, _alternative, _capital, on_opened=None,
+            v2_action_id=None: (
+                calls.append(("open", "ZROUSDT", 8)) or
+                (on_opened({"grid_id": 19}) if on_opened else None) or {"grid_id": 19}))
     engine = V2ScenarioEngine()
     decision = engine.decide(operator, goal, {"pieces": [{"grid_id": 18,
         "symbol": "ZROUSDT", "levels": [{"held_qty": 39.12, "entry_price": 1.789}],
@@ -1263,7 +1353,7 @@ def test_interruptor_exploracion_apagado_conserva_no_cambiar():
 def test_interruptor_exploracion_apagado_delega_en_comportamiento_previo():
     operator, goal, valuation, plan = _review_fixture()
     calls = []
-    operator._review_allocations = lambda _goal, _value, plan=None: (
+    operator._review_allocations = lambda _goal, _value, plan=None, **_kwargs: (
         calls.append(plan) or {"decision": "cerrar_y_reasignar"})
     result = V2ScenarioEngine().review(operator, goal, valuation, plan)
     assert result["decision"] == "cerrar_y_reasignar"
