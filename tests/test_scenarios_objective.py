@@ -34,7 +34,14 @@ def test_objective_reports_each_infeasibility_reason():
 
     no_ci = objective_v2({key: value for key, value in _metrics().items()
         if key != "p_loss_ci95"}, perfil="RAPIDO", capital_meta=100)
-    assert not no_ci["factible"] and "falta el límite superior" in no_ci["motivos"][0]
+    assert not no_ci["factible"] and "metrica_incompleta" in no_ci["motivos"][0]
+
+
+def test_objective_incompleto_no_lanza_error_y_es_no_factible():
+    result = objective_v2({"p_target": .2, "p_loss": 0}, perfil="RAPIDO",
+        capital_meta=100)
+    assert result["factible"] is False
+    assert result["motivos"][0].startswith("metrica_incompleta")
 
 
 def test_rank_alternatives_uses_target_then_days_then_mean():

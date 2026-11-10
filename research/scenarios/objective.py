@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -46,21 +47,41 @@ def objective_limits(perfil, *, settings_db=None):
 def objective_v2(metrics, *, perfil, capital_meta, max_loss_pct=None,
         p_limit_cap=None, ev_floor_pct=1.0, cut_slippage_expected_max_pct=0.5):
     """Evalúa factibilidad; la cota superior del IC de pérdida se usa por seguridad."""
+    metrics = metrics if isinstance(metrics, dict) else {}
     profile_name = str(perfil).upper()
     if profile_name not in DEFAULT_PROFILES:
         raise ValueError(f"perfil desconocido: {perfil}")
     capital = float(capital_meta)
     if capital <= 0:
         raise ValueError("capital_meta debe ser positivo")
+    required = ("pnl_mean_usdt", "p_target", "p_loss_ci95")
+    missing = [key for key in required if key not in metrics or metrics[key] is None]
+    if missing:
+        return {"factible": False, "motivos": [
+            "metrica_incompleta: faltan " + ", ".join(missing)],
+            "clave_orden": (1.0, float("inf"), float("inf"))}
     profile = DEFAULT_PROFILES[profile_name]
     probability_cap = float(DEFAULT_P_LIMIT_CAP[profile_name] if p_limit_cap is None else p_limit_cap)
-    mean_pnl = float(metrics["pnl_mean_usdt"])
-    cut_slippage_expected = float(metrics.get("cut_slippage_expected_usdt",
-        float(metrics.get("p_loss", 0.0)) * float(metrics.get("cut_slippage_mean_usdt", 0.0))))
-    target_probability = float(metrics["p_target"])
     median_days = metrics.get("days_to_target_p50")
     loss_ci = metrics.get("p_loss_ci95")
-    loss_upper = float(loss_ci[1]) if isinstance(loss_ci, (list, tuple)) and len(loss_ci) == 2 else None
+    try:
+        mean_pnl = float(metrics["pnl_mean_usdt"])
+        cut_slippage_expected = float(metrics.get("cut_slippage_expected_usdt",
+            float(metrics.get("p_loss", 0.0)) * float(metrics.get("cut_slippage_mean_usdt", 0.0))))
+        target_probability = float(metrics["p_target"])
+        valid_loss_interval = isinstance(loss_ci, (list, tuple)) and len(loss_ci) == 2
+        loss_interval = tuple(float(value) for value in loss_ci) if valid_loss_interval else ()
+        loss_upper = loss_interval[1] if valid_loss_interval else None
+        loss_probability = float(metrics.get("p_loss", 0.0))
+        cut_slippage_expected = float(cut_slippage_expected)
+        numbers_valid = valid_loss_interval and all(math.isfinite(value) for value in (
+            mean_pnl, target_probability, loss_probability, cut_slippage_expected, *loss_interval))
+    except (TypeError, ValueError, OverflowError):
+        numbers_valid = False
+        loss_upper = None
+    if not numbers_valid:
+        return {"factible": False, "motivos": ["metrica_incompleta: valor no numérico"],
+            "clave_orden": (1.0, float("inf"), float("inf"))}
 
     reasons = []
     if ev_floor_pct is not None and mean_pnl < -capital * float(ev_floor_pct) / 100:

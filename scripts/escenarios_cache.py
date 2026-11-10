@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 import math
 import multiprocessing
@@ -563,6 +564,9 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         if cash is None or equity is None or timestamps is None:
             return
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
+        _metrics, metric_error = _normalize_row_metrics(row)
+        if metric_error:
+            failed_candidates[candidate_key] = metric_error
         if bool(piece.get("is_current")):
             entry = {"candidate_key": candidate_key,
             "piece": dict(piece), "metrics": dict(row.get("metrics") or {}),
@@ -872,6 +876,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         if parallel_pool is not None:
             parallel_pool.shutdown(wait=True, cancel_futures=True)
     first = {"pieces": first_rows, "skipped_symbols": skipped}
+    for row in first_rows:
+        key = str((row.get("piece") or {}).get("candidate_key") or
+            _candidate_key(row.get("piece") or {}))
+        _metrics, metric_error = _normalize_row_metrics(row)
+        if metric_error:
+            failed_candidates[key] = metric_error
     objective_started = time.perf_counter()
     ranked = rank_alternatives_v2(first["pieces"], perfil=context["profile"],
         capital_meta=capital, cut_slippage_expected_max_pct=
@@ -1005,10 +1015,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     for row in output_rows:
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
+        _metrics, metric_error = _normalize_row_metrics(row)
+        if metric_error:
+            failed_candidates[candidate_key] = metric_error
         objective_started = time.perf_counter()
         objective = rank_alternatives_v2([row], perfil=context["profile"],
             capital_meta=capital, cut_slippage_expected_max_pct=
                 cut_slippage_expected_max_pct)[0]["objetivo"]
+        if metric_error:
+            objective = {**objective, "factible": False,
+                "motivos": ["metrica_incompleta"]}
         if row.get("sin_baseline"):
             objective = {**objective, "factible": False,
                 "motivos": [*objective.get("motivos", []), "sin_baseline"]}
@@ -1064,9 +1080,105 @@ def _candidate_key(piece):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+_REQUIRED_SCENARIO_METRICS = ("n", "pnl_mean_usdt", "p_target", "p_loss",
+    "p_loss_ci95", "cut_slippage_mean_usdt", "cut_slippage_p90_usdt",
+    "cut_slippage_expected_usdt")
+
+
+def _metrics_complete(metrics):
+    if not isinstance(metrics, dict) or any(key not in metrics or metrics[key] is None
+            for key in _REQUIRED_SCENARIO_METRICS):
+        return False
+    try:
+        if int(metrics["n"]) <= 0:
+            return False
+        if any(not math.isfinite(float(metrics[key])) for key in (
+                "pnl_mean_usdt", "p_target", "p_loss", "cut_slippage_mean_usdt",
+                "cut_slippage_p90_usdt", "cut_slippage_expected_usdt")):
+            return False
+        interval = metrics["p_loss_ci95"]
+        return (isinstance(interval, (list, tuple)) and len(interval) == 2 and
+            all(value is not None and math.isfinite(float(value)) for value in interval))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _normalize_row_metrics(row):
+    """Completa métricas propias y marca explícitamente los resúmenes insuficientes."""
+    own = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    if _metrics_complete(own):
+        metrics = dict(own)
+        metrics.setdefault("metrics_origen", "pieza")
+        row["metrics"] = metrics
+        return metrics, None
+
+    derived = _scenario_metrics(row)
+    if _metrics_complete(derived):
+        metrics = dict(own)
+        for key in _REQUIRED_SCENARIO_METRICS:
+            value = own.get(key)
+            if value is None:
+                metrics[key] = derived[key]
+                continue
+            try:
+                valid = (all(item is not None and math.isfinite(float(item)) for item in value)
+                    if key == "p_loss_ci95" and isinstance(value, (list, tuple)) else
+                    math.isfinite(float(value)) and (key != "n" or int(value) > 0))
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            if not valid:
+                metrics[key] = derived[key]
+        for key, value in derived.items():
+            metrics.setdefault(key, value)
+        metrics["metrics_origen"] = "escenarios_pieza"
+        row["metrics"] = metrics
+        if _metrics_complete(metrics):
+            return metrics, None
+
+    portfolio = row.get("portfolio_metrics")
+    if _metrics_complete(portfolio):
+        metrics = dict(portfolio)
+        metrics["metrics_origen"] = "cartera"
+        row["metrics"] = metrics
+        return metrics, None
+
+    # Conserva una forma serializable y evaluable, pero no declara factible un
+    # resultado sin escenarios ni una trayectoria de cartera usable.
+    metrics = {**derived, **{key: value for key, value in own.items() if value is not None}}
+    defaults = {"n": 0, "pnl_mean_usdt": 0.0, "p_target": 0.0, "p_loss": 0.0,
+        "p_loss_ci95": [0.0, 1.0], "cut_slippage_mean_usdt": 0.0,
+        "cut_slippage_p90_usdt": 0.0, "cut_slippage_expected_usdt": 0.0}
+    for key, value in defaults.items():
+        current = metrics.get(key)
+        try:
+            if key == "p_loss_ci95":
+                valid = (isinstance(current, (list, tuple)) and len(current) == 2 and
+                    all(item is not None and math.isfinite(float(item)) for item in current))
+            else:
+                valid = (current is not None and math.isfinite(float(current)) and
+                    (key != "n" or int(current) > 0))
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            metrics[key] = value
+    metrics["metrics_origen"] = "sin_resumen"
+    row["metrics"] = metrics
+    return metrics, "metrica_incompleta: simulación sin resumen propio ni cartera válida"
+
+
 def _scenario_metrics(row):
-    scenario_results = row.get("scenario_results") or []
-    pnls = [float(item["pnl_usdt"]) for item in scenario_results]
+    scenario_results, pnls = [], []
+    for item in (row.get("scenario_results") or []):
+        if not isinstance(item, dict) or item.get("pnl_usdt") is None:
+            continue
+        try:
+            pnl = float(item["pnl_usdt"])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(pnl):
+            continue
+        scenario_results.append(item)
+        pnls.append(pnl)
     return {"n": len(pnls), "pnl_mean_usdt": sum(pnls) / len(pnls) if pnls else 0,
         "p_target": sum(bool(item["reached"]) for item in scenario_results) / len(pnls) if pnls else 0,
         "p_loss": sum(bool(item["loss_cut"]) for item in scenario_results) / len(pnls) if pnls else 0,
@@ -1475,7 +1587,10 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                     f"tiempos={_json_dumps(evaluated.get('profile_times', {}), ensure_ascii=False)}")
         except Exception as exc:
             status = exc.status if isinstance(exc, CacheLimitExceeded) else "failed"
-            error_details = {"motivo": str(exc), **progress_state}
+            error_details = {"exception_type": type(exc).__name__,
+                "motivo": str(exc),
+                "traceback_tail": traceback.format_exc().splitlines()[-20:],
+                **progress_state}
             error_details["discarded_count"] = sum(progress_state.get("discarded", {}).values())
             with store._connect() as conn:
                 conn.execute("UPDATE scenario_eval_runs SET status=?,error=?,seconds=?,rss_mb=?,"
@@ -1513,6 +1628,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 break
             watchdog_stop.set()
             watcher.join(timeout=2)
+            print(f"SCENARIO_CACHE contexto={context['goal_id'] or context['profile']} "
+                f"estado=failed error={type(exc).__name__}: {exc}", file=sys.stderr)
             raise
         finally:
             active_context_started[0] = None
@@ -1594,7 +1711,7 @@ def main(argv=None):
             f"segundos={time.perf_counter()-started:.3f} rss_max_mb={result['rss_mb']}")
         return 0
     except Exception as exc:
-        print(f"SCENARIO_CACHE estado=failed error={exc} "
+        print(f"SCENARIO_CACHE estado=failed error={type(exc).__name__}: {exc} "
             f"segundos={time.perf_counter()-started:.3f} rss_max_mb={_rss_max_mb()}",
             file=sys.stderr)
         return 1

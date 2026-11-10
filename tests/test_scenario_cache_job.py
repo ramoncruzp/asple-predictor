@@ -873,6 +873,118 @@ def test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva(
     assert result["symbol_stats"]["ZROUSDT"]["reconvertir_fallidos"] == 0
 
 
+def test_cache_con_dos_bots_reconvierte_y_normaliza_metricas_incompletas(
+        cache_databases, monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import numpy as np
+    from data.exchange_filters import SymbolFilters
+
+    db, market_path = cache_databases
+    store = CandleStore(market_path)
+    store.load = lambda _symbol, _interval: SimpleNamespace(
+        close=np.asarray([1.54, 1.61], dtype=float))
+    live_pieces = [
+        {"candidate_key": "mantener:18", "grid_id": 18, "grid_status": "ACTIVE",
+            "symbol": "ZROUSDT", "strategy": "bot", "piece_type": "individual_bot_grid",
+            "capital": 53, "capital_nominal": 53, "liquidation_value": 53,
+            "has_inventory": True, "is_current": True},
+        {"candidate_key": "mantener:21", "grid_id": 21, "grid_status": "ACTIVE",
+            "symbol": "JUPUSDT", "strategy": "bot", "piece_type": "individual_bot_grid",
+            "capital": 21, "capital_nominal": 21, "liquidation_value": 21,
+            "has_inventory": False, "is_current": True},
+    ]
+    monkeypatch.setattr(cache_script, "_active_grid_pieces",
+        lambda *_args: [dict(piece) for piece in live_pieces])
+    incomplete = {"candidate_key": "simple-incompleto", "symbol": "JUPUSDT",
+        "strategy": "simple", "capital": 9, "n": 6, "width_sigma": .5,
+        "force_incomplete": True}
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [incomplete, {"strategy": "usdt_quieto"}], "discarded": {},
+        "discarded_by_symbol": {}, "invalid_count": 0})
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    filters = SymbolFilters(tick_size=Decimal("0.00000001"),
+        min_price=Decimal("0.00000001"), max_price=Decimal("100000"),
+        step_size=Decimal("0.00000001"), min_qty=Decimal("0.00000001"),
+        max_qty=Decimal("100000000"), min_notional=Decimal("5"),
+        apply_min_to_market=True, max_num_orders=None)
+
+    def evaluate(pieces, **_kwargs):
+        rows = []
+        for piece in pieces:
+            if piece.get("force_incomplete"):
+                rows.append({"piece": piece, "metrics": {"p_target": .8, "p_loss": 0}})
+            elif piece.get("is_current") and piece["symbol"] == "JUPUSDT":
+                rows.append({"piece": piece, "metrics": {"p_target": 0, "p_loss": 0},
+                    "scenario_results": [{"pnl_usdt": .1, "reached": False,
+                        "loss_cut": False}]})
+            else:
+                pnl = -2.0 if piece.get("is_current") else 1.2
+                rows.append({"piece": piece, "metrics": {"n": 100,
+                    "pnl_mean_usdt": pnl, "p_target": .01 if piece.get("is_current") else .02,
+                    "p_loss": 0, "p_loss_ci95": [0, .01],
+                    "cut_slippage_mean_usdt": 0, "cut_slippage_p90_usdt": 0,
+                    "cut_slippage_expected_usdt": 0, "days_to_target_p50": 10,
+                    "evidence_sufficient": True}})
+        return {"pieces": rows}
+
+    result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
+        "free_cash": 9, "capital": 100, "capital_initial": 100,
+        "target": 10, "horizon": 17, "max_loss_pct": 18,
+        "profile_config": {"capital_per_coin_pct": 70}},
+        store=store, app_db=db.engine.url.database, market_path=market_path,
+        library_dir="unused", filters={"ZROUSDT": filters, "JUPUSDT": filters},
+        prices={"ZROUSDT": 1.556, "JUPUSDT": .26},
+        sigmas={"ZROUSDT": .0595, "JUPUSDT": .04}, skipped={}, evaluator=evaluate)
+
+    zro = next(row for row in result["results"] if row["candidate_key"] == "mantener:18")
+    jup = next(row for row in result["results"] if row["candidate_key"] == "mantener:21")
+    broken = next(row for row in result["results"]
+        if row["candidate_key"] == "simple-incompleto")
+    assert result["status"] == "ok"
+    assert zro["metrics"]["metrics_origen"] == "pieza"
+    assert jup["metrics"]["metrics_origen"] == "escenarios_pieza"
+    assert zro["metrics"]["pnl_mean_usdt"] != jup["metrics"]["pnl_mean_usdt"]
+    assert all(key in zro["metrics"] and key in jup["metrics"]
+        for key in cache_script._REQUIRED_SCENARIO_METRICS)
+    assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] >= 6
+    assert broken["objective"]["factible"] is False
+    assert "metrica_incompleta" in broken["objective"]["motivos"]
+    assert "simple-incompleto" in result["failed_candidates"]
+
+
+def test_cache_fallida_persiste_traceback_tail_y_log_usa_tipo(capsys,
+        cache_databases, monkeypatch):
+    db, market_path = cache_databases
+    context = {"goal_id": 7, "profile": "RAPIDO", "horizon": 17,
+        "capital": 100, "free_cash": 9, "target": 10, "max_loss_pct": 18}
+    monkeypatch.setattr(cache_script, "_contexts", lambda *_args: [dict(context)])
+    monkeypatch.setattr(cache_script, "_read_market_inputs", lambda *_args, **_kwargs:
+        ({"ZROUSDT": FILTERS}, {"ZROUSDT": 1.556}, {"ZROUSDT": .0595}, {}))
+    monkeypatch.setattr(cache_script, "_evaluate_context", lambda *_args, **_kwargs:
+        (_ for _ in ()).throw(KeyError("pnl_mean_usdt")))
+
+    with pytest.raises(KeyError, match="pnl_mean_usdt"):
+        cache_script.run_cache(db.engine.url.database, market_path, max_seconds=10)
+
+    with sqlite3.connect(market_path) as conn:
+        status, raw_error = conn.execute(
+            "SELECT status,error FROM scenario_eval_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    details = json.loads(raw_error)
+    assert status == "failed"
+    assert details["exception_type"] == "KeyError"
+    assert details["motivo"] == "'pnl_mean_usdt'"
+    assert len(details["traceback_tail"]) <= 20
+    assert any("_evaluate_context" in line for line in details["traceback_tail"])
+
+    monkeypatch.setattr(cache_script, "run_cache", lambda *_args, **_kwargs:
+        (_ for _ in ()).throw(KeyError("pnl_mean_usdt")))
+    exit_code = cache_script.main(["--app-db", "unused.sqlite", "--market-db", "unused-market.sqlite",
+        "--contexto", "7"])
+    assert exit_code == 1
+    assert "error=KeyError: 'pnl_mean_usdt'" in capsys.readouterr().err
+
+
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,
         monkeypatch):
     db, market_path = cache_databases
