@@ -305,32 +305,40 @@ def decide_cazador(context):
 def build_runtime_context(operator, goal, valuation):
     """Carga el contexto del Cazador desde velas locales y lecturas públicas actuales."""
     import numpy as np
-    from data.market_store import CandleStore
+    import json
+    import sqlite3
+    from data.market_store import market_db_path
+    from data.exchange_filters import SymbolFilters
     from grid.meta_live_pieces import live_meta_grid_links
     from grid.meta import DEFAULT_PROFILES
 
-    store = CandleStore()
+    path = market_db_path()
     markets = {}
-    with store._connect() as conn:
-        rows = conn.execute("SELECT symbol FROM symbols WHERE role='operar' AND active=1 ORDER BY symbol").fetchall()
-    for (symbol,) in rows:
-        data = store.load(symbol, "5m")
-        if len(data.close) < 289:
-            continue
-        close = np.asarray(data.close[-289:], dtype=float)
-        returns = np.diff(np.log(close))
-        sigma = float(np.std(returns, ddof=1) * np.sqrt(288)) if len(returns) > 1 else 0.0
-        try:
-            book = operator._book_ticker(symbol)
-            bid = float(book.get("bid_price") or book.get("bidPrice") or 0)
-            ask = float(book.get("ask_price") or book.get("askPrice") or 0)
-        except Exception:
-            continue
-        if bid <= 0 or ask < bid:
-            continue
-        markets[str(symbol).upper()] = {"mid": (bid + ask) / 2, "bid": bid,
-            "sigma_24h": sigma, "low_24h": float(np.min(data.low[-288:])),
-            "high_24h": float(np.max(data.high[-288:])), "filters": store.filters(symbol)}
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+        symbols = conn.execute("SELECT id,symbol FROM symbols WHERE role='operar' AND active=1 ORDER BY symbol").fetchall()
+        for symbol_id, symbol in symbols:
+            rows = conn.execute("SELECT high,low,close FROM candles WHERE symbol_id=? AND interval='5m' ORDER BY open_ts DESC LIMIT 289",
+                (symbol_id,)).fetchall()
+            if len(rows) < 289:
+                continue
+            rows.reverse()
+            close = np.asarray([row[2] for row in rows], dtype=float)
+            returns = np.diff(np.log(close))
+            sigma = float(np.std(returns, ddof=1) * np.sqrt(288)) if len(returns) > 1 else 0.0
+            filter_row = conn.execute("SELECT raw_json FROM symbol_filters WHERE symbol=?",
+                (str(symbol).upper(),)).fetchone()
+            filters = SymbolFilters.from_symbol_info(json.loads(filter_row[0])) if filter_row else None
+            try:
+                book = operator._book_ticker(symbol)
+                bid = float(book.get("bid_price") or book.get("bidPrice") or 0)
+                ask = float(book.get("ask_price") or book.get("askPrice") or 0)
+            except Exception:
+                continue
+            if bid <= 0 or ask < bid:
+                continue
+            markets[str(symbol).upper()] = {"mid": (bid + ask) / 2, "bid": bid,
+                "sigma_24h": sigma, "low_24h": float(min(row[1] for row in rows[-288:])),
+                "high_24h": float(max(row[0] for row in rows[-288:])), "filters": filters}
     pieces = []
     for link in live_meta_grid_links(operator.core, int(goal["id"])):
         grid_id = int(link["grid_id"])

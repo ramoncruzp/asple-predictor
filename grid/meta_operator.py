@@ -4282,6 +4282,7 @@ class MetaOperator:
                     result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
                     self._alert_engine_failure(meta_id, engine, exc)
             value = current_value
+        cazador_shadow = self._record_cazador_shadow(goal, value, result)
         engine_shadow = self._run_engine_shadow(goal, value, plan, engine, active_decision=result)
         if not engine_shadow.get("deferred"):
             self._persist_engine_shadow_decision(goal, engine, result, engine_shadow, plan)
@@ -4295,6 +4296,7 @@ class MetaOperator:
             **comparison_error,
             "decision": self._compact_review_result(result),
             "shadow_decision": getattr(self, "_last_review_shadow", None),
+            "cazador_shadow": cazador_shadow,
             "engine": engine_meta, "engine_shadow": engine_shadow,
             "valuation": value,
             **({"valuation_unknown": self._valuation_unknown_diagnostic(value)}
@@ -4354,6 +4356,28 @@ class MetaOperator:
                 "engine": engine.name, "error": f"{type(error).__name__}: {error}"})
         except Exception:
             logging.getLogger(__name__).exception("No se pudo alertar del fallo del motor Meta %s", meta_id)
+
+    def _record_cazador_shadow(self, goal, value, active_result):
+        """Registra la propuesta pura del Cazador para esta revisi?n sin ejecutarla."""
+        if isinstance(active_result, dict) and active_result.get("cazador"):
+            return {"duplicated": True, "reason": "la revisi?n activa ya evalu? el Cazador"}
+        from grid.engines.cazador import build_runtime_context, decide_cazador
+        from grid.engines.shadow_guard import shadow_execution_context
+        try:
+            with shadow_execution_context():
+                context = build_runtime_context(self, goal, value)
+                proposal = decide_cazador(context)
+            result = {"decision": proposal.get("accion"), "proposal": proposal,
+                "sigma_por_moneda": proposal.get("sigma_por_moneda", {}),
+                "puntajes_piezas": proposal.get("puntajes_piezas", []),
+                "pieza_elegida": proposal.get("pieza"), "motivo": proposal.get("motivo"),
+                "destino": proposal.get("destino", []),
+                "perdida_realizada_estimada": proposal.get("perdida_realizada_estimada"),
+                "presupuesto_perdida": proposal.get("presupuesto_perdida")}
+        except Exception as exc:
+            result = {"decision": "no_disponible", "error": f"{type(exc).__name__}: {exc}"}
+        self._ledger(int(goal["id"]), "META_CAZADOR_SOMBRA", result)
+        return result
 
     def _run_engine_shadow(self, goal, value, plan, engine, *, active_decision=None):
         from grid.engines import get_engine

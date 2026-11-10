@@ -1410,3 +1410,20 @@ def test_cazador_switch_defaults_on_and_persists_explicit_off(engine_databases):
     status = operator.cazador_status()
     assert status["enabled"] is False
     assert status["defaulted"] is False
+
+
+def test_cazador_shadow_runs_under_guard_and_records_after_context(monkeypatch):
+    from grid.engines import cazador
+    from grid.engines.shadow_guard import SHADOW_MODE
+    events = []
+    operator = MetaOperator.__new__(MetaOperator)
+    operator._ledger = lambda *args, **kwargs: events.append((args, SHADOW_MODE.get()))
+    monkeypatch.setattr(cazador, "build_runtime_context", lambda *_args: {"fixture": True})
+    monkeypatch.setattr(cazador, "decide_cazador", lambda _ctx: {
+        "accion": "ninguna", "motivo": "sin mejora", "destino": [],
+        "puntajes_piezas": [], "sigma_por_moneda": {"PEPEUSDT": .2},
+        "perdida_realizada_estimada": 0, "presupuesto_perdida": {}})
+    result = operator._record_cazador_shadow({"id": 42}, {"status": "KNOWN"}, {})
+    assert result["decision"] == "ninguna"
+    assert len(events) == 1 and events[0][0][1] == "META_CAZADOR_SOMBRA"
+    assert events[0][1] is False

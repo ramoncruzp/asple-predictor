@@ -489,7 +489,7 @@
     'META_OPERATOR_ROTATION', 'META_CORTADA_POR_PERDIDA', 'META_CUMPLIDA', 'META_CANCELLED', 'META_VENCIDA']);
   const LEDGER_REVIEW_INTERNAL_EVENTS = new Set(['META_OPERATOR_ROTATION_EVALUATED',
     'META_OPERATOR_COUNTERFACTUAL_STATE', 'META_OPERATOR_NOOP', 'META_OPERATOR_RECONFIGURE_EVALUATED',
-    'META_OPERATOR_ALLOCATION_SHADOW', 'META_BOT_TOUCH_SHADOW', 'META_OPERATOR_REVIEW_SKIPPED']);
+    'META_OPERATOR_ALLOCATION_SHADOW', 'META_BOT_TOUCH_SHADOW', 'META_OPERATOR_REVIEW_SKIPPED', 'META_CAZADOR_SOMBRA']);
   const LEDGER_HIGHLIGHT_EVENTS = new Set([...LEDGER_ACTION_EVENTS, 'META_CREATED', 'META_OPERATOR_OPEN_FAILED',
     'META_OPERATOR_OPEN_REJECTED', 'META_OPERATOR_ROTATION_REJECTED', 'META_LOSS_WARNING', 'META_UNKNOWN',
     'META_UNPROTECTED', 'META_VALUATION_PARTIAL', 'META_VALUATION_RECOVERED', 'META_CLOSE_PENDING',
@@ -546,11 +546,13 @@
       const p = currentEstimate.piece || {}, e = currentEstimate.estimate || {};
       return `Pieza actual: ${p.symbol || ''} · ${fmtMoney(p.capital_usdt)} USDT · rango ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${p.n_levels ?? '—'} niveles · probabilidad histórica ${fmtMoney(Number(e.probability_replay || 0) * 100, 1)} % · ajustada ${fmtMoney(Number(e.probability_adjusted || e.probability || 0) * 100, 1)} % · avance mediano ${fmtMoney(e.median_progress_pct, 1)} %`;
     })() : '';
+    const cazadorLine = event.event_type === 'META_CAZADOR_SOMBRA'
+      ? `?24h ${JSON.stringify(details.sigma_por_moneda || {})} ? pieza ${details.pieza_elegida ?? '?'} ? ${details.motivo || ''} ? destino ${JSON.stringify(details.destino || [])} ? p?rdida estimada ${fmtMoney(details.perdida_realizada_estimada)} USDT` : '';
     const allocationLine = event.event_type === 'META_OPERATOR_ALLOCATION_SHADOW'
       ? `Capital_usage es de la mejor cartera propuesta desde cero · efectivo libre REAL de la Meta ${fmtMoney(details.real_free_cash_usdt)} USDT` : '';
     const decisionText = [decision || '', reasonText].filter(Boolean).join(' · ');
     const detailText = [label, symbol, capital == null ? '' : `${fmtMoney(capital)} USDT`, range,
-      oldNew, decisionText, engineText, shadowText, improvement, currentPieceLine, allocationLine, v2AuditLine].filter(Boolean).join(' · ');
+      oldNew, decisionText, engineText, shadowText, improvement, currentPieceLine, allocationLine, v2AuditLine, cazadorLine].filter(Boolean).join(' · ');
     return `<tr>
       <td class="mono">${window.ASPLEFormat?.formatDateTime?.(event.ts) ?? esc(event.ts)}</td>
       <td>${esc(label)}<br><small class="muted">${esc(event.event_type)}</small></td>
