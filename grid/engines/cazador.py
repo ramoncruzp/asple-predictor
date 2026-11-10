@@ -1,0 +1,294 @@
+"""Regla pura para comparar actividad de piezas y carteras destino."""
+from __future__ import annotations
+
+from math import erf, exp, isfinite, log, sqrt
+
+
+GRID_LEVEL_COUNTS = (10, 8, 6, 4)
+BOT_SIGMA_OFFSETS = (.5, 1.0, 1.5, 2.0)
+
+
+def _normal_survival(value):
+    return .5 * (1.0 - erf(float(value) / sqrt(2.0)))
+
+
+def piece_activity(piece, market, *, now_s=None):
+    """Estima operaciones/día según distancia a órdenes y geometría actual."""
+    sigma = float(market.get("sigma_24h") or 0)
+    mid = float(market.get("mid") or 0)
+    if sigma <= 0 or mid <= 0:
+        return 0.0
+    strategy = str(piece.get("strategy") or "simple").lower()
+    if piece.get("piece_type") == "individual_bot_grid" or strategy == "bot":
+        orders = piece.get("pending_prices") or []
+        if not orders:
+            orders = [piece.get("pending_price") or piece.get("sell_price") or
+                piece.get("buy_price")]
+        probabilities = []
+        for order in orders:
+            try:
+                distance = abs(log(float(order) / mid))
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            probabilities.append(min(1.0, 2.0 * _normal_survival(distance / sigma)))
+        return max(probabilities, default=0.0)
+    low, high = float(piece.get("low") or 0), float(piece.get("high") or 0)
+    levels = max(1, int(piece.get("n_levels") or piece.get("n") or 1))
+    if low <= 0 or high <= low:
+        return 0.0
+    step_pct = ((high / low) ** (1.0 / levels)) - 1.0
+    if step_pct <= 0:
+        return 0.0
+    if mid < low or mid > high:
+        distance = low / mid - 1.0 if mid < low else mid / high - 1.0
+        if distance > step_pct:
+            return 0.0
+    return min(10.0, sigma / step_pct)
+
+
+def _valid_market(market):
+    try:
+        sigma = float(market.get("sigma_24h"))
+        mid = float(market.get("mid"))
+        low = float(market.get("low_24h"))
+        high = float(market.get("high_24h"))
+    except (TypeError, ValueError):
+        return False
+    return all(isfinite(value) and value > 0 for value in (sigma, mid, low, high)) and high >= low
+
+
+def _grid_destination(symbol, capital, market, profile, levels, *, allow_smart):
+    filters = market.get("filters")
+    min_notional = float(getattr(filters, "min_notional", 5.0) or 5.0)
+    minimum_per_level = max(min_notional * 1.1, 6.0)
+    sigma = float(market["sigma_24h"])
+    low = float(market["low_24h"]) * (1.0 - .25 * sigma)
+    high = float(market["high_24h"]) * (1.0 + .25 * sigma)
+    mid = float(market["mid"])
+    if low <= 0 or high <= low:
+        return None
+    n_levels = next((n for n in GRID_LEVEL_COUNTS if n <= levels and
+        capital / n >= minimum_per_level), None)
+    if n_levels is None:
+        return None
+    ratio = (high / low) ** (1.0 / n_levels)
+    if ratio - 1.0 < .005:
+        ratio = 1.005
+        half = ratio ** (n_levels / 2)
+        low, high = mid / half, mid * half
+    step = (high / low) ** (1.0 / n_levels) - 1.0
+    if mid - low < low * step:
+        low = mid / (1.0 + step)
+    if high - mid < mid * step:
+        high = mid * (1.0 + step)
+    if filters is not None:
+        try:
+            from grid.levels import compute_lines
+            lines = compute_lines(str(low), str(high), n_levels, filters)
+            step_pct = min(float((right - left) / left) for left, right in zip(lines, lines[1:]))
+        except Exception:
+            return None
+    else:
+        step_pct = (high / low) ** (1.0 / n_levels) - 1.0
+    if step_pct < .005:
+        return None
+    kind = "smart" if allow_smart and bool(profile.get("smart_grid_enabled", True)) and (
+        float(market["high_24h"]) / float(market["low_24h"]) - 1.0 >= .08) else "grid"
+    return {"symbol": symbol, "type": kind, "capital": float(capital),
+        "geometry": {"low": low, "high": high}, "levels": n_levels,
+        "score": min(10.0, float(market["sigma_24h"]) / step_pct)}
+
+
+def _bot_ladder(symbol, capital, market, profile, available_slots):
+    filters = market.get("filters")
+    minimum = max(10.0, float(getattr(filters, "min_notional", 5.0) or 5.0) * 1.1)
+    count = min(4, max(0, int(available_slots)), int(float(capital) // minimum))
+    if count < 2:
+        return []
+    unit = float(capital) / count
+    mid, sigma = float(market["mid"]), float(market["sigma_24h"])
+    min_margin = float(profile.get("min_margin_pct", .3)) / 100.0
+    sell_move = max(sigma, min_margin + .002)
+    bots = []
+    for multiple in BOT_SIGMA_OFFSETS[:count]:
+        buy = mid * exp(-multiple * sigma)
+        sell = buy * (1.0 + sell_move)
+        if filters is not None:
+            from decimal import Decimal
+            qty = filters.round_qty_down(Decimal(str(unit)) / Decimal(str(buy * 1.001)))
+            net_qty = filters.round_qty_down(qty * Decimal("0.999"))
+            if qty < filters.min_qty or qty * Decimal(str(buy)) < filters.min_notional:
+                continue
+            if net_qty < filters.min_qty or net_qty * Decimal(str(sell)) < filters.min_notional:
+                continue
+        bots.append({"symbol": symbol, "type": "bot", "capital": unit,
+            "geometry": {"buy_price": buy, "sell_price": sell,
+                "buy_sigma_offset": -multiple}, "levels": 1,
+            "score": min(1.0, 2.0 * _normal_survival(multiple))})
+    return bots
+
+
+def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
+        source_symbol=None, require_sigma_ratio=1.2):
+    candidates = [(symbol, market) for symbol, market in markets.items()
+        if _valid_market(market) and (symbol == str(source_symbol or "").upper() or
+            float(market["sigma_24h"]) >= require_sigma_ratio * float(source_sigma))]
+    candidates.sort(key=lambda item: (-float(item[1]["sigma_24h"]), item[0]))
+    candidates = candidates[:3]
+    if not candidates or budget <= 0:
+        return []
+    while candidates:
+        total_sigma = sum(float(market["sigma_24h"]) for _, market in candidates)
+        grids_left = max(0, int(limits.get("max_grids", 0)))
+        bots_left = max(0, int(limits.get("max_bots", 0)))
+        by_symbol = {str(key).upper(): float(value) for key, value in
+            (limits.get("capital_by_symbol") or {}).items()}
+        coin_cap = float(limits.get("capital_per_coin_usdt", float("inf")))
+        output, failed_symbols = [], []
+        for index, (symbol, market) in enumerate(candidates):
+            share = budget * float(market["sigma_24h"]) / total_sigma
+            amount = min(share, max(0.0, coin_cap - by_symbol.get(symbol, 0.0)))
+            if amount < 10.0:
+                failed_symbols.append(symbol)
+                continue
+            # El primer destino es un grid si alcanza; los posteriores usan bots.
+            grid = (_grid_destination(symbol, amount, market, profile, grids_left,
+                allow_smart=True) if index == 0 and grids_left > 0 else None)
+            if grid is not None:
+                output.append(grid)
+                grids_left -= 1
+                by_symbol[symbol] = by_symbol.get(symbol, 0.0) + amount
+                continue
+            ladder = _bot_ladder(symbol, amount, market, profile, bots_left)
+            if ladder:
+                output.extend(ladder)
+                bots_left -= len(ladder)
+                by_symbol[symbol] = by_symbol.get(symbol, 0.0) + sum(row["capital"] for row in ladder)
+            else:
+                failed_symbols.append(symbol)
+        if not failed_symbols:
+            return output
+        remaining = [row for row in candidates if row[0] not in set(failed_symbols)]
+        if len(remaining) == len(candidates):
+            return output
+        candidates = remaining
+    return []
+
+
+def decide_cazador(context):
+    """Evalúa rotación/agregado sin escribir en BD ni llamar al exchange."""
+    markets = {str(symbol).upper(): dict(value) for symbol, value in
+        (context.get("markets") or {}).items() if _valid_market(value)}
+    pieces = [dict(row) for row in context.get("pieces", [])]
+    now = float(context.get("now_s") or 0)
+    profile = dict(context.get("profile") or {})
+    limits = dict(context.get("limits") or {})
+    scores = []
+    sigma_all = sorted(float(row["sigma_24h"]) for row in markets.values())
+    median_sigma = sigma_all[len(sigma_all) // 2] if sigma_all else 0.0
+    current_loss = max(0.0, -float(context.get("result_pct") or 0) *
+        float(context.get("capital_initial") or 0) / 100.0)
+    loss_limit = float(context.get("capital_initial") or 0) * float(
+        profile.get("max_loss_pct", 18.0)) / 100.0
+    for piece in pieces:
+        symbol = str(piece.get("symbol") or "").upper()
+        market = markets.get(symbol)
+        score = piece_activity(piece, market or {})
+        reasons = []
+        warnings = []
+        if piece.get("last_cycle_at_s") is not None and now - float(piece["last_cycle_at_s"]) < 12 * 3600:
+            reasons.append("ciclo completo en las últimas 12 h")
+        if piece.get("opened_by_cazador_at_s") is not None and now - float(
+                piece["opened_by_cazador_at_s"]) < 6 * 3600:
+            reasons.append("pieza abierta por el Cazador hace menos de 6 h")
+        if market and piece.get("sell_price"):
+            distance = abs(log(float(piece["sell_price"]) / float(market["mid"])))
+            if distance <= .5 * float(market["sigma_24h"]):
+                reasons.append("venta pendiente a punto de ejecutarse")
+        if market is None:
+            reasons.append("sin libro o volatilidad válida para la pieza")
+        capital = float(piece.get("liquidation_value") or piece.get("capital") or 0)
+        budget = capital + (float(context.get("free_cash") or 0)
+            if float(context.get("free_cash") or 0) >= 10 else 0.0)
+        destination = (_destination_portfolio(markets, budget,
+            float(market["sigma_24h"]), profile, limits,
+            source_symbol=symbol) if market is not None else [])
+        destination_score = sum(float(item["score"]) for item in destination)
+        gain = destination_score - score
+        if not destination:
+            reasons.append("ninguna moneda cumple el umbral de volatilidad y capital")
+        if not (market and any(float(row["sigma_24h"]) >= 1.2 *
+                float(market["sigma_24h"]) for row in markets.values() if row is not market)):
+            if destination and any(row["symbol"] != symbol for row in destination):
+                reasons.append("σ de destino no supera 1,2× la pieza")
+        if gain < .5 * score:
+            reasons.append("la actividad destino no supera 1,5× la actividad actual")
+        def loss_penalty(rows):
+            return sum(.5 * float(item["capital"]) * max(0.0,
+                (float(markets[item["symbol"]]["mid"]) - float(item["geometry"].get("low",
+                    item["geometry"].get("buy_price", markets[item["symbol"]]["mid"])))) /
+                    float(markets[item["symbol"]]["mid"])) for item in rows)
+        penalty = loss_penalty(destination)
+        initial_budget = budget
+        for _attempt in range(12):
+            if current_loss + penalty <= loss_limit or not destination:
+                break
+            allowed = max(0.0, loss_limit - current_loss)
+            ratio = allowed / penalty if penalty > 0 else 0.0
+            budget *= min(.9, max(.5, ratio * .98))
+            destination = (_destination_portfolio(markets, budget,
+                float(market["sigma_24h"]), profile, limits,
+                source_symbol=symbol) if market is not None else [])
+            destination_score = sum(float(item["score"]) for item in destination)
+            gain = destination_score - score
+            penalty = loss_penalty(destination)
+        if initial_budget > budget + 1e-8 and current_loss + penalty <= loss_limit:
+            warnings.append("capital de destino reducido para respetar el presupuesto de pérdida")
+        if current_loss + penalty > loss_limit:
+            reasons.append("presupuesto de pérdida insuficiente")
+        scores.append({"grid_id": piece.get("grid_id"), "symbol": symbol,
+            "capital": capital, "puntaje_pieza": score, "puntaje_destino": destination_score,
+            "ganancia_actividad": gain, "destino": destination,
+            "motivos_freno": reasons, "avisos": warnings,
+            "perdida_estimada_usdt": penalty})
+    eligible = [row for row in scores if not row["motivos_freno"]]
+    if eligible:
+        chosen = max(eligible, key=lambda row: (row["ganancia_actividad"], row["capital"]))
+        return {"accion": "rotar", "pieza": chosen["grid_id"],
+            "puntaje_pieza": chosen["puntaje_pieza"],
+            "puntaje_destino": chosen["puntaje_destino"], "motivo": "mayor ganancia de actividad",
+            "destino": chosen["destino"], "puntajes_piezas": scores,
+            "sigma_por_moneda": {key: value["sigma_24h"] for key, value in markets.items()},
+            "rango_24h": {key: {"low": value["low_24h"], "high": value["high_24h"]}
+                for key, value in markets.items()}, "capital_total": sum(
+                    row["capital"] for row in chosen["destino"]),
+            "perdida_realizada_estimada": chosen["perdida_estimada_usdt"],
+            "presupuesto_perdida": {"limite_usdt": loss_limit,
+                "perdida_actual_usdt": current_loss,
+                "perdida_estimada_usdt": chosen["perdida_estimada_usdt"]}}
+    cash = float(context.get("free_cash") or 0)
+    if cash >= 10 and median_sigma > 0:
+        destination = _destination_portfolio(markets, cash, median_sigma, profile, limits,
+            require_sigma_ratio=1.2)
+        if destination:
+            return {"accion": "agregar", "pieza": None, "puntaje_pieza": 0.0,
+                "puntaje_destino": sum(row["score"] for row in destination),
+                "motivo": "efectivo libre y monedas con movimiento suficiente",
+                "destino": destination, "puntajes_piezas": scores,
+                "sigma_por_moneda": {key: value["sigma_24h"] for key, value in markets.items()},
+                "rango_24h": {key: {"low": value["low_24h"], "high": value["high_24h"]}
+                    for key, value in markets.items()}, "capital_total": sum(
+                        row["capital"] for row in destination),
+                "perdida_realizada_estimada": 0.0,
+                "presupuesto_perdida": {"limite_usdt": loss_limit,
+                    "perdida_actual_usdt": current_loss, "perdida_estimada_usdt": 0.0}}
+    return {"accion": "ninguna", "pieza": None, "puntaje_pieza": 0.0,
+        "puntaje_destino": 0.0, "motivo": (scores[0]["motivos_freno"][0] if scores and
+            scores[0]["motivos_freno"] else "no hay cartera destino factible"),
+        "destino": [], "puntajes_piezas": scores,
+        "sigma_por_moneda": {key: value["sigma_24h"] for key, value in markets.items()},
+        "rango_24h": {key: {"low": value["low_24h"], "high": value["high_24h"]}
+            for key, value in markets.items()}, "capital_total": 0.0,
+        "perdida_realizada_estimada": 0.0,
+        "presupuesto_perdida": {"limite_usdt": loss_limit,
+            "perdida_actual_usdt": current_loss, "perdida_estimada_usdt": 0.0}}
