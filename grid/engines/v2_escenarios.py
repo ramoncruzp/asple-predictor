@@ -613,6 +613,17 @@ class V2ScenarioEngine(DecisionEngine):
         """Ejecuta una decisión v2 con sus propios frenos y validaciones comunes."""
         from contextlib import nullcontext
         review_at_s = self._operator_now(operator)
+        # El Cazador usa velas locales y puede actuar aunque la cach? est? vencida.
+        try:
+            from grid.engines.shadow_guard import SHADOW_MODE
+            reader = getattr(operator, "cazador_status", None)
+            if callable(reader) and reader().get("enabled") and not SHADOW_MODE.get():
+                hunted = self._review_cazador(operator, goal, valuation, review_at_s)
+                if hunted is not None:
+                    return json_safe(hunted)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Fall? el Cazador; contin?a la revisi?n v2 normal")
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
         exploration_enabled = bool((plan or {}).get("exploration_enabled"))
@@ -694,6 +705,93 @@ class V2ScenarioEngine(DecisionEngine):
                 "comparison_v2": decision.get("comparison_v2")})
         return json_safe({**executed, "modo": decision.get("modo", "meta"),
             "comparison_v2": decision.get("comparison_v2")})
+
+    def _review_cazador(self, operator, goal, valuation, review_at_s):
+        from grid.engines.cazador import build_runtime_context, decide_cazador
+        context = build_runtime_context(operator, goal, valuation)
+        proposal = decide_cazador(context)
+        if proposal.get("accion") != "rotar":
+            return None
+        grid_id = int(proposal["pieza"])
+        signature = json.dumps({"grid": grid_id, "destino": proposal.get("destino")},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        rows = operator._meta_ledger_rows(int(goal["id"]))
+        prior = [row for row in rows if row.get("event_type") == "META_CAZADOR_REVISION"]
+        last = prior[-1].get("details", {}) if prior else {}
+        stamp = float(last.get("review_at_s") or 0)
+        if last.get("signature") != signature or review_at_s - stamp < 840:
+            reason = "persistencia Cazador: dos propuestas iguales separadas por 14 minutos"
+            operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
+                "signature": signature, "review_at_s": review_at_s, "grid_id": grid_id,
+                "brake": reason}, grid_id=grid_id)
+            return {"decision": "mantener", "reason": reason, "cazador": proposal, "freno": reason}
+        actions = [row for row in rows if row.get("event_type") == "META_CAZADOR_ROTACION"]
+        if any(review_at_s - float((row.get("details") or {}).get("review_at_s") or 0) < 21600
+                for row in actions):
+            return {"decision": "mantener", "reason": "freno Cazador: una rotaci?n cada 6 horas",
+                "cazador": proposal, "freno": "rotacion_6h"}
+        operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
+            "signature": signature, "review_at_s": review_at_s, "grid_id": grid_id}, grid_id=grid_id)
+        return self._execute_cazador_rotation(operator, goal, context, proposal, review_at_s)
+
+    def _execute_cazador_rotation(self, operator, goal, context, proposal, review_at_s):
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("cazador_rotation")
+        grid_id = int(proposal["pieza"])
+        source = operator.db.get_grid(grid_id)
+        if not source:
+            raise ValueError("pieza origen ya no existe")
+        levels = operator.db.get_grid_levels(grid_id)
+        closed = operator.engine.close_grid(grid_id,
+            "liquidate" if any(float(row.get("held_qty") or 0) > 0 for row in levels) else "cancel",
+            close_reason="META_CAZADOR_ROTATION")
+        if str((closed or {}).get("status") or "").upper() not in {"CLOSED", "CANCELLED", "DONE"}:
+            return {"decision": "mantener", "reason": "cierre del Cazador no verificado", "cazador": proposal}
+        # El enlace deja de representar capital de la meta en cuanto el cierre se confirma.
+        from sqlalchemy import update
+        with operator.db.engine.begin() as conn:
+            conn.execute(update(operator.db.meta_piece_links).where(
+                operator.db.meta_piece_links.c.meta_id == int(goal["id"]),
+                operator.db.meta_piece_links.c.grid_id == grid_id,
+                operator.db.meta_piece_links.c.released_at.is_(None)).values(
+                    released_at=operator.core._now()))
+        operator._ledger(int(goal["id"]), "META_PIECE_RELEASED", {
+            "grid_id": grid_id, "reason": "rotaci?n Cazador confirmada"}, grid_id=grid_id)
+        action_id = uuid.uuid4().hex
+        operator._ledger(int(goal["id"]), "META_V2_ACTION", {"v2_action_id": action_id,
+            "action_type": "cazador_rotar", "grid_id": grid_id, "review_at_s": review_at_s,
+            "result": {"exchange_close_confirmed": True, "closed": closed}}, grid_id=grid_id)
+        opened, failures = [], []
+        for destination in proposal.get("destino", []):
+            symbol, kind = str(destination["symbol"]).upper(), destination.get("type")
+            geometry = destination.get("geometry") or {}
+            if kind == "bot":
+                piece = {"symbol": symbol, "strategy": "simple", "piece_type": "individual_bot_grid",
+                    "floor": float(geometry["buy_price"]), "ceiling": float(geometry["sell_price"]),
+                    "n_levels": 1, "capital_usdt": float(destination["capital"])}
+            else:
+                piece = {"symbol": symbol, "strategy": "smart" if kind == "smart" else "simple",
+                    "piece_type": "grid", "floor": float(geometry["low"]),
+                    "ceiling": float(geometry["high"]), "n_levels": int(destination["levels"]),
+                    "capital_usdt": float(destination["capital"])}
+            try:
+                operator._validate_v2_plan_limits(goal, {"pieces": [piece]}, replacing_grid_id=grid_id)
+                checked = operator._testnet_openability(piece, goal, replacing_grid_id=grid_id)
+                if not checked.get("allowed"):
+                    raise ValueError(checked.get("reason") or "pieza no abrible")
+                alt = {"symbol": symbol, "strategy": piece["strategy"], "pieces": [piece],
+                    "reason": "redistribuci?n por Cazador de volatilidad"}
+                opened.append(operator._open_replacement(goal, alt, piece["capital_usdt"], v2_action_id=action_id))
+            except Exception as exc:
+                failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
+        detail = {"review_at_s": review_at_s, "proposal": proposal, "closed": closed,
+            "opened": opened, "failed_opens": failures}
+        operator._ledger(int(goal["id"]), "META_CAZADOR_ROTACION", detail, grid_id=grid_id)
+        notifier = getattr(operator, "alert", None)
+        if callable(notifier):
+            notifier("META_CAZADOR_ROTACION", int(goal["id"]), detail)
+        return {"decision": "rotar_cazador", "grid_id": grid_id, "cazador": proposal,
+            "opened": opened, "failed_opens": failures}
 
     @staticmethod
     def _operator_now(operator):

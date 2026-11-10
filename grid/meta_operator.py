@@ -1072,6 +1072,22 @@ class MetaOperator:
         return self._set_global_switch("v2_exploration_enabled",
             "v2_exploration_switch_events", enabled, confirm=confirm, actor=actor)
 
+    def cazador_status(self):
+        """Devuelve el interruptor global del Cazador, encendido si nunca se configuró."""
+        from sqlalchemy import select
+        result = self._global_switch_status("cazador_enabled", "cazador_switch_events")
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(self.db.meta_profile_settings.c.settings).where(
+                self.db.meta_profile_settings.c.profile == "GLOBAL")).scalar_one_or_none()
+        values = json.loads(raw or "{}")
+        result["defaulted"] = "cazador_enabled" not in values
+        result["enabled"] = bool(values.get("cazador_enabled", True))
+        return result
+
+    def set_cazador_enabled(self, enabled, *, confirm, actor):
+        return self._set_global_switch("cazador_enabled", "cazador_switch_events",
+            enabled, confirm=confirm, actor=actor)
+
     def set_decision_engine(self, profile, engine, *, confirm, actor):
         from sqlalchemy import select
         from grid.engines import get_engine
@@ -4210,15 +4226,25 @@ class MetaOperator:
                 allocation_free_cash=value.get("cash_usdt"))
             plan["engine"] = engine_meta
         except Exception as exc:
-            self._reset_rotation_streaks(meta_id, f"motor {engine.name} falló: {exc}")
-            result = {"decision": "no_hacer_nada", "reason": f"análisis de revisión no disponible: {exc}"}
-            result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
-            self._alert_engine_failure(meta_id, engine, exc)
-            engine_shadow = self._run_engine_shadow(goal, value, None, engine, active_decision=result)
-            if not engine_shadow.get("deferred"):
-                self._persist_engine_shadow_decision(goal, engine, result, engine_shadow, None)
-            self._record_review(meta_id, result, value, None, engine=engine, engine_shadow=engine_shadow)
-            return result
+            cazador_only = False
+            try:
+                cazador_only = (engine.name == "v2" and self.cazador_status().get("enabled"))
+            except Exception:
+                cazador_only = False
+            if cazador_only:
+                logging.getLogger(__name__).warning(
+                    "Cach?/plan v2 no disponible para Meta %s; se intenta Cazador: %s", meta_id, exc)
+                plan = {"engine": engine_meta, "alternatives": [], "pieces": [],
+                    "cazador_only": True, "plan_error": f"{type(exc).__name__}: {exc}"}
+            else:
+                self._reset_rotation_streaks(meta_id, f"motor {engine.name} fall?: {exc}")
+                result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} fall?: {exc}"}
+                self._alert_engine_failure(meta_id, engine, exc)
+                engine_shadow = self._run_engine_shadow(goal, value, None, engine, active_decision=result)
+                if not engine_shadow.get("deferred"):
+                    self._persist_engine_shadow_decision(goal, engine, result, engine_shadow, None)
+                self._record_review(meta_id, result, value, None, engine=engine, engine_shadow=engine_shadow)
+                return result
         try:
             touch_bot_proposals = self._touch_bot_shadow_proposals(goal, plan)
         except Exception as exc:

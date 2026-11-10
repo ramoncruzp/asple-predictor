@@ -1390,3 +1390,23 @@ def test_interruptor_exploracion_apagado_delega_en_comportamiento_previo():
     result = V2ScenarioEngine().review(operator, goal, valuation, plan)
     assert result["decision"] == "cerrar_y_reasignar"
     assert len(calls) == 1
+
+
+def test_cazador_enabled_review_preempts_cache_decision(monkeypatch):
+    operator = SimpleNamespace(cazador_status=lambda: {"enabled": True}, clock=lambda: 1000)
+    engine = V2ScenarioEngine()
+    monkeypatch.setattr(engine, "_review_cazador", lambda *_args: {"decision": "rotar_cazador"})
+    monkeypatch.setattr(engine, "decide", lambda *_args: (_ for _ in ()).throw(AssertionError("cache path called")))
+    assert engine.review(operator, {"id": 1}, {"status": "KNOWN"}, {}) == {"decision": "rotar_cazador"}
+
+
+def test_cazador_switch_defaults_on_and_persists_explicit_off(engine_databases):
+    db, _market = engine_databases
+    operator = MetaOperator.__new__(MetaOperator)
+    operator.db = db
+    assert operator.cazador_status()["enabled"] is True
+    assert operator.cazador_status()["defaulted"] is True
+    operator.set_cazador_enabled(False, confirm=True, actor="test")
+    status = operator.cazador_status()
+    assert status["enabled"] is False
+    assert status["defaulted"] is False

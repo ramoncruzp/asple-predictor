@@ -274,6 +274,17 @@ def v2_exploration_status(request: Request):
     return _operator(request).v2_exploration_status()
 
 
+@router.get("/cazador")
+def cazador_status(request: Request):
+    return _operator(request).cazador_status()
+
+
+@router.put("/cazador/switch")
+def update_cazador_switch(request: Request, body: ScenarioCacheSwitch):
+    return _call(_operator(request).set_cazador_enabled, body.enabled,
+        confirm=body.confirm, actor=body.actor)
+
+
 @router.put("/v2-exploration/switch")
 def update_v2_exploration_switch(request: Request, body: ScenarioCacheSwitch):
     return _call(_operator(request).set_v2_exploration_enabled, body.enabled,
