@@ -244,7 +244,8 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
     if np.any((order_side == 1) & (qty <= 0)) or np.any((order_side == 2) & (held <= 0)):
         raise ValueError("orden abierta sin cantidad en initial_cells")
     cash_value = initial_cells.get("cash_usdt") if isinstance(initial_cells, dict) else None
-    cash = (np.full(count, float(cash_value), dtype=np.float64) if cash_value is not None else
+    cash = (np.full(count, float(cash_value), dtype=np.float64) + reserved.sum(axis=1)
+        if cash_value is not None else
         np.maximum(0.0, capital_rows - held.sum(axis=1) * close[:, 0] * (1 - fee)))
     dust = np.zeros(count, dtype=np.float64)
     raw_net = qty - qty * fee

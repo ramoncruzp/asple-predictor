@@ -65,6 +65,20 @@ def test_initial_cells_fuera_de_rango_conserva_ventas_y_no_abre_compras():
     assert result["inventory_qty"].tolist() == [0]
 
 
+def test_initial_cells_buy_open_incluye_reserva_en_efectivo_sin_doble_conteo():
+    scenario = _scenario([100] * 8)
+    filters = FILTERS
+    reserved = 21.021
+    result = simulate_simple(scenario, n_levels=6, capital=reserved,
+        low=90, high=110, filters=filters, initial_cells={"cash_usdt": 0,
+            "cells": [{"buy_price": 90, "sell_price": 95, "qty": .1,
+                "held_qty": 0, "state": "BUY_OPEN", "active_from": 99,
+                "reserved_cash": reserved}]})
+
+    np.testing.assert_allclose(result["cash_curve"], reserved, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(result["equity_curve"], reserved, rtol=0, atol=1e-12)
+
+
 @pytest.mark.parametrize("strategy", ["simple", "bot"])
 def test_lote_geometrias_coincide_con_candidatos_individuales(strategy):
     rng = np.random.default_rng(4308)

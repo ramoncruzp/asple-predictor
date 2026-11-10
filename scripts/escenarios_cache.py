@@ -333,7 +333,7 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
                 else:
                     returned += quote
             held_qty = sum(float(level['held_qty'] or 0) for level in levels)
-            buy_open_capital = sum(float(level['capital'] or 0) for level in levels
+            buy_open_capital = sum(float(level['capital'] or 0) * 1.001 for level in levels
                 if str(level['state']).upper() == 'BUY_OPEN')
             piece_cash = max(0.0, float(grid['capital_total']) - delivered + returned - commissions - buy_open_capital)
             inventory_value = max(0.0, held_qty * price * .999)
@@ -355,7 +355,7 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
                     'active_from': 0})
             status = str(grid['status']).upper()
             piece = {'symbol': symbol, 'strategy': strategy,
-                'capital': piece_cash + inventory_value, 'capital_nominal': float(grid['capital_total']),
+                'capital': piece_cash + inventory_value + buy_open_capital, 'capital_nominal': float(grid['capital_total']),
                 'cash_usdt': piece_cash, 'inventory_value_executable': inventory_value,
                 'liquidation_value': inventory_value + buy_open_capital,
                 'low': float(grid['range_low']), 'high': float(grid['range_high']),
@@ -659,13 +659,20 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     current_keys = {str(piece["candidate_key"]) for piece in current_pieces}
     phases = ((0, [piece for piece in pieces if str(piece.get("candidate_key")) in current_keys]),
         (1, first_pass_candidates), (2, second_pass_candidates))
-    baseline_failed = False
+    failed_live_rows = []
     for phase_index, phase_pieces in phases:
-        if phase_index > 0 and baseline_failed:
+        if phase_index > 0 and failed_live_rows:
+            failed_grid_ids = {int((row.get("piece") or {}).get("grid_id") or -1)
+                for row in failed_live_rows}
+            kept_pieces = []
             for piece in phase_pieces:
-                failed_candidates[str(piece.get("candidate_key") or _candidate_key(piece))] = (
-                    "sin_baseline: falló mantener; alternativa no evaluada")
-            continue
+                replaced = piece.get("reconvert_from_grid_id")
+                if replaced is not None and int(replaced) in failed_grid_ids:
+                    failed_candidates[str(piece.get("candidate_key") or _candidate_key(piece))] = (
+                        "mantener_fallido: no se reconvierte una pieza sin trayectoria")
+                else:
+                    kept_pieces.append(piece)
+            phase_pieces = kept_pieces
         phase_symbols = ([symbol for symbol in symbol_order if any(
             str(piece["symbol"]).upper() == symbol for piece in phase_pieces)]
             if phase_index != 1 else list(symbol_order))
@@ -703,7 +710,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                     "capital": capital, "target": context["target"],
                     "max_loss_pct": context["max_loss_pct"],
                     "loss_confirm_minutes": (context.get("profile_config") or {}).get(
-                        "loss_confirm_minutes", 2), "profile": context["profile"],
+                        "loss_confirm_minutes", 2), "failed_live_rows": failed_live_rows,
+                    "profile": context["profile"],
                     "cut_slippage_expected_max_pct": cut_slippage_expected_max_pct,
                     "max_rss_mb": max_rss_mb,
                     "max_seconds": remaining_seconds() if remaining_seconds else max_seconds})
@@ -742,6 +750,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                     retain_trajectory(trajectory_row)
                 rows = result["rows"]
                 errors = result["errors"]
+                returned_failures = {int((item.get("piece") or {}).get("grid_id") or -1): item
+                    for item in result.get("failed_live_rows", [])}
+                for failed in failed_live_rows:
+                    returned = returned_failures.get(int((failed.get("piece") or {}).get("grid_id") or -1))
+                    if returned and returned.get("constant_metrics") is not None:
+                        failed["constant_metrics"] = returned["constant_metrics"]
                 first_rows.extend(rows)
                 failed_candidates.update(errors)
                 progress_state["evaluated_count"] += len(rows)
@@ -805,16 +819,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             for batch_start in range(0, len(symbol_pieces), MAX_PIECES_PER_BATCH):
                 piece_batch = symbol_pieces[batch_start:batch_start + MAX_PIECES_PER_BATCH]
                 rows, errors = _evaluate_with_isolation(evaluator, piece_batch, **kwargs)
-                if phase_index > 0 and not baseline_failed:
+                if phase_index > 0:
                     baseline_rows = [row for row in first_rows
                         if (row.get("piece") or {}).get("is_current")]
-                    if baseline_rows:
+                    if baseline_rows or failed_live_rows:
                         _apply_live_portfolio_metrics(rows, baseline_rows,
                             capital=capital, target=context["target"],
                             max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
                             trajectory_sink=retain_trajectory,
                             loss_confirm_minutes=(context.get("profile_config") or {}).get(
-                                "loss_confirm_minutes", 2))
+                                "loss_confirm_minutes", 2), failed_live_rows=failed_live_rows)
                     else:
                         for row in rows:
                             row["metrics_pieza_sola"] = row.get("metrics")
@@ -829,7 +843,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
                 first_rows.extend(rows)
                 failed_candidates.update(errors)
                 if phase_index == 0 and errors:
-                    baseline_failed = True
+                    failed_keys = set(errors)
+                    for current_piece in current_pieces:
+                        key = str(current_piece.get("candidate_key") or _candidate_key(current_piece))
+                        if key in failed_keys:
+                            failed_live_rows.append({"piece": current_piece, "error": errors[key]})
                 progress_state["evaluated_count"] += len(rows)
                 symbol_stats[symbol]["evaluated_count"] += len(rows)
                 for reason in errors.values():
@@ -971,17 +989,13 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             "rss_hwm_mb": _rss_max_mb(), "segundos": candidate_seconds.get(symbol, 0.0)}
         progress_state["rss_por_moneda"] = dict(rss_per_symbol)
         profile_times["metricas_bootstrap_s"] += smart_timings.get("metrics_s", 0.0)
-    if not baseline_failed:
-        if live_rows:
-            _apply_live_portfolio_metrics(live_rows, live_rows,
+    if live_rows or failed_live_rows:
+        _apply_live_portfolio_metrics(live_rows, live_rows,
             capital=capital, target=context["target"],
             max_loss_pct=context["max_loss_pct"], horizon=context["horizon"],
             trajectory_sink=retain_trajectory,
             loss_confirm_minutes=(context.get("profile_config") or {}).get(
-                "loss_confirm_minutes", 2))
-    else:
-        for row in second_rows:
-            retain_trajectory(row)
+                "loss_confirm_minutes", 2), failed_live_rows=failed_live_rows)
     trajectory_file = write_trajectory_archive()
     child_peaks = sorted((float(row["rss_hwm_child_mb"])
         for row in rss_per_symbol.values() if row.get("rss_hwm_child_mb") is not None),
@@ -1004,14 +1018,16 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     evaluated_keys = {str((row.get("piece") or {}).get("candidate_key"))
         for row in [*first.get("pieces", []), *second_rows]}
     output_rows = [*first.get("pieces", []), *second_rows]
-    if baseline_failed:
-        for candidate in candidates:
-            key = str(candidate.get("candidate_key") or _candidate_key(candidate))
-            if candidate.get("is_current") and key not in evaluated_keys:
-                output_rows.append({"piece": candidate, "error": failed_candidates.get(key,
-                    "mantener_fallido: no se pudo evaluar la pieza viva")})
-            elif not candidate.get("is_current") and key not in evaluated_keys:
-                output_rows.append({"piece": candidate, "sin_baseline": True})
+    if failed_live_rows:
+        for failed in failed_live_rows:
+            piece = failed.get("piece") or {}
+            key = str(piece.get("candidate_key") or _candidate_key(piece))
+            if key not in evaluated_keys:
+                failed_row = {"piece": piece, "error": failed.get("error") or
+                    "mantener_fallido: no se pudo evaluar la pieza viva"}
+                if failed.get("constant_metrics") is not None:
+                    failed_row["metrics"] = failed["constant_metrics"]
+                output_rows.append(failed_row)
     for row in output_rows:
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
@@ -1278,28 +1294,51 @@ def _portfolio_outcome_metrics(rows, *, capital, target, max_loss_pct, horizon,
 
 
 def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
-        max_loss_pct, horizon, trajectory_sink=None, loss_confirm_minutes=2):
+        max_loss_pct, horizon, trajectory_sink=None, loss_confirm_minutes=2,
+        failed_live_rows=None):
     """Asigna el baseline vivo y las alternativas sobre los mismos índices."""
-    if not live_rows:
+    failed_live_rows = list(failed_live_rows or [])
+    if not live_rows and not failed_live_rows:
         return
     baseline = _portfolio_outcome_metrics(live_rows, capital=capital,
         target=target, max_loss_pct=max_loss_pct, horizon=horizon,
         loss_confirm_minutes=loss_confirm_minutes)
-    if baseline is None:
-        return
+    if baseline is not None:
+        for live in live_rows:
+            if (live.get("piece") or {}).get("is_current"):
+                live["portfolio_metrics"] = baseline
+                if trajectory_sink is not None:
+                    trajectory_sink(live)
     for row in rows:
         piece = row.get("piece") or {}
         if piece.get("is_current"):
-            row["portfolio_metrics"] = baseline
-            if trajectory_sink is not None:
-                trajectory_sink(row)
+            if baseline is not None:
+                row["portfolio_metrics"] = baseline
             continue
         baseline_rows = live_rows
         if piece.get("reconvert_from_grid_id") is not None:
             baseline_rows = [live for live in live_rows
                 if int((live.get("piece") or {}).get("grid_id") or -1) !=
                     int(piece["reconvert_from_grid_id"])]
-        combined = _portfolio_outcome_metrics([*baseline_rows, row], capital=capital,
+        outcomes = row.get("scenario_outcomes") or {}
+        timestamps = outcomes.get("trajectory_timestamps")
+        equity = outcomes.get("trajectory_equity_f32")
+        constants = []
+        if timestamps is not None and equity is not None:
+            for failed in failed_live_rows:
+                failed_piece = failed.get("piece") or {}
+                replaced_id = piece.get("reconvert_from_grid_id")
+                if replaced_id is not None and int(failed_piece.get("grid_id") or -1) == int(replaced_id):
+                    continue
+                constant = _constant_failed_piece(failed, timestamps=timestamps,
+                    scenario_count=len(equity), target=target,
+                    max_loss_pct=max_loss_pct, horizon=horizon)
+                if constant is not None:
+                    constants.append(constant)
+                    if failed.get("constant_metrics") is None:
+                        failed["constant_metrics"] = dict(constant["metrics"])
+                        failed["constant_metrics"]["metrics_origen"] = "constante_por_fallo"
+        combined = _portfolio_outcome_metrics([*baseline_rows, *constants, row], capital=capital,
             target=target, max_loss_pct=max_loss_pct, horizon=horizon,
             loss_confirm_minutes=loss_confirm_minutes)
         if combined is not None:
@@ -1308,6 +1347,30 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         if trajectory_sink is not None:
             trajectory_sink(row)
         _drop_outcome_trajectories(row)
+
+
+def _constant_failed_piece(failed_row, *, timestamps, scenario_count, target,
+        max_loss_pct, horizon):
+    """Representa una pieza fallida por su valor de liquidación sin cambio."""
+    source_piece = failed_row.get("piece") or {}
+    value = float(source_piece.get("liquidation_value") or source_piece.get("capital") or 0)
+    if value <= 0:
+        return None
+    piece = {**source_piece, "capital": value, "is_current": True}
+    curve = np.full((int(scenario_count), len(timestamps)), value, dtype=np.float32)
+    row = {"piece": piece, "scenario_outcomes": {
+        "trajectory_cash_f32": curve.copy(), "trajectory_equity_f32": curve.copy(),
+        "trajectory_timestamps": np.asarray(timestamps, dtype=np.int64),
+        "inventory_qty": np.zeros(int(scenario_count), dtype=np.float32),
+        "inventory_value": np.zeros(int(scenario_count), dtype=np.float32)}}
+    metrics = _portfolio_outcome_metrics([row], capital=value, target=target,
+        max_loss_pct=max_loss_pct, horizon=horizon)
+    if metrics is None:
+        return None
+    metrics["metrics_origen"] = "constante_por_fallo"
+    row["metrics"] = metrics
+    row["error"] = failed_row.get("error")
+    return row
 
 
 def _evaluate_with_isolation(evaluator, pieces, **kwargs):
@@ -1365,11 +1428,28 @@ def _evaluate_currency_worker(payload):
             single_metrics = row.get("metrics") or {}
             row["metrics_pieza_sola"] = single_metrics
             current_rows = payload.get("live_rows") or []
-            if piece.get("reconvert_from_grid_id") is not None:
+            replaced_id = piece.get("reconvert_from_grid_id")
+            if replaced_id is not None:
                 current_rows = [live for live in current_rows
-                    if int((live.get("piece") or {}).get("grid_id") or -1) !=
-                    int(piece["reconvert_from_grid_id"])]
-            combined = _portfolio_outcome_metrics([*current_rows, row],
+                    if int((live.get("piece") or {}).get("grid_id") or -1) != int(replaced_id)]
+            constants = []
+            for failed in payload.get("failed_live_rows") or []:
+                failed_piece = failed.get("piece") or {}
+                if replaced_id is not None and int(failed_piece.get("grid_id") or -1) == int(replaced_id):
+                    continue
+                outcomes = row.get("scenario_outcomes") or {}
+                if outcomes.get("trajectory_timestamps") is not None:
+                    constant = _constant_failed_piece(failed,
+                        timestamps=outcomes["trajectory_timestamps"],
+                        scenario_count=len(outcomes["trajectory_equity_f32"]),
+                        target=payload["target"], max_loss_pct=payload["max_loss_pct"],
+                        horizon=payload["horizon"])
+                    if constant is not None:
+                        constants.append(constant)
+                        if failed.get("constant_metrics") is None:
+                            failed["constant_metrics"] = dict(constant["metrics"])
+                            failed["constant_metrics"]["metrics_origen"] = "constante_por_fallo"
+            combined = _portfolio_outcome_metrics([*current_rows, *constants, row],
                 capital=payload["capital"], target=payload["target"],
                 max_loss_pct=payload["max_loss_pct"], horizon=payload["horizon"],
                 loss_confirm_minutes=payload["loss_confirm_minutes"])
@@ -1415,6 +1495,7 @@ def _evaluate_currency_worker(payload):
     return {"symbol": symbol, "pid": os.getpid(), "rows": all_rows, "errors": errors,
         "trajectories": [value for key, value in retained.items()
             if not key.startswith("_meta_")],
+        "failed_live_rows": payload.get("failed_live_rows") or [],
         "generation_timings": generation_timings, "timings": timings,
         "seconds": time.perf_counter() - started, "rss_actual_mb": _rss_current_mb(),
         "rss_hwm_mb": _rss_max_mb(), "limit_status": limit_status}

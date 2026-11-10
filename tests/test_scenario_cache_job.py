@@ -367,7 +367,9 @@ def test_perfil_libera_por_moneda_y_conserva_dieciseis_finalistas_diversos(
         f"tiempo={elapsed:.3f} s; pasadas={result['pass_seconds']}; finalistas=16")
 
 
-def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monkeypatch):
+def test_mantener_fallido_no_impide_evaluar_alternativas(cache_databases, monkeypatch):
+    import numpy as np
+
     db, market_path = cache_databases
     current = {"candidate_key": "mantener:JUP", "symbol": "JUPUSDT",
         "strategy": "smart", "capital": 40, "n": 6, "low": .254,
@@ -386,7 +388,22 @@ def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monke
 
     def evaluate(pieces, **_kwargs):
         calls.extend(piece["candidate_key"] for piece in pieces)
-        raise ValueError("exchange mid price must be strictly inside the grid range")
+        if any(piece.get("is_current") for piece in pieces):
+            raise ValueError("exchange mid price must be strictly inside the grid range")
+        rows = []
+        for piece in pieces:
+            rows.append({"piece": piece, "metrics": {
+                "n": 10, "pnl_mean_usdt": 1, "p_target": .4, "p_loss": 0,
+                "p_loss_ci95": [0, 0], "cut_slippage_mean_usdt": 0,
+                "cut_slippage_p90_usdt": 0, "cut_slippage_expected_usdt": 0,
+                "days_to_target_p50": 3, "evidence_sufficient": True},
+                "scenario_outcomes": {
+                    "trajectory_cash_f32": np.full((10, 2), 10, dtype=np.float32),
+                    "trajectory_equity_f32": np.full((10, 2), 10, dtype=np.float32),
+                    "trajectory_timestamps": np.asarray([0, 3600], dtype=np.int64),
+                    "inventory_qty": np.zeros(10, dtype=np.float32),
+                    "inventory_value": np.zeros(10, dtype=np.float32)}})
+        return {"pieces": rows}
 
     result = cache_script._evaluate_context({"goal_id": 7, "profile": "RAPIDO",
         "free_cash": 50, "capital": 90, "target": 3, "horizon": 15,
@@ -395,14 +412,14 @@ def test_mantener_fallido_marca_alternativas_sin_baseline(cache_databases, monke
         market_path=market_path, library_dir="unused", filters={"JUPUSDT": FILTERS},
         prices={"JUPUSDT": .24}, sigmas={"JUPUSDT": .01}, skipped={}, evaluator=evaluate)
 
-    assert calls == ["mantener:JUP"]
+    assert calls == ["mantener:JUP", "alternativa:JUP"]
     maintain = next(row for row in result["results"] if row["candidate_key"] == "mantener:JUP")
     alternative_result = next(row for row in result["results"]
         if row["candidate_key"] == "alternativa:JUP")
     assert "mantener_fallido" in maintain["metrics"]
-    assert alternative_result["metrics"]["sin_baseline"] is True
-    assert alternative_result["objective"]["factible"] is False
-    assert "sin_baseline" in alternative_result["objective"]["motivos"]
+    assert maintain["metrics"]["metrics_origen"] == "constante_por_fallo"
+    assert "sin_baseline" not in alternative_result["metrics"]
+    assert alternative_result["objective"]["factible"] is True
 
 
 def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_databases):
@@ -463,6 +480,48 @@ def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_data
         .2646, .2753, .286, .2966]
     assert pieces[0]["inventory_value_executable"] == pytest.approx(170.3 * .24 * .999)
     assert "mejor bid no disponible" in pieces[0]["valuation_warning"]
+
+
+def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases):
+    from datetime import datetime, timezone
+    import numpy as np
+    from research.scenarios.fastsim import simulate_simple
+
+    db, market_path = cache_databases
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db.engine.begin() as conn:
+        goal_id = conn.execute(db.meta_goals.insert().values(
+            capital_initial=100, target_usdt=3, target_input_type="USDT",
+            target_input_value=3, profile="RAPIDO", status="ACTIVE",
+            environment="testnet", created_at=now, started_at=now,
+            config_snapshot=json.dumps({"max_loss_pct": 18}))).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal_id,
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+    levels = [{"level_idx": idx, "price": .26, "capital": 3.5,
+        "sell_price": .28, "entry_price": None, "held_qty": 0,
+        "state": "BUY_OPEN", "order_id": 3000 + idx}
+        for idx in range(6)]
+    grid = db.create_grid_with_levels({"symbol": "JUPUSDT", "strategy": "bot",
+        "range_low": .20, "range_high": .32, "n_levels": 6,
+        "capital_total": 21, "status": "ACTIVE", "environment": "testnet"}, levels)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal_id,
+            run_id=run_id, grid_id=grid["id"], piece_type="grid", created_at=now))
+
+    piece = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
+        {"JUPUSDT": .30}, {"JUPUSDT": FILTERS})[0]
+    print("PIECE_DEBUG", piece)
+    bars = {"open": np.full((1, 8), .30), "high": np.full((1, 8), .301),
+        "low": np.full((1, 8), .299), "close": np.full((1, 8), .30)}
+    result = simulate_simple(bars, n_levels=6, capital=piece["capital"],
+        low=piece["low"], high=piece["high"], filters=FILTERS,
+        initial_cells=piece["initial_cells"])
+
+    assert piece["capital"] == pytest.approx(21.021)
+    assert piece["initial_cells"]["cash_usdt"] == pytest.approx(0)
+    assert sum(cell["reserved_cash"] for cell in piece["initial_cells"]["cells"]) == pytest.approx(21.021)
+    assert result["cash_curve"][0, 0] == pytest.approx(piece["capital"])
+    assert result["equity_curve"][0, 0] == pytest.approx(piece["capital"])
 
 
 def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases):
