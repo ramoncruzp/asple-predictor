@@ -134,15 +134,24 @@ def _bot_candidate(symbol, capital, buy_offset, sell_offset, price, filters, pro
 
 
 def build_smart_candidates(top_simple, *, filters_by_symbol=None):
-    """Crea la segunda pasada Smart usando solo las dos mejores geometrías Simple."""
+    """Crea Smart solo desde geometrías Simple válidas basadas en sigma."""
     smart, seen = [], set()
-    for item in list(top_simple or [])[:2]:
+    for item in list(top_simple or []):
+        if len(smart) >= 2:
+            break
         piece = item.get("piece", item)
-        if piece.get("strategy") != "simple":
+        if piece.get("strategy") != "simple" or piece.get("reconversion"):
             continue
-        symbol = str(piece["symbol"]).upper()
-        geometry = (symbol, int(piece.get("n", 6)), float(piece["width_sigma"]),
-            float(piece["capital"]))
+        symbol = str(piece.get("symbol") or "").upper()
+        try:
+            width_sigma = float(piece.get("width_sigma"))
+            levels = int(piece.get("n", 6))
+            capital = float(piece.get("capital"))
+        except (TypeError, ValueError):
+            continue
+        if not symbol or not np.isfinite(width_sigma) or not np.isfinite(capital):
+            continue
+        geometry = (symbol, levels, width_sigma, capital)
         if geometry in seen:
             continue
         seen.add(geometry)

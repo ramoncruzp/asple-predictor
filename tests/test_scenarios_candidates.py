@@ -102,6 +102,21 @@ def test_smart_candidates_are_limited_to_two_simple_geometries():
     assert all(row["strategy"] == "smart" and row["n"] == 6 for row in smart)
 
 
+def test_smart_ignora_reconversion_rango_7d_y_simple_sin_width_sigma():
+    smart = build_smart_candidates([
+        {"piece": {"symbol": "ZROUSDT", "strategy": "simple", "capital": 53,
+            "n": 6, "range_type": "rango_7d", "reconversion": True}},
+        {"piece": {"symbol": "JUPUSDT", "strategy": "simple", "capital": 30,
+            "n": 6}},
+        {"piece": {"symbol": "WIFUSDT", "strategy": "simple", "capital": 30,
+            "n": 6, "width_sigma": 1}},
+    ])
+
+    assert len(smart) == 1
+    assert smart[0]["symbol"] == "WIFUSDT"
+    assert smart[0]["strategy"] == "smart"
+
+
 def test_reconversion_de_bot_con_inventario_genera_geometrias_y_liquida():
     result = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
         "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",

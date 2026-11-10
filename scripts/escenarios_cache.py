@@ -477,6 +477,12 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     first_pass_candidates, second_pass_candidates, _max_by_symbol = _split_candidate_passes(
         [piece for piece in candidates if not piece.get("is_current")],
         free_cash=free, capital_max_by_symbol=capital_max_by_symbol)
+    reconversion_keys_for_pass = {str(piece.get("candidate_key")) for piece in reconversions}
+    priority_reconversions = [piece for piece in second_pass_candidates
+        if str(piece.get("candidate_key")) in reconversion_keys_for_pass]
+    second_pass_candidates = [piece for piece in second_pass_candidates
+        if str(piece.get("candidate_key")) not in reconversion_keys_for_pass]
+    first_pass_candidates.extend(priority_reconversions)
     symbol_stats = {}
     for symbol in filters:
         reconversion_info = reconversion_stats.get(symbol, {})
@@ -908,7 +914,13 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
     simple_ranked = [row for row in ranked
         if row.get("piece", {}).get("strategy") == "simple"
         and not row.get("piece", {}).get("is_current")][:2]
-    smart = build_smart_candidates(simple_ranked)
+    smart_omitido = None
+    try:
+        smart = build_smart_candidates(simple_ranked)
+    except Exception as exc:
+        smart = []
+        smart_omitido = f"smart_omitido: {type(exc).__name__}: {exc}"
+        progress_state["smart_omitido"] = smart_omitido
     smart_generated = len(smart)
     if smart and remaining_seconds is not None and remaining_seconds() < 120:
         progress_state["smart_omitido_por_tiempo"] = len(smart)
@@ -1005,12 +1017,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         on_progress([*first_rows, *second_rows])
     reconversion_keys = {str(piece.get("candidate_key")): str(piece.get("symbol") or "").upper()
         for piece in reconversions}
-    evaluated_reconversion_keys = {str((row.get("piece") or {}).get("candidate_key"))
-        for row in [*first_rows, *second_rows]
-        if str((row.get("piece") or {}).get("candidate_key")) in reconversion_keys}
     for symbol, stats in symbol_stats.items():
-        stats["reconvertir_evaluados"] = sum(
-            reconversion_keys.get(key) == symbol for key in evaluated_reconversion_keys)
         stats["reconvertir_fallidos"] = int(stats.get("reconvertir_fallidos", 0)) + sum(
             reconversion_keys.get(key) == symbol for key in failed_candidates)
     results = []
@@ -1068,6 +1075,11 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             "cut_slippage_expected_usdt": 0},
         "objective": {"factible": True, "motivos": [], "clave_orden": (0, 0, 0)}}
     results.append(quiet)
+    saved_reconversion_keys = {str(row.get("candidate_key")) for row in results
+        if str(row.get("candidate_key")) in reconversion_keys}
+    for symbol, stats in symbol_stats.items():
+        stats["reconvertir_evaluados"] = sum(
+            reconversion_keys.get(key) == symbol for key in saved_reconversion_keys)
     discarded = dict(built["discarded"])
     for reason in failed_candidates.values():
         label = reason.split(":", 1)[0]
@@ -1087,7 +1099,8 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         "generated_count": len(candidates) + int(built.get("invalid_count", 0)) + smart_generated,
         "generated_candidates": len(candidates) + smart_generated,
         "discarded_count": sum(discarded.values()), "profile_times": profile_times,
-        "smart_omitido_por_tiempo": progress_state.get("smart_omitido_por_tiempo", 0)}
+        "smart_omitido_por_tiempo": progress_state.get("smart_omitido_por_tiempo", 0),
+        "smart_omitido": smart_omitido}
 
 
 def _candidate_key(piece):
@@ -1646,7 +1659,8 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                             "rss_por_moneda": evaluated.get("rss_por_moneda", {}),
                             "trajectory_file": evaluated.get("trajectory_file"),
                             "failed_candidates": evaluated.get("failed_candidates", {}),
-                            "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0)},
+                            "smart_omitido_por_tiempo": evaluated.get("smart_omitido_por_tiempo", 0),
+                            "smart_omitido": evaluated.get("smart_omitido")},
                             ensure_ascii=False),
                         time.perf_counter() - context_started, _rss_max_mb(), _rss_current_mb(),
                         _rss_max_mb(), run_id))
@@ -1657,6 +1671,7 @@ def run_cache(app_db, market_db, *, library_dir="data/derived/scenario_lib",
                 f"evaluados={evaluated.get('evaluated_count', 0)} "
                 f"descartados={json.dumps(evaluated.get('discarded', {}), ensure_ascii=False)} "
                 f"smart_omitido_por_tiempo={evaluated.get('smart_omitido_por_tiempo', 0)} "
+                f"smart_omitido={evaluated.get('smart_omitido')} "
                 f"segundos_moneda={json.dumps(evaluated.get('candidate_seconds', {}), ensure_ascii=False)} "
                 f"segundos_pasadas={json.dumps(evaluated.get('pass_seconds', {}), ensure_ascii=False)} "
                 f"rss_por_moneda={json.dumps(evaluated.get('rss_por_moneda', {}), ensure_ascii=False)} "

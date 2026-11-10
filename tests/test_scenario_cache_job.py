@@ -510,7 +510,6 @@ def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases
 
     piece = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
         {"JUPUSDT": .30}, {"JUPUSDT": FILTERS})[0]
-    print("PIECE_DEBUG", piece)
     bars = {"open": np.full((1, 8), .30), "high": np.full((1, 8), .301),
         "low": np.full((1, 8), .299), "close": np.full((1, 8), .30)}
     result = simulate_simple(bars, n_levels=6, capital=piece["capital"],
@@ -894,7 +893,8 @@ def test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva(
     monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
         "candidates": [{"strategy": "usdt_quieto"}], "discarded": {},
         "discarded_by_symbol": {}, "invalid_count": 0})
-    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    monkeypatch.setattr(cache_script, "build_smart_candidates",
+        lambda _rows: (_ for _ in ()).throw(KeyError("width_sigma")))
     filters = SymbolFilters(tick_size=Decimal("0.00000001"),
         min_price=Decimal("0.00000001"), max_price=Decimal("100000"),
         step_size=Decimal("0.00000001"), min_qty=Decimal("0.00000001"),
@@ -928,8 +928,12 @@ def test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva(
         if row["params"].get("reconversion")]
     assert result["status"] == "ok"
     assert len(reconversion_rows) == 8
+    assert {row["params"]["reconversion_geometry"] for row in reconversion_rows} == {
+        "sigma_1", "sigma_2", "rango_7d"}
     assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] == 8
     assert result["symbol_stats"]["ZROUSDT"]["reconvertir_fallidos"] == 0
+    assert result["status"] == "ok"
+    assert "smart_omitido: KeyError: 'width_sigma'" == result["smart_omitido"]
 
 
 def test_cache_con_dos_bots_reconvierte_y_normaliza_metricas_incompletas(
@@ -958,17 +962,21 @@ def test_cache_con_dos_bots_reconvierte_y_normaliza_metricas_incompletas(
     incomplete = {"candidate_key": "simple-incompleto", "symbol": "JUPUSDT",
         "strategy": "simple", "capital": 9, "n": 6, "width_sigma": .5,
         "force_incomplete": True}
+    second_pass_candidate = {"candidate_key": "simple-segunda-pasada",
+        "symbol": "JUPUSDT", "strategy": "simple", "capital": 8,
+        "n": 8, "width_sigma": 2}
     monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
-        "candidates": [incomplete, {"strategy": "usdt_quieto"}], "discarded": {},
+        "candidates": [incomplete, second_pass_candidate, {"strategy": "usdt_quieto"}], "discarded": {},
         "discarded_by_symbol": {}, "invalid_count": 0})
-    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
     filters = SymbolFilters(tick_size=Decimal("0.00000001"),
         min_price=Decimal("0.00000001"), max_price=Decimal("100000"),
         step_size=Decimal("0.00000001"), min_qty=Decimal("0.00000001"),
         max_qty=Decimal("100000000"), min_notional=Decimal("5"),
         apply_min_to_market=True, max_num_orders=None)
 
+    evaluated_batches = []
     def evaluate(pieces, **_kwargs):
+        evaluated_batches.append([piece.get("candidate_key") for piece in pieces])
         rows = []
         for piece in pieces:
             if piece.get("force_incomplete"):
@@ -1007,6 +1015,13 @@ def test_cache_con_dos_bots_reconvierte_y_normaliza_metricas_incompletas(
     assert all(key in zro["metrics"] and key in jup["metrics"]
         for key in cache_script._REQUIRED_SCENARIO_METRICS)
     assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] >= 6
+    assert result["pass_seconds"]["pasada_1"] > 0
+    assert result["pass_seconds"]["pasada_2"] > 0
+    reconversion_keys = {row["candidate_key"] for row in result["results"]
+        if row["params"].get("reconversion")}
+    assert any(key in batch for key in reconversion_keys for batch in evaluated_batches)
+    print(f"Meta 7 sintética: tiempos por pasada={result['pass_seconds']}; "
+        f"ZRO reconversiones guardadas={result['symbol_stats']['ZROUSDT']['reconvertir_evaluados']}")
     assert broken["objective"]["factible"] is False
     assert "metrica_incompleta" in broken["objective"]["motivos"]
     assert "simple-incompleto" in result["failed_candidates"]
