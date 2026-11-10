@@ -129,7 +129,7 @@ def _bot_ladder(symbol, capital, market, profile, available_slots):
 
 
 def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
-        source_symbol=None, require_sigma_ratio=1.2):
+        source_symbol=None, source_piece_type=None, require_sigma_ratio=1.2):
     candidates = [(symbol, market) for symbol, market in markets.items()
         if _valid_market(market) and (symbol == str(source_symbol or "").upper() or
             float(market["sigma_24h"]) >= require_sigma_ratio * float(source_sigma))]
@@ -154,12 +154,17 @@ def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
             # El primer destino es un grid si alcanza; los posteriores usan bots.
             grid = (_grid_destination(symbol, amount, market, profile, grids_left,
                 allow_smart=True) if index == 0 and grids_left > 0 else None)
+            if symbol == str(source_symbol or "").upper() and source_piece_type == "grid":
+                grid = None
             if grid is not None:
                 output.append(grid)
                 grids_left -= 1
                 by_symbol[symbol] = by_symbol.get(symbol, 0.0) + amount
                 continue
-            ladder = _bot_ladder(symbol, amount, market, profile, bots_left)
+            same_symbol_same_type = (symbol == str(source_symbol or "").upper()
+                and source_piece_type == "individual_bot_grid")
+            ladder = ([] if same_symbol_same_type else
+                _bot_ladder(symbol, amount, market, profile, bots_left))
             if ladder:
                 output.extend(ladder)
                 bots_left -= len(ladder)
@@ -210,20 +215,23 @@ def decide_cazador(context):
                 reasons.append("venta pendiente a punto de ejecutarse")
         if market is None:
             reasons.append("sin libro o volatilidad válida para la pieza")
-        capital = float(piece.get("liquidation_value") or piece.get("capital") or 0)
+        capital = float(piece.get("liquidation_value") if piece.get("liquidation_value") is not None
+            else piece.get("capital") or 0)
         budget = capital + (float(context.get("free_cash") or 0)
             if float(context.get("free_cash") or 0) >= 10 else 0.0)
         piece_limits = dict(limits)
         piece_limits["capital_by_symbol"] = dict(limits.get("capital_by_symbol") or {})
+        source_allocated = float(piece.get("capital_nominal")
+            if piece.get("capital_nominal") is not None else capital)
         piece_limits["capital_by_symbol"][symbol] = max(0.0,
-            float(piece_limits["capital_by_symbol"].get(symbol, 0.0)) - capital)
+            float(piece_limits["capital_by_symbol"].get(symbol, 0.0)) - source_allocated)
         if piece.get("piece_type") == "individual_bot_grid":
             piece_limits["max_bots"] = int(piece_limits.get("max_bots", 0)) + 1
         else:
             piece_limits["max_grids"] = int(piece_limits.get("max_grids", 0)) + 1
         destination = (_destination_portfolio(markets, budget,
             float(market["sigma_24h"]), profile, piece_limits,
-            source_symbol=symbol) if market is not None else [])
+            source_symbol=symbol, source_piece_type=piece.get("piece_type")) if market is not None else [])
         destination_score = sum(float(item["score"]) for item in destination)
         gain = destination_score - score
         if not destination:
@@ -249,7 +257,7 @@ def decide_cazador(context):
             budget *= min(.9, max(.5, ratio * .98))
             destination = (_destination_portfolio(markets, budget,
                 float(market["sigma_24h"]), profile, piece_limits,
-                source_symbol=symbol) if market is not None else [])
+                source_symbol=symbol, source_piece_type=piece.get("piece_type")) if market is not None else [])
             destination_score = sum(float(item["score"]) for item in destination)
             gain = destination_score - score
             penalty = loss_penalty(destination)
@@ -263,7 +271,7 @@ def decide_cazador(context):
                 reasons.append("presupuesto de perdida insuficiente")
         scores.append({"grid_id": piece.get("grid_id"), "symbol": symbol,
             "capital": capital, "puntaje_pieza": score, "puntaje_destino": destination_score,
-            "ganancia_actividad": gain, "destino": destination,
+            "ganancia_actividad": gain, "presupuesto": budget, "destino": destination,
             "motivos_freno": reasons, "avisos": warnings,
             "perdida_estimada_usdt": penalty})
     eligible = [row for row in scores if not row["motivos_freno"]]
@@ -272,6 +280,9 @@ def decide_cazador(context):
         return {"accion": "rotar", "pieza": chosen["grid_id"],
             "puntaje_pieza": chosen["puntaje_pieza"],
             "puntaje_destino": chosen["puntaje_destino"], "motivo": "mayor ganancia de actividad",
+            "por_que_elegida": [{"grid_id": row.get("grid_id"),
+                "ganancia_actividad": row.get("ganancia_actividad"),
+                "seleccionada": row is chosen} for row in scores],
             "destino": chosen["destino"], "puntajes_piezas": scores,
             "sigma_por_moneda": {key: value["sigma_24h"] for key, value in markets.items()},
             "rango_24h": {key: {"low": value["low_24h"], "high": value["high_24h"]}
@@ -357,10 +368,13 @@ def build_runtime_context(operator, goal, valuation):
         market = markets.get(symbol, {})
         pending = []
         held = 0.0
+        buy_open_capital = 0.0
         for level in levels:
             state = str(level.get("state") or "").upper()
             held += float(level.get("held_qty") or 0)
-            if state == "BUY_OPEN": pending.append(float(level.get("price") or 0))
+            if state == "BUY_OPEN":
+                pending.append(float(level.get("price") or 0))
+                buy_open_capital += float(level.get("capital") or 0) * 1.001
             elif state == "SELL_OPEN": pending.append(float(level.get("sell_price") or 0))
         capital = float(grid.get("capital_total") or 0)
         pieces.append({"grid_id": grid_id, "symbol": symbol,
@@ -369,9 +383,10 @@ def build_runtime_context(operator, goal, valuation):
             "n_levels": grid.get("n_levels"), "pending_prices": pending,
             "sell_price": next((float(row.get("sell_price") or 0) for row in levels
                 if str(row.get("state") or "").upper() == "SELL_OPEN"), None),
-            "liquidation_value": held * float(market.get("bid") or 0) * .999,
+            "liquidation_value": (held * float(market.get("bid") or 0) * .999 + buy_open_capital),
+            "buy_open_capital": buy_open_capital, "capital_nominal": capital,
             "capital": capital, "status": grid.get("status")})
-    cash, _reserved = operator.core._available_usdt(int(goal["id"]))
+    free_cash = float(valuation.get("free_capital_usdt") or 0.0)
     cfg = {**DEFAULT_PROFILES.get(str(goal.get("profile") or "").upper(), {}),
         **(goal.get("config_snapshot") or {})}
     by_symbol = {}
@@ -384,7 +399,7 @@ def build_runtime_context(operator, goal, valuation):
         if link.get("piece_type") == "individual_bot_grid": bots += 1
         else: grids += 1
     initial = float(goal.get("capital_initial") or 0)
-    return {"markets": markets, "pieces": pieces, "free_cash": float(cash or 0),
+    return {"markets": markets, "pieces": pieces, "free_cash": free_cash,
         "result_pct": valuation.get("result_pct"), "capital_initial": initial,
         "profile": cfg, "limits": {"max_grids": max(0, int(cfg.get("max_grids", 0))-grids),
             "max_bots": max(0, int(cfg.get("max_bots", 0))-bots),

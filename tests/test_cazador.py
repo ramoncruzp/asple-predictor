@@ -47,6 +47,10 @@ def test_cazador_meta7_rota_bot_dormido_a_cartera_diversa(meta7_cazador_context)
     assert result["sigma_por_moneda"]["PEPEUSDT"] >= 2 * result["sigma_por_moneda"]["ZROUSDT"]
     assert {row["symbol"] for row in result["destino"]} >= {"PEPEUSDT", "XRPUSDT"}
     assert sum(row["capital"] for row in result["destino"]) <= 70
+    pieza_jup = next(row for row in result["puntajes_piezas"] if row["grid_id"] == 21)
+    assert pieza_jup["presupuesto"] == 21  # 9 USDT libres no alcanzan el minimo de agregado.
+    assert not any(row["symbol"] == "JUPUSDT" and row["type"] == "bot"
+        for row in pieza_jup["destino"])
     assert meta7_cazador_context == before
 
 

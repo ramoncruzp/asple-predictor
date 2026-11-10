@@ -613,19 +613,6 @@ class V2ScenarioEngine(DecisionEngine):
         """Ejecuta una decisión v2 con sus propios frenos y validaciones comunes."""
         from contextlib import nullcontext
         review_at_s = self._operator_now(operator)
-        # El Cazador usa velas locales y puede actuar aunque la caché está vencida.
-        try:
-            from grid.engines.shadow_guard import SHADOW_MODE
-            reader = getattr(operator, "cazador_status", None)
-            if callable(reader) and reader().get("enabled") and not SHADOW_MODE.get():
-                lock = getattr(operator, "_operation_lock", None)
-                with lock if lock is not None else nullcontext():
-                    hunted = self._review_cazador(operator, goal, valuation, review_at_s)
-                if hunted is not None:
-                    return json_safe(hunted)
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception("Falló el Cazador; continúa la revisión v2 normal")
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
         exploration_enabled = bool((plan or {}).get("exploration_enabled"))
@@ -712,9 +699,14 @@ class V2ScenarioEngine(DecisionEngine):
         from grid.engines.cazador import build_runtime_context, decide_cazador
         context = build_runtime_context(operator, goal, valuation)
         proposal = decide_cazador(context)
-        if proposal.get("accion") not in {"rotar", "agregar"}:
-            return None
         grid_id = int(proposal["pieza"]) if proposal.get("pieza") is not None else None
+        audit = {"decision": proposal.get("accion"), "proposal": proposal,
+            "puntajes_piezas": proposal.get("puntajes_piezas", []),
+            "pieza_elegida": proposal.get("pieza"), "motivo": proposal.get("motivo")}
+        if proposal.get("accion") not in {"rotar", "agregar"}:
+            operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
+                **audit, "review_at_s": review_at_s, "grid_id": grid_id})
+            return None
         signature = self._cazador_signature(proposal, grid_id)
         rows = operator._meta_ledger_rows(int(goal["id"]))
         prior = [row for row in rows if row.get("event_type") == "META_CAZADOR_REVISION"]
@@ -740,11 +732,12 @@ class V2ScenarioEngine(DecisionEngine):
         if last.get("signature") != signature or review_at_s - stamp < 840:
             reason = "persistencia Cazador: dos propuestas iguales separadas por 14 minutos"
             operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
-                "signature": signature, "review_at_s": review_at_s, "grid_id": grid_id,
-                "brake": reason}, grid_id=grid_id)
+                **audit, "signature": signature, "review_at_s": review_at_s,
+                "grid_id": grid_id, "brake": reason}, grid_id=grid_id)
             return {"decision": "mantener", "reason": reason, "cazador": proposal, "freno": reason}
         operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
-            "signature": signature, "review_at_s": review_at_s, "grid_id": grid_id}, grid_id=grid_id)
+            **audit, "signature": signature, "review_at_s": review_at_s,
+            "grid_id": grid_id}, grid_id=grid_id)
         if proposal.get("accion") == "agregar":
             return self._execute_cazador_add(operator, goal, context, proposal, review_at_s)
         return self._execute_cazador_rotation(operator, goal, context, proposal, review_at_s)

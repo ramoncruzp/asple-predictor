@@ -852,6 +852,39 @@ def test_revision_activa_v2_ejecuta_dentro_del_candado(action, monkeypatch):
     assert state["seen"] == [True]
 
 
+def test_cazador_activo_precede_al_plan_v2_y_a_la_deriva():
+    state = {"lock": False, "events": []}
+    goal = {"id": 771, "status": "ACTIVE", "config_snapshot": {
+        "decision_engine": "v2", "warning_loss_pct": 20}}
+    valuation = {"status": "KNOWN", "result_pct": 0, "cash_usdt": 9}
+    class Lock:
+        def __enter__(self): state["lock"] = True
+        def __exit__(self, *_args): state["lock"] = False
+    operator = object.__new__(MetaOperator)
+    operator._operation_lock = Lock()
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal)
+    operator._engine_for_goal = lambda _goal: engine
+    operator._valuation_with_retry = lambda _id: (valuation, [])
+    operator.cazador_status = lambda: {"enabled": True}
+    operator.clock = lambda: 2000
+    operator._record_cazador_shadow = lambda *_args: {"decision": "rotar"}
+    operator._run_engine_shadow = lambda *_args, **_kwargs: {"name": "v1", "decision": "mantener"}
+    operator._persist_engine_shadow_decision = lambda *_args: None
+    operator._compact_review_result = MetaOperator._compact_review_result
+    operator._ledger = lambda _id, event, details: state["events"].append(event)
+    def cazador(_operator, _goal, _value, _now):
+        assert state["lock"]
+        state["events"].append("META_CAZADOR_REVISION")
+        return {"decision": "rotar_cazador", "cazador": {"accion": "rotar",
+            "puntajes_piezas": [{"grid_id": 18, "puntaje_pieza": 0.1}]}}
+    engine = SimpleNamespace(name="v2", version="test", _review_cazador=cazador,
+        plan=lambda *_args, **_kwargs: pytest.fail("Cazador should preempt plan"))
+    result = MetaOperator._review_once_locked(operator, goal["id"])
+    assert result["decision"] == "rotar_cazador"
+    assert "META_CAZADOR_REVISION" in state["events"]
+    assert state["lock"] is False
+
+
 def test_guardas_lanzan_error_si_sombra_intenta_ejecutar():
     engine = object.__new__(GridEngine)
     core = object.__new__(MetaCore)
@@ -1392,21 +1425,14 @@ def test_interruptor_exploracion_apagado_delega_en_comportamiento_previo():
     assert len(calls) == 1
 
 
-def test_cazador_enabled_review_preempts_cache_decision_inside_lock(monkeypatch):
-    class Lock:
-        active = False
-        def __enter__(self): self.active = True
-        def __exit__(self, *_args): self.active = False
-    lock = Lock()
-    operator = SimpleNamespace(cazador_status=lambda: {"enabled": True}, clock=lambda: 1000,
-        _operation_lock=lock)
+def test_cazador_no_se_evalua_dentro_del_review_v2(monkeypatch):
+    operator = SimpleNamespace(cazador_status=lambda: {"enabled": True})
     engine = V2ScenarioEngine()
-    def cazador_review(*_args):
-        assert lock.active
-        return {"decision": "rotar_cazador"}
-    monkeypatch.setattr(engine, "_review_cazador", cazador_review)
-    monkeypatch.setattr(engine, "decide", lambda *_args: (_ for _ in ()).throw(AssertionError("cache path called")))
-    assert engine.review(operator, {"id": 1}, {"status": "KNOWN"}, {}) == {"decision": "rotar_cazador"}
+    monkeypatch.setattr(engine, "_review_cazador", lambda *_args: pytest.fail(
+        "Cazador must be evaluated by MetaOperator before planning"))
+    monkeypatch.setattr(engine, "decide", lambda *_args: {"decision": "mantener"})
+    result = engine.review(operator, {"id": 1}, {"status": "KNOWN"}, {})
+    assert result["decision"] == "mantener"
 
 
 def test_cazador_switch_defaults_on_and_persists_explicit_off(engine_databases):

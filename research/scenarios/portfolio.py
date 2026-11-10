@@ -194,7 +194,7 @@ def greedy_portfolio(archive_path, *, profile, capital, free_cash, target,
             below_threshold = (pnl_improvement < .2 - 1e-12 if exploration_mode else
                 improvement < .02 - 1e-12)
             if below_threshold or not objective["factible"]:
-                reason = ("rompe los lÃ­mites de riesgo: " + "; ".join(objective["motivos"])
+                reason = ("rompe los límites de riesgo: " + "; ".join(objective["motivos"])
                     if not objective["factible"] else
                     "no sube la ganancia esperada al menos 0,2 USDT" if exploration_mode else
                     "no sube P(meta) al menos 2 pp")

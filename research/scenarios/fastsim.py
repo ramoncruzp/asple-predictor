@@ -209,7 +209,7 @@ def simulate_simple(scenarios, *, n_levels, capital, low, high, filters=None,
 def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filters,
         fee_pct, resync_candles, max_loss_pct, target_usdt, initial_timestamp,
         candle_seconds, pack_curves, initial_cells, keep_5m=False):
-    """Replaya celdas existentes sin volver a planificar su geometrÃ­a."""
+    """Replaya celdas existentes sin volver a planificar su geometría."""
     close = bars["close"]
     count, n_bars = close.shape
     capital_rows = np.broadcast_to(np.asarray(capital, dtype=np.float64), (count,))
@@ -231,7 +231,7 @@ def _simulate_simple_initial_state(bars, *, n_levels, capital, low, high, filter
     sides = {"IDLE": 0, "BUY_OPEN": 1, "SELL_OPEN": 2, "DONE": 0}
     if any(state not in sides for state in states) or np.any(prices <= 0) or np.any(sells <= 0) \
             or np.any(qty < 0) or np.any(held < 0):
-        raise ValueError("estado, precio o cantidad invÃ¡lidos en initial_cells")
+        raise ValueError("estado, precio o cantidad inválidos en initial_cells")
     order_side = np.broadcast_to(np.asarray([sides[state] for state in states], dtype=np.int8),
         (count, len(cells))).copy()
     state_codes = {"IDLE": 0, "BUY_OPEN": 1, "SELL_OPEN": 2, "DONE": 0}

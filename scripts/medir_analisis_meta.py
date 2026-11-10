@@ -54,7 +54,7 @@ def read_only_db(db_url: str):
 
 def main():
     # Fase 40c, parte B4.4: en S1 la terminal no siempre usa UTF-8 (cp1252 por
-    # defecto en Windows) y la salida mostraba "pr?stamos" en vez de "préstamos".
+    # El defecto en Windows sustituia una tilde por un signo de interrogacion.
     # Forzar UTF-8 en stdout no depende de la configuración regional del host.
     try:
         sys.stdout.reconfigure(encoding="utf-8")

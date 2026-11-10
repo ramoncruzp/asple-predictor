@@ -1,4 +1,4 @@
-﻿"""Lista o repara enlaces de grids vacíos asociados a metas finalizadas."""
+"""Lista o repara enlaces de grids vacíos asociados a metas finalizadas."""
 from __future__ import annotations
 
 import argparse

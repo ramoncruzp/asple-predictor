@@ -4219,6 +4219,44 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida"}
             self._record_review(meta_id, result, value, None, engine=engine)
             return result
+        # El Cazador evalúa el libro local antes del plan costoso y de la caché.
+        cazador_result = None
+        if engine.name == "v2" and not value.get("connection_error"):
+            try:
+                status = self.cazador_status()
+                if status.get("enabled"):
+                    with self._operation_lock:
+                        current_goal = self.core.get_goal(meta_id)
+                        current_value, _ = self._valuation_with_retry(meta_id)
+                        if (current_goal.get("status") == "ACTIVE"
+                                and current_value.get("status") == "KNOWN"
+                                and float(current_value.get("result_pct") or 0)
+                                    > -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0))):
+                            cazador_result = engine._review_cazador(
+                                self, current_goal, current_value, float(self.clock()))
+                    if isinstance(cazador_result, dict) and cazador_result.get("decision") in {
+                            "rotar_cazador", "agregar_cazador"}:
+                        cazador_shadow = self._record_cazador_shadow(
+                            current_goal, current_value, cazador_result)
+                        engine_shadow = self._run_engine_shadow(
+                            current_goal, current_value, {}, engine, active_decision=cazador_result)
+                        if not engine_shadow.get("deferred"):
+                            self._persist_engine_shadow_decision(
+                                current_goal, engine, cazador_result, engine_shadow, {})
+                        result = cazador_result
+                        self._ledger(meta_id, "META_OPERATOR_REVIEW_DECISION", {
+                            "ledger_schema_version": 2, "plan_decision_id": None,
+                            "decision": self._compact_review_result(result),
+                            "shadow_decision": getattr(self, "_last_review_shadow", None),
+                            "cazador_shadow": cazador_shadow, "engine": engine_meta,
+                            "engine_shadow": engine_shadow, "valuation": current_value,
+                            "decision_choices": {"comparison_version": 2}, "comparison_version": 2})
+                        return result
+            except Exception as exc:
+                logging.getLogger(__name__).exception(
+                    "Falló la evaluación inicial del Cazador para Meta %s", meta_id)
+                self._ledger(meta_id, "META_CAZADOR_REVISION", {
+                    "decision": "error", "error": f"{type(exc).__name__}: {exc}"})
         # Scanner/Advisor/replays can take minutes. They must not hold the
         # monitor lock because MetaCore's one-minute loss guard uses it too.
         try:
@@ -4233,12 +4271,12 @@ class MetaOperator:
                 cazador_only = False
             if cazador_only:
                 logging.getLogger(__name__).warning(
-                    "Cach?/plan v2 no disponible para Meta %s; se intenta Cazador: %s", meta_id, exc)
+                    "Caché/plan v2 no disponible para Meta %s; se intenta Cazador: %s", meta_id, exc)
                 plan = {"engine": engine_meta, "alternatives": [], "pieces": [],
                     "cazador_only": True, "plan_error": f"{type(exc).__name__}: {exc}"}
             else:
-                self._reset_rotation_streaks(meta_id, f"motor {engine.name} fall?: {exc}")
-                result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} fall?: {exc}"}
+                self._reset_rotation_streaks(meta_id, f"motor {engine.name} falló: {exc}")
+                result = {"decision": "no_hacer_nada", "reason": f"motor {engine.name} falló: {exc}"}
                 self._alert_engine_failure(meta_id, engine, exc)
                 engine_shadow = self._run_engine_shadow(goal, value, None, engine, active_decision=result)
                 if not engine_shadow.get("deferred"):
@@ -4358,9 +4396,18 @@ class MetaOperator:
             logging.getLogger(__name__).exception("No se pudo alertar del fallo del motor Meta %s", meta_id)
 
     def _record_cazador_shadow(self, goal, value, active_result):
-        """Registra la propuesta pura del Cazador para esta revisi?n sin ejecutarla."""
+        """Registra la propuesta pura del Cazador para esta revisión sin ejecutarla."""
         if isinstance(active_result, dict) and active_result.get("cazador"):
-            return {"duplicated": True, "reason": "la revisi?n activa ya evalu? el Cazador"}
+            proposal = active_result["cazador"]
+            result = {"decision": proposal.get("accion"), "proposal": proposal,
+                "sigma_por_moneda": proposal.get("sigma_por_moneda", {}),
+                "puntajes_piezas": proposal.get("puntajes_piezas", []),
+                "pieza_elegida": proposal.get("pieza"), "motivo": proposal.get("motivo"),
+                "por_que_elegida": proposal.get("por_que_elegida", []),
+                "destino": proposal.get("destino", []),
+                "misma_evaluacion_activa": True}
+            self._ledger(int(goal["id"]), "META_CAZADOR_SOMBRA", result)
+            return result
         from grid.engines.cazador import build_runtime_context, decide_cazador
         from grid.engines.shadow_guard import shadow_execution_context
         try:
@@ -4371,6 +4418,7 @@ class MetaOperator:
                 "sigma_por_moneda": proposal.get("sigma_por_moneda", {}),
                 "puntajes_piezas": proposal.get("puntajes_piezas", []),
                 "pieza_elegida": proposal.get("pieza"), "motivo": proposal.get("motivo"),
+                "por_que_elegida": proposal.get("por_que_elegida", []),
                 "destino": proposal.get("destino", []),
                 "perdida_realizada_estimada": proposal.get("perdida_realizada_estimada"),
                 "presupuesto_perdida": proposal.get("presupuesto_perdida"),

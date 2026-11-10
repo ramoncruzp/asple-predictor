@@ -351,7 +351,7 @@ def replay_summary(rows):
 
 
 def calibrate_grid(grid_id: int, db_path: Path):
-    """Compara fills persistidos del grid con replay pÃºblico de 5m/1m, sin escritura."""
+    """Compara fills persistidos del grid con replay público de 5m/1m, sin escritura."""
     with _connect_read_only(db_path) as conn:
         grid = conn.execute("SELECT * FROM grids WHERE id=?", (int(grid_id),)).fetchone()
         if grid is None:
