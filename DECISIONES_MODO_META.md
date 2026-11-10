@@ -548,3 +548,7 @@ Las nuevas aperturas de grids Simple/Smart de v2 y del Cazador pueden comprar al
 ### 43h-0w8b - completar inventario inicial de grids Cazador
 
 En las revisiones v2, los grids activos que consten como abiertos por eventos del Cazador y sigan ligados a la meta pueden completar una sola vez su inventario inicial. Se exige que toda la pieza siga sin fills, ciclos ni inventario; solo se consideran niveles `IDLE` por encima del precio. Dos firmas iguales deben persistir al menos 840 segundos. La ejecución queda dentro de `_operation_lock` y se registra en `META_CAZADOR_COMPLETAR`; grids manuales, grids v1 y piezas con fills quedan excluidos.
+
+### 43h-0w8c - presupuesto de BUY_OPEN del Cazador
+
+El valor liquidable de una pieza incluye el inventario al bid neto de comisión y el capital reservado nominal de sus órdenes `BUY_OPEN`. No se añade un margen de comisión artificial a esa reserva. En el fixture de Meta #7, JUP BUY_OPEN reserva 21 USDT y los 9 USDT libres no alcanzan el mínimo para sumarse: el presupuesto de rotación permanece en 21 USDT. El destino sigue excluyendo bots de JUP al reemplazar el bot JUP.

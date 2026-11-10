@@ -946,3 +946,7 @@ Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de 
 ### 43h-0w8b - finalización persistente de inventario
 
 **Validado localmente:** la primera observación guarda la firma; a los 839 s no compra; a los 840 s ejecuta una sola vez y registra `META_CAZADOR_COMPLETAR`. Los fixtures de grids manuales y grids con ciclos no cambian. La revisión real de Meta #7 en S1 queda pendiente.
+
+### 43h-0w8c - capital reservado en bots BUY_OPEN
+
+**Validado localmente:** el contexto del Cazador calcula la reserva BUY_OPEN con el importe del nivel, sin sobrecontar 0,1 %. El fixture de Meta #7 da presupuesto JUP 21 USDT con 9 USDT libres, actividad positiva y sin autorrotación a un bot JUP. La comprobación conectada de Meta #7 en S1 queda pendiente.

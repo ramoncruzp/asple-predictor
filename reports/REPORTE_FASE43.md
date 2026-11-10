@@ -1105,3 +1105,9 @@ Prueba enfocada: 6 pasaron en 4,49 s; se verificaron dos niveles comprados y pro
 Las revisiones v2 detectan grids que aparecen como abiertos en `META_CAZADOR_ROTACION` o `META_CAZADOR_AGREGADO`. Si el grid sigue `ACTIVE`, enlazado a la meta y sin ningún fill/ciclo/inventario, una firma estable de niveles `IDLE` sobre el precio debe persistir 840 s antes de llamar al sembrado inicial. La operación ocurre dentro del candado y queda auditada como `META_CAZADOR_COMPLETAR`; se reconoce también el grid #22 ya abierto, siempre que su evento de apertura siga en la bitácora.
 
 Prueba enfocada: 3 pasaron en 4,49 s; cubre la frontera de 14 min, no tocar un grid manual ni uno con ciclo, y ejecución dentro del candado. No hubo compras reales.
+
+### 43h-0w8c - presupuesto de bots con compra pendiente
+
+`build_runtime_context` valora una orden `BUY_OPEN` por el capital reservado del nivel, sin sumar una comisión estimada adicional. El contexto sintético de Meta #7 comprobó JUP con reserva y valor liquidable de 21 USDT, efectivo libre de 9 USDT y presupuesto de rotación de 21 USDT. El puntaje de actividad de JUP es positivo y no se propone abrir otro bot JUP al reemplazarlo.
+
+Prueba enfocada: `tests/test_cazador.py`, 10 pasaron en 1,09 s. Solo BD de mercado temporal y exchange falso.

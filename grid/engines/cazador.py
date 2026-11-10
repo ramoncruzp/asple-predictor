@@ -374,7 +374,8 @@ def build_runtime_context(operator, goal, valuation):
             held += float(level.get("held_qty") or 0)
             if state == "BUY_OPEN":
                 pending.append(float(level.get("price") or 0))
-                buy_open_capital += float(level.get("capital") or 0) * 1.001
+                # El capital reservado ya representa el importe comprometido por la orden.
+                buy_open_capital += float(level.get("capital") or 0)
             elif state == "SELL_OPEN": pending.append(float(level.get("sell_price") or 0))
         capital = float(grid.get("capital_total") or 0)
         pieces.append({"grid_id": grid_id, "symbol": symbol,

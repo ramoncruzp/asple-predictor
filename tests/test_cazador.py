@@ -1,4 +1,5 @@
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +53,72 @@ def test_cazador_meta7_rota_bot_dormido_a_cartera_diversa(meta7_cazador_context)
     assert not any(row["symbol"] == "JUPUSDT" and row["type"] == "bot"
         for row in pieza_jup["destino"])
     assert meta7_cazador_context == before
+
+
+def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
+        tmp_path, monkeypatch, meta7_cazador_context):
+    import sqlite3
+    import data.market_store
+    import grid.meta_live_pieces
+    from grid.engines.cazador import build_runtime_context
+
+    market_path = tmp_path / "market.sqlite"
+    with sqlite3.connect(market_path) as conn:
+        conn.executescript("""
+            CREATE TABLE symbols(id INTEGER PRIMARY KEY, symbol TEXT, role TEXT, active INTEGER);
+            CREATE TABLE candles(symbol_id INTEGER, interval TEXT, open_ts INTEGER,
+                high REAL, low REAL, close REAL);
+            CREATE TABLE symbol_filters(symbol TEXT, raw_json TEXT);
+        """)
+        for symbol_id, symbol, price in ((1, "JUPUSDT", .25), (2, "ZROUSDT", 1.55),
+                (3, "PEPEUSDT", .00001), (4, "XRPUSDT", .525)):
+            conn.execute("INSERT INTO symbols VALUES(?,?, 'operar', 1)",
+                (symbol_id, symbol))
+            for index in range(289):
+                close = price * (1 + (index % 7 - 3) * .0002)
+                conn.execute("INSERT INTO candles VALUES(?, '5m', ?, ?, ?, ?)",
+                    (symbol_id, index * 300, close * 1.002, close * .998, close))
+    monkeypatch.setattr(data.market_store, "market_db_path", lambda: market_path)
+    grids = {
+        18: {"id": 18, "symbol": "ZROUSDT", "strategy": "bot", "status": "ACTIVE",
+            "capital_total": 70, "range_low": 1.5, "range_high": 1.6, "n_levels": 1},
+        21: {"id": 21, "symbol": "JUPUSDT", "strategy": "bot", "status": "ACTIVE",
+            "capital_total": 21, "range_low": .23, "range_high": .26, "n_levels": 1},
+    }
+    levels = {
+        18: [{"state": "SELL_OPEN", "held_qty": 39.12, "capital": 70,
+            "price": 1.789, "sell_price": 1.872}],
+        21: [{"state": "BUY_OPEN", "held_qty": 0, "capital": 21,
+            "price": .2425, "sell_price": .2498}],
+    }
+    class FakeDb:
+        def get_grid(self, grid_id):
+            return grids[int(grid_id)]
+        def get_grid_levels(self, grid_id):
+            return levels[int(grid_id)]
+    db = FakeDb()
+    core = SimpleNamespace(db=db)
+    operator = SimpleNamespace(core=core, db=db,
+        _book_ticker=lambda symbol: {
+            "bid_price": meta7_cazador_context["markets"][symbol]["mid"] * .999,
+            "ask_price": meta7_cazador_context["markets"][symbol]["mid"] * 1.001})
+    monkeypatch.setattr(grid.meta_live_pieces, "live_meta_grid_links",
+        lambda *_args: [{"grid_id": 18, "piece_type": "individual_bot_grid"},
+            {"grid_id": 21, "piece_type": "individual_bot_grid"}])
+
+    context = build_runtime_context(operator,
+        {"id": 7, "profile": "RAPIDO", "capital_initial": 100},
+        {"free_capital_usdt": 9, "result_pct": -3})
+    jup = next(row for row in context["pieces"] if row["grid_id"] == 21)
+    result = decide_cazador(context)
+    jup_score = next(row for row in result["puntajes_piezas"] if row["grid_id"] == 21)
+
+    assert jup["buy_open_capital"] == pytest.approx(21)
+    assert jup["liquidation_value"] == pytest.approx(21)
+    assert jup_score["presupuesto"] == pytest.approx(21)
+    assert jup_score["puntaje_pieza"] > 0
+    assert not any(row["symbol"] == "JUPUSDT" and row["type"] == "bot"
+        for row in jup_score["destino"])
 
 
 @pytest.mark.parametrize("piece_update, reason", [
