@@ -940,3 +940,6 @@ $env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0w5-fi
 Resultado: 65 pasaron en 8,27 s; un aviso de obsolescencia de Starlette. `node --check frontend/metas.js` pasó y `scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La prueba aislada de la ruta sintética de caché de reconversión ZRO: 1 pasó en 0,59 s de pytest (2,537 s de pared incluyendo inicio de pytest). No se midió RSS para esa prueba unitaria. La regresión `test_v1_plan_y_review_son_identicos_a_776eedf` pasó; no se cambió la decisión v1.
 
 Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de volatilidad (Testnet)» está encendido (el Cazador se predetermina encendido, pero motor v2 y caché conservan interruptores independientes); inspeccionar eventos `META_CAZADOR_SOMBRA`, `META_CAZADOR_REVISION`, `META_CAZADOR_ROTACION` y `META_V2_ACTION` de la Meta 7. No ejecutar esta validación conectada desde este entorno.
+### 43h-0w8a - inventario inicial
+
+**Validado localmente:** el fixture abre un grid con dos niveles `IDLE` por encima del precio, confirma las compras MARKET con exchange falso y verifica su estado `SELL_OPEN`, comisión y eventos `GRID_COMPRA_INICIAL`. Un fixture de profundidad con VWAP por encima de 0,5 % compra solo el primer nivel admisible y deja el siguiente en `IDLE`. La compra y ejecución conectada en S1 queda pendiente.

@@ -794,7 +794,8 @@ class V2ScenarioEngine(DecisionEngine):
                         "result": {"exchange_open_confirmed": True, "opened": row}},
                         grid_id=row.get("grid_id"))
                 opened.append(operator._open_replacement(goal, alternative,
-                    piece["capital_usdt"], on_opened=record_open, v2_action_id=action_id))
+                    piece["capital_usdt"], on_opened=record_open, v2_action_id=action_id,
+                    seed_initial_inventory=True))
             except Exception as exc:
                 failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
         details = {"review_at_s": review_at_s, "proposal": proposal,
@@ -853,7 +854,8 @@ class V2ScenarioEngine(DecisionEngine):
                     raise ValueError(checked.get("reason") or "pieza no abrible")
                 alt = {"symbol": symbol, "strategy": piece["strategy"], "pieces": [piece],
                     "reason": "redistribución por Cazador de volatilidad"}
-                opened.append(operator._open_replacement(goal, alt, piece["capital_usdt"], v2_action_id=action_id))
+                opened.append(operator._open_replacement(goal, alt, piece["capital_usdt"],
+                    v2_action_id=action_id, seed_initial_inventory=True))
             except Exception as exc:
                 failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
         detail = {"review_at_s": review_at_s, "proposal": proposal, "closed": closed,
@@ -1000,11 +1002,13 @@ class V2ScenarioEngine(DecisionEngine):
                 "_v2_close_confirmation": True})
         if on_opened is None:
             opened = operator._open_replacement(goal, alternative,
-                float(piece.get("capital_usdt") or grid.get("capital_total") or 0))
+                float(piece.get("capital_usdt") or grid.get("capital_total") or 0),
+                seed_initial_inventory=True)
         else:
             opened = operator._open_replacement(goal, alternative,
                 float(piece.get("capital_usdt") or grid.get("capital_total") or 0),
-                on_opened=on_opened, v2_action_id=v2_action_id)
+                on_opened=on_opened, v2_action_id=v2_action_id,
+                seed_initial_inventory=True)
         rotation_details = {
             "grid_id": grid_id, "closed": closed, "opened": opened,
             "alternative_id": alternative.get("alternative_id"),

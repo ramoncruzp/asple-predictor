@@ -613,6 +613,142 @@ class GridEngine:
         logger.info("grid=%s level=%s action=%s_SENT order_id=%s", grid_id, level["level_idx"], side, order["order_id"])
         return int(order["order_id"])
 
+    def seed_initial_inventory(self, grid_id: int, *, max_slippage_pct: Decimal | float = Decimal("0.5")) -> dict:
+        """Compra con cautela las celdas inactivas que quedan sobre el precio."""
+        from grid.engines.shadow_guard import reject_shadow_side_effect
+        reject_shadow_side_effect("seed_initial_inventory")
+        grid = self.db.get_grid(int(grid_id))
+        if not grid or str(grid.get("status") or "").upper() not in {"ACTIVE", "OPENING"}:
+            return {"status": "skipped", "reason": "grid no activo"}
+        symbol = str(grid["symbol"]).upper()
+        filters, ticker, avg_price = self._market_context(symbol)
+        if not book_is_two_sided(ticker):
+            return {"status": "skipped", "reason": "libro sin bid/ask"}
+        depth_reader = getattr(self.exchange, "get_order_book_depth", None)
+        if not callable(depth_reader):
+            return {"status": "skipped", "reason": "exchange sin lectura de profundidad"}
+        depth = depth_reader(symbol, limit=100)
+        asks = sorted(((_d(price), _d(qty)) for price, qty in depth.get("asks", [])
+            if _d(price) > 0 and _d(qty) > 0), key=lambda item: item[0])
+        if not asks:
+            return {"status": "skipped", "reason": "libro sin asks"}
+        best_ask = _d(ticker["ask_price"])
+        levels = sorted(self.db.get_grid_levels(int(grid_id)),
+            key=lambda row: int(row["level_idx"]))
+        candidates = [row for row in levels if str(row.get("state") or "").upper() == "IDLE"
+            and _d(row.get("held_qty") or 0) == 0
+            and _d(row.get("price") or 0) > _d(book_mid(ticker) or 0)]
+        selected = []
+        cumulative_qty = Decimal(0)
+        cumulative_quote = Decimal(0)
+        remaining_asks = [[price, qty] for price, qty in asks]
+        skipped = []
+        for level in candidates:
+            budget = _d(level.get("capital") or 0)
+            qty = filters.round_qty_down(budget / best_ask) if best_ask > 0 else Decimal(0)
+            if qty < filters.min_qty:
+                skipped.append({"level_idx": int(level["level_idx"]), "reason": "below_min_qty"})
+                continue
+            # Estima el impacto acumulado por niveles, sin superar el capital reservado.
+            tentative_quote = Decimal(0)
+            remaining = qty
+            worst = best_ask
+            for price, available in remaining_asks:
+                take = min(remaining, available)
+                tentative_quote += take * price
+                remaining -= take
+                worst = price
+                if remaining <= 0:
+                    break
+            if remaining > 0:
+                skipped.append({"level_idx": int(level["level_idx"]), "reason": "insufficient_depth"})
+                break
+            vwap = tentative_quote / qty
+            if tentative_quote > budget:
+                qty = filters.round_qty_down(qty * budget / tentative_quote)
+                if qty < filters.min_qty:
+                    skipped.append({"level_idx": int(level["level_idx"]), "reason": "capital_insuficiente"})
+                    continue
+                tentative_quote = Decimal(0)
+                remaining = qty
+                for price, available in remaining_asks:
+                    take = min(remaining, available)
+                    tentative_quote += take * price
+                    remaining -= take
+                    if remaining <= 0:
+                        break
+                vwap = tentative_quote / qty
+            slippage_pct = (vwap / best_ask - 1) * 100
+            if slippage_pct > _d(max_slippage_pct):
+                skipped.append({"level_idx": int(level["level_idx"]),
+                    "reason": "slippage_over_limit", "slippage_pct": float(slippage_pct)})
+                break
+            try:
+                filters.validate_order("BUY", best_ask, qty, avg_price)
+            except FilterViolation as exc:
+                skipped.append({"level_idx": int(level["level_idx"]), "reason": str(exc)})
+                continue
+            selected.append({"level": level, "qty": qty, "vwap_estimate": vwap,
+                "slippage_pct": slippage_pct})
+            cumulative_qty += qty
+            cumulative_quote += tentative_quote
+            need = qty
+            for index, (price, available) in enumerate(remaining_asks):
+                take = min(need, available)
+                remaining_asks[index][1] -= take
+                need -= take
+                if need <= 0:
+                    break
+
+        results = []
+        for item in selected:
+            level = item["level"]
+            idx = int(level["level_idx"])
+            cid = f"gI{int(grid_id)}L{idx}"
+            self.db.update_level(int(grid_id), idx, buy_client_order_id=cid)
+            try:
+                order = self.exchange.find_order_by_client_id(symbol, cid)
+                if order is None:
+                    self.exchange.place_order(symbol, "BUY", item["qty"],
+                        order_type="MARKET", client_order_id=cid)
+                order = self.exchange.get_order(symbol, order_id=order["order_id"]) \
+                    if order is not None else self.exchange.get_order(symbol, client_order_id=cid)
+                if str(order.get("status") or "").upper() != "FILLED":
+                    results.append({"level_idx": idx, "status": "pending",
+                        "client_order_id": cid, "order_id": order.get("order_id")})
+                    continue
+                live_grid = self.db.get_grid(int(grid_id))
+                live_level = next(row for row in self.db.get_grid_levels(int(grid_id))
+                    if int(row["level_idx"]) == idx)
+                handled, error = self._handle_buy_fill(live_grid, live_level, order,
+                    filters, avg_price)
+                updated_level = next(row for row in self.db.get_grid_levels(int(grid_id))
+                    if int(row["level_idx"]) == idx)
+                trades = self.exchange.get_my_trades(symbol, int(order["order_id"]))
+                executed_qty = _d(order.get("executed_qty") or 0)
+                quote = sum((_d(trade.get("quoteQty") or
+                    _d(trade.get("qty") or 0) * _d(trade.get("price") or 0)) for trade in trades), Decimal(0))
+                fee_usdt = self._fee_value_usdt(trades, symbol)
+                avg_fill = quote / executed_qty if executed_qty else Decimal(0)
+                event_details = {"order_id": int(order["order_id"]),
+                    "client_order_id": cid, "level_idx": idx,
+                    "quantity": str(executed_qty), "held_qty": str(updated_level.get("held_qty") or 0),
+                    "price_avg": str(avg_fill), "slippage_pct_estimated": float(item["slippage_pct"]),
+                    "fee_usdt": str(fee_usdt), "status": "filled", "sell_protected": not error}
+                self._close_event("GRID_COMPRA_INICIAL", int(grid_id), event_details,
+                    client_order_id=cid, order_id=int(order["order_id"]), level_idx=idx,
+                    price=avg_fill)
+                results.append(event_details)
+            except Exception as exc:
+                results.append({"level_idx": idx, "status": "error",
+                    "client_order_id": cid, "reason": f"{type(exc).__name__}: {exc}"})
+        return {"status": "completed" if not skipped and all(
+            row.get("status") == "filled" for row in results) else "partial",
+            "grid_id": int(grid_id), "selected_levels": [int(row["level"]["level_idx"])
+                for row in selected], "results": results, "skipped": skipped,
+            "planned_quantity": str(cumulative_qty), "planned_quote_usdt": str(cumulative_quote),
+            "best_ask": str(best_ask), "max_slippage_pct": float(max_slippage_pct)}
+
     @staticmethod
     def _loan_cid(grid_id: int, level_idx: int, cycle: int, previous: str | None,
                   loan_id: int, amount: Any, role: str) -> str:

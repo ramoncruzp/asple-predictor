@@ -5169,7 +5169,7 @@ class MetaOperator:
         return None
 
     def _open_replacement(self, goal, alternative, capital, *, on_opened=None,
-            v2_action_id=None):
+            v2_action_id=None, seed_initial_inventory=False):
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("open_replacement")
         piece = dict(alternative["pieces"][0])
@@ -5200,8 +5200,19 @@ class MetaOperator:
         if on_opened is not None:
             on_opened(opened)
         self.core.link_grid(int(goal["id"]), grid_id, piece["piece_type"])
+        initial_inventory = None
+        if (seed_initial_inventory and piece.get("piece_type") == "grid"
+                and str(piece.get("strategy") or "").lower() in {"simple", "smart"}):
+            seed = getattr(self.engine, "seed_initial_inventory", None)
+            initial_inventory = (seed(grid_id) if callable(seed) else {
+                "status": "skipped", "reason": "engine sin soporte de inventario inicial"})
+            if initial_inventory.get("selected_levels") or initial_inventory.get("skipped"):
+                self._ledger(goal["id"], "GRID_COMPRA_INICIAL", initial_inventory,
+                    grid_id=grid_id)
         details = {"piece": piece, "grid_id": grid_id,
             "reason": alternative.get("reason") or "pieza seleccionada por el motor de meta"}
+        if initial_inventory is not None:
+            details["initial_inventory"] = initial_inventory
         if v2_action_id is not None:
             details["v2_action_id"] = str(v2_action_id)
         self._ledger(goal["id"], "META_OPERATOR_OPEN", details, grid_id=grid_id)

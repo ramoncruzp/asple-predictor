@@ -38,6 +38,45 @@ def test_create_grid_places_only_buys_below_exchange_bid():
     assert all(order["side"] == "BUY" for order in exchange.get_open_orders("XRPUSDT"))
 
 
+def test_initial_inventory_buys_idle_levels_and_leaves_sell_protection():
+    engine, db, exchange = make_engine()
+    grid = create(engine)
+
+    result = engine.seed_initial_inventory(grid["id"])
+
+    assert result["status"] == "completed"
+    levels = db.get_grid_levels(grid["id"])
+    assert [row["state"] for row in levels] == [
+        "BUY_OPEN", "BUY_OPEN", "BUY_OPEN", "SELL_OPEN", "SELL_OPEN"]
+    market_buys = [row for row in exchange.orders.values()
+        if row["type"] == "MARKET" and row["side"] == "BUY"]
+    assert len(market_buys) == 2
+    assert all(row["held_qty"] > 0 and row["entry_price"] == pytest.approx(100)
+        for row in levels[3:])
+    assert len([row for row in exchange.get_open_orders("XRPUSDT")
+        if row["side"] == "SELL"]) == 2
+    events = db.list_grid_events(grid_id=grid["id"], event_type="GRID_COMPRA_INICIAL")
+    assert len(events) == 2
+    assert all(row["details"]["fee_usdt"] != "0" for row in events)
+
+
+def test_initial_inventory_limits_buy_levels_when_depth_slippage_exceeds_half_percent():
+    engine, db, exchange = make_engine()
+    grid = create(engine)
+    exchange.get_order_book_depth = lambda _symbol, limit=5: {
+        "asks": [(Decimal("100.01"), Decimal("2")), (Decimal("101"), Decimal("100"))],
+        "bids": [(Decimal("99.99"), Decimal("100"))],
+    }
+
+    result = engine.seed_initial_inventory(grid["id"])
+
+    assert len(result["selected_levels"]) == 1
+    assert result["skipped"][-1]["reason"] == "slippage_over_limit"
+    levels = db.get_grid_levels(grid["id"])
+    assert levels[3]["state"] == "SELL_OPEN"
+    assert levels[4]["state"] == "IDLE"
+
+
 def test_smart_grid_requests_volatility_at_its_selected_horizon():
     engine, _db, _exchange = make_engine()
     class Provider:

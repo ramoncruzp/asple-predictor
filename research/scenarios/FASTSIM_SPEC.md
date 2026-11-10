@@ -131,3 +131,6 @@ el umbral y el patrimonio congelado. Esto aproxima el vigilante real que consult
 cada minuto y confirma el corte; no reconstruye el orden de ticks dentro de cada
 vela de cinco minutos ni la latencia de ejecuci?n. El camino opcional no cambia
 las curvas por defecto ni las decisiones v1.
+## Inventario inicial de grids v2
+
+La apertura de grids Simple/Smart de v2 y Cazador puede comprar los niveles `IDLE` que quedan por encima del precio de mercado, de abajo hacia arriba. El proceso usa profundidad de asks para estimar precio medio ejecutable; si el desliz estimado de un nivel supera 0,5 % frente al mejor ask, detiene las compras de niveles superiores y conserva esos niveles en `IDLE`. La ruta solo da por comprado un nivel cuando el exchange confirma `FILLED`; entonces registra la comisión, actualiza inventario y coloca la orden SELL. Esta función no participa en v1 ni en la sombra.

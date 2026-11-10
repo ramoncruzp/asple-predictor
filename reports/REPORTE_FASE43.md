@@ -1095,3 +1095,8 @@ $env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0w5-fi
 Resultado: 65 pasaron en 8,27 s; un aviso de obsolescencia de Starlette. `node --check frontend/metas.js` pasó y `scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La prueba aislada de la ruta sintética de caché de reconversión ZRO: 1 pasó en 0,59 s de pytest (2,537 s de pared incluyendo inicio de pytest). No se midió RSS para esa prueba unitaria. La regresión `test_v1_plan_y_review_son_identicos_a_776eedf` pasó; no se cambió la decisión v1.
 
 Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de volatilidad (Testnet)» está encendido (el Cazador se predetermina encendido, pero motor v2 y caché conservan interruptores independientes); inspeccionar eventos `META_CAZADOR_SOMBRA`, `META_CAZADOR_REVISION`, `META_CAZADOR_ROTACION` y `META_V2_ACTION` de la Meta 7. No ejecutar esta validación conectada desde este entorno.
+### 43h-0w8a - inventario inicial al abrir
+
+Se añadió una operación optativa de GridEngine para sembrar inventario en celdas `IDLE` por encima del precio al abrir grids Simple/Smart de v2 o Cazador. La lectura de asks define el VWAP estimado por nivel; el límite es 0,5 % sobre el mejor ask. Cada fill confirmado pasa por el manejador de compra existente, que persiste cantidad y comisiones y coloca la SELL de protección. `GRID_COMPRA_INICIAL` se registra en el grid y en la bitácora Meta. Bots individuales y v1 no entran en este camino.
+
+Prueba enfocada: 6 pasaron en 4,49 s; se verificaron dos niveles comprados y protegidos y la compra parcial ante desliz superior al límite. No se usaron S1, Testnet, red ni bases reales.
