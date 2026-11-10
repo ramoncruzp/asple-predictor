@@ -1075,3 +1075,23 @@ El interruptor de exploración se predetermina encendido solo con Testnet config
 Se corrigió la construcción de geometrías de reconversión para que el precio inicial quede dentro del rango con margen de un paso, y las geometrías con pasos inferiores al mínimo se descarten antes de simular. La caché separa las métricas de cada pieza viva de las métricas de cartera. Las acciones de v2 quedan registradas al confirmarse en el exchange y los frenos G4 reconocen aperturas/rotaciones aunque falte el evento nuevo.
 
 Validación local: generador real de reconversión ZRO con fixture de precio 1,556, σ 0,0595, horizonte 17 días y capital 53 USDT; salida de métricas sintéticas conectada a decisión y rotación con exchange falso. Sin consultas a S1, Testnet, `.env`, bases reales ni red. El detalle numérico y los comandos se consignan en `reports/DISCREPANCIAS_FASE43.md`.
+
+
+### 43h-0w2?0w5 ? Cazador de volatilidad
+
+Se incorpor? la regla de actividad por volatilidad reciente, el interruptor de Laboratorio y el registro sombra. La sombra es una propuesta, no una operaci?n ni un resultado medido. Se preserv? la decisi?n v1; las validaciones de esta entrega son sint?ticas y offline. El interruptor del Cazador se predetermina encendido ?nicamente para su ruta v2; el motor v2 y la cach? conservan sus propios controles independientes.
+
+
+### 43h-0w5 ? validación local final del Cazador
+
+El fixture de Meta #7 incorpora ZRO bot con 39,12 unidades, compra a 1,789, venta pendiente a 1,872 y valor liquidable aproximado de 60,6 USDT al bid 1,55; JUP bot BUY_OPEN con 21 USDT sin inventario; y 9 USDT libres. Con σ 24 h ZRO 0,005, PEPE 0,10 y XRP 0,05, la propuesta pura selecciona rotar el grid 18: puntaje ZRO 0,00 frente a destino 1,484; destino PEPE Smart de 4 niveles por 40,40 USDT y dos bots XRP de 10,10 USDT cada uno. Capital destino 60,60 USDT, pérdida estimada 6,78 USDT (límite 18 USDT), con 70 % por moneda y conteos bajo los máximos. JUP se conserva; su compra pendiente está cerca del precio. El freno exige dos propuestas idénticas separadas 840 s y bloquea nueva rotación por seis horas. Es una estimación sintética, no una ejecución ni una medición financiera.
+
+Comando final enfocado:
+
+```powershell
+$env:ASPLE_OFFLINE='1'; $basetemp=Join-Path $env:TEMP ('pytest-fase43-43h-0w5-final-'+[guid]::NewGuid().ToString('N')); pytest -q tests/test_cazador.py tests/test_scenario_cache_job.py::test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva tests/test_v2_scenario_engine.py tests/test_meta_own_grid_evaluation.py::test_v1_plan_y_review_son_identicos_a_776eedf --basetemp="$basetemp"
+```
+
+Resultado: 65 pasaron en 8,27 s; un aviso de obsolescencia de Starlette. `node --check frontend/metas.js` pasó y `scripts/revisar_codificacion.py` informó `HALLAZGOS=0`. La prueba aislada de la ruta sintética de caché de reconversión ZRO: 1 pasó en 0,59 s de pytest (2,537 s de pared incluyendo inicio de pytest). No se midió RSS para esa prueba unitaria. La regresión `test_v1_plan_y_review_son_identicos_a_776eedf` pasó; no se cambió la decisión v1.
+
+Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de volatilidad (Testnet)» está encendido (el Cazador se predetermina encendido, pero motor v2 y caché conservan interruptores independientes); inspeccionar eventos `META_CAZADOR_SOMBRA`, `META_CAZADOR_REVISION`, `META_CAZADOR_ROTACION` y `META_V2_ACTION` de la Meta 7. No ejecutar esta validación conectada desde este entorno.

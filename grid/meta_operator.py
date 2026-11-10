@@ -4373,7 +4373,8 @@ class MetaOperator:
                 "pieza_elegida": proposal.get("pieza"), "motivo": proposal.get("motivo"),
                 "destino": proposal.get("destino", []),
                 "perdida_realizada_estimada": proposal.get("perdida_realizada_estimada"),
-                "presupuesto_perdida": proposal.get("presupuesto_perdida")}
+                "presupuesto_perdida": proposal.get("presupuesto_perdida"),
+                "freno": (active_result or {}).get("freno")}
         except Exception as exc:
             result = {"decision": "no_disponible", "error": f"{type(exc).__name__}: {exc}"}
         self._ledger(int(goal["id"]), "META_CAZADOR_SOMBRA", result)

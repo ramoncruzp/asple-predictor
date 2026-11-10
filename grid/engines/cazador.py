@@ -168,10 +168,13 @@ def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
                 failed_symbols.append(symbol)
         if not failed_symbols:
             return output
-        remaining = [row for row in candidates if row[0] not in set(failed_symbols)]
-        if len(remaining) == len(candidates):
+        # Quita una sola moneda fallida por iteraci??n para redistribuir su parte
+        # antes de descartar tambi??n una segunda/tercera moneda que s?? cabe.
+        failed = next((row[0] for row in reversed(candidates)
+            if row[0] in set(failed_symbols)), None)
+        if failed is None:
             return output
-        candidates = remaining
+        candidates = [row for row in candidates if row[0] != failed]
     return []
 
 
@@ -254,6 +257,10 @@ def decide_cazador(context):
             warnings.append("capital de destino reducido para respetar el presupuesto de pérdida")
         if current_loss + penalty > loss_limit:
             reasons.append("presupuesto de pérdida insuficiente")
+        if not destination:
+            reasons.append("sin cartera destino factible tras aplicar limites")
+            if current_loss >= loss_limit - 1e-8 and not any("presupuesto" in item for item in reasons):
+                reasons.append("presupuesto de perdida insuficiente")
         scores.append({"grid_id": piece.get("grid_id"), "symbol": symbol,
             "capital": capital, "puntaje_pieza": score, "puntaje_destino": destination_score,
             "ganancia_actividad": gain, "destino": destination,

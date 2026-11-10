@@ -546,8 +546,8 @@
       const p = currentEstimate.piece || {}, e = currentEstimate.estimate || {};
       return `Pieza actual: ${p.symbol || ''} · ${fmtMoney(p.capital_usdt)} USDT · rango ${fmtPrice(p.floor)}–${fmtPrice(p.ceiling)} · ${p.n_levels ?? '—'} niveles · probabilidad histórica ${fmtMoney(Number(e.probability_replay || 0) * 100, 1)} % · ajustada ${fmtMoney(Number(e.probability_adjusted || e.probability || 0) * 100, 1)} % · avance mediano ${fmtMoney(e.median_progress_pct, 1)} %`;
     })() : '';
-    const cazadorLine = event.event_type === 'META_CAZADOR_SOMBRA'
-      ? `?24h ${JSON.stringify(details.sigma_por_moneda || {})} ? pieza ${details.pieza_elegida ?? '?'} ? ${details.motivo || ''} ? destino ${JSON.stringify(details.destino || [])} ? p?rdida estimada ${fmtMoney(details.perdida_realizada_estimada)} USDT` : '';
+    const cazadorLine = ['META_CAZADOR_SOMBRA', 'META_CAZADOR_ROTACION', 'META_CAZADOR_AGREGADO'].includes(event.event_type)
+      ? (() => { const data = details.proposal || details; return `\u03c324h ${JSON.stringify(details.sigma_por_moneda || data.sigma_por_moneda || {})} \u00b7 puntajes ${JSON.stringify(details.puntajes_piezas || data.puntajes_piezas || [])} \u00b7 pieza ${details.pieza_elegida ?? data.pieza ?? '?'} \u00b7 ${details.motivo || data.motivo || ''} \u00b7 destino ${JSON.stringify(details.destino || data.destino || [])} \u00b7 p\u00e9rdida ${fmtMoney(details.perdida_realizada_estimada ?? data.perdida_realizada_estimada)} USDT \u00b7 presupuesto ${JSON.stringify(details.presupuesto_perdida || data.presupuesto_perdida || {})} \u00b7 freno ${details.freno || ''}`; })() : '';
     const allocationLine = event.event_type === 'META_OPERATOR_ALLOCATION_SHADOW'
       ? `Capital_usage es de la mejor cartera propuesta desde cero · efectivo libre REAL de la Meta ${fmtMoney(details.real_free_cash_usdt)} USDT` : '';
     const decisionText = [decision || '', reasonText].filter(Boolean).join(' · ');

@@ -1392,10 +1392,19 @@ def test_interruptor_exploracion_apagado_delega_en_comportamiento_previo():
     assert len(calls) == 1
 
 
-def test_cazador_enabled_review_preempts_cache_decision(monkeypatch):
-    operator = SimpleNamespace(cazador_status=lambda: {"enabled": True}, clock=lambda: 1000)
+def test_cazador_enabled_review_preempts_cache_decision_inside_lock(monkeypatch):
+    class Lock:
+        active = False
+        def __enter__(self): self.active = True
+        def __exit__(self, *_args): self.active = False
+    lock = Lock()
+    operator = SimpleNamespace(cazador_status=lambda: {"enabled": True}, clock=lambda: 1000,
+        _operation_lock=lock)
     engine = V2ScenarioEngine()
-    monkeypatch.setattr(engine, "_review_cazador", lambda *_args: {"decision": "rotar_cazador"})
+    def cazador_review(*_args):
+        assert lock.active
+        return {"decision": "rotar_cazador"}
+    monkeypatch.setattr(engine, "_review_cazador", cazador_review)
     monkeypatch.setattr(engine, "decide", lambda *_args: (_ for _ in ()).throw(AssertionError("cache path called")))
     assert engine.review(operator, {"id": 1}, {"status": "KNOWN"}, {}) == {"decision": "rotar_cazador"}
 
@@ -1415,15 +1424,115 @@ def test_cazador_switch_defaults_on_and_persists_explicit_off(engine_databases):
 def test_cazador_shadow_runs_under_guard_and_records_after_context(monkeypatch):
     from grid.engines import cazador
     from grid.engines.shadow_guard import SHADOW_MODE
-    events = []
+    events, guard_states = [], []
     operator = MetaOperator.__new__(MetaOperator)
     operator._ledger = lambda *args, **kwargs: events.append((args, SHADOW_MODE.get()))
     monkeypatch.setattr(cazador, "build_runtime_context", lambda *_args: {"fixture": True})
-    monkeypatch.setattr(cazador, "decide_cazador", lambda _ctx: {
-        "accion": "ninguna", "motivo": "sin mejora", "destino": [],
+    def decide(_ctx):
+        guard_states.append(SHADOW_MODE.get())
+        return {"accion": "ninguna", "motivo": "sin mejora", "destino": [],
         "puntajes_piezas": [], "sigma_por_moneda": {"PEPEUSDT": .2},
-        "perdida_realizada_estimada": 0, "presupuesto_perdida": {}})
+        "perdida_realizada_estimada": 0, "presupuesto_perdida": {}}
+    monkeypatch.setattr(cazador, "decide_cazador", decide)
     result = operator._record_cazador_shadow({"id": 42}, {"status": "KNOWN"}, {})
     assert result["decision"] == "ninguna"
     assert len(events) == 1 and events[0][0][1] == "META_CAZADOR_SOMBRA"
+    assert guard_states == [True]
     assert events[0][1] is False
+
+
+def test_cazador_persistencia_14m_y_enfriamiento_6h(monkeypatch):
+    from grid.engines import cazador
+    operator = SimpleNamespace(rows=[], _meta_ledger_rows=lambda _mid: operator.rows)
+    def ledger(_mid, event, details, **_kwargs):
+        operator.rows.append({"event_type": event, "details": details})
+    operator._ledger = ledger
+    goal = {"id": 7}
+    ctx = {"now_s": 2_000_000_000, "capital_initial": 100, "result_pct": -3,
+        "free_cash": 9, "profile": {"max_loss_pct": 18, "min_margin_pct": .3,
+            "smart_grid_enabled": True}, "limits": {"max_grids": 4, "max_bots": 8,
+            "capital_per_coin_usdt": 70, "capital_by_symbol": {}}, "markets": {
+            "ZROUSDT": {"sigma_24h": .005, "low_24h": 1.52, "high_24h": 1.58, "mid": 1.55},
+            "PEPEUSDT": {"sigma_24h": .10, "low_24h": .000007, "high_24h": .000013, "mid": .00001},
+            "XRPUSDT": {"sigma_24h": .05, "low_24h": .50, "high_24h": .55, "mid": .525}},
+        "pieces": [{"grid_id": 18, "symbol": "ZROUSDT", "piece_type": "individual_bot_grid",
+            "strategy": "bot", "capital": 70, "liquidation_value": 70, "sell_price": 1.872,
+            "pending_prices": [1.872]}]}
+    monkeypatch.setattr(cazador, "build_runtime_context", lambda *_args: ctx)
+    actions = []
+    engine = V2ScenarioEngine()
+    def execute(_operator, _goal, _ctx, proposal, stamp):
+        actions.append(stamp)
+        _operator.rows.append({"event_type": "META_CAZADOR_ROTACION", "details": {"review_at_s": stamp}})
+        return {"decision": "rotar_cazador", "cazador": proposal}
+    monkeypatch.setattr(engine, "_execute_cazador_rotation", execute)
+    first = engine._review_cazador(operator, goal, {"result_pct": -3}, 2_000_000_000)
+    second = engine._review_cazador(operator, goal, {"result_pct": -3}, 2_000_000_840)
+    third = engine._review_cazador(operator, goal, {"result_pct": -3}, 2_000_001_000)
+    assert first["freno"].startswith("persistencia")
+    assert second["decision"] == "rotar_cazador"
+    assert third["freno"] == "rotacion_6h"
+    assert actions == [2_000_000_840]
+
+
+def test_cazador_rotation_fake_exchange_records_close_open_alert_and_continues(engine_databases):
+    from datetime import datetime
+    db, _market = engine_databases
+    core = _meta_three_live_piece_fixture(db)
+    calls, ledger, alerts = [], [], []
+    class FakeExchangeEngine:
+        def close_grid(self, grid_id, mode, **kwargs):
+            calls.append(("close", grid_id, mode))
+            return {"status": "CLOSED", "grid_id": grid_id}
+    operator = SimpleNamespace(db=db, core=SimpleNamespace(_now=lambda: datetime.now()),
+        engine=FakeExchangeEngine(), _ledger=lambda *args, **kwargs: ledger.append(args),
+        _validate_v2_plan_limits=lambda *_args, **_kwargs: calls.append(("validate",)),
+        _testnet_openability=lambda piece, *_args, **_kwargs: (
+            calls.append(("check", piece["symbol"])) or
+            {"allowed": piece["symbol"] != "PEPEUSDT", "reason": "filtro sint?tico"}),
+        _open_replacement=lambda _goal, alternative, capital, **_kwargs: (
+            calls.append(("open", alternative["symbol"], capital)) or
+            {"grid_id": 30 + len([item for item in calls if item[0] == "open"]),
+             "symbol": alternative["symbol"]}),
+        alert=lambda *args: alerts.append(args))
+    proposal = {"accion": "rotar", "pieza": 13, "destino": [
+        {"symbol": "PEPEUSDT", "type": "grid", "capital": 20,
+            "geometry": {"low": .000007, "high": .000013}, "levels": 4},
+        {"symbol": "XRPUSDT", "type": "bot", "capital": 20,
+            "geometry": {"buy_price": .50, "sell_price": .53}, "levels": 1}]}
+    result = V2ScenarioEngine()._execute_cazador_rotation(operator,
+        {"id": 9, "capital_initial": 100, "config_snapshot": {"capital_per_coin_pct": 70}},
+        {"markets": {"PEPEUSDT": {"mid": .00001}, "XRPUSDT": {"mid": .52}}}, proposal, 12345)
+    assert result["decision"] == "rotar_cazador"
+    assert calls[0] == ("close", 13, "liquidate")
+    assert ("check", "PEPEUSDT") in calls and ("check", "XRPUSDT") in calls
+    assert any(item[0] == "open" and item[1] == "XRPUSDT" for item in calls)
+    assert len(result["failed_opens"]) == 1
+    assert [row[1] for row in ledger] == [
+        "META_PIECE_RELEASED", "META_V2_ACTION", "META_CAZADOR_ROTACION"]
+    assert alerts and alerts[0][0] == "META_CAZADOR_ROTACION"
+    with db.engine.connect() as conn:
+        released = conn.execute(select(db.meta_piece_links.c.released_at).where(
+            db.meta_piece_links.c.meta_id == 9, db.meta_piece_links.c.grid_id == 13)).scalar_one()
+    assert released is not None
+
+
+def test_cazador_agrega_con_efectivo_libre_y_registra_action():
+    calls, ledger, alerts = [], [], []
+    operator = SimpleNamespace(
+        _validate_v2_plan_limits=lambda *_args, **_kwargs: calls.append("validate"),
+        _testnet_openability=lambda *_args, **_kwargs: {"allowed": True},
+        _open_replacement=lambda _goal, alternative, capital, *, on_opened, **_kwargs: (
+            on_opened({"grid_id": 55, "symbol": alternative["symbol"]}) or
+            {"grid_id": 55, "capital": capital}),
+        _ledger=lambda *args, **kwargs: ledger.append(args),
+        alert=lambda *args: alerts.append(args))
+    proposal = {"accion": "agregar", "destino": [{"symbol": "PEPEUSDT",
+        "type": "grid", "capital": 20, "levels": 4,
+        "geometry": {"low": .000007, "high": .000013}}]}
+    result = V2ScenarioEngine()._execute_cazador_add(operator,
+        {"id": 9, "capital_initial": 100}, {"free_cash": 20}, proposal, 1000)
+    assert result["decision"] == "agregar_cazador"
+    assert calls == ["validate"]
+    assert [row[1] for row in ledger] == ["META_V2_ACTION", "META_CAZADOR_AGREGADO"]
+    assert alerts[0][0] == "META_CAZADOR_AGREGADO"
