@@ -135,7 +135,7 @@ def test_reconversion_de_bot_con_inventario_genera_geometrias_y_liquida():
         filters_by_symbol={"ZROUSDT": _filters()}, horizon_days=10)
 
 
-def test_reconversion_zro_expone_geometrias_validas_y_filtra_paso_minimo():
+def test_reconversion_zro_expone_geometrias_sigma_y_rango_7d_validas():
     stats = {}
     rows = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
         "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
@@ -148,13 +148,31 @@ def test_reconversion_zro_expone_geometrias_validas_y_filtra_paso_minimo():
     assert len(rows) >= 6
     assert stats["ZROUSDT"]["generated"] == len(rows)
     assert stats["ZROUSDT"].get("failed", 0) == 0
-    assert stats["ZROUSDT"]["discarded"].get("reconvertir: paso menor al mínimo", 0) >= 1
+    assert stats["ZROUSDT"]["discarded"].get("reconvertir: paso menor al mínimo", 0) == 0
     assert all("width_sigma" not in row for row in rows if row.get("range_type") == "rango_7d")
     for row in rows:
         low, high = _piece_geometry(row, symbol="ZROUSDT", price=1.556,
             sigma24=.0595, horizon=17, profile={"min_margin_pct": .3})
         assert low == row["low"]
         assert high == row["high"]
+
+
+def test_reconversion_sigma_ancora_el_precio_dentro_del_rango_planificable():
+    rows = build_reconversion_candidates(live_pieces=[{"grid_id": 18,
+        "piece_type": "individual_bot_grid", "symbol": "ZROUSDT",
+        "capital": 53, "has_inventory": True}],
+        price_by_symbol={"ZROUSDT": 1.556}, sigma_by_symbol={"ZROUSDT": .0595},
+        wide_range_by_symbol={}, filters_by_symbol={"ZROUSDT": _filters()},
+        horizon_days=17)
+    sigma_rows = [row for row in rows if row["reconversion_geometry"] in {"sigma_1", "sigma_2"}]
+
+    assert len(sigma_rows) >= 5
+    for row in sigma_rows:
+        lines = __import__("grid.levels", fromlist=["compute_lines"]).compute_lines(
+            str(row["low"]), str(row["high"]), row["n"], _filters())
+        assert lines[0] < Decimal("1.556") < lines[-1]
+        shifted_mid = Decimal("1.556") * Decimal("1.035")
+        assert lines[0] < shifted_mid < lines[-1]
 
 
 @pytest.mark.parametrize("price", [1.2, 2.0])

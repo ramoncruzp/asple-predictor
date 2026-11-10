@@ -904,6 +904,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         key = str((row.get("piece") or {}).get("candidate_key") or
             _candidate_key(row.get("piece") or {}))
         _metrics, metric_error = _normalize_row_metrics(row)
+        _materialize_comparison_metrics(row)
         if metric_error:
             failed_candidates[key] = metric_error
     objective_started = time.perf_counter()
@@ -1039,6 +1040,7 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
         piece = row.get("piece", {})
         candidate_key = str(piece.get("candidate_key") or _candidate_key(piece))
         _metrics, metric_error = _normalize_row_metrics(row)
+        _materialize_comparison_metrics(row)
         if metric_error:
             failed_candidates[candidate_key] = metric_error
         objective_started = time.perf_counter()
@@ -1052,7 +1054,10 @@ def _evaluate_context(context, *, store, app_db, market_path, library_dir,
             objective = {**objective, "factible": False,
                 "motivos": [*objective.get("motivos", []), "sin_baseline"]}
         profile_times["objetivo_s"] += time.perf_counter() - objective_started
-        metrics = row.get("metrics") or _scenario_metrics(row)
+        metrics = row.get("metrics_cartera") or row.get("metrics") or _scenario_metrics(row)
+        metrics = {**metrics,
+            "metrics_pieza": row.get("metrics_pieza") or {},
+            "metrics_cartera": row.get("metrics_cartera") or metrics}
         if row.get("portfolio_metrics") is not None:
             metrics = {**metrics, "portfolio_metrics": row["portfolio_metrics"]}
         if row.get("sin_baseline"):
@@ -1195,6 +1200,19 @@ def _normalize_row_metrics(row):
     return metrics, "metrica_incompleta: simulación sin resumen propio ni cartera válida"
 
 
+def _materialize_comparison_metrics(row):
+    """Conserva ambos resumenes y fija cartera como metrica de comparacion."""
+    own = (row.get("metrics_pieza") or row.get("metrics_pieza_sola") or
+        row.get("metrics") or {})
+    portfolio = (row.get("metrics_cartera") or row.get("portfolio_metrics") or
+        row.get("metrics") or {})
+    row["metrics_pieza"] = dict(own) if isinstance(own, dict) else {}
+    row["metrics_cartera"] = dict(portfolio) if isinstance(portfolio, dict) else {}
+    if row["metrics_cartera"]:
+        row["metrics"] = row["metrics_cartera"]
+    return row
+
+
 def _scenario_metrics(row):
     scenario_results, pnls = [], []
     for item in (row.get("scenario_results") or []):
@@ -1320,6 +1338,9 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         for live in live_rows:
             if (live.get("piece") or {}).get("is_current"):
                 live["portfolio_metrics"] = baseline
+                live["metrics_cartera"] = baseline
+                live.setdefault("metrics_pieza", live.get("metrics_pieza_sola") or
+                    live.get("metrics") or {})
                 if trajectory_sink is not None:
                     trajectory_sink(live)
     for row in rows:
@@ -1327,6 +1348,9 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
         if piece.get("is_current"):
             if baseline is not None:
                 row["portfolio_metrics"] = baseline
+                row["metrics_cartera"] = baseline
+                row.setdefault("metrics_pieza", row.get("metrics_pieza_sola") or
+                    row.get("metrics") or {})
             continue
         baseline_rows = live_rows
         if piece.get("reconvert_from_grid_id") is not None:
@@ -1356,6 +1380,8 @@ def _apply_live_portfolio_metrics(rows, live_rows, *, capital, target,
             loss_confirm_minutes=loss_confirm_minutes)
         if combined is not None:
             row["metrics_pieza_sola"] = row.get("metrics")
+            row["metrics_pieza"] = row["metrics_pieza_sola"]
+            row["metrics_cartera"] = combined
             row["metrics"] = combined
         if trajectory_sink is not None:
             trajectory_sink(row)

@@ -120,7 +120,8 @@ class V2ScenarioEngine(DecisionEngine):
             **({"grid_id": int(params["grid_id"])} if params.get("grid_id") else {})}
 
     @staticmethod
-    def _reanchor_piece(operator, goal, cached, alternative, candidate, *, book_cache=None):
+    def _reanchor_piece(operator, goal, cached, alternative, candidate, *, book_cache=None,
+            max_drift_pct=3.0):
         """Ancla una geometría seleccionada al libro actual sin mover la geometría v1."""
         piece = (alternative.get("pieces") or [None])[0]
         source = candidate.get("piece") or {}
@@ -146,7 +147,7 @@ class V2ScenarioEngine(DecisionEngine):
         if cache_price <= 0:
             raise EngineUnavailable(f"la caché no tiene precio base para {symbol}")
         movement_pct = (mid / cache_price - 1.0) * 100.0
-        if abs(movement_pct) > 3.0:
+        if abs(movement_pct) > float(max_drift_pct):
             raise EngineUnavailable(
                 f"la caché está desactualizada para {symbol} (movimiento {movement_pct:+.1f}%); "
                 "espera la próxima corrida o córrela a mano")
@@ -391,7 +392,8 @@ class V2ScenarioEngine(DecisionEngine):
             candidate = ranked_by_key.get(str(alternative.get("cache_candidate_key")))
             if candidate is not None:
                 self._reanchor_piece(operator, goal, cached, alternative, candidate,
-                    book_cache=book_cache)
+                    book_cache=book_cache,
+                    max_drift_pct=6.0 if plan_kind == "revision" else 3.0)
         if is_draft and selected_pieces:
             validator = getattr(operator, "_validate_v2_plan_limits", None)
             if callable(validator):

@@ -26,10 +26,21 @@ def _market(price):
 
 
 def _simple_candidate(symbol, capital, levels, width_sigma, price, sigma, horizon_days,
-        filters):
+        filters, *, ensure_mid_inside=False):
     width = float(width_sigma) * float(sigma) * np.sqrt(float(horizon_days))
     low, high = price * np.exp(-width), price * np.exp(width)
     lines = compute_lines(str(low), str(high), int(levels), filters)
+    if ensure_mid_inside:
+        anchor = Decimal(str(price))
+        spacing = min((right - left for left, right in zip(lines, lines[1:])),
+            default=Decimal(0))
+        if spacing > 0 and anchor - lines[0] < spacing:
+            low = float(anchor - spacing)
+        if spacing > 0 and lines[-1] - anchor < spacing:
+            high = float(anchor + spacing)
+        lines = compute_lines(str(low), str(high), int(levels), filters)
+        if not lines[0] < anchor < lines[-1]:
+            raise ValueError("precio de mercado fuera del rango reconvertido")
     plans = plan_cells(lines, str(capital), _market(price), filters,
         {"grid_min_step_pct": .003, "capital_max_por_nivel_pct": .30})
     # FastSim aplica 0,1 % de comisión y vuelve a redondear la venta neta.
@@ -60,7 +71,8 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
         if filters is None or price <= 0 or sigma <= 0 or capital < 10:
             continue
         stats = stats_by_symbol.setdefault(symbol, {"generated": 0, "discarded": {}})
-        widths = [("sigma_1", sigma), ("sigma_2", 2 * sigma)]
+        # _simple_candidate recibe multiplicadores sigma, no volatilidad absoluta.
+        widths = [("sigma_1", 1.0), ("sigma_2", 2.0)]
         wide = wide_range_by_symbol.get(symbol)
         if wide and float(wide[0]) > 0 and float(wide[1]) > float(wide[0]):
             widths.append(("rango_7d", None))
@@ -90,7 +102,7 @@ def build_reconversion_candidates(*, live_pieces, price_by_symbol, sigma_by_symb
                             "range_type": "rango_7d"}
                     else:
                         candidate = _simple_candidate(symbol, capital, n, width_sigma, price,
-                            sigma, horizon_days, filters)
+                            sigma, horizon_days, filters, ensure_mid_inside=True)
                     candidate.update({"reconversion": True,
                         "reconversion_variant": "vender_inventario_a_mercado",
                         "reconvert_from_grid_id": int(live["grid_id"]),

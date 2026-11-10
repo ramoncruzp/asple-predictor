@@ -950,3 +950,7 @@ Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de 
 ### 43h-0w8c - capital reservado en bots BUY_OPEN
 
 **Validado localmente:** el contexto del Cazador calcula la reserva BUY_OPEN con el importe del nivel, sin sobrecontar 0,1 %. El fixture de Meta #7 da presupuesto JUP 21 USDT con 9 USDT libres, actividad positiva y sin autorrotación a un bot JUP. La comprobación conectada de Meta #7 en S1 queda pendiente.
+
+### 43h-0w8d - reserva BUY_OPEN, reconversión y métricas de cartera
+
+**Validado localmente:** la ruta `_evaluate_context` recibe y conserva el capital reservado de un bot BUY_OPEN en JUP, y persiste las métricas propias y de cartera explícitamente. Las reconversiones por sigma ya usan multiplicadores ±1σ/±2σ y dan margen a una variación de 3,5 % en el fixture; el reanclaje de revisión acepta 3,5 % y rechaza 6,1 %, mientras el umbral de inicio permanece en 3 %. El comportamiento en la caché y el libro de S1 queda pendiente de validación conectada.

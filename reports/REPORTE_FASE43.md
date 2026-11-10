@@ -1111,3 +1111,9 @@ Prueba enfocada: 3 pasaron en 4,49 s; cubre la frontera de 14 min, no tocar un g
 `build_runtime_context` valora una orden `BUY_OPEN` por el capital reservado del nivel, sin sumar una comisión estimada adicional. El contexto sintético de Meta #7 comprobó JUP con reserva y valor liquidable de 21 USDT, efectivo libre de 9 USDT y presupuesto de rotación de 21 USDT. El puntaje de actividad de JUP es positivo y no se propone abrir otro bot JUP al reemplazarlo.
 
 Prueba enfocada: `tests/test_cazador.py`, 10 pasaron en 1,09 s. Solo BD de mercado temporal y exchange falso.
+
+### 43h-0w8d - completar pendientes de caché y v2
+
+La ruta de caché ahora conserva en cada resultado las métricas propias y las de cartera bajo nombres explícitos; la cartera es la métrica que alimenta el objetivo. El fixture de job con evaluador sintético y JUP BUY_OPEN (seis reservas de 3,5 USDT) verifica que el capital 21,021 USDT y ambos resúmenes se conservan; la prueba FastSim independiente confirma que el efectivo inicial coincide con esa reserva. Las reconversiones usan multiplicadores ±1σ/±2σ, no σ multiplicado por σ, y dejan margen de una celda respecto al ancla. Las revisiones reanclan hasta 6 % de movimiento y rechazan un movimiento mayor; al inicio del plan sigue aplicando 3 %.
+
+Prueba enfocada final: 9 pasaron en 8,30 s, incluida la regresión v1 `test_v1_plan_y_review_son_identicos_a_776eedf`. No se midió rendimiento S1 ni se usaron libros reales.

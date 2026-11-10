@@ -542,6 +542,26 @@ def test_reanclaje_grid_sigma_conserva_ancho_relativo(engine_databases):
     assert piece["ceiling"] == pytest.approx(99.0 * __import__("math").exp(.04))
 
 
+def test_reanclaje_revision_admite_hasta_seis_por_ciento_y_rechaza_mas(engine_databases):
+    operator = SimpleNamespace(_book_ticker=lambda _symbol: {
+        "bid_price": 103.5, "ask_price": 103.5})
+    cached = {"horizon_days": 10,
+        "symbol_stats": {"ZROUSDT": {"price": 100.0, "sigma_24h": .02}}}
+    candidate = {"piece": {"strategy": "simple", "width_sigma": .5}}
+    alt = {"pieces": [{"symbol": "ZROUSDT", "floor": 90, "ceiling": 110}]}
+
+    V2ScenarioEngine._reanchor_piece(operator, {}, cached, alt, candidate,
+        max_drift_pct=6.0)
+    assert alt["pieces"][0]["mid_at_plan"] == pytest.approx(103.5)
+    assert alt["pieces"][0]["price_source"] == "book"
+
+    operator._book_ticker = lambda _symbol: {"bid_price": 106.1, "ask_price": 106.1}
+    alt = {"pieces": [{"symbol": "ZROUSDT", "floor": 90, "ceiling": 110}]}
+    with pytest.raises(EngineUnavailable, match="desactualizada"):
+        V2ScenarioEngine._reanchor_piece(operator, {}, cached, alt, candidate,
+            max_drift_pct=6.0)
+
+
 def test_start_plan_v2_rechaza_exceso_antes_de_tocar_exchange(engine_databases):
     db, _market_path = engine_databases
     calls = []

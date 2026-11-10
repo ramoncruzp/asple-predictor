@@ -552,3 +552,7 @@ En las revisiones v2, los grids activos que consten como abiertos por eventos de
 ### 43h-0w8c - presupuesto de BUY_OPEN del Cazador
 
 El valor liquidable de una pieza incluye el inventario al bid neto de comisión y el capital reservado nominal de sus órdenes `BUY_OPEN`. No se añade un margen de comisión artificial a esa reserva. En el fixture de Meta #7, JUP BUY_OPEN reserva 21 USDT y los 9 USDT libres no alcanzan el mínimo para sumarse: el presupuesto de rotación permanece en 21 USDT. El destino sigue excluyendo bots de JUP al reemplazar el bot JUP.
+
+### 43h-0w8d - métricas de cartera y reanclaje de caché en revisión
+
+Las filas de la caché guardan `metrics_pieza` y `metrics_cartera` explícitamente. El objetivo, el ranking y la comparación consumen las métricas de cartera; las propias de la pieza quedan como diagnóstico. Las geometrías reconvertidas usan multiplicadores de ancho ±1σ y ±2σ (antes se multiplicaba por σ dos veces) y dejan al menos una celda entre el precio de ancla y el borde tras el redondeo. En una revisión v2 se reancla la geometría al libro si el precio se movió hasta 6 % desde la caché; al iniciar un plan se conserva el límite de 3 %.

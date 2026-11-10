@@ -482,7 +482,7 @@ def test_fixture_s1_separa_ordenes_historicas_y_piezas_cerradas_vivas(cache_data
     assert "mejor bid no disponible" in pieces[0]["valuation_warning"]
 
 
-def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases):
+def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases, monkeypatch):
     from datetime import datetime, timezone
     import numpy as np
     from research.scenarios.fastsim import simulate_simple
@@ -521,6 +521,40 @@ def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases
     assert sum(cell["reserved_cash"] for cell in piece["initial_cells"]["cells"]) == pytest.approx(21.021)
     assert result["cash_curve"][0, 0] == pytest.approx(piece["capital"])
     assert result["equity_curve"][0, 0] == pytest.approx(piece["capital"])
+
+    monkeypatch.setattr(cache_script, "build_candidates", lambda **_kwargs: {
+        "candidates": [{"strategy": "usdt_quieto"}], "discarded": {},
+        "discarded_by_symbol": {}, "invalid_count": 0})
+    def evaluate_live(pieces, **_kwargs):
+        rows = []
+        for candidate in pieces:
+            if candidate.get("is_current"):
+                assert candidate["capital"] == pytest.approx(21.021)
+                assert sum(cell["reserved_cash"] for cell in
+                    candidate["initial_cells"]["cells"]) == pytest.approx(21.021)
+            own_metrics = {"n": 20, "pnl_mean_usdt": .2, "p_target": .15,
+                "p_loss": .01, "p_loss_ci95": [0, .05],
+                "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .2,
+                "cut_slippage_expected_usdt": .001, "days_to_target_p50": 8}
+            rows.append({"piece": candidate, "metrics": own_metrics,
+                "scenario_outcomes": {}})
+        return {"pieces": rows}
+    monkeypatch.setattr(cache_script, "build_smart_candidates", lambda _rows: [])
+    cache_result = cache_script._evaluate_context({"goal_id": goal_id,
+        "profile": "RAPIDO", "free_cash": 9, "capital": 100,
+        "capital_initial": 100, "target": 3, "horizon": 10,
+        "max_loss_pct": 18, "profile_config": {"capital_per_coin_pct": 70}},
+        store=CandleStore(market_path), app_db=db.engine.url.database, market_path=market_path,
+        library_dir="unused", filters={"JUPUSDT": FILTERS},
+        prices={"JUPUSDT": .30}, sigmas={"JUPUSDT": .03}, skipped={},
+        evaluator=evaluate_live)
+    maintained = next(row for row in cache_result["results"]
+        if row["params"].get("is_current"))
+    assert cache_result["status"] == "ok"
+    assert maintained["params"]["capital"] == pytest.approx(21.021)
+    assert maintained["metrics"]["pnl_mean_usdt"] == pytest.approx(.2)
+    assert maintained["metrics"]["metrics_pieza"]["pnl_mean_usdt"] == pytest.approx(.2)
+    assert maintained["metrics"]["metrics_cartera"]["pnl_mean_usdt"] == pytest.approx(.2)
 
 
 def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases):
@@ -927,10 +961,10 @@ def test_cache_sintetica_evalua_reconversiones_zro_de_pieza_viva(
     reconversion_rows = [row for row in result["results"]
         if row["params"].get("reconversion")]
     assert result["status"] == "ok"
-    assert len(reconversion_rows) == 8
+    assert len(reconversion_rows) == 9
     assert {row["params"]["reconversion_geometry"] for row in reconversion_rows} == {
         "sigma_1", "sigma_2", "rango_7d"}
-    assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] == 8
+    assert result["symbol_stats"]["ZROUSDT"]["reconvertir_evaluados"] == 9
     assert result["symbol_stats"]["ZROUSDT"]["reconvertir_fallidos"] == 0
     assert result["status"] == "ok"
     assert "smart_omitido: KeyError: 'width_sigma'" == result["smart_omitido"]
@@ -1057,6 +1091,29 @@ def test_cache_fallida_persiste_traceback_tail_y_log_usa_tipo(capsys,
         "--contexto", "7"])
     assert exit_code == 1
     assert "error=KeyError: 'pnl_mean_usdt'" in capsys.readouterr().err
+
+
+def test_cache_separa_metricas_de_pieza_y_cartera_y_compara_con_cartera():
+    from research.scenarios.objective import objective_v2
+    own = {"n": 100, "pnl_mean_usdt": -10, "p_target": .01,
+        "p_loss": .5, "p_loss_ci95": [.4, .6],
+        "cut_slippage_mean_usdt": 1, "cut_slippage_p90_usdt": 2,
+        "cut_slippage_expected_usdt": .5}
+    portfolio = {"n": 100, "pnl_mean_usdt": 1, "p_target": .2,
+        "p_loss": .02, "p_loss_ci95": [.01, .03],
+        "cut_slippage_mean_usdt": .1, "cut_slippage_p90_usdt": .2,
+        "cut_slippage_expected_usdt": .002}
+    row = {"metrics": own, "metrics_pieza_sola": own,
+        "portfolio_metrics": portfolio}
+
+    cache_script._materialize_comparison_metrics(row)
+
+    assert row["metrics_pieza"] == own
+    assert row["metrics_cartera"] == portfolio
+    assert row["metrics"] == portfolio
+    assert objective_v2(row["metrics"], perfil="RAPIDO", capital_meta=100)["factible"]
+    assert not objective_v2(row["metrics_pieza"], perfil="RAPIDO",
+        capital_meta=100)["factible"]
 
 
 def test_corrida_completa_persiste_candidatos_y_usdt_quieto(cache_databases, tmp_path,
