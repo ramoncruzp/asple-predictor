@@ -695,6 +695,85 @@ class V2ScenarioEngine(DecisionEngine):
         return json_safe({**executed, "modo": decision.get("modo", "meta"),
             "comparison_v2": decision.get("comparison_v2")})
 
+    def _complete_cazador_initial_inventory(self, operator, goal, valuation, review_at_s):
+        """Completa una sola vez el inventario inicial de un grid abierto por Cazador."""
+        from grid.meta_live_pieces import live_meta_grid_links
+        rows = operator._meta_ledger_rows(int(goal["id"]))
+        cazador_grid_ids = set()
+        for row in rows:
+            if row.get("event_type") not in {"META_CAZADOR_ROTACION", "META_CAZADOR_AGREGADO"}:
+                continue
+            details = row.get("details") or {}
+            opened = details.get("opened") or []
+            if isinstance(opened, dict):
+                opened = [opened]
+            for piece in opened:
+                try:
+                    if int(piece.get("grid_id")) > 0:
+                        cazador_grid_ids.add(int(piece["grid_id"]))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        if not cazador_grid_ids:
+            return None
+        linked_ids = {int(link["grid_id"]) for link in
+            live_meta_grid_links(operator.core, int(goal["id"]))}
+        for grid_id in sorted(cazador_grid_ids & linked_ids):
+            grid = operator.db.get_grid(grid_id)
+            if (not grid or str(grid.get("status") or "").upper() != "ACTIVE"
+                    or str(grid.get("strategy") or "").lower() not in {"simple", "smart"}):
+                continue
+            levels = operator.db.get_grid_levels(grid_id)
+            if any(int(level.get("cycles_completed") or 0) > 0
+                    or float(level.get("held_qty") or 0) > 0
+                    or level.get("entry_price") is not None or level.get("bought_at") is not None
+                    for level in levels):
+                continue
+            try:
+                _filters, ticker, _avg = operator.engine._market_context(grid["symbol"])
+                mid = float(ticker.get("mid") or ticker.get("mid_price") or
+                    ((ticker.get("bid_price") or 0) + (ticker.get("ask_price") or 0)) / 2)
+            except Exception:
+                continue
+            pending_levels = [int(level["level_idx"]) for level in levels
+                if str(level.get("state") or "").upper() == "IDLE"
+                and float(level.get("price") or 0) > mid]
+            if not pending_levels:
+                continue
+            signature = json.dumps({"grid_id": grid_id, "levels": pending_levels},
+                sort_keys=True, separators=(",", ":"))
+            previous = next((row for row in reversed(rows)
+                if row.get("event_type") == "META_CAZADOR_COMPLETAR"
+                and int(row.get("grid_id") or 0) == grid_id), None)
+            prior = (previous or {}).get("details") or {}
+            if prior.get("status") == "aplicado":
+                continue
+            prior_at = float(prior.get("review_at_s") or 0)
+            if prior.get("signature") == signature and review_at_s - prior_at < 840:
+                continue
+            if prior.get("signature") != signature:
+                operator._ledger(int(goal["id"]), "META_CAZADOR_COMPLETAR", {
+                    "status": "persistencia", "grid_id": grid_id,
+                    "signature": signature, "review_at_s": review_at_s,
+                    "levels": pending_levels, "reason": "dos revisiones iguales separadas por 14 minutos"},
+                    grid_id=grid_id)
+                continue
+            try:
+                result = operator.engine.seed_initial_inventory(grid_id)
+                details = {"status": "aplicado", "grid_id": grid_id,
+                    "signature": signature, "review_at_s": review_at_s,
+                    "levels": pending_levels, "result": result}
+            except Exception as exc:
+                details = {"status": "aplicado", "grid_id": grid_id,
+                    "signature": signature, "review_at_s": review_at_s,
+                    "levels": pending_levels,
+                    "error": f"{type(exc).__name__}: {exc}"}
+            operator._ledger(int(goal["id"]), "META_CAZADOR_COMPLETAR", details,
+                grid_id=grid_id)
+            return {"decision": "completar_cazador", "reason":
+                "se aplicó el inventario inicial pendiente del Cazador",
+                "grid_id": grid_id, "completion": details}
+        return None
+
     def _review_cazador(self, operator, goal, valuation, review_at_s):
         from grid.engines.cazador import build_runtime_context, decide_cazador
         context = build_runtime_context(operator, goal, valuation)

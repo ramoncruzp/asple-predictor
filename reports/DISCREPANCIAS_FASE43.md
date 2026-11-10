@@ -943,3 +943,6 @@ Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de 
 ### 43h-0w8a - inventario inicial
 
 **Validado localmente:** el fixture abre un grid con dos niveles `IDLE` por encima del precio, confirma las compras MARKET con exchange falso y verifica su estado `SELL_OPEN`, comisión y eventos `GRID_COMPRA_INICIAL`. Un fixture de profundidad con VWAP por encima de 0,5 % compra solo el primer nivel admisible y deja el siguiente en `IDLE`. La compra y ejecución conectada en S1 queda pendiente.
+### 43h-0w8b - finalización persistente de inventario
+
+**Validado localmente:** la primera observación guarda la firma; a los 839 s no compra; a los 840 s ejecuta una sola vez y registra `META_CAZADOR_COMPLETAR`. Los fixtures de grids manuales y grids con ciclos no cambian. La revisión real de Meta #7 en S1 queda pendiente.

@@ -885,6 +885,84 @@ def test_cazador_activo_precede_al_plan_v2_y_a_la_deriva():
     assert state["lock"] is False
 
 
+def test_completar_inventario_cazador_persiste_14_min_y_ignora_manual_y_con_fill():
+    records = {
+        22: {"id": 22, "status": "ACTIVE", "symbol": "ZROUSDT", "strategy": "simple"},
+        23: {"id": 23, "status": "ACTIVE", "symbol": "JUPUSDT", "strategy": "simple"},
+        24: {"id": 24, "status": "ACTIVE", "symbol": "PEPEUSDT", "strategy": "simple"},
+    }
+    def levels(grid_id):
+        count = 1 if grid_id == 24 else 2
+        return ([{"level_idx": 0, "state": "BUY_OPEN", "price": 1.0,
+            "held_qty": 0, "cycles_completed": 0, "entry_price": None, "bought_at": None},
+            {"level_idx": 1, "state": "IDLE", "price": 1.5,
+                "held_qty": 0, "cycles_completed": 0, "entry_price": None, "bought_at": None}]
+            if count == 2 else [{"level_idx": 0, "state": "IDLE", "price": 1.5,
+                "held_qty": 0, "cycles_completed": 1, "entry_price": None, "bought_at": None}])
+    class DB:
+        def get_grid(self, grid_id): return records.get(grid_id)
+        def get_grid_levels(self, grid_id): return levels(grid_id)
+    db = DB()
+    state = {"rows": [{"event_type": "META_CAZADOR_ROTACION",
+        "grid_id": 18, "details": {"opened": [{"grid_id": 22}, {"grid_id": 24}]}}],
+        "now": 100, "calls": []}
+    core = SimpleNamespace(db=db, _owned_grids=lambda _id: [
+        {"grid_id": 22}, {"grid_id": 23}, {"grid_id": 24}])
+    def seed(grid_id):
+        state["calls"].append(grid_id)
+        return {"status": "completed", "selected_levels": [1]}
+    operator = SimpleNamespace(core=core, db=db, engine=SimpleNamespace(
+        _market_context=lambda _symbol: (None, {"bid_price": 1.19, "ask_price": 1.20}, 1.2),
+        seed_initial_inventory=seed),
+        _meta_ledger_rows=lambda _id: list(state["rows"]),
+        _ledger=lambda _id, event_type, details, **kwargs: state["rows"].append({
+            "event_type": event_type, "details": details, "grid_id": kwargs.get("grid_id")}))
+    engine = V2ScenarioEngine()
+
+    assert engine._complete_cazador_initial_inventory(operator, {"id": 7}, {}, 100) is None
+    assert engine._complete_cazador_initial_inventory(operator, {"id": 7}, {}, 939) is None
+    result = engine._complete_cazador_initial_inventory(operator, {"id": 7}, {}, 940)
+
+    assert result["decision"] == "completar_cazador"
+    assert state["calls"] == [22]
+    assert state["rows"][-1]["event_type"] == "META_CAZADOR_COMPLETAR"
+    assert state["rows"][-1]["details"]["status"] == "aplicado"
+
+
+def test_completar_inventario_cazador_se_ejecuta_dentro_del_candado(monkeypatch):
+    state = {"locked": False}
+    goal = {"id": 772, "status": "ACTIVE", "config_snapshot": {
+        "decision_engine": "v2", "warning_loss_pct": 20}}
+    valuation = {"status": "KNOWN", "result_pct": 0, "cash_usdt": 9}
+    class Lock:
+        def __enter__(self): state["locked"] = True
+        def __exit__(self, *_args): state["locked"] = False
+    operator = object.__new__(MetaOperator)
+    operator._operation_lock = Lock()
+    operator.core = SimpleNamespace(get_goal=lambda _id: goal)
+    operator._engine_for_goal = lambda _goal: engine
+    operator._valuation_with_retry = lambda _id: (valuation, [])
+    operator.cazador_status = lambda: {"enabled": True}
+    operator.clock = lambda: 3000
+    operator._record_cazador_shadow = lambda *_args: {"decision": "no_disponible"}
+    operator._run_engine_shadow = lambda *_args, **_kwargs: {"name": "v1", "decision": "mantener"}
+    operator._persist_engine_shadow_decision = lambda *_args: None
+    operator._compact_review_result = MetaOperator._compact_review_result
+    operator._ledger = lambda *_args, **_kwargs: None
+    def complete(_operator, _goal, _valuation, _stamp):
+        assert state["locked"]
+        return {"decision": "completar_cazador", "grid_id": 22}
+    engine = SimpleNamespace(name="v2", version="test",
+        _complete_cazador_initial_inventory=complete,
+        _review_cazador=lambda *_args: pytest.fail("no debe proponer otra accion"),
+        plan=lambda *_args, **_kwargs: pytest.fail("no debe planificar despues de completar"))
+
+    result = MetaOperator._review_once_locked(operator, goal["id"])
+
+    assert result["decision"] == "completar_cazador"
+    assert state["locked"] is False
+
+
 def test_guardas_lanzan_error_si_sombra_intenta_ejecutar():
     engine = object.__new__(GridEngine)
     core = object.__new__(MetaCore)

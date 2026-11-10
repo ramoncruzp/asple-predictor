@@ -4232,10 +4232,17 @@ class MetaOperator:
                                 and current_value.get("status") == "KNOWN"
                                 and float(current_value.get("result_pct") or 0)
                                     > -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0))):
-                            cazador_result = engine._review_cazador(
-                                self, current_goal, current_value, float(self.clock()))
+                            review_at_s = float(self.clock())
+                            completion = getattr(engine, "_complete_cazador_initial_inventory", None)
+                            if callable(completion):
+                                cazador_result = completion(
+                                    self, current_goal, current_value, review_at_s)
+                            if not (isinstance(cazador_result, dict)
+                                    and cazador_result.get("decision") == "completar_cazador"):
+                                cazador_result = engine._review_cazador(
+                                    self, current_goal, current_value, review_at_s)
                     if isinstance(cazador_result, dict) and cazador_result.get("decision") in {
-                            "rotar_cazador", "agregar_cazador"}:
+                            "rotar_cazador", "agregar_cazador", "completar_cazador"}:
                         cazador_shadow = self._record_cazador_shadow(
                             current_goal, current_value, cazador_result)
                         engine_shadow = self._run_engine_shadow(

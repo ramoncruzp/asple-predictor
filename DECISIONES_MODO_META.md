@@ -545,3 +545,6 @@ La prueba de ejecuci?n sint?tica usa un exchange falso: confirma cierre/liquidac
 ### 43h-0w8a - inventario inicial de grids v2
 
 Las nuevas aperturas de grids Simple/Smart de v2 y del Cazador pueden comprar al mercado las celdas `IDLE` que quedan por encima del precio, ordenadas por nivel ascendente. Antes de comprar se consulta la profundidad de asks y se estima el desliz; si una celda supera 0,5 % frente al mejor ask, esa celda y las superiores quedan sin comprar. Cada compra usa `newClientOrderId` propio, se procesa solo tras confirmar `FILLED`, registra cantidad neta, precio medio y comisión, y deja su orden SELL abierta como protección. El flujo de v1 y la apertura de bots individuales no usan esta opción.
+### 43h-0w8b - completar inventario inicial de grids Cazador
+
+En las revisiones v2, los grids activos que consten como abiertos por eventos del Cazador y sigan ligados a la meta pueden completar una sola vez su inventario inicial. Se exige que toda la pieza siga sin fills, ciclos ni inventario; solo se consideran niveles `IDLE` por encima del precio. Dos firmas iguales deben persistir al menos 840 segundos. La ejecución queda dentro de `_operation_lock` y se registra en `META_CAZADOR_COMPLETAR`; grids manuales, grids v1 y piezas con fills quedan excluidos.

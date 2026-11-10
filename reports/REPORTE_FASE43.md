@@ -1100,3 +1100,8 @@ Para S1: desplegar los cinco commits; en Laboratorio confirmar que «Cazador de 
 Se añadió una operación optativa de GridEngine para sembrar inventario en celdas `IDLE` por encima del precio al abrir grids Simple/Smart de v2 o Cazador. La lectura de asks define el VWAP estimado por nivel; el límite es 0,5 % sobre el mejor ask. Cada fill confirmado pasa por el manejador de compra existente, que persiste cantidad y comisiones y coloca la SELL de protección. `GRID_COMPRA_INICIAL` se registra en el grid y en la bitácora Meta. Bots individuales y v1 no entran en este camino.
 
 Prueba enfocada: 6 pasaron en 4,49 s; se verificaron dos niveles comprados y protegidos y la compra parcial ante desliz superior al límite. No se usaron S1, Testnet, red ni bases reales.
+### 43h-0w8b - completar grids Cazador sin fills
+
+Las revisiones v2 detectan grids que aparecen como abiertos en `META_CAZADOR_ROTACION` o `META_CAZADOR_AGREGADO`. Si el grid sigue `ACTIVE`, enlazado a la meta y sin ningún fill/ciclo/inventario, una firma estable de niveles `IDLE` sobre el precio debe persistir 840 s antes de llamar al sembrado inicial. La operación ocurre dentro del candado y queda auditada como `META_CAZADOR_COMPLETAR`; se reconoce también el grid #22 ya abierto, siempre que su evento de apertura siga en la bitácora.
+
+Prueba enfocada: 3 pasaron en 4,49 s; cubre la frontera de 14 min, no tocar un grid manual ni uno con ciclo, y ejecución dentro del candado. No hubo compras reales.
