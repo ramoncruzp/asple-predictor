@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-WORD_QUESTION = re.compile(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]\?[A-Za-zÁÉÍÓÚáéíóúÑñ]")
+WORD_QUESTION = re.compile(r"[^\W\d_]\?[^\W\d_]", re.UNICODE)
 ISOLATED_HEADING_QUESTION = re.compile(r"^#+ .* \? ")
 URL = re.compile(r"https?://\S+")
 BAD_TEXT = (chr(0x00c3), chr(0x00c2), chr(0x00e2) + chr(0x20ac), chr(0xfffd), chr(0xfeff))

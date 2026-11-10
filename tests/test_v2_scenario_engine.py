@@ -1458,7 +1458,16 @@ def test_cazador_persistencia_14m_y_enfriamiento_6h(monkeypatch):
         "pieces": [{"grid_id": 18, "symbol": "ZROUSDT", "piece_type": "individual_bot_grid",
             "strategy": "bot", "capital": 70, "liquidation_value": 70, "sell_price": 1.872,
             "pending_prices": [1.872]}]}
-    monkeypatch.setattr(cazador, "build_runtime_context", lambda *_args: ctx)
+    calls = []
+    def changing_context(*_args):
+        calls.append(1)
+        changed = json.loads(json.dumps(ctx))
+        if len(calls) > 1:
+            changed["markets"]["PEPEUSDT"]["mid"] *= 1.01
+            changed["markets"]["PEPEUSDT"]["low_24h"] *= 1.01
+            changed["markets"]["PEPEUSDT"]["high_24h"] *= 1.01
+        return changed
+    monkeypatch.setattr(cazador, "build_runtime_context", changing_context)
     actions = []
     engine = V2ScenarioEngine()
     def execute(_operator, _goal, _ctx, proposal, stamp):
@@ -1473,6 +1482,9 @@ def test_cazador_persistencia_14m_y_enfriamiento_6h(monkeypatch):
     assert second["decision"] == "rotar_cazador"
     assert third["freno"] == "rotacion_6h"
     assert actions == [2_000_000_840]
+    signatures = [row["details"]["signature"] for row in operator.rows
+        if row["event_type"] == "META_CAZADOR_REVISION"]
+    assert len(signatures) == 2 and signatures[0] == signatures[1]
 
 
 def test_cazador_rotation_fake_exchange_records_close_open_alert_and_continues(engine_databases):
@@ -1489,7 +1501,7 @@ def test_cazador_rotation_fake_exchange_records_close_open_alert_and_continues(e
         _validate_v2_plan_limits=lambda *_args, **_kwargs: calls.append(("validate",)),
         _testnet_openability=lambda piece, *_args, **_kwargs: (
             calls.append(("check", piece["symbol"])) or
-            {"allowed": piece["symbol"] != "PEPEUSDT", "reason": "filtro sint?tico"}),
+            {"allowed": piece["symbol"] != "PEPEUSDT", "reason": "filtro sintético"}),
         _open_replacement=lambda _goal, alternative, capital, **_kwargs: (
             calls.append(("open", alternative["symbol"], capital)) or
             {"grid_id": 30 + len([item for item in calls if item[0] == "open"]),
@@ -1536,3 +1548,44 @@ def test_cazador_agrega_con_efectivo_libre_y_registra_action():
     assert calls == ["validate"]
     assert [row[1] for row in ledger] == ["META_V2_ACTION", "META_CAZADOR_AGREGADO"]
     assert alerts[0][0] == "META_CAZADOR_AGREGADO"
+
+
+def test_cazador_firma_cambia_si_cambia_moneda_o_tipo():
+    proposal = {"accion": "rotar", "destino": [{"symbol": "PEPEUSDT", "type": "smart",
+        "capital": 40, "levels": 6, "geometry": {"low": 1, "high": 2}}]}
+    same_shape = {**proposal, "destino": [{"symbol": "PEPEUSDT", "type": "smart",
+        "capital": 55, "levels": 6, "geometry": {"low": 1.2, "high": 2.4}}]}
+    different_coin = {**proposal, "destino": [{**proposal["destino"][0], "symbol": "XRPUSDT"}]}
+    different_type = {**proposal, "destino": [{**proposal["destino"][0], "type": "grid"}]}
+    signature = V2ScenarioEngine._cazador_signature(proposal, 18)
+    assert signature == V2ScenarioEngine._cazador_signature(same_shape, 18)
+    assert signature != V2ScenarioEngine._cazador_signature(different_coin, 18)
+    assert signature != V2ScenarioEngine._cazador_signature(different_type, 18)
+
+
+def test_cazador_agregado_fallido_no_reintenta_antes_de_dos_horas(monkeypatch):
+    operator = SimpleNamespace(rows=[])
+    operator._meta_ledger_rows = lambda _mid: list(operator.rows)
+    operator._ledger = lambda _mid, event, details, **_kwargs: operator.rows.append(
+        {"event_type": event, "details": details})
+    checks = []
+    operator._validate_v2_plan_limits = lambda *_args, **_kwargs: None
+    operator._testnet_openability = lambda *_args, **_kwargs: (
+        checks.append("validado") or {"allowed": False, "reason": "filtro"})
+    operator._open_replacement = lambda *_args, **_kwargs: pytest.fail("no debe abrir")
+    goal = {"id": 8}
+    proposal = {"accion": "agregar", "pieza": None, "destino": [{
+        "symbol": "PEPEUSDT", "type": "grid", "capital": 20, "levels": 4,
+        "geometry": {"low": .000007, "high": .000013}}]}
+    from grid.engines import cazador
+    monkeypatch.setattr(cazador, "build_runtime_context", lambda *_args: {"fixture": True})
+    monkeypatch.setattr(cazador, "decide_cazador", lambda _ctx: proposal)
+    engine = V2ScenarioEngine()
+    first = engine._review_cazador(operator, goal, {}, 2_000_000_000)
+    second = engine._review_cazador(operator, goal, {}, 2_000_000_840)
+    third = engine._review_cazador(operator, goal, {}, 2_000_001_000)
+    assert first["freno"].startswith("persistencia")
+    assert second["failed_opens"] and len(checks) == 1
+    assert third["freno"] == "agregado_2h"
+    assert any(row["event_type"] == "META_CAZADOR_FRENO" for row in operator.rows)
+    assert len(checks) == 1

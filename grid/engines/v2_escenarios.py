@@ -613,7 +613,7 @@ class V2ScenarioEngine(DecisionEngine):
         """Ejecuta una decisión v2 con sus propios frenos y validaciones comunes."""
         from contextlib import nullcontext
         review_at_s = self._operator_now(operator)
-        # El Cazador usa velas locales y puede actuar aunque la cach? est? vencida.
+        # El Cazador usa velas locales y puede actuar aunque la caché está vencida.
         try:
             from grid.engines.shadow_guard import SHADOW_MODE
             reader = getattr(operator, "cazador_status", None)
@@ -625,7 +625,7 @@ class V2ScenarioEngine(DecisionEngine):
                     return json_safe(hunted)
         except Exception:
             import logging
-            logging.getLogger(__name__).exception("Fall? el Cazador; contin?a la revisi?n v2 normal")
+            logging.getLogger(__name__).exception("Falló el Cazador; continúa la revisión v2 normal")
         decision = self.decide(operator, goal, valuation, plan)
         action = decision.pop("proposed_action", None)
         exploration_enabled = bool((plan or {}).get("exploration_enabled"))
@@ -715,18 +715,28 @@ class V2ScenarioEngine(DecisionEngine):
         if proposal.get("accion") not in {"rotar", "agregar"}:
             return None
         grid_id = int(proposal["pieza"]) if proposal.get("pieza") is not None else None
-        signature = json.dumps({"grid": grid_id, "destino": proposal.get("destino")},
-            sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        signature = self._cazador_signature(proposal, grid_id)
         rows = operator._meta_ledger_rows(int(goal["id"]))
         prior = [row for row in rows if row.get("event_type") == "META_CAZADOR_REVISION"]
         last = prior[-1].get("details", {}) if prior else {}
         stamp = float(last.get("review_at_s") or 0)
         actions = [row for row in rows if row.get("event_type") == "META_CAZADOR_ROTACION"]
+        additions = [row for row in rows if row.get("event_type") == "META_CAZADOR_AGREGADO"]
+        brake = None
         if proposal.get("accion") == "rotar" and any(
                 review_at_s - float((row.get("details") or {}).get("review_at_s") or 0) < 21600
                 for row in actions):
-            return {"decision": "mantener", "reason": "freno Cazador: una rotaci?n cada 6 horas",
-                "cazador": proposal, "freno": "rotacion_6h"}
+            brake = "freno Cazador: una rotación cada 6 horas"
+        elif proposal.get("accion") == "agregar" and any(
+                review_at_s - float((row.get("details") or {}).get("review_at_s") or 0) < 7200
+                for row in additions):
+            brake = "freno Cazador: un agregado cada 2 horas"
+        if brake:
+            operator._ledger(int(goal["id"]), "META_CAZADOR_FRENO", {
+                "signature": signature, "review_at_s": review_at_s, "grid_id": grid_id,
+                "reason": brake}, grid_id=grid_id)
+            return {"decision": "mantener", "reason": brake, "cazador": proposal,
+                "freno": "rotacion_6h" if proposal.get("accion") == "rotar" else "agregado_2h"}
         if last.get("signature") != signature or review_at_s - stamp < 840:
             reason = "persistencia Cazador: dos propuestas iguales separadas por 14 minutos"
             operator._ledger(int(goal["id"]), "META_CAZADOR_REVISION", {
@@ -738,6 +748,26 @@ class V2ScenarioEngine(DecisionEngine):
         if proposal.get("accion") == "agregar":
             return self._execute_cazador_add(operator, goal, context, proposal, review_at_s)
         return self._execute_cazador_rotation(operator, goal, context, proposal, review_at_s)
+
+    @staticmethod
+    def _cazador_signature(proposal, grid_id):
+        """Firma la estructura del destino sin precios ni capitales variables."""
+        destinations = []
+        bots_by_symbol = {}
+        for item in proposal.get("destino") or []:
+            symbol = str(item.get("symbol") or "").upper()
+            kind = str(item.get("type") or "").lower()
+            if kind == "bot":
+                bots_by_symbol[symbol] = bots_by_symbol.get(symbol, 0) + 1
+            else:
+                destinations.append({"symbol": symbol, "type": kind,
+                    "levels": int(item.get("levels") or 0)})
+        destinations.extend({"symbol": symbol, "type": "bots", "count": count}
+            for symbol, count in bots_by_symbol.items())
+        return json.dumps({"action": proposal.get("accion"), "grid": grid_id,
+            "destino": sorted(destinations, key=lambda row: (row["symbol"], row["type"],
+                row.get("levels", 0), row.get("count", 0)))},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     def _execute_cazador_add(self, operator, goal, context, proposal, review_at_s):
         """Abre destinos financiados solo con efectivo atribuible libre."""
@@ -763,7 +793,7 @@ class V2ScenarioEngine(DecisionEngine):
                 if not checked.get("allowed"):
                     raise ValueError(checked.get("reason") or "pieza no abrible")
                 alternative = {"symbol": symbol, "strategy": piece["strategy"], "pieces": [piece],
-                    "reason": "asignaci?n de efectivo libre por Cazador de volatilidad"}
+                    "reason": "asignación de efectivo libre por Cazador de volatilidad"}
                 def record_open(row):
                     operator._ledger(int(goal["id"]), "META_V2_ACTION", {
                         "v2_action_id": action_id, "action_type": "cazador_agregar",
@@ -805,7 +835,7 @@ class V2ScenarioEngine(DecisionEngine):
                 operator.db.meta_piece_links.c.released_at.is_(None)).values(
                     released_at=operator.core._now()))
         operator._ledger(int(goal["id"]), "META_PIECE_RELEASED", {
-            "grid_id": grid_id, "reason": "rotaci?n Cazador confirmada"}, grid_id=grid_id)
+            "grid_id": grid_id, "reason": "rotación Cazador confirmada"}, grid_id=grid_id)
         action_id = uuid.uuid4().hex
         operator._ledger(int(goal["id"]), "META_V2_ACTION", {"v2_action_id": action_id,
             "action_type": "cazador_rotar", "grid_id": grid_id, "review_at_s": review_at_s,
@@ -829,7 +859,7 @@ class V2ScenarioEngine(DecisionEngine):
                 if not checked.get("allowed"):
                     raise ValueError(checked.get("reason") or "pieza no abrible")
                 alt = {"symbol": symbol, "strategy": piece["strategy"], "pieces": [piece],
-                    "reason": "redistribuci?n por Cazador de volatilidad"}
+                    "reason": "redistribución por Cazador de volatilidad"}
                 opened.append(operator._open_replacement(goal, alt, piece["capital_usdt"], v2_action_id=action_id))
             except Exception as exc:
                 failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
