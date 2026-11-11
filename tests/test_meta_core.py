@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 import threading
+import json
 
 import pytest
 
@@ -119,7 +120,7 @@ def test_grid_cancelled_verifica_exchange_antes_de_liberar_enlace(tmp_path, orde
             created_at=now, environment="testnet", strategy="bot", params="{}",
             dust_qty="0")).inserted_primary_key[0]
         conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
-            price=1, capital=20, state="DONE", held_qty=0, order_id=77,
+            price=1, capital=20, state="BUY_OPEN", held_qty=0, order_id=77,
             cycles_completed=1, pnl=3, fee_paid=0, updated_at=now))
         run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
             status="COMPLETED", started_at=now, finished_at=now,
@@ -141,6 +142,10 @@ def test_grid_cancelled_verifica_exchange_antes_de_liberar_enlace(tmp_path, orde
         link = conn.execute(select(db.meta_piece_links.c.released_at).where(
             db.meta_piece_links.c.grid_id == grid_id)).scalar_one()
     assert (link is not None) is should_release
+    if should_release:
+        cleared = db.get_grid_levels(grid_id)[0]
+        assert cleared["state"] == "DONE"
+        assert cleared["order_id"] is None
     assert result["pending"] == ([] if should_release else [
         {"grid_id": grid_id, "reason": "orden_exchange_viva"}])
 
@@ -238,6 +243,140 @@ def test_attributable_cash_fixed_numbers():
     # 100 iniciales - 70 entregados + 70.10 devueltos - 0.1814 de comisiones
     # deja 99.9186 USDT tras una pérdida neta realizada de 0.0814.
     assert attributable_cash("100", "70", "70.10", "0.1814") == Decimal("99.9186")
+
+
+def test_historial_de_pieza_liberada_conserva_perdida_en_efectivo_y_resultado(tmp_path):
+    db, core = _core(tmp_path, exchange=FakeTestnet(free=86.97))
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1,
+            range_high=2, n_levels=1, capital_total=70, reserve=0, status="CLOSED",
+            created_at=now, environment="testnet", strategy="bot", params="{}",
+            dust_qty="0")).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="COMPLETED", started_at=now, finished_at=now,
+            realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=run_id, grid_id=grid_id, piece_type="individual_bot_grid",
+            origin_grid_id=grid_id, created_at=now, released_at=now))
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id,
+        level_idx=0, event_type="BUY_FILLED",
+        details={"cummulative_quote_qty": "69.99", "fee_usdt": "0"})
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id,
+        level_idx=0, event_type="SELL_FILLED",
+        details={"cummulative_quote_qty": "56.96", "fee_usdt": "0"})
+
+    valuation = core.valuation(goal["id"])
+    assert Decimal(valuation["cash_usdt"]) == Decimal("86.97")
+    assert Decimal(valuation["result_pct"]) == Decimal("-13.03")
+    assert core._available_usdt(goal["id"])[0] == Decimal("86.97")
+    assert core._owned_grids(goal["id"]) == []
+    assert len(core._all_piece_links(goal["id"])) == 1
+
+
+def test_vigilante_usa_perdida_realizada_de_enlace_liberado(tmp_path):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path, exchange=FakeTestnet(free=86.97))
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT", range_low=1,
+            range_high=2, n_levels=1, capital_total=70, reserve=0, status="CLOSED",
+            created_at=now, environment="testnet", strategy="bot", params="{}",
+            dust_qty="0")).inserted_primary_key[0]
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="ACTIVE", started_at=now, realized_extra_usdt=0,
+            loss_limit_breach_count=0)).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=run_id, grid_id=grid_id, piece_type="individual_bot_grid",
+            origin_grid_id=grid_id, created_at=now, released_at=now))
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=now,
+            config_snapshot=json.dumps({"max_loss_pct": 10, "warning_loss_pct": 7.5,
+                "loss_confirm_minutes": 1, "max_days": 30})))
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id,
+        level_idx=0, event_type="BUY_FILLED",
+        details={"cummulative_quote_qty": "69.99", "fee_usdt": "0"})
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=grid_id,
+        level_idx=0, event_type="SELL_FILLED",
+        details={"cummulative_quote_qty": "56.96", "fee_usdt": "0"})
+    class Engine:
+        pass
+    core.engine = Engine()
+
+    result = core.run_once()
+
+    assert Decimal(result[0]["valuation"]["result_pct"]) == Decimal("-13.03")
+    assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
+    with db.engine.connect() as conn:
+        run = conn.execute(select(db.meta_runs.c.loss_limit_breach_count,
+            db.meta_runs.c.status).where(db.meta_runs.c.id == run_id)).one()
+    assert run.loss_limit_breach_count == 1
+    assert run.status == "CORTADA_POR_PERDIDA"
+
+
+def test_salto_de_efectivo_sin_fills_alerta_y_bloquea(tmp_path):
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    goal = core.create_goal(100, 10)
+    first = core.valuation(goal["id"])
+    assert first["cash_coherent"] is True
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            capital_initial=80))
+
+    second = core.valuation(goal["id"])
+
+    assert second["cash_coherent"] is False
+    assert second["cash_coherence"]["reason"] == "salto de efectivo sin fill o cierre"
+    assert any(item[0] == "META_VALUACION_INCOHERENTE" for item in alerts)
+    assert core.valuation(goal["id"])["cash_coherent"] is False
+
+
+def test_enlace_vigente_a_grid_ausente_mantiene_error_controlado(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=None, grid_id=987654, piece_type="grid", origin_grid_id=987654,
+            created_at=datetime(2026, 1, 1), released_at=None))
+
+    valuation = core.valuation(goal["id"])
+
+    assert valuation["status"] == "DESCONOCIDO"
+    assert valuation["reason"] == "grid eliminado"
+    assert valuation["cash_coherent"] is False
+
+
+def test_enlace_liberado_a_grid_ausente_alerta_y_bloquea_sin_tumbar_valuacion(tmp_path):
+    from sqlalchemy import select
+
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    goal = core.create_goal(100, 10)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=None, grid_id=987655, piece_type="grid", origin_grid_id=987655,
+            created_at=datetime(2026, 1, 1), released_at=datetime(2026, 1, 2)))
+
+    valuation = core.valuation(goal["id"])
+    state = db.get_alert_state(f"meta_cash_coherence_{goal['id']}")
+    with db.engine.connect() as conn:
+        events = conn.execute(select(db.meta_ledger.c.details).where(
+            db.meta_ledger.c.meta_id == goal["id"],
+            db.meta_ledger.c.event_type == "META_VALUACION_INCOHERENTE")).all()
+
+    assert valuation["status"] == "KNOWN"
+    assert valuation["cash_coherent"] is False
+    assert valuation["cash_coherence"]["reason"] == "grid de enlace liberado no existe"
+    assert valuation["cash_coherence"]["missing_released_grid_ids"] == [987655]
+    assert state["blocked"] is True
+    assert len(events) == 1
+    assert len(alerts) == 1
+    assert alerts[0][0] == "META_VALUACION_INCOHERENTE"
+    assert alerts[0][2]["grid_ids"] == [987655]
 
 
 def test_prudent_verification_minimum_is_editable_in_profile_settings(tmp_path):

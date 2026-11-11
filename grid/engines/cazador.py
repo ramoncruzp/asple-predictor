@@ -185,6 +185,9 @@ def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
 
 def decide_cazador(context):
     """Evalúa rotación/agregado sin escribir en BD ni llamar al exchange."""
+    if context.get("cash_coherent") is False:
+        return {"accion": "ninguna", "pieza": None, "destino": [],
+            "motivo": "efectivo de la meta incoherente", "puntajes_piezas": []}
     markets = {str(symbol).upper(): dict(value) for symbol, value in
         (context.get("markets") or {}).items() if _valid_market(value)}
     pieces = [dict(row) for row in context.get("pieces", [])]
@@ -388,6 +391,11 @@ def build_runtime_context(operator, goal, valuation):
             "buy_open_capital": buy_open_capital, "capital_nominal": capital,
             "capital": capital, "status": grid.get("status")})
     free_cash = float(valuation.get("free_capital_usdt") or 0.0)
+    try:
+        account_attributable, _reserve = operator.core._available_usdt(int(goal["id"]))
+        free_cash = min(free_cash, float(account_attributable))
+    except Exception:
+        free_cash = 0.0
     cfg = {**DEFAULT_PROFILES.get(str(goal.get("profile") or "").upper(), {}),
         **(goal.get("config_snapshot") or {})}
     by_symbol = {}
@@ -401,6 +409,7 @@ def build_runtime_context(operator, goal, valuation):
         else: grids += 1
     initial = float(goal.get("capital_initial") or 0)
     return {"markets": markets, "pieces": pieces, "free_cash": free_cash,
+        "cash_coherent": valuation.get("cash_coherent") is not False,
         "result_pct": valuation.get("result_pct"), "capital_initial": initial,
         "profile": cfg, "limits": {"max_grids": max(0, int(cfg.get("max_grids", 0))-grids),
             "max_bots": max(0, int(cfg.get("max_bots", 0))-bots),

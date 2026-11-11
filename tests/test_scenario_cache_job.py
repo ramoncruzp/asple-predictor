@@ -557,7 +557,7 @@ def test_bot_solo_buy_open_conserva_capital_reservado_en_fastsim(cache_databases
     assert maintained["metrics"]["metrics_cartera"]["pnl_mean_usdt"] == pytest.approx(.2)
 
 
-def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases):
+def test_grid_cerrado_no_se_considera_pieza_viva_aunque_queden_filas(cache_databases):
     db, _market_path = cache_databases
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -571,20 +571,19 @@ def test_grid_terminal_con_inventario_o_venta_abierta_sigue_vivo(cache_databases
             status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
     terminal_grids = [db.create_grid_with_levels({"symbol": "JUPUSDT",
         "strategy": "smart", "range_low": .2, "range_high": .3,
-        "n_levels": 1, "capital_total": 10, "status": "CLOSED",
-        "environment": "testnet"}, [level]) for level in (
-            {"level_idx": 0, "price": .25, "capital": 10, "sell_price": None,
-                "entry_price": .25, "held_qty": 2, "state": "DONE"},
-            {"level_idx": 0, "price": .25, "capital": 10, "sell_price": .27,
-                "entry_price": None, "held_qty": 0, "state": "SELL_OPEN"})]
+        "n_levels": 1, "capital_total": 10, "status": status,
+        "environment": "testnet"}, [level]) for status, level in (
+            ("CLOSED", {"level_idx": 0, "price": .25, "capital": 10, "sell_price": None,
+                "entry_price": .25, "held_qty": 2, "state": "DONE"}),
+            ("CANCELLED", {"level_idx": 0, "price": .25, "capital": 10, "sell_price": .27,
+                "entry_price": None, "held_qty": 0, "state": "SELL_OPEN"}))]
     with db.engine.begin() as conn:
         for grid in terminal_grids:
             conn.execute(db.meta_piece_links.insert().values(meta_id=goal_id,
                 run_id=run_id, grid_id=grid["id"], piece_type="grid", created_at=now))
     pieces = cache_script._active_grid_pieces(db.engine.url.database, goal_id,
         {"JUPUSDT": .26})
-    assert [piece["grid_id"] for piece in pieces] == [
-        grid["id"] for grid in terminal_grids]
+    assert pieces == []
 
 
 def test_capital_vivo_excedido_usa_liquidacion_y_registra_aviso():

@@ -97,7 +97,7 @@ def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
         def get_grid_levels(self, grid_id):
             return levels[int(grid_id)]
     db = FakeDb()
-    core = SimpleNamespace(db=db)
+    core = SimpleNamespace(db=db, _available_usdt=lambda _goal_id: (4, 0))
     operator = SimpleNamespace(core=core, db=db,
         _book_ticker=lambda symbol: {
             "bid_price": meta7_cazador_context["markets"][symbol]["mid"] * .999,
@@ -109,6 +109,7 @@ def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
     context = build_runtime_context(operator,
         {"id": 7, "profile": "RAPIDO", "capital_initial": 100},
         {"free_capital_usdt": 9, "result_pct": -3})
+    assert context["free_cash"] == pytest.approx(4)
     jup = next(row for row in context["pieces"] if row["grid_id"] == 21)
     result = decide_cazador(context)
     jup_score = next(row for row in result["puntajes_piezas"] if row["grid_id"] == 21)
@@ -145,6 +146,13 @@ def test_cazador_agrega_con_efectivo_sin_pieza_dormida(meta7_cazador_context):
     assert result["accion"] == "agregar"
     assert result["destino"]
     assert result["capital_total"] <= 30
+
+
+def test_cazador_no_propone_acciones_con_efectivo_incoherente(meta7_cazador_context):
+    meta7_cazador_context["cash_coherent"] = False
+    result = decide_cazador(meta7_cazador_context)
+    assert result["accion"] == "ninguna"
+    assert "incoherente" in result["motivo"]
 
 
 def test_puntaje_grid_y_retorna_cero_fuera_de_rango():

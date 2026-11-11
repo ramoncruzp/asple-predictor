@@ -14,8 +14,11 @@ def _field(row, name, default=None):
 
 
 def is_live_meta_grid(status, levels):
-    """Incluye grids no terminales y terminales con inventario u órdenes vivas."""
-    if str(status or "").upper() not in TERMINAL_GRID_STATUSES:
+    """No cuenta grids cerrados/cancelados ni filas viejas como exposición viva."""
+    normalized = str(status or "").upper()
+    if normalized in {"CLOSED", "CANCELLED"}:
+        return False
+    if normalized not in TERMINAL_GRID_STATUSES:
         return True
     return any(float(_field(level, "held_qty", 0) or 0) > 0
         or str(_field(level, "state", "")).upper() in OPEN_GRID_LEVEL_STATES

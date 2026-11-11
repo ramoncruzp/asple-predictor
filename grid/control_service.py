@@ -314,8 +314,7 @@ def _release_final_meta_link(request, db, client, grid, link):
     from sqlalchemy import select
     grid_id = int(grid["id"])
     levels = db.get_grid_levels(grid_id)
-    if any(_d(row.get("held_qty")) > 0 or row.get("state") in {"BUY_OPEN", "SELL_OPEN"}
-            for row in levels):
+    if any(_d(row.get("held_qty")) > 0 for row in levels):
         return False, "queda inventario o una orden abierta en los niveles"
     try:
         open_orders = client.get_open_orders(grid["symbol"])
@@ -329,13 +328,16 @@ def _release_final_meta_link(request, db, client, grid, link):
         client_id = str(order.get("client_order_id") or order.get("orig_client_order_id") or "")
         if (oid is not None and int(oid) in own_ids) or client_id in own_clients:
             return False, "queda una orden propia abierta en Testnet"
+    core = getattr(request.app.state, "meta_core", None)
+    if core is not None:
+        core._terminalize_empty_grid_levels(grid_id)
+        levels = db.get_grid_levels(grid_id)
     now = getattr(getattr(request.app.state, "meta_core", None), "_now", None)
     released_at = now() if callable(now) else datetime.now(timezone.utc).replace(tzinfo=None)
     with db.engine.begin() as conn:
         conn.execute(db.meta_piece_links.update().where(
             db.meta_piece_links.c.id == int(link["id"]),
             db.meta_piece_links.c.released_at.is_(None)).values(released_at=released_at))
-    core = getattr(request.app.state, "meta_core", None)
     if core is not None:
         core._ledger(int(link["meta_id"]), None, "META_PIECE_MANUALLY_CLOSED",
             {"grid_id": grid_id, "grid_status": db.get_grid(grid_id).get("status")},

@@ -408,6 +408,11 @@ def test_cancel_grid_reports_base_inventory_without_liquidating_it():
     assert result["remaining_inventory"] == [{"level_idx": 2, "asset": "XRP", "held_qty": 1.9}]
     assert exchange.get_open_orders("XRPUSDT") == []
     assert db.get_grid(grid["id"])["status"] == "CANCELLED"
+    empty_levels = [row for row in db.get_grid_levels(grid["id"])
+        if Decimal(str(row.get("held_qty") or 0)) <= 0]
+    assert all(row["state"] == "DONE" and row.get("order_id") is None
+        and row.get("client_order_id") is None and row.get("buy_client_order_id") is None
+        for row in empty_levels)
 
 
 def test_commission_in_non_base_asset_does_not_reduce_held_quantity():

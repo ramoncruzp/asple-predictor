@@ -4213,6 +4213,13 @@ class MetaOperator:
             self._record_review(meta_id, result, value, None, engine=engine,
                 diagnostics={"valuation_unknown": diagnostic, "valuation_attempts": valuation_attempts})
             return result
+        if value.get("cash_coherent") is False:
+            self._reset_rotation_streaks(meta_id, "efectivo de meta incoherente")
+            result = {"decision": "no_hacer_nada",
+                "reason": "efectivo de la meta incoherente; agregar o rotar bloqueado"}
+            self._record_review(meta_id, result, value, None, engine=engine,
+                diagnostics={"cash_coherence": value.get("cash_coherence")})
+            return result
         cfg = goal.get("config_snapshot") or {}
         if float(value["result_pct"]) <= -float(cfg.get("warning_loss_pct", 0)):
             self._reset_rotation_streaks(meta_id, "bloqueo 75% del limite de perdida")

@@ -419,10 +419,19 @@ class MetaCore:
                 self.db.meta_piece_links.c.released_at.is_(None))).mappings().all()
         return [dict(row) for row in rows]
 
+    def _all_piece_links(self, meta_id):
+        """Devuelve el historial completo de piezas, incluso enlaces liberados."""
+        from sqlalchemy import select
+        with self.db.engine.connect() as conn:
+            rows = conn.execute(select(self.db.meta_piece_links).where(
+                self.db.meta_piece_links.c.meta_id == int(meta_id)).order_by(
+                    self.db.meta_piece_links.c.id)).mappings().all()
+        return [dict(row) for row in rows]
+
     def _goal_cash(self, meta_id):
-        """Efectivo atribuible a una meta segun sus propios fills."""
+        """Efectivo atribuible según todos los fills históricos de la meta."""
         delivered = returned = commissions = Decimal(0)
-        for link in self._owned_grids(meta_id):
+        for link in self._all_piece_links(meta_id):
             grid = self.db.get_grid(int(link["grid_id"]))
             if grid is None:
                 continue
@@ -585,36 +594,22 @@ class MetaCore:
         from sqlalchemy import select
         goal = self.get_goal(meta_id)
         links = self._owned_grids(meta_id)
-        delivered = returned = commissions = Decimal(0)
+        history_links = self._all_piece_links(meta_id)
         try:
             pieces = []
             quantities_by_symbol = defaultdict(Decimal)
-            books_by_symbol = {}
+            cash = self._goal_cash(meta_id)
+            missing_released_grids = [int(link["grid_id"]) for link in history_links
+                if link.get("released_at") is not None
+                and self.db.get_grid(int(link["grid_id"])) is None]
+            cash_coherence = self._check_cash_coherence(meta_id, cash, history_links,
+                missing_released_grids=missing_released_grids)
             for link in links:
                 grid = self.db.get_grid(int(link["grid_id"]))
                 if grid is None:
                     raise ValueError("grid eliminado")
-                events = list(reversed(self.db.list_grid_events(grid_id=int(grid["id"]), limit=100000)))
                 repo_id = link.get("repository_grid_id")
                 level_map = json.loads(link.get("repository_level_map") or "{}")
-                if repo_id is not None:
-                    repo_events = self.db.list_grid_events(grid_id=int(repo_id), limit=100000)
-                    moved_ids = {int(idx) for idx in level_map.values()}
-                    events.extend(event for event in reversed(repo_events)
-                                  if event.get("level_idx") is not None and int(event["level_idx"]) in moved_ids)
-                for event in events:
-                    details = event.get("details") or {}
-                    if event.get("event_type") == "BUY_FILLED":
-                        quote, fee = self._fill_cash(grid, event, details)
-                        delivered += quote
-                        commissions += fee
-                    elif event.get("event_type") in {"SELL_FILLED", "CELL_LIQUIDATED"}:
-                        if event.get("event_type") == "CELL_LIQUIDATED" and details.get("cash_proceeds_net") is not None:
-                            returned += _d(details["cash_proceeds_net"])
-                        else:
-                            quote, fee = self._fill_cash(grid, event, details)
-                            returned += quote
-                            commissions += fee
                 if repo_id is None:
                     inventory_levels = self.db.get_grid_levels(int(grid["id"]))
                 else:
@@ -625,7 +620,6 @@ class MetaCore:
                 pieces.append({"symbol": grid["symbol"], "grid_id": int(link["grid_id"]),
                                "grid_status": grid.get("status"), "qty": held, "levels": inventory_levels})
                 quantities_by_symbol[grid["symbol"]] += held
-            cash = attributable_cash(goal["capital_initial"], delivered, returned, commissions)
             cfg_raw = goal.get("config_snapshot") or {}
             cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw)
             profile_cfg = self._profile_settings().get(goal["profile"], {})
@@ -728,7 +722,17 @@ class MetaCore:
                              for link in links if self.db.get_grid(int(link["grid_id"]))
                              and self.db.get_grid(int(link["grid_id"])).get("status")
                              in {"OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}), Decimal(0))
-            free_capital = max(Decimal(0), _d(goal["capital_initial"]) - allocated)
+            buy_reserves = Decimal(0)
+            for link in links:
+                reserve_grid = self.db.get_grid(int(link["grid_id"]))
+                if not reserve_grid or reserve_grid.get("status") not in {
+                        "OPENING", "ACTIVE", "PAUSED", "CLOSING", "HOLDING"}:
+                    continue
+                buy_reserves += sum((_d(level.get("capital"))
+                    for level in self.db.get_grid_levels(int(link["grid_id"]))
+                    if str(level.get("state") or "").upper() == "BUY_OPEN"), Decimal(0))
+            free_capital = min(max(Decimal(0), _d(goal["capital_initial"]) - allocated),
+                max(Decimal(0), cash - buy_reserves))
             with self.db.engine.connect() as conn:
                 run = conn.execute(select(self.db.meta_runs).where(
                     self.db.meta_runs.c.meta_id == int(meta_id),
@@ -751,6 +755,8 @@ class MetaCore:
                     "result_pct": str(result_exec) if status != "DESCONOCIDO" else None,
                     "result_pct_best_bid": str(result_best),
                     "result_pct_executable": str(result_exec) if status != "DESCONOCIDO" else None,
+                    "cash_coherent": cash_coherence["coherent"],
+                    "cash_coherence": cash_coherence,
                     "estimated_sell_fee_pct": "0.1", "pieces": pieces}
         except Exception as exc:
             symbol = next((self.db.get_grid(int(link["grid_id"])).get("symbol") for link in links
@@ -762,7 +768,90 @@ class MetaCore:
                  "readtimeout", "timed out", "timeout", "tunnel"))
             return {"status": "DESCONOCIDO", "symbol": symbol, "reason": str(exc),
                     "connection_error": connection_error, "value_best_bid": None,
-                    "value_executable": None, "result_pct": None, "pieces": []}
+                    "value_executable": None, "result_pct": None, "pieces": [],
+                    "cash_coherent": False}
+
+    def _check_cash_coherence(self, meta_id, cash, history_links, *, missing_released_grids=()):
+        """Detecta saltos del efectivo que no coinciden con fills o cierres."""
+        from sqlalchemy import func, select
+        key = f"meta_cash_coherence_{int(meta_id)}"
+        previous = self.db.get_alert_state(key) or {}
+        grid_ids = {int(link["grid_id"]) for link in history_links}
+        grid_ids.update(int(link["repository_grid_id"]) for link in history_links
+            if link.get("repository_grid_id") is not None)
+        max_event_id = None
+        explained = False
+        with self.db.engine.connect() as conn:
+            if grid_ids:
+                max_event_id = conn.execute(select(func.max(self.db.grid_events.c.id)).where(
+                    self.db.grid_events.c.grid_id.in_(grid_ids))).scalar_one_or_none()
+                prior_id = int(previous.get("event_id") or 0)
+                activity = conn.execute(select(self.db.grid_events.c.id).where(
+                    self.db.grid_events.c.grid_id.in_(grid_ids),
+                    self.db.grid_events.c.id > prior_id,
+                    self.db.grid_events.c.event_type.in_(("BUY_FILLED", "SELL_FILLED",
+                        "CELL_LIQUIDATED", "GRID_CLOSED", "CELL_MOVED_TO_REPOSITORY"))
+                    ).limit(1)).first()
+                explained = activity is not None
+        amount = _d(cash)
+        initial = _d(self.get_goal(meta_id)["capital_initial"])
+        threshold = initial * Decimal("0.05")
+        old_amount = _d(previous.get("cash_usdt")) if previous.get("cash_usdt") is not None else None
+        delta = abs(amount - old_amount) if old_amount is not None else Decimal(0)
+        missing_released_grids = sorted({int(grid_id) for grid_id in missing_released_grids})
+        previous_missing = sorted({int(grid_id) for grid_id in previous.get(
+            "missing_released_grid_ids", [])})
+        blocked = bool(previous.get("blocked"))
+        reason = previous.get("reason")
+        if not previous:
+            blocked = False
+            reason = None
+        if missing_released_grids:
+            blocked = True
+            reason = "grid de enlace liberado no existe"
+            if (not previous.get("blocked") or previous_missing != missing_released_grids
+                    or previous.get("reason") != reason):
+                details = {"grid_ids": missing_released_grids, "reason": reason}
+                self._ledger(meta_id, None, "META_VALUACION_INCOHERENTE", details)
+                try:
+                    self.alert("META_VALUACION_INCOHERENTE", int(meta_id), details)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "No se pudo alertar grid ausente de enlace liberado en Meta %s", meta_id)
+        elif previous_missing and reason == "grid de enlace liberado no existe":
+            blocked = False
+            reason = None
+            self._ledger(meta_id, None, "META_VALUACION_COHERENCIA_RESUELTA", {
+                "grid_ids": previous_missing, "reason": "grid de enlace liberado disponible"})
+        elif explained:
+            blocked = False
+            reason = None
+            if previous.get("blocked"):
+                details = {"previous_cash_usdt": str(old_amount), "cash_usdt": str(amount),
+                    "reason": "fill_o_cierre_atribuible"}
+                self._ledger(meta_id, None, "META_VALUACION_COHERENCIA_RESUELTA", details)
+        elif old_amount is not None and delta > threshold:
+            blocked = True
+            reason = "salto de efectivo sin fill o cierre"
+            if not previous.get("blocked"):
+                details = {"previous_cash_usdt": str(old_amount), "cash_usdt": str(amount),
+                    "delta_usdt": str(delta), "threshold_usdt": str(threshold),
+                    "reason": "salto_sin_fill_ni_cierre"}
+                self._ledger(meta_id, None, "META_VALUACION_INCOHERENTE", details)
+                try:
+                    self.alert("META_VALUACION_INCOHERENTE", int(meta_id), details)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "No se pudo alertar efectivo incoherente de Meta %s", meta_id)
+        state = {"cash_usdt": str(amount), "event_id": max_event_id,
+            "blocked": blocked, "reason": reason,
+            "missing_released_grid_ids": missing_released_grids,
+            "updated_at": self._now().isoformat()}
+        self.db.set_alert_state(key, state)
+        return {"coherent": not blocked,
+            "reason": reason if blocked else None,
+            "missing_released_grid_ids": missing_released_grids,
+            "delta_usdt": str(delta), "threshold_usdt": str(threshold)}
 
     def _update_valuation_state(self, meta_id, states, cfg):
         """Persiste transiciones y cadencias de alertas, incluso tras reiniciar el proceso."""
@@ -831,6 +920,27 @@ class MetaCore:
         if quote_value is None or fee_value is None:
             raise ValueError("fill sin atribución de USDT o comisión verificable")
         return _d(quote_value), _d(fee_value)
+
+    def _terminalize_empty_grid_levels(self, grid_id):
+        """Limpia órdenes locales obsoletas tras confirmar un grid terminal sin inventario."""
+        changed = []
+        for level in self.db.get_grid_levels(int(grid_id)):
+            if _d(level.get("held_qty")) > 0:
+                continue
+            state = str(level.get("state") or "").upper()
+            if (state == "DONE" and level.get("order_id") is None
+                    and not level.get("client_order_id") and not level.get("buy_client_order_id")):
+                continue
+            previous = {key: level.get(key) for key in (
+                "state", "order_id", "client_order_id", "buy_client_order_id")}
+            self.db.update_level(int(grid_id), int(level["level_idx"]), state="DONE",
+                order_id=None, client_order_id=None, buy_client_order_id=None)
+            self.db.add_grid_event(run_id=None, source="CLI", grid_id=int(grid_id),
+                level_idx=int(level["level_idx"]), event_type="META_TERMINAL_LEVEL_CLEARED",
+                details={"previous": previous, "reason": "sin_orden_exchange_ni_inventario"})
+            changed.append(int(level["level_idx"]))
+        return changed
+
 
     def run_once(self):
         from sqlalchemy import select
@@ -1123,8 +1233,7 @@ class MetaCore:
                 local_ids = {int(row["order_id"]) for row in levels if row.get("order_id") is not None}
                 client_ids = {str(row[key]) for row in levels for key in
                     ("client_order_id", "buy_client_order_id") if row.get(key)}
-                if any(_d(row.get("held_qty")) > 0 or row.get("state") in {"BUY_OPEN", "SELL_OPEN"}
-                        for row in levels):
+                if any(_d(row.get("held_qty")) > 0 for row in levels):
                     pending.append({"grid_id": grid_id, "reason": "inventario_o_orden_local_viva"})
                     continue
                 try:
@@ -1137,6 +1246,17 @@ class MetaCore:
                     or str(order.get("client_order_id") or order.get("orig_client_order_id") or "") in client_ids]
                 if owned_open:
                     pending.append({"grid_id": grid_id, "reason": "orden_exchange_viva"})
+                    continue
+                # El exchange es la fuente de verdad; limpia órdenes locales obsoletas.
+                self._terminalize_empty_grid_levels(grid_id)
+                if repo_id is not None:
+                    self._terminalize_empty_grid_levels(int(repo_id))
+                levels = self.db.get_grid_levels(grid_id)
+                if repo_id is not None:
+                    levels.extend(row for row in self.db.get_grid_levels(int(repo_id))
+                        if int(row["level_idx"]) in repo_indices)
+                if any(_d(row.get("held_qty")) > 0 for row in levels):
+                    pending.append({"grid_id": grid_id, "reason": "inventario_local_pendiente"})
                     continue
                 if str(grid.get("status") or "").upper() not in terminal:
                     try:

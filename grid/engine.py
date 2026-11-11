@@ -2609,6 +2609,20 @@ class GridEngine:
         if new_status == "CANCELLED":
             updates["closed_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
         self.db.update_grid(grid_id, **updates)
+        if new_status == "CANCELLED":
+            for level in self.db.get_grid_levels(grid_id):
+                if _d(level.get("held_qty")) > 0:
+                    continue
+                previous = {key: level.get(key) for key in
+                    ("state", "order_id", "client_order_id", "buy_client_order_id")}
+                if (level.get("state") == "DONE" and level.get("order_id") is None
+                        and not level.get("client_order_id") and not level.get("buy_client_order_id")):
+                    continue
+                self.db.update_level(grid_id, int(level["level_idx"]), state="DONE",
+                    order_id=None, client_order_id=None, buy_client_order_id=None)
+                self.db.add_grid_event(run_id=None, source="CLI", grid_id=int(grid_id),
+                    level_idx=int(level["level_idx"]), event_type="GRID_CANCEL_LEVEL_CLEARED",
+                    details={"previous": previous, "reason": "cancelacion_confirmada_sin_orden_viva"})
         inventory = [
             {"level_idx": row["level_idx"], "asset": symbol[:-4], "held_qty": row["held_qty"]}
             for row in self.db.get_grid_levels(grid_id)

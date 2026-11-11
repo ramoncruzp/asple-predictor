@@ -1200,6 +1200,32 @@ def test_review_can_add_one_piece_using_only_free_goal_cash():
     assert operator._add_piece_from_free_cash(goal, links, {"alternatives": []}) is None
 
 
+def test_revision_bloquea_motor_si_efectivo_de_meta_es_incoherente():
+    from types import SimpleNamespace
+    from grid.meta_operator import MetaOperator
+
+    class Core:
+        def get_goal(self, _meta_id):
+            return {"id": 7, "status": "ACTIVE", "config_snapshot": {}}
+
+    operator = MetaOperator.__new__(MetaOperator)
+    operator.core = Core()
+    engine = SimpleNamespace(name="v2", version="test")
+    operator._engine_for_goal = lambda _goal: engine
+    operator._valuation_with_retry = lambda _meta_id: ({"status": "KNOWN",
+        "cash_coherent": False, "cash_coherence": {"reason": "salto"}}, 1)
+    resets, reviews = [], []
+    operator._reset_rotation_streaks = lambda _mid, reason: resets.append(reason)
+    operator._record_review = lambda *args, **kwargs: reviews.append((args, kwargs))
+
+    result = operator._review_once_locked(7)
+
+    assert result["decision"] == "no_hacer_nada"
+    assert "incoherente" in result["reason"]
+    assert resets == ["efectivo de meta incoherente"]
+    assert reviews and reviews[0][0][2]["cash_coherent"] is False
+
+
 def test_extended_allocation_shadow_off_logs_without_changing_legacy_open_path():
     from grid.meta_operator import MetaOperator
 
