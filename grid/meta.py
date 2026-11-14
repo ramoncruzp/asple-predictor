@@ -434,6 +434,33 @@ class MetaCore:
             rows = conn.execute(select(self.db.meta_goals).order_by(self.db.meta_goals.c.id.desc())).mappings().all()
         return [dict(row) for row in rows]
 
+    def tournament_scoreboard(self, round_number=None):
+        """Resume resultados observados del ledger para mostrar el torneo."""
+        rows = []
+        for goal in self.list_goals():
+            cfg = json.loads(goal["config_snapshot"] or "{}")
+            if not cfg.get("competidor") or (round_number is not None and
+                    int(cfg.get("ronda", 0)) != int(round_number)):
+                continue
+            events = self.ledger(goal["id"])
+            latest = next((item.get("details") or {} for item in reversed(events)
+                if item.get("event_type") == "META_VALUATION"), {})
+            run = next(iter(self.list_runs(goal["id"])), {})
+            rows.append({"meta_id": int(goal["id"]), "ronda": int(cfg.get("ronda", 0)),
+                "competidor": cfg["competidor"], "status": goal["status"],
+                "result_pct": latest.get("result_pct"), "equity_usdt": latest.get("value_usdt"),
+                "cash_usdt": latest.get("cash_usdt"),
+                "realized_gain_usdt": run.get("realized_extra_usdt", 0),
+                "max_drawdown_pct": run.get("worst_result_pct", 0),
+                "cycles": sum(1 for item in events if item.get("event_type") == "SELL_FILLED"),
+                "rotations_reprices": sum(1 for item in events if item.get("event_type") in {
+                    "META_CAZADOR_ROTACION", "META_TOURNAMENT_REPRICE", "META_TOURNAMENT_RECENTER"}),
+                "target_reached": goal["status"] == "CUMPLIDA",
+                "v2_predicted_probability": next((float((item.get("details") or {}).get("p_meta"))
+                    for item in reversed(events) if item.get("event_type") == "META_OPERATOR_REVIEW_DECISION"
+                    and (item.get("details") or {}).get("p_meta") is not None), None) if cfg["competidor"] == "v2" else None})
+        return sorted(rows, key=lambda item: item["meta_id"])
+
     def discard_goal(self, meta_id):
         """Descarta un borrador (DRAFT): no toca el exchange, no cuenta como meta activa."""
         goal = self.get_goal(meta_id)

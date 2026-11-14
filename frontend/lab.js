@@ -31,6 +31,11 @@
     }
     try { const result = await get('/api/metas/tournament/availability'); host.querySelector('[data-free]').textContent = `${Number(result.free_usdt).toFixed(2)} USDT (reservado ${Number(result.reserved_usdt).toFixed(2)})`; }
     catch (error) { host.querySelector('[data-free]').textContent = `no disponible: ${error.message}`; }
+    try {
+      const board = await get('/api/metas/tournament/scoreboard');
+      const rows = board.competitors || [];
+      host.querySelector('[data-rounds]').innerHTML = rows.length ? `<h3>Marcador</h3><table class="data-table"><thead><tr><th>Ronda</th><th>Competidor</th><th>Meta</th><th>Estado</th><th>Resultado</th><th>Equity USDT</th><th>Ganancia realizada</th><th>Caída máxima</th><th>Ciclos</th><th>Rotaciones</th><th>P(meta) v2</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.ronda)}</td><td>${esc(row.competidor)}</td><td>#${esc(row.meta_id)}</td><td>${esc(row.status)}</td><td>${row.result_pct == null ? '—' : `${Number(row.result_pct).toFixed(2)} %`}</td><td>${row.equity_usdt == null ? '—' : Number(row.equity_usdt).toFixed(2)}</td><td>${Number(row.realized_gain_usdt || 0).toFixed(2)}</td><td>${Number(row.max_drawdown_pct || 0).toFixed(2)} %</td><td>${esc(row.cycles)}</td><td>${esc(row.rotations_reprices)}</td><td>${row.v2_predicted_probability == null ? '—' : `${(Number(row.v2_predicted_probability) * 100).toFixed(1)} %`}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Todavía no hay rondas del torneo.</p>';
+    } catch (error) { host.querySelector('[data-rounds]').textContent = `No se pudo cargar el marcador: ${error.message}`; }
   }
   function renderStats(stats) {
     const host = document.getElementById('lab-stoploss-stats-content');

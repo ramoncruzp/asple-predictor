@@ -358,6 +358,11 @@ def tournament_availability(request: Request):
         raise HTTPException(503, f"No se pudo consultar el saldo libre: {exc}") from exc
 
 
+@router.get("/tournament/scoreboard")
+def tournament_scoreboard(request: Request, round_number: int | None = None):
+    return {"competitors": _core(request).tournament_scoreboard(round_number)}
+
+
 @router.get("/{meta_id}")
 def get_goal(request: Request, meta_id: int):
     return _call(_core(request).get_goal, meta_id)

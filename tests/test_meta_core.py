@@ -52,6 +52,9 @@ def test_ronda_torneo_crea_competidores_activos_con_snapshot_aislado(tmp_path):
     assert {goal["status"] for goal in result["goals"]} == {"ACTIVE"}
     assert next(cfg for cfg in configs if cfg["competidor"] == "v2")["decision_engine"] == "v2"
     assert next(cfg for cfg in configs if cfg["competidor"] == "cazador")["decision_engine"] == "v1"
+    board = core.tournament_scoreboard(result["ronda"])
+    assert [row["competidor"] for row in board] == ["v1", "v2", "cazador"]
+    assert all(row["equity_usdt"] is None for row in board)
 
 
 def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
