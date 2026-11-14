@@ -361,6 +361,52 @@ class MetaCore:
         self._ledger(goal_id, None, "META_CREATED", {"target_usdt": str(target), "profile": profile})
         return self.get_goal(goal_id)
 
+    def create_tournament_round(self, competitors, capital=50, target_value=1.5,
+            target_type="USDT", profile="RAPIDO", duration_days=20):
+        """Crea y activa en una transacción las metas de una ronda completa."""
+        from sqlalchemy import func, select
+        allowed = {"v1", "v2", "cazador", "escalera", "seguidor", "control"}
+        selected = list(dict.fromkeys(str(item).lower() for item in competitors))
+        if not selected or any(item not in allowed for item in selected):
+            raise ValueError("La selección de competidores del torneo no es válida.")
+        self._enabled_testnet()
+        capital, target_value = _d(capital), _d(target_value)
+        profile, target_type = str(profile).upper(), str(target_type).upper()
+        if capital <= 0 or target_value <= 0 or profile not in DEFAULT_PROFILES or target_type not in {"USDT", "PCT"}:
+            raise ValueError("Capital, objetivo, perfil o tipo inválido.")
+        target = target_value if target_type == "USDT" else capital * target_value / 100
+        goals = []
+        now = self._now()
+        with self.db.engine.begin() as conn:
+            self._lock_capacity_row(conn)
+            active = int(conn.execute(select(func.count()).select_from(self.db.meta_goals).where(
+                self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED", "CLOSING", "TARGET_CLOSING"]))).scalar_one())
+            if active + len(selected) > 7:
+                raise ValueError("La ronda excede el máximo de siete metas activas.")
+            available, reserved = self._available_usdt()
+            if available < max(Decimal("300"), capital * len(selected)):
+                raise ValueError(f"USDT libre insuficiente para la ronda: disponible {available}; requerido {max(Decimal('300'), capital * len(selected))}.")
+            round_number = int(conn.execute(select(func.count()).select_from(self.db.meta_ledger).where(
+                self.db.meta_ledger.c.event_type == "META_TOURNAMENT_ROUND_CREATED")).scalar_one()) + 1
+            snapshot = self._profile_settings()[profile]
+            for competitor in selected:
+                cfg = {**snapshot, "competidor": competitor, "ronda": round_number,
+                    "duration_days": int(duration_days), "decision_engine": "v2" if competitor == "v2" else "v1"}
+                meta_id = conn.execute(self.db.meta_goals.insert().values(
+                    capital_initial=float(capital), target_usdt=float(target), target_input_type=target_type,
+                    target_input_value=float(target_value), profile=profile, status="ACTIVE", environment="testnet",
+                    started_at=now, created_at=now, config_snapshot=json.dumps(cfg, sort_keys=True)
+                )).inserted_primary_key[0]
+                run_id = conn.execute(self.db.meta_runs.insert().values(meta_id=meta_id,
+                    status="ACTIVE", started_at=now, worst_result_pct=0.0, realized_extra_usdt=0.0)).inserted_primary_key[0]
+                goals.append({"meta_id": int(meta_id), "run_id": int(run_id), "competidor": competitor})
+            conn.execute(self.db.meta_ledger.insert().values(meta_id=goals[0]["meta_id"], run_id=None,
+                ts=now, event_type="META_TOURNAMENT_ROUND_CREATED", details=json.dumps({
+                    "ronda": round_number, "competidores": selected, "capital_usdt": str(capital),
+                    "saldo_libre_usdt": str(available), "reservado_usdt": str(reserved)}, sort_keys=True)))
+        return {"ronda": round_number, "goals": [self.get_goal(row["meta_id"]) for row in goals],
+            "saldo_libre_usdt": str(available), "iniciadas_juntas": True}
+
     def _ledger(self, meta_id, run_id, event_type, details=None, reason=None, grid_id=None, level_idx=None):
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("write_meta_ledger")

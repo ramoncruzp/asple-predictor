@@ -7,6 +7,31 @@
     if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     return payload;
   }
+  async function createRound(body) {
+    const headers = {'Content-Type':'application/json', ...(window.gridApiToken ? {'X-API-Token':window.gridApiToken} : {})};
+    const response = await fetch((window.API_BASE || location.origin) + '/api/metas/tournament/rounds', {method:'POST', headers, body:JSON.stringify(body)});
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+    return payload;
+  }
+  async function loadTournament() {
+    const screen = document.getElementById('screen-lab');
+    if (!screen) return;
+    let host = document.getElementById('lab-tournament');
+    if (!host) {
+      host = document.createElement('section'); host.id = 'lab-tournament'; host.className = 'card lab-section';
+      host.innerHTML = '<h2>Torneo de estrategias</h2><p>Saldo libre: <b data-free>consultando…</b></p><form data-round><label>Capital por competidor <input name="capital" type="number" min="10" value="50" required></label> <label>Objetivo USDT <input name="target" type="number" min="0.01" step="0.01" value="1.5" required></label> <label>Plazo días <input name="days" type="number" min="1" value="20" required></label><fieldset><legend>Competidores</legend>' + ['v1','v2','cazador','escalera','seguidor','control'].map(x => `<label><input type="checkbox" name="competitor" value="${x}" checked> ${x}</label> `).join('') + '</fieldset><button type="submit">Crear ronda y activar metas</button></form><p data-status role="status"></p><div data-rounds></div>';
+      screen.insertBefore(host, screen.children[2] || null);
+      host.querySelector('[data-round]').addEventListener('submit', async event => {
+        event.preventDefault(); const form = event.currentTarget, status = host.querySelector('[data-status]');
+        const competitors = [...form.querySelectorAll('[name="competitor"]:checked')].map(x => x.value);
+        try { const result = await createRound({competitors, capital_usdt:Number(form.capital.value), target_value:Number(form.target.value), target_type:'USDT', profile:'RAPIDO', duration_days:Number(form.days.value)}); status.textContent = `Ronda ${result.ronda} activada: ${result.goals.map(x => `Meta #${x.id} (${x.config_snapshot.competidor})`).join(', ')}. Saldo libre antes de crear: ${Number(result.saldo_libre_usdt).toFixed(2)} USDT.`; }
+        catch (error) { status.textContent = `No se creó la ronda: ${error.message}`; }
+      });
+    }
+    try { const result = await get('/api/metas/tournament/availability'); host.querySelector('[data-free]').textContent = `${Number(result.free_usdt).toFixed(2)} USDT (reservado ${Number(result.reserved_usdt).toFixed(2)})`; }
+    catch (error) { host.querySelector('[data-free]').textContent = `no disponible: ${error.message}`; }
+  }
   function renderStats(stats) {
     const host = document.getElementById('lab-stoploss-stats-content');
     if (!host) return;
@@ -58,7 +83,7 @@
     } catch (error) { host.innerHTML = `<p class="muted">No se pudo leer la bitácora de motores: ${esc(error.message)}</p>`; }
   }
   window.loadLabPage = async function () {
-    await Promise.all([window.ASPLEGlobalFlags?.load('lab-global-settings-content'), loadStats(), loadEngineShadow()]);
+    await Promise.all([window.ASPLEGlobalFlags?.load('lab-global-settings-content'), loadStats(), loadEngineShadow(), loadTournament()]);
     const host = document.getElementById('lab-global-settings-content');
     await window.ASPLEMetaLearning?.loadSwitches(host);
   };

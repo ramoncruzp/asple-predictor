@@ -40,6 +40,20 @@ def _core(tmp_path, *, exchange=None, enabled=True, alert=None):
     return db, core
 
 
+def test_ronda_torneo_crea_competidores_activos_con_snapshot_aislado(tmp_path):
+    db, core = _core(tmp_path)
+    result = core.create_tournament_round(["v1", "v2", "cazador"], 50, 1.5,
+        "USDT", "RAPIDO", 20)
+    assert result["iniciadas_juntas"] is True
+    assert len(result["goals"]) == 3
+    configs = [goal["config_snapshot"] for goal in result["goals"]]
+    assert {cfg["competidor"] for cfg in configs} == {"v1", "v2", "cazador"}
+    assert {cfg["ronda"] for cfg in configs} == {result["ronda"]}
+    assert {goal["status"] for goal in result["goals"]} == {"ACTIVE"}
+    assert next(cfg for cfg in configs if cfg["competidor"] == "v2")["decision_engine"] == "v2"
+    assert next(cfg for cfg in configs if cfg["competidor"] == "cazador")["decision_engine"] == "v1"
+
+
 def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     from sqlalchemy import select
 

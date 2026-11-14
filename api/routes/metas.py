@@ -36,6 +36,16 @@ class GoalCreate(BaseModel):
     profile: str = "PRUDENTE"
 
 
+class TournamentRoundCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    competitors: list[str] = Field(default_factory=lambda: ["v1", "v2", "cazador", "escalera", "seguidor", "control"])
+    capital_usdt: float = Field(default=50, gt=0)
+    target_value: float = Field(default=1.5, gt=0)
+    target_type: str = "USDT"
+    profile: str = "RAPIDO"
+    duration_days: int = Field(default=20, ge=1, le=365)
+
+
 class PieceLink(BaseModel):
     model_config = ConfigDict(extra="forbid")
     grid_id: int = Field(gt=0)
@@ -329,6 +339,23 @@ def piece_links(request: Request):
 def create_goal(request: Request, body: GoalCreate):
     return _call(_core(request).create_goal, body.capital_usdt, body.target_value,
                  body.target_type, body.profile)
+
+
+@router.post("/tournament/rounds")
+def create_tournament_round(request: Request, body: TournamentRoundCreate):
+    return _call(_core(request).create_tournament_round, body.competitors,
+                 body.capital_usdt, body.target_value, body.target_type,
+                 body.profile, body.duration_days)
+
+
+@router.get("/tournament/availability")
+def tournament_availability(request: Request):
+    core = _core(request)
+    try:
+        free, reserved = core._available_usdt()
+        return {"free_usdt": str(free), "reserved_usdt": str(reserved)}
+    except Exception as exc:
+        raise HTTPException(503, f"No se pudo consultar el saldo libre: {exc}") from exc
 
 
 @router.get("/{meta_id}")
