@@ -51,6 +51,28 @@ def follower_geometry(mid, sigma_24h, *, levels=8, inventory_pct=0, cash_pct=0):
         "recenter_trigger_levels": 1}
 
 
+def follower_recenter(mid, current_low, current_high, sigma_24h, *,
+        last_recenter_s=None, now_s=None, inventory=()):
+    """Recentra fuera de rango y reasigna inventario a ventas no deficitarias."""
+    mid = float(mid)
+    step = (float(current_high) / float(current_low)) ** (1 / 8) - 1
+    outside = (mid < float(current_low) / (1 + step) or
+        mid > float(current_high) * (1 + step))
+    if not outside:
+        return {"recenter": False, "inventory_sells": []}
+    if last_recenter_s is not None and now_s is not None and float(now_s) - float(last_recenter_s) < 6 * 3600:
+        return {"recenter": False, "reason": "cooldown", "inventory_sells": []}
+    geometry = follower_geometry(mid, sigma_24h)
+    spacing = (geometry["high"] / geometry["low"]) ** (1 / 8) - 1
+    sells = []
+    for piece in inventory:
+        qty, cost = float(piece.get("quantity") or 0), float(piece.get("cost_price") or 0)
+        if qty <= 0 or cost <= 0:
+            continue
+        sells.append({"quantity": qty, "price": max(cost * 1.003, mid * (1 + spacing))})
+    return {"recenter": True, "geometry": geometry, "inventory_sells": sells}
+
+
 def control_geometry(mid, sigma_24h):
     """Grid de control fijo: ocho niveles sobre ±2σ al inicio."""
     mid, sigma = float(mid), float(sigma_24h)

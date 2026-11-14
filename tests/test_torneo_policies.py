@@ -1,6 +1,7 @@
 import pytest
 
-from grid.engines.torneo import control_geometry, follower_geometry, ladder_orders
+from grid.engines.torneo import (control_geometry, follower_geometry,
+    follower_recenter, ladder_orders)
 
 
 def test_escalera_respeta_escalones_tope_y_bot_comprado():
@@ -26,3 +27,13 @@ def test_control_es_fijo_a_dos_sigma():
     result = control_geometry(100, .02)
     assert result["levels"] == 8 and result["interventions"] is False
     assert result["low"] == pytest.approx(100 * __import__("math").exp(-.04))
+
+
+def test_seguidor_recentra_con_enfriamiento_y_protege_costo():
+    result = follower_recenter(120, 90, 110, .02, now_s=100_000,
+        inventory=[{"quantity": 2, "cost_price": 121}])
+    assert result["recenter"] is True
+    assert result["inventory_sells"][0]["price"] >= 121
+    waiting = follower_recenter(120, 90, 110, .02, last_recenter_s=99_000,
+        now_s=100_000, inventory=[{"quantity": 2, "cost_price": 121}])
+    assert waiting["recenter"] is False and waiting["reason"] == "cooldown"
