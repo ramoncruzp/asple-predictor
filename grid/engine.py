@@ -613,7 +613,8 @@ class GridEngine:
         logger.info("grid=%s level=%s action=%s_SENT order_id=%s", grid_id, level["level_idx"], side, order["order_id"])
         return int(order["order_id"])
 
-    def seed_initial_inventory(self, grid_id: int, *, max_slippage_pct: Decimal | float = Decimal("0.5")) -> dict:
+    def seed_initial_inventory(self, grid_id: int, *, max_slippage_pct: Decimal | float = Decimal("0.5"),
+            max_quote_usdt: Decimal | float | None = None) -> dict:
         """Compra con cautela las celdas inactivas que quedan sobre el precio."""
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("seed_initial_inventory")
@@ -639,12 +640,19 @@ class GridEngine:
             and _d(row.get("held_qty") or 0) == 0
             and _d(row.get("price") or 0) > _d(book_mid(ticker) or 0)]
         selected = []
+        quote_cap = None if max_quote_usdt is None else _d(max_quote_usdt)
+        quote_used = Decimal(0)
         cumulative_qty = Decimal(0)
         cumulative_quote = Decimal(0)
         remaining_asks = [[price, qty] for price, qty in asks]
         skipped = []
         for level in candidates:
             budget = _d(level.get("capital") or 0)
+            if quote_cap is not None:
+                budget = min(budget, max(Decimal(0), quote_cap - quote_used))
+                if budget <= 0:
+                    skipped.append({"level_idx": int(level["level_idx"]), "reason": "initial_inventory_cap"})
+                    break
             qty = filters.round_qty_down(budget / best_ask) if best_ask > 0 else Decimal(0)
             if qty < filters.min_qty:
                 skipped.append({"level_idx": int(level["level_idx"]), "reason": "below_min_qty"})
@@ -690,6 +698,7 @@ class GridEngine:
                 continue
             selected.append({"level": level, "qty": qty, "vwap_estimate": vwap,
                 "slippage_pct": slippage_pct})
+            quote_used += tentative_quote
             cumulative_qty += qty
             cumulative_quote += tentative_quote
             need = qty

@@ -760,7 +760,8 @@ class V2ScenarioEngine(DecisionEngine):
                     grid_id=grid_id)
                 continue
             try:
-                result = operator.engine.seed_initial_inventory(grid_id)
+                result = operator.engine.seed_initial_inventory(grid_id,
+                    max_quote_usdt=float(grid.get("capital_total") or 0) * .40)
                 details = {"status": "aplicado", "grid_id": grid_id,
                     "signature": signature, "review_at_s": review_at_s,
                     "levels": pending_levels, "result": result}

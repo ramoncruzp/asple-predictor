@@ -71,6 +71,12 @@ def test_cazador_excluye_destino_con_profundidad_menor_a_dos_capitales(meta7_caz
     assert not any(row["symbol"] == "PEPEUSDT" for row in result["destino"])
 
 
+def test_cazador_excluye_destino_con_caida_mayor_a_sigma(meta7_cazador_context):
+    meta7_cazador_context["markets"]["PEPEUSDT"]["drift_24h"] = -.101
+    result = decide_cazador(meta7_cazador_context)
+    assert not any(row["symbol"] == "PEPEUSDT" for row in result["destino"])
+
+
 def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
         tmp_path, monkeypatch, meta7_cazador_context):
     import sqlite3

@@ -54,7 +54,9 @@ def _valid_market(market):
         high = float(market.get("high_24h"))
     except (TypeError, ValueError):
         return False
-    return (all(isfinite(value) and value > 0 for value in (sigma, mid, low, high)) and
+    drift = market.get("drift_24h")
+    falling = (drift is not None and isfinite(float(drift)) and float(drift) < -sigma)
+    return (not falling and all(isfinite(value) and value > 0 for value in (sigma, mid, low, high)) and
         high >= low and int(market.get("bid_levels") or 0) >= 5 and
         int(market.get("ask_levels") or 0) >= 5 and
         float(market.get("bid_depth_usdt_1pct") or 0) > 0 and
@@ -354,6 +356,7 @@ def build_runtime_context(operator, goal, valuation):
             close = np.asarray([row[2] for row in rows], dtype=float)
             returns = np.diff(np.log(close))
             sigma = float(np.std(returns, ddof=1) * np.sqrt(288)) if len(returns) > 1 else 0.0
+            price_24h = float(close[0])
             filter_row = conn.execute("SELECT raw_json FROM symbol_filters WHERE symbol=?",
                 (str(symbol).upper(),)).fetchone()
             filters = SymbolFilters.from_symbol_info(json.loads(filter_row[0])) if filter_row else None
@@ -386,6 +389,8 @@ def build_runtime_context(operator, goal, valuation):
                 continue
             markets[str(symbol).upper()] = {"mid": (bid + ask) / 2, "bid": bid,
                 "sigma_24h": sigma, "low_24h": float(min(row[1] for row in rows[-288:])),
+                "price_24h": price_24h,
+                "drift_24h": float(np.log(((bid + ask) / 2) / price_24h)) if price_24h > 0 else None,
                 "high_24h": float(max(row[0] for row in rows[-288:])), "filters": filters,
                 "bid_levels": len(bids), "ask_levels": len(asks),
                 "bid_depth_usdt_1pct": bid_depth, "ask_depth_usdt_1pct": ask_depth}
