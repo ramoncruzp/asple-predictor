@@ -450,20 +450,73 @@ class MetaCore:
             latest = next((item.get("details") or {} for item in reversed(events)
                 if item.get("event_type") == "META_VALUATION"), {})
             run = next(iter(self.list_runs(goal["id"])), {})
+            goal_events = [row for row in events if row.get("event_type") in {
+                "META_TARGET_MET", "META_CUMPLIDA", "META_VENCIDA", "META_CORTADA_POR_PERDIDA"}]
+            started = goal.get("started_at")
+            finished = goal.get("finished_at") or (goal_events[-1].get("ts") if goal_events else None)
+            days_to_finish = None
+            if started is not None and finished is not None:
+                if isinstance(started, str): started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                if isinstance(finished, str): finished = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+                if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
+                if finished.tzinfo is None: finished = finished.replace(tzinfo=timezone.utc)
+                days_to_finish = round(max(0, (finished - started).total_seconds()) / 86400, 3)
+            cycles = 0
+            for link in self._all_piece_links(int(goal["id"])):
+                grid = self.db.get_grid(int(link["grid_id"]))
+                if grid:
+                    cycles += sum(1 for event in self.db.list_grid_events(
+                        grid_id=int(link["grid_id"]), limit=100000)
+                        if event.get("event_type") == "SELL_FILLED")
             rows.append({"meta_id": int(goal["id"]), "ronda": int(cfg.get("ronda", 0)),
                 "competidor": cfg["competidor"], "status": goal["status"],
                 "result_pct": latest.get("result_pct"), "equity_usdt": latest.get("value_usdt"),
                 "cash_usdt": latest.get("cash_usdt"),
-                "realized_gain_usdt": run.get("realized_extra_usdt", 0),
+                "realized_gain_usdt": sum(float(level.get("pnl") or 0)
+                    for link in self._all_piece_links(int(goal["id"]))
+                    for level in self.db.get_grid_levels(int(link["grid_id"]))
+                    if self.db.get_grid(int(link["grid_id"])) is not None),
                 "max_drawdown_pct": run.get("worst_result_pct", 0),
-                "cycles": sum(1 for item in events if item.get("event_type") == "SELL_FILLED"),
+                "cycles": cycles,
                 "rotations_reprices": sum(1 for item in events if item.get("event_type") in {
                     "META_CAZADOR_ROTACION", "META_TOURNAMENT_REPRICE", "META_TOURNAMENT_RECENTER"}),
-                "target_reached": goal["status"] == "CUMPLIDA",
+                "target_reached": goal["status"] == "CUMPLIDA", "days_to_finish": days_to_finish,
                 "v2_predicted_probability": next((float((item.get("details") or {}).get("p_meta"))
                     for item in reversed(events) if item.get("event_type") == "META_OPERATOR_REVIEW_DECISION"
                     and (item.get("details") or {}).get("p_meta") is not None), None) if cfg["competidor"] == "v2" else None})
         return sorted(rows, key=lambda item: item["meta_id"])
+
+    def generate_tournament_round_report(self, round_number, output_dir="reports/torneo"):
+        """Escribe el informe final solo cuando todas las metas de la ronda cerraron."""
+        from pathlib import Path
+        goals = []
+        for goal in self.list_goals():
+            raw_cfg = goal.get("config_snapshot") or "{}"
+            cfg = json.loads(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
+            if int(cfg.get("ronda", 0)) == int(round_number):
+                goals.append(goal)
+        terminal = {"CUMPLIDA", "VENCIDA", "CORTADA_POR_PERDIDA", "CANCELLED", "DESCARTADA"}
+        if len(goals) != 6 or any(goal["status"] not in terminal for goal in goals):
+            return {"generated": False, "reason": "la ronda todavía tiene metas activas"}
+        board = self.tournament_scoreboard(round_number)
+        labels = [str(row["competidor"]) for row in board]
+        values = [float(row["equity_usdt"] or 0) for row in board]
+        ceiling = max(values, default=1) or 1
+        bars = "".join(f'<text x="8" y="{28 + i*30}">{label}</text><rect x="110" y="{12+i*30}" width="{max(1, 350*value/ceiling):.1f}" height="18" fill="#4387d8"/><text x="{118+350*value/ceiling:.1f}" y="{27+i*30}">{value:.2f}</text>'
+            for i, (label, value) in enumerate(zip(labels, values)))
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="500" height="{len(values)*30+20}">{bars}</svg>'
+        lines = ["# Resultado de la ronda " + str(round_number), "",
+            "| Competidor | Meta | Resultado | Equity USDT | Ganancia realizada | Caída máxima | Ciclos | Acciones | Meta alcanzada | Días | P(meta) v2 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+        for row in board:
+            lines.append("| {competidor} | #{meta_id} | {result_pct} | {equity_usdt} | {realized_gain_usdt} | {max_drawdown_pct} | {cycles} | {rotations_reprices} | {target_reached} | {days_to_finish} | {v2_predicted_probability} |".format(**row))
+        lines.extend(["", "## Equity por competidor", "", "```svg", svg, "```", "",
+            "## Propuesta de reasignación", "",
+            "Revisar resultado, riesgo y duración; Ramón decide qué estrategias continúan o cambian. No se reasigna capital automáticamente.", ""])
+        path = Path(output_dir) / f"ronda_{int(round_number)}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return {"generated": True, "path": str(path)}
 
     def discard_goal(self, meta_id):
         """Descarta un borrador (DRAFT): no toca el exchange, no cuenta como meta activa."""
@@ -1179,6 +1232,18 @@ class MetaCore:
                             "No se pudo registrar el error del vigilante de Meta %s", goal_id)
                     results.append({"meta_id": goal_id, "status": "WATCHDOG_ERROR",
                         "error": f"{type(exc).__name__}: {exc}"})
+            rounds = set()
+            for goal in self.list_goals():
+                raw_cfg = goal.get("config_snapshot") or "{}"
+                cfg = json.loads(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
+                if cfg.get("competidor") and cfg.get("ronda") is not None:
+                    rounds.add(int(cfg["ronda"]))
+            for round_number in rounds:
+                try:
+                    self.generate_tournament_round_report(round_number)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "No se pudo generar el informe final de la ronda %s", round_number)
             return results
 
     def _check_watchdog_health(self, goal):
@@ -1820,8 +1885,30 @@ class MetaCore:
     def start(self):
         self.scheduler.add_job(self.run_once, "cron", minute="*", second=0, timezone="UTC", id="meta_watchdog",
                                replace_existing=True, max_instances=1, coalesce=True)
+        self.scheduler.add_job(self._send_tournament_weekly_summary, "cron",
+            day_of_week="mon", hour=12, minute=17, timezone="UTC",
+            id="meta_tournament_weekly", replace_existing=True, max_instances=1)
         if not self.scheduler.running:
             self.scheduler.start()
+
+    def _send_tournament_weekly_summary(self):
+        rounds = set()
+        for goal in self.list_goals():
+            raw_cfg = goal.get("config_snapshot") or "{}"
+            cfg = json.loads(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
+            if cfg.get("competidor") and cfg.get("ronda") is not None:
+                rounds.add(int(cfg["ronda"]))
+        sent = 0
+        for round_number in sorted(rounds):
+            board = self.tournament_scoreboard(round_number)
+            if not board:
+                continue
+            meta_id = int(board[0]["meta_id"])
+            details = {"ronda": round_number, "scoreboard": board}
+            self._ledger(meta_id, None, "META_TOURNAMENT_WEEKLY", details)
+            self.alert("META_TOURNAMENT_WEEKLY", meta_id, details)
+            sent += 1
+        return {"rounds_sent": sent}
 
     def stop(self):
         if self.scheduler.running:

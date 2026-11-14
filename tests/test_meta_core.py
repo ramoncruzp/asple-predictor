@@ -70,6 +70,23 @@ def test_ronda_torneo_mantiene_efectivo_y_equity_aislados_por_meta(tmp_path):
         assert valuation["cash_coherent"] is True
 
 
+def test_reporte_de_ronda_cerrada_y_resumen_semanal(tmp_path):
+    from sqlalchemy import update
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    result = core.create_tournament_round(
+        ["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5)
+    with db.engine.begin() as conn:
+        conn.execute(update(db.meta_goals).values(status="CUMPLIDA", finished_at=core._now()))
+    report = core.generate_tournament_round_report(result["ronda"], tmp_path / "reports")
+    assert report["generated"] is True
+    content = (tmp_path / "reports" / f"ronda_{result['ronda']}.md").read_text(encoding="utf-8")
+    assert "Propuesta de reasignación" in content and "<svg" in content
+    summary = core._send_tournament_weekly_summary()
+    assert summary["rounds_sent"] == 1
+    assert alerts[-1][0] == "META_TOURNAMENT_WEEKLY"
+
+
 def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     from sqlalchemy import select
 
