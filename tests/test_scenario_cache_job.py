@@ -834,7 +834,12 @@ def test_contexto_meta_calcula_efectivo_valor_inventario_y_objetivo(cache_databa
             run_id=run_id, grid_id=grid["id"], piece_type="grid", created_at=now))
     db.add_grid_event(run_id=grid.get("run_id"), source="MONITOR",
         event_type="BUY_FILLED", grid_id=grid["id"], price=1,
-        details={"quote_qty": 40, "fee_usdt": .04})
+        order_id=71, level_idx=0, client_order_id="initial-0",
+        details={"cummulative_quote_qty": 0, "executed_qty": 40, "fee_usdt": 0})
+    db.add_grid_event(run_id=grid.get("run_id"), source="MONITOR",
+        event_type="GRID_COMPRA_INICIAL", grid_id=grid["id"], price=1,
+        order_id=71, level_idx=0, client_order_id="initial-0",
+        details={"price_avg": 1, "quantity": 40, "fee_usdt": .04})
 
     context = cache_script._contexts(db.engine.url.database, {"XRPUSDT": 1})[0]
 

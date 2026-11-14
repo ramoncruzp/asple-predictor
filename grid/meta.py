@@ -156,6 +156,7 @@ class MetaCore:
         # Candado hoja: protege exclusivamente la lectura del libro y su caché.
         # No adquirir ops_lock ni _lock mientras se mantiene este candado.
         self._depth_read_lock = threading.RLock()
+        self._equity_coherence_lock = threading.RLock()
         self._cancel_plans: dict[str, tuple[datetime, tuple[int, ...]]] = {}
 
     def _now(self):
@@ -444,6 +445,7 @@ class MetaCore:
                 events.extend(event for event in reversed(repository_events)
                               if event.get("level_idx") is not None
                               and int(event["level_idx"]) in moved_ids)
+            events = self._repair_initial_buy_events(events)
             for event in events:
                 details = event.get("details") or {}
                 if event.get("event_type") == "BUY_FILLED":
@@ -458,6 +460,36 @@ class MetaCore:
                         returned += quote
                         commissions += fee
         return attributable_cash(self.get_goal(meta_id)["capital_initial"], delivered, returned, commissions)
+
+    @staticmethod
+    def _repair_initial_buy_events(events):
+        """Recupera el quote/fee MARKET histórico desde GRID_COMPRA_INICIAL."""
+        result = list(events)
+        buys = [event for event in result if event.get("event_type") == "BUY_FILLED"]
+        for initial in (event for event in result
+                if event.get("event_type") == "GRID_COMPRA_INICIAL"):
+            details = initial.get("details") or {}
+            order_id = initial.get("order_id") or details.get("order_id")
+            match = next((event for event in buys if
+                (order_id is not None and str(event.get("order_id")) == str(order_id)) or
+                (event.get("level_idx") == initial.get("level_idx") and
+                 event.get("client_order_id") == initial.get("client_order_id"))), None)
+            quote = _d(details.get("price_avg")) * _d(details.get("quantity"))
+            fee = details.get("fee_usdt")
+            if match is None:
+                match = {**initial, "event_type": "BUY_FILLED", "details": {}}
+                result.append(match)
+                buys.append(match)
+            buy_details = dict(match.get("details") or {})
+            old_quote = buy_details.get("cummulative_quote_qty",
+                buy_details.get("quote_qty", buy_details.get("executed_quote_qty")))
+            if quote > 0 and (old_quote is None or _d(old_quote) <= 0):
+                buy_details.update({"cummulative_quote_qty": str(quote), "quote_qty": str(quote)})
+            if fee is not None and (buy_details.get("fee_usdt") is None or
+                    old_quote is None or _d(old_quote) <= 0):
+                buy_details["fee_usdt"] = str(fee)
+            match["details"] = buy_details
+        return result
 
     def _unlinked_grid_reserve(self, excluded_grid_ids=()):
         from sqlalchemy import select
@@ -713,6 +745,10 @@ class MetaCore:
                 piece["status"] = coin.get("status", "KNOWN")
                 piece["valuation_reason"] = symbol_diagnostics.get(piece["symbol"], {}).get("reason") or coin.get("reason")
                 piece["book_read_at"] = coin.get("book_read_at")
+            with self._equity_coherence_lock:
+                equity_coherence = self._check_equity_coherence(meta_id, goal, cash,
+                    inventory_exec, history_links, pieces)
+            cash_coherent = cash_coherence["coherent"] and equity_coherence["coherent"]
             self._update_valuation_state(meta_id, state_rows, profile_cfg)
             value_best = cash + inventory_best * (Decimal(1) - FEE)
             value_exec = cash + inventory_exec
@@ -755,8 +791,8 @@ class MetaCore:
                     "result_pct": str(result_exec) if status != "DESCONOCIDO" else None,
                     "result_pct_best_bid": str(result_best),
                     "result_pct_executable": str(result_exec) if status != "DESCONOCIDO" else None,
-                    "cash_coherent": cash_coherence["coherent"],
-                    "cash_coherence": cash_coherence,
+                    "cash_coherent": cash_coherent,
+                    "cash_coherence": {**cash_coherence, "equity": equity_coherence},
                     "estimated_sell_fee_pct": "0.1", "pieces": pieces}
         except Exception as exc:
             symbol = next((self.db.get_grid(int(link["grid_id"])).get("symbol") for link in links
@@ -853,6 +889,102 @@ class MetaCore:
             "missing_released_grid_ids": missing_released_grids,
             "delta_usdt": str(delta), "threshold_usdt": str(threshold)}
 
+    def _check_equity_coherence(self, meta_id, goal, cash, inventory, history_links, pieces):
+        """Contrasta equity con PnL realizado y variación no realizada de piezas."""
+        realized = Decimal(0)
+        open_cost = Decimal(0)
+        open_fees = Decimal(0)
+        pnl_known = True
+        for link in history_links:
+            grid = self.db.get_grid(int(link["grid_id"]))
+            if grid is None:
+                continue
+            events = self.db.list_grid_events(grid_id=int(grid["id"]), limit=100000)
+            repository_grid_id = link.get("repository_grid_id")
+            if repository_grid_id is not None:
+                level_map = json.loads(link.get("repository_level_map") or "{}")
+                moved_ids = {int(index) for index in level_map.values()}
+                repository_events = self.db.list_grid_events(
+                    grid_id=int(repository_grid_id), limit=100000)
+                events.extend(event for event in repository_events
+                    if event.get("level_idx") is not None and
+                    int(event["level_idx"]) in moved_ids)
+            events = self._repair_initial_buy_events(events)
+            latest_buys = {}
+            for event in reversed(events):
+                kind = event.get("event_type")
+                details = event.get("details") or {}
+                if kind == "BUY_FILLED":
+                    latest_buys[int(event.get("level_idx") or 0)] = event
+                elif kind == "SELL_FILLED":
+                    pnl = details.get("cycle_pnl")
+                    if pnl is None:
+                        pnl_known = False
+                    else:
+                        realized += _d(pnl)
+                elif kind == "CELL_LIQUIDATED":
+                    pnl = details.get("realized_pnl", details.get("cycle_pnl"))
+                    if pnl is None and details.get("cash_proceeds_net") is not None:
+                        buy = latest_buys.get(int(event.get("level_idx") or 0))
+                        buy_details = (buy or {}).get("details") or {}
+                        buy_quote = buy_details.get("cummulative_quote_qty",
+                            buy_details.get("quote_qty", buy_details.get("executed_quote_qty")))
+                        if buy_quote is not None:
+                            pnl = _d(details["cash_proceeds_net"]) - _d(buy_quote) - _d(buy_details.get("fee_usdt"))
+                    if pnl is None:
+                        pnl_known = False
+                    else:
+                        realized += _d(pnl)
+            piece = next((row for row in pieces if int(row["grid_id"]) == int(link["grid_id"])), None)
+            if piece is None:
+                continue
+            for level in piece["levels"]:
+                qty = _d(level.get("held_qty"))
+                if qty <= 0:
+                    continue
+                buy = latest_buys.get(int(level["level_idx"]))
+                entry_price = _d(level.get("entry_price"))
+                if entry_price <= 0 and buy:
+                    buy_details = buy.get("details") or {}
+                    buy_quote = buy_details.get("cummulative_quote_qty",
+                        buy_details.get("quote_qty", buy_details.get("executed_quote_qty")))
+                    buy_qty = _d(buy_details.get("executed_qty"))
+                    if buy_quote is not None:
+                        entry_price = (_d(buy_quote) / buy_qty if buy_qty > 0
+                            else _d(buy_quote) / qty)
+                open_cost += qty * entry_price
+                if buy:
+                    open_fees += _d((buy.get("details") or {}).get("fee_usdt"))
+        actual = _d(cash) + _d(inventory)
+        expected = _d(goal["capital_initial"]) + realized + _d(inventory) - open_cost - open_fees
+        threshold = _d(goal["capital_initial"]) * Decimal("0.01")
+        delta = abs(actual - expected)
+        coherent = pnl_known and delta <= threshold
+        key = f"meta_equity_coherence_{int(meta_id)}"
+        previous = self.db.get_alert_state(key) or {}
+        blocked = not coherent
+        reason = None if coherent else ("PnL realizado de pieza no verificable" if not pnl_known
+            else "equity no cuadra con PnL de piezas")
+        if blocked and not previous.get("blocked"):
+            details = {"equity_usdt": str(actual), "expected_equity_usdt": str(expected),
+                "delta_usdt": str(delta), "threshold_usdt": str(threshold), "reason": reason}
+            self._ledger(meta_id, None, "META_VALUACION_INCOHERENTE", details)
+            try:
+                self.alert("META_VALUACION_INCOHERENTE", int(meta_id), details)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo alertar equity incoherente de Meta %s", meta_id)
+        elif not blocked and previous.get("blocked"):
+            self._ledger(meta_id, None, "META_VALUACION_COHERENCIA_RESUELTA", {
+                "reason": "equity coherente", "equity_usdt": str(actual),
+                "expected_equity_usdt": str(expected)})
+        self.db.set_alert_state(key, {"blocked": blocked, "reason": reason,
+            "equity_usdt": str(actual), "expected_equity_usdt": str(expected),
+            "updated_at": self._now().isoformat()})
+        return {"coherent": coherent, "reason": reason, "equity_usdt": str(actual),
+            "expected_equity_usdt": str(expected), "delta_usdt": str(delta),
+            "threshold_usdt": str(threshold)}
+
     def _update_valuation_state(self, meta_id, states, cfg):
         """Persiste transiciones y cadencias de alertas, incluso tras reiniciar el proceso."""
         from sqlalchemy import select
@@ -911,9 +1043,11 @@ class MetaCore:
     def _fill_cash(self, grid, event, details):
         quote_value = details.get("cummulative_quote_qty", details.get("quote_qty", details.get("executed_quote_qty")))
         fee_value = details.get("commission_usdt", details.get("fee_usdt"))
-        if quote_value is None and event.get("order_id") is not None:
+        if (quote_value is None or _d(quote_value) <= 0 or fee_value is None) and event.get("order_id") is not None:
             order = self.exchange.get_order(grid["symbol"], order_id=int(event["order_id"]))
-            quote_value = order.get("cummulative_quote_qty")
+            order_quote = order.get("cummulative_quote_qty")
+            if quote_value is None or _d(quote_value) <= 0:
+                quote_value = order_quote
             if fee_value is None and self.engine is not None:
                 trades = self.exchange.get_my_trades(grid["symbol"], int(event["order_id"]))
                 fee_value = self.engine._fee_value_usdt(trades, grid["symbol"])
@@ -1029,6 +1163,8 @@ class MetaCore:
                     "value_best_bid": valuation["value_best_bid"],
                     "value_executable": valuation["value_executable"],
                     "result_pct": valuation["result_pct"], "cash_usdt": valuation["cash_usdt"],
+                    "cash_coherent": valuation.get("cash_coherent"),
+                    "cash_coherence": valuation.get("cash_coherence"),
                     "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
                     "profile": goal["profile"], "decision": "revisar_limites_y_objetivo"})
                 warn = -_d(cfg.get("max_loss_pct", 8)) * Decimal("0.75")

@@ -287,6 +287,27 @@ def test_operations_view_uses_level_limit_prices_until_that_cell_is_adjusted():
     assert fallback["prices_approx"] is True
 
 
+def test_operations_view_repairs_initial_market_buy_from_initial_event():
+    events = [
+        {"id": 1, "event_type": "BUY_FILLED", "level_idx": 2,
+         "order_id": 25, "client_order_id": "initial-2",
+         "ts": NOW - timedelta(hours=1), "price": 1.2,
+         "details": {"cummulative_quote_qty": "0", "executed_qty": "14.3"}},
+        {"id": 2, "event_type": "GRID_COMPRA_INICIAL", "level_idx": 2,
+         "order_id": 25, "client_order_id": "initial-2",
+         "ts": NOW - timedelta(hours=1),
+         "details": {"price_avg": "1.23", "quantity": "14.3", "fee_usdt": "0.02"}},
+        {"id": 3, "event_type": "SELL_FILLED", "level_idx": 2,
+         "ts": NOW, "price": 1.3,
+         "details": {"executed_qty": "14.3", "cycle_pnl": "0.98"}},
+    ]
+
+    operation = sv.operations_view(events, levels=[_level(2, 1.2, 1.3)])[0]
+
+    assert operation["buy_price_approx"] == pytest.approx(1.23)
+    assert operation["buy_fee_usdt"] == "0.02"
+
+
 def test_daily_profit_includes_cycle_stoploss_and_liquidation_pnl_and_reconciles():
     events = [
         {"event_type": "SELL_FILLED", "ts": NOW, "details": {"cycle_pnl": "2"}},

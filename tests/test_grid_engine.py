@@ -60,6 +60,61 @@ def test_initial_inventory_buys_idle_levels_and_leaves_sell_protection():
     assert all(row["details"]["fee_usdt"] != "0" for row in events)
 
 
+def test_compra_inicial_market_resta_quote_real_y_comision_a_la_meta():
+    from datetime import datetime, timezone
+    from grid.meta import MetaCore
+
+    engine, db, exchange = make_engine()
+    exchange.testnet = True
+    core = MetaCore(db, exchange, settings=SimpleNamespace(meta_mode_enabled=True),
+        engine=engine, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    engine.event_sink = lambda event: db.add_grid_event(run_id=None,
+        source="MONITOR", **{key: value for key, value in event.items()
+            if key not in {"persisted", "source"}})
+    goal = core.create_goal(100, 10)
+    grid = create(engine)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=None, grid_id=grid["id"], piece_type="grid",
+            origin_grid_id=grid["id"], created_at=datetime(2026, 1, 1)))
+
+    before = core._goal_cash(goal["id"])
+    result = engine.seed_initial_inventory(grid["id"])
+    after = core._goal_cash(goal["id"])
+    initial = db.list_grid_events(grid_id=grid["id"], event_type="GRID_COMPRA_INICIAL")
+    buys = db.list_grid_events(grid_id=grid["id"], event_type="BUY_FILLED")
+    expected_cost = sum((Decimal(row["details"]["price_avg"]) *
+        Decimal(row["details"]["quantity"]) + Decimal(row["details"]["fee_usdt"])
+        for row in initial), Decimal(0))
+
+    assert result["status"] == "completed"
+    assert len(buys) == len(initial) == 2
+    assert all(Decimal(row["details"]["cummulative_quote_qty"]) > 0 for row in buys)
+    assert before - after == expected_cost
+
+
+def test_compra_inicial_repara_quote_market_cero_desde_trades():
+    engine, db, exchange = make_engine()
+    engine.event_sink = lambda event: db.add_grid_event(run_id=None,
+        source="MONITOR", **{key: value for key, value in event.items()
+            if key not in {"persisted", "source"}})
+    grid = create(engine)
+    # Simula la respuesta MARKET problemática: quote acumulado cero, trades correctos.
+    original = exchange.get_order
+    def get_order(*args, **kwargs):
+        order = original(*args, **kwargs)
+        if order.get("type") == "MARKET" and order.get("status") == "FILLED":
+            order["cummulative_quote_qty"] = Decimal(0)
+        return order
+    exchange.get_order = get_order
+
+    engine.seed_initial_inventory(grid["id"])
+
+    buys = db.list_grid_events(grid_id=grid["id"], event_type="BUY_FILLED")
+    assert len(buys) == 2
+    assert all(Decimal(row["details"]["cummulative_quote_qty"]) > 0 for row in buys)
+
+
 def test_initial_inventory_limits_buy_levels_when_depth_slippage_exceeds_half_percent():
     engine, db, exchange = make_engine()
     grid = create(engine)

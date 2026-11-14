@@ -17,13 +17,17 @@ def meta7_cazador_context():
             "capital_by_symbol": {"ZROUSDT": 0, "PEPEUSDT": 0, "XRPUSDT": 0, "JUPUSDT": 21}},
         "markets": {
             "ZROUSDT": {"sigma_24h": .005, "low_24h": 1.52,
-                "high_24h": 1.58, "mid": 1.55},
+                "high_24h": 1.58, "mid": 1.55, "bid_levels": 5, "ask_levels": 5,
+                "bid_depth_usdt_1pct": 10000, "ask_depth_usdt_1pct": 10000},
             "PEPEUSDT": {"sigma_24h": .10, "low_24h": .000007,
-                "high_24h": .000013, "mid": .000010},
+                "high_24h": .000013, "mid": .000010, "bid_levels": 5, "ask_levels": 5,
+                "bid_depth_usdt_1pct": 10000, "ask_depth_usdt_1pct": 10000},
             "XRPUSDT": {"sigma_24h": .05, "low_24h": .50,
-                "high_24h": .55, "mid": .525},
+                "high_24h": .55, "mid": .525, "bid_levels": 5, "ask_levels": 5,
+                "bid_depth_usdt_1pct": 10000, "ask_depth_usdt_1pct": 10000},
             "JUPUSDT": {"sigma_24h": .02, "low_24h": .235,
-                "high_24h": .265, "mid": .25}},
+                "high_24h": .265, "mid": .25, "bid_levels": 5, "ask_levels": 5,
+                "bid_depth_usdt_1pct": 10000, "ask_depth_usdt_1pct": 10000}},
         "pieces": [{"grid_id": 18, "symbol": "ZROUSDT",
             "piece_type": "individual_bot_grid", "strategy": "bot",
             "capital": 70, "liquidation_value": 60.6,
@@ -53,6 +57,18 @@ def test_cazador_meta7_rota_bot_dormido_a_cartera_diversa(meta7_cazador_context)
     assert not any(row["symbol"] == "JUPUSDT" and row["type"] == "bot"
         for row in pieza_jup["destino"])
     assert meta7_cazador_context == before
+
+
+def test_cazador_excluye_destino_con_libro_delgado(meta7_cazador_context):
+    meta7_cazador_context["markets"]["PEPEUSDT"]["ask_levels"] = 4
+    result = decide_cazador(meta7_cazador_context)
+    assert not any(row["symbol"] == "PEPEUSDT" for row in result["destino"])
+
+
+def test_cazador_excluye_destino_con_profundidad_menor_a_dos_capitales(meta7_cazador_context):
+    meta7_cazador_context["markets"]["PEPEUSDT"]["bid_depth_usdt_1pct"] = 20
+    result = decide_cazador(meta7_cazador_context)
+    assert not any(row["symbol"] == "PEPEUSDT" for row in result["destino"])
 
 
 def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
@@ -98,7 +114,16 @@ def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
             return levels[int(grid_id)]
     db = FakeDb()
     core = SimpleNamespace(db=db, _available_usdt=lambda _goal_id: (4, 0))
+    class BookClient:
+        def get_order_book(self, symbol, limit=100):
+            mid = meta7_cazador_context["markets"][symbol]["mid"]
+            return {"bids": [[mid * (1 - i * .0005), 10000] for i in range(5)],
+                "asks": [[mid * (1 + i * .0005), 10000] for i in range(5)]}
+    book_client = BookClient()
     operator = SimpleNamespace(core=core, db=db,
+        scanner=SimpleNamespace(client=book_client),
+        _plan_read=lambda source, method, *args, **kwargs:
+            getattr(source, method)(*args, **kwargs),
         _book_ticker=lambda symbol: {
             "bid_price": meta7_cazador_context["markets"][symbol]["mid"] * .999,
             "ask_price": meta7_cazador_context["markets"][symbol]["mid"] * 1.001})

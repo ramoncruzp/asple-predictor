@@ -1251,8 +1251,12 @@ class GridEngine:
             "BUY_FILLED", grid_id, idx, client_order_id=level.get("client_order_id"),
             order_id=order["order_id"], details={
                 "executed_qty": str(gross_qty), "held_qty": str(held_qty),
-                "cummulative_quote_qty": str(order.get("cummulative_quote_qty", gross_quote)),
-                "fee_usdt": str(fee_usdt), "base_fee": str(base_fee),
+                # Los fills MARKET pueden traer cummulative_quote_qty=0 aunque
+                # los trades ya confirmen el importe real ejecutado.
+                "cummulative_quote_qty": str(gross_quote),
+                "quote_qty": str(gross_quote), "fee_usdt": str(fee_usdt),
+                "commission_usdt": str(fee_usdt), "price_avg": str(entry_price),
+                "base_fee": str(base_fee),
             },
         )
         if held_qty < filters.min_qty:

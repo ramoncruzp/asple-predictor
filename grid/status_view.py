@@ -375,7 +375,35 @@ def operations_view(events: list[dict], limit: int = 50, *, levels: list[dict] |
     shown with ``prices_approx`` set. Per-operation gross and sell fee remain
     unavailable because the event stores net realized PnL only.
     """
-    by_ts = sorted(events, key=lambda event: (event["ts"], event.get("id", 0)))
+    by_ts = sorted((dict(event) for event in events),
+        key=lambda event: (event["ts"], event.get("id", 0)))
+    initial_events = [event for event in by_ts
+        if event.get("event_type") == "GRID_COMPRA_INICIAL"]
+    for event in by_ts:
+        if event.get("event_type") != "BUY_FILLED":
+            continue
+        details = dict(event.get("details") or {})
+        quote = details.get("cummulative_quote_qty",
+            details.get("quote_qty", details.get("executed_quote_qty")))
+        if quote is not None and float(quote or 0) > 0:
+            continue
+        order_id = event.get("order_id")
+        initial = next((row for row in initial_events if
+            (order_id is not None and str(row.get("order_id")) == str(order_id)) or
+            (row.get("level_idx") == event.get("level_idx") and
+             row.get("client_order_id") == event.get("client_order_id"))), None)
+        if initial is None:
+            continue
+        initial_details = initial.get("details") or {}
+        initial_quote = float(initial_details.get("price_avg") or 0) * float(
+            initial_details.get("quantity") or 0)
+        if initial_quote > 0:
+            details["cummulative_quote_qty"] = str(initial_quote)
+            details["price_avg"] = str(initial_details.get("price_avg"))
+            details["executed_qty"] = str(details.get("executed_qty") or
+                initial_details.get("quantity"))
+            details["fee_usdt"] = str(initial_details.get("fee_usdt", details.get("fee_usdt", 0)))
+            event["details"] = details
     level_by_idx = {int(row["level_idx"]): row for row in (levels or [])}
     adjusted_levels: set[int] = set()
     for event in by_ts:
@@ -412,7 +440,18 @@ def operations_view(events: list[dict], limit: int = 50, *, levels: list[dict] |
                 sell_price = details.get("price")
                 net_pnl = details.get("cycle_pnl", details.get("realized_pnl"))
             else:
-                buy_price = level.get("price") if exact_prices else (buy_event.get("price") if buy_event else None)
+                buy_details = (buy_event or {}).get("details") or {}
+                buy_quote = buy_details.get("cummulative_quote_qty",
+                    buy_details.get("quote_qty", buy_details.get("executed_quote_qty")))
+                buy_qty = buy_details.get("executed_qty")
+                actual_buy_price = (float(buy_quote) / float(buy_qty)
+                    if buy_quote is not None and buy_qty is not None and float(buy_qty) > 0
+                    else buy_details.get("price_avg"))
+                if actual_buy_price is None:
+                    actual_buy_price = ((buy_event or {}).get("price") if not exact_prices
+                        else level.get("price"))
+                buy_price = actual_buy_price if buy_event is not None else (
+                    level.get("price") if exact_prices else None)
                 sell_price = level.get("sell_price") if exact_prices else event.get("price")
                 net_pnl = details.get("cycle_pnl")
             operations.append({

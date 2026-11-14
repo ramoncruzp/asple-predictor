@@ -54,7 +54,11 @@ def _valid_market(market):
         high = float(market.get("high_24h"))
     except (TypeError, ValueError):
         return False
-    return all(isfinite(value) and value > 0 for value in (sigma, mid, low, high)) and high >= low
+    return (all(isfinite(value) and value > 0 for value in (sigma, mid, low, high)) and
+        high >= low and int(market.get("bid_levels") or 0) >= 5 and
+        int(market.get("ask_levels") or 0) >= 5 and
+        float(market.get("bid_depth_usdt_1pct") or 0) > 0 and
+        float(market.get("ask_depth_usdt_1pct") or 0) > 0)
 
 
 def _grid_destination(symbol, capital, market, profile, levels, *, allow_smart):
@@ -149,6 +153,10 @@ def _destination_portfolio(markets, budget, source_sigma, profile, limits, *,
             share = budget * float(market["sigma_24h"]) / total_sigma
             amount = min(share, max(0.0, coin_cap - by_symbol.get(symbol, 0.0)))
             if amount < 10.0:
+                failed_symbols.append(symbol)
+                continue
+            if (float(market["bid_depth_usdt_1pct"]) < 2 * amount or
+                    float(market["ask_depth_usdt_1pct"]) < 2 * amount):
                 failed_symbols.append(symbol)
                 continue
             # El primer destino es un grid si alcanza; los posteriores usan bots.
@@ -357,9 +365,30 @@ def build_runtime_context(operator, goal, valuation):
                 continue
             if bid <= 0 or ask < bid:
                 continue
+            try:
+                client = operator.scanner.client
+                raw = getattr(client, "client", client)
+                depth_reader = getattr(client, "get_order_book_depth", None)
+                if callable(depth_reader):
+                    depth = operator._plan_read(client, "get_order_book_depth", symbol, 100)
+                else:
+                    depth = operator._plan_read(raw, "get_order_book", symbol=symbol, limit=100)
+                bids = depth.get("bids", [])
+                asks = depth.get("asks", [])
+                mid = (bid + ask) / 2
+                bid_depth = sum(float(price) * float(qty) for price, qty in bids
+                    if float(price) >= mid * .99 and float(qty) > 0)
+                ask_depth = sum(float(price) * float(qty) for price, qty in asks
+                    if float(price) <= mid * 1.01 and float(qty) > 0)
+            except Exception:
+                continue
+            if len(bids) < 5 or len(asks) < 5:
+                continue
             markets[str(symbol).upper()] = {"mid": (bid + ask) / 2, "bid": bid,
                 "sigma_24h": sigma, "low_24h": float(min(row[1] for row in rows[-288:])),
-                "high_24h": float(max(row[0] for row in rows[-288:])), "filters": filters}
+                "high_24h": float(max(row[0] for row in rows[-288:])), "filters": filters,
+                "bid_levels": len(bids), "ask_levels": len(asks),
+                "bid_depth_usdt_1pct": bid_depth, "ask_depth_usdt_1pct": ask_depth}
     pieces = []
     for link in live_meta_grid_links(operator.core, int(goal["id"])):
         grid_id = int(link["grid_id"])

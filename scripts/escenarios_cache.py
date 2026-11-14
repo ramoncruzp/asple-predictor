@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.market_store import CandleStore, market_db_path
-from grid.meta import DEFAULT_PROFILES
+from grid.meta import DEFAULT_PROFILES, MetaCore
 from grid.json_utils import json_dumps_safe, json_safe
 from research.scenarios.candidates import (build_candidates, build_reconversion_candidates,
     build_smart_candidates)
@@ -171,9 +171,15 @@ def _contexts(app_db, prices=None):
                 for link in links:
                     grid_id = int(link["id"])
                     symbol = str(link["symbol"]).upper()
-                    events = conn.execute("SELECT event_type,price,details FROM grid_events WHERE grid_id=? AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED') ORDER BY id", (grid_id,)).fetchall()
+                    events = conn.execute("SELECT event_type,price,details,order_id,client_order_id,level_idx FROM grid_events WHERE grid_id=? AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED','GRID_COMPRA_INICIAL') ORDER BY id", (grid_id,)).fetchall()
+                    event_rows = [dict(row) for row in events]
+                    for event_row in event_rows:
+                        event_row["details"] = json.loads(event_row["details"] or "{}")
+                    events = [event for event in MetaCore._repair_initial_buy_events(
+                        event_rows) if event["event_type"] in
+                        {"BUY_FILLED", "SELL_FILLED", "CELL_LIQUIDATED"}]
                     for event in events:
-                        details = json.loads(event["details"] or "{}")
+                        details = event["details"] if isinstance(event["details"], dict) else json.loads(event["details"] or "{}")
                         quote = details.get("cummulative_quote_qty", details.get("quote_qty", details.get("executed_quote_qty")))
                         if event["event_type"] == "CELL_LIQUIDATED":
                             quote = details.get("cash_proceeds_net", quote)
@@ -312,12 +318,18 @@ def _active_grid_pieces(app_db, goal_id, prices=None, filters=None):
                 "FROM grid_levels WHERE grid_id=? ORDER BY level_idx", (grid_id,)).fetchall()
             if not is_live_meta_grid(grid['status'], levels):
                 continue
-            events = conn.execute("SELECT event_type,price,details FROM grid_events WHERE grid_id=? "
-                "AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED') ORDER BY id",
+            events = conn.execute("SELECT event_type,price,details,order_id,client_order_id,level_idx FROM grid_events WHERE grid_id=? "
+                "AND event_type IN ('BUY_FILLED','SELL_FILLED','CELL_LIQUIDATED','GRID_COMPRA_INICIAL') ORDER BY id",
                 (grid_id,)).fetchall()
+            event_rows = [dict(row) for row in events]
+            for event_row in event_rows:
+                event_row['details'] = json.loads(event_row['details'] or '{}')
+            events = [event for event in MetaCore._repair_initial_buy_events(
+                event_rows) if event['event_type'] in
+                {'BUY_FILLED', 'SELL_FILLED', 'CELL_LIQUIDATED'}]
             delivered = returned = commissions = 0.0
             for event in events:
-                details = json.loads(event['details'] or '{}')
+                details = event['details'] if isinstance(event['details'], dict) else json.loads(event['details'] or '{}')
                 quote = details.get('cummulative_quote_qty', details.get('quote_qty',
                     details.get('executed_quote_qty', details.get('cash_proceeds_net'))))
                 if quote is None and event['price'] is not None:

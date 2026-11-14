@@ -335,6 +335,120 @@ def test_salto_de_efectivo_sin_fills_alerta_y_bloquea(tmp_path):
     assert core.valuation(goal["id"])["cash_coherent"] is False
 
 
+def test_equity_incoherente_alerta_y_bloquea_cazador(tmp_path):
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    goal = core.create_goal(100, 10)
+    grid = db.create_grid_with_levels({"symbol": "XRPUSDT", "range_low": 1,
+        "range_high": 2, "n_levels": 1, "capital_total": 50,
+        "status": "ACTIVE", "environment": "testnet"}, [{"level_idx": 0,
+        "price": 1, "sell_price": 1.1, "capital": 50,
+        "state": "IDLE", "held_qty": 0}])
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=None, grid_id=grid["id"], piece_type="grid",
+            origin_grid_id=grid["id"], created_at=datetime(2026, 1, 1)))
+    db.add_grid_event(run_id=None, source="MONITOR", grid_id=grid["id"],
+        level_idx=0, event_type="BUY_FILLED", details={
+            "cummulative_quote_qty": "50", "executed_qty": "50", "fee_usdt": "0.05"})
+
+    valuation = core.valuation(goal["id"])
+
+    assert valuation["cash_coherent"] is False
+    assert valuation["cash_coherence"]["equity"]["delta_usdt"] == "50.05"
+    assert any(item[0] == "META_VALUACION_INCOHERENTE" for item in alerts)
+    assert db.get_alert_state(f"meta_equity_coherence_{goal['id']}")["blocked"] is True
+
+
+def test_detalle_meta_valuation_guarda_cash_coherent(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=now))
+        conn.execute(db.meta_runs.insert().values(meta_id=goal["id"], status="ACTIVE",
+            started_at=now, realized_extra_usdt=0))
+
+    core.run_once()
+
+    valuation_event = next(row for row in core.ledger(goal["id"])
+        if row["event_type"] == "META_VALUATION")
+    assert valuation_event["details"]["cash_coherent"] is True
+
+
+def test_fixture_meta7_recupera_compras_iniciales_y_resulta_menos_13_pct(tmp_path):
+    db, core = _core(tmp_path, exchange=FakeTestnet(bid=1.1469))
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        prior_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT",
+            range_low=1, range_high=2, n_levels=1, capital_total=70, reserve=0,
+            status="CLOSED", created_at=now, environment="testnet", strategy="simple",
+            params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"], run_id=None,
+            grid_id=prior_id, piece_type="grid", origin_grid_id=prior_id,
+            created_at=now, released_at=now))
+    gram = db.create_grid_with_levels({"symbol": "GRAMUSDT", "range_low": 1,
+        "range_high": 2, "n_levels": 4, "capital_total": 70, "status": "ACTIVE",
+        "environment": "testnet"}, [{"level_idx": 2, "price": 1.23,
+        "sell_price": 1.3, "capital": 17.6, "entry_price": 1.23,
+        "held_qty": 14.3, "state": "HOLDING"}])
+    zro = db.create_grid_with_levels({"symbol": "ZROUSDT", "range_low": 1,
+        "range_high": 2, "n_levels": 4, "capital_total": 48.66,
+        "status": "CLOSED", "environment": "testnet"}, [])
+    for grid_id, released_at in ((gram["id"], None), (zro["id"], now)):
+        with db.engine.begin() as conn:
+            conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+                run_id=None, grid_id=grid_id, piece_type="grid", origin_grid_id=grid_id,
+                created_at=now, released_at=released_at))
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=prior_id,
+        level_idx=0, event_type="BUY_FILLED", details={"cummulative_quote_qty": "70",
+            "executed_qty": "70", "fee_usdt": "0"})
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=prior_id,
+        level_idx=0, event_type="SELL_FILLED", details={"cummulative_quote_qty": "57.94",
+            "executed_qty": "70", "fee_usdt": "0", "cycle_pnl": "-12.06"})
+    gram_quote = Decimal("17.589")
+    gram_fee = gram_quote * Decimal("0.001")
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=gram["id"],
+        level_idx=2, order_id=250, event_type="BUY_FILLED", details={
+            "cummulative_quote_qty": "0", "executed_qty": "14.3", "fee_usdt": "0"})
+    db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=gram["id"],
+        level_idx=2, order_id=250, event_type="GRID_COMPRA_INICIAL", details={
+            "price_avg": "1.23", "quantity": "14.3",
+            "fee_usdt": str(gram_fee)})
+    zro_buys = ((0, Decimal("7.77"), Decimal("1.55")),
+        (1, Decimal("7.67"), Decimal("1.55")))
+    buy_quotes = []
+    for level_idx, qty, price in zro_buys:
+        quote = qty * price
+        fee = quote * Decimal("0.001")
+        buy_quotes.append((level_idx, quote, fee))
+        db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=zro["id"],
+            level_idx=level_idx, order_id=260 + level_idx, event_type="BUY_FILLED",
+            details={"cummulative_quote_qty": "0", "executed_qty": str(qty), "fee_usdt": "0"})
+        db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=zro["id"],
+            level_idx=level_idx, order_id=260 + level_idx,
+            event_type="GRID_COMPRA_INICIAL", details={"price_avg": str(price),
+                "quantity": str(qty), "fee_usdt": str(fee)})
+    gross_cycle_profit = Decimal("0.43")
+    sell_quote_each = (sum((quote for _, quote, _ in buy_quotes), Decimal(0)) +
+        gross_cycle_profit) / 2
+    for level_idx, buy_quote, buy_fee in buy_quotes:
+        sell_fee = sell_quote_each * Decimal("0.001")
+        net_cycle_pnl = sell_quote_each - buy_quote - buy_fee - sell_fee
+        db.add_grid_event(run_id=None, source="MONITOR", ts=now, grid_id=zro["id"],
+            level_idx=level_idx, order_id=270 + level_idx, event_type="SELL_FILLED",
+            details={"cummulative_quote_qty": str(sell_quote_each), "executed_qty": "7.7",
+                "fee_usdt": str(sell_fee), "cycle_pnl": str(net_cycle_pnl)})
+
+    valuation = core.valuation(goal["id"])
+
+    assert Decimal(valuation["cash_usdt"]) == Decimal("70.715117")
+    assert Decimal(valuation["result_pct"]) == pytest.approx(Decimal("-12.90"), abs=Decimal("0.02"))
+    assert valuation["cash_coherent"] is True
+
+
 def test_enlace_vigente_a_grid_ausente_mantiene_error_controlado(tmp_path):
     db, core = _core(tmp_path)
     goal = core.create_goal(100, 10)
