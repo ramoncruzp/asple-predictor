@@ -367,8 +367,8 @@ class MetaCore:
         from sqlalchemy import func, select
         allowed = {"v1", "v2", "cazador", "escalera", "seguidor", "control"}
         selected = list(dict.fromkeys(str(item).lower() for item in competitors))
-        if not selected or any(item not in allowed for item in selected):
-            raise ValueError("La selección de competidores del torneo no es válida.")
+        if set(selected) != allowed or len(selected) != len(allowed):
+            raise ValueError("La ronda debe incluir exactamente una meta por cada uno de los seis competidores.")
         self._enabled_testnet()
         capital, target_value = _d(capital), _d(target_value)
         profile, target_type = str(profile).upper(), str(target_type).upper()
@@ -383,9 +383,11 @@ class MetaCore:
                 self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED", "CLOSING", "TARGET_CLOSING"]))).scalar_one())
             if active + len(selected) > 7:
                 raise ValueError("La ronda excede el máximo de siete metas activas.")
+            exchange_free = _d(self.exchange.get_balance("USDT").get("USDT", {}).get("free"))
             available, reserved = self._available_usdt()
-            if available < max(Decimal("300"), capital * len(selected)):
-                raise ValueError(f"USDT libre insuficiente para la ronda: disponible {available}; requerido {max(Decimal('300'), capital * len(selected))}.")
+            required = max(Decimal("300"), capital * len(selected))
+            if exchange_free < required + reserved or available < required:
+                raise ValueError(f"USDT libre insuficiente para la ronda: saldo exchange {exchange_free}, saldo atribuible {available}, reservas {reserved}; requerido {required} más reservas.")
             round_number = int(conn.execute(select(func.count()).select_from(self.db.meta_ledger).where(
                 self.db.meta_ledger.c.event_type == "META_TOURNAMENT_ROUND_CREATED")).scalar_one()) + 1
             snapshot = self._profile_settings()[profile]
@@ -403,9 +405,11 @@ class MetaCore:
             conn.execute(self.db.meta_ledger.insert().values(meta_id=goals[0]["meta_id"], run_id=None,
                 ts=now, event_type="META_TOURNAMENT_ROUND_CREATED", details=json.dumps({
                     "ronda": round_number, "competidores": selected, "capital_usdt": str(capital),
-                    "saldo_libre_usdt": str(available), "reservado_usdt": str(reserved)}, sort_keys=True)))
+                    "saldo_libre_usdt": str(available), "exchange_free_usdt": str(exchange_free),
+                    "reservado_usdt": str(reserved)}, sort_keys=True)))
         return {"ronda": round_number, "goals": [self.get_goal(row["meta_id"]) for row in goals],
-            "saldo_libre_usdt": str(available), "iniciadas_juntas": True}
+            "saldo_libre_usdt": str(available), "exchange_free_usdt": str(exchange_free),
+            "capital_total_usdt": str(capital * len(selected)), "iniciadas_juntas": True}
 
     def _ledger(self, meta_id, run_id, event_type, details=None, reason=None, grid_id=None, level_idx=None):
         from grid.engines.shadow_guard import reject_shadow_side_effect

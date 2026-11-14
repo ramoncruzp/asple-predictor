@@ -353,7 +353,9 @@ def tournament_availability(request: Request):
     core = _core(request)
     try:
         free, reserved = core._available_usdt()
-        return {"free_usdt": str(free), "reserved_usdt": str(reserved)}
+        exchange_free = core.exchange.get_balance("USDT").get("USDT", {}).get("free")
+        return {"free_usdt": str(free), "exchange_free_usdt": str(exchange_free),
+            "reserved_usdt": str(reserved)}
     except Exception as exc:
         raise HTTPException(503, f"No se pudo consultar el saldo libre: {exc}") from exc
 

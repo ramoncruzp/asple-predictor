@@ -25,11 +25,14 @@
       host.querySelector('[data-round]').addEventListener('submit', async event => {
         event.preventDefault(); const form = event.currentTarget, status = host.querySelector('[data-status]');
         const competitors = [...form.querySelectorAll('[name="competitor"]:checked')].map(x => x.value);
-        try { const result = await createRound({competitors, capital_usdt:Number(form.capital.value), target_value:Number(form.target.value), target_type:'USDT', profile:'RAPIDO', duration_days:Number(form.days.value)}); status.textContent = `Ronda ${result.ronda} activada: ${result.goals.map(x => `Meta #${x.id} (${x.config_snapshot.competidor})`).join(', ')}. Saldo libre antes de crear: ${Number(result.saldo_libre_usdt).toFixed(2)} USDT.`; }
+        if (competitors.length !== 6) { status.textContent = 'La ronda requiere los seis competidores.'; return; }
+        const capital = Number(form.capital.value), total = capital * 6;
+        if (!window.confirm(`Crear ronda con saldo libre del exchange ${host.querySelector('[data-free]').textContent}, capital total ${total.toFixed(2)} USDT y seis metas: ${competitors.join(', ')}. ¿Continuar?`)) return;
+        try { const result = await createRound({competitors, capital_usdt:capital, target_value:Number(form.target.value), target_type:'USDT', profile:'RAPIDO', duration_days:Number(form.days.value)}); status.textContent = `Ronda ${result.ronda} creada y activada: ${result.goals.map(x => `Meta #${x.id} (${x.config_snapshot.competidor})`).join(', ')}. Libre exchange: ${Number(result.exchange_free_usdt).toFixed(2)} USDT; capital reservado por la ronda: ${Number(result.capital_total_usdt).toFixed(2)} USDT.`; }
         catch (error) { status.textContent = `No se creó la ronda: ${error.message}`; }
       });
     }
-    try { const result = await get('/api/metas/tournament/availability'); host.querySelector('[data-free]').textContent = `${Number(result.free_usdt).toFixed(2)} USDT (reservado ${Number(result.reserved_usdt).toFixed(2)})`; }
+    try { const result = await get('/api/metas/tournament/availability'); host.querySelector('[data-free]').textContent = `${Number(result.exchange_free_usdt).toFixed(2)} USDT exchange; atribuible ${Number(result.free_usdt).toFixed(2)} (reservado ${Number(result.reserved_usdt).toFixed(2)})`; }
     catch (error) { host.querySelector('[data-free]').textContent = `no disponible: ${error.message}`; }
     try {
       const board = await get('/api/metas/tournament/scoreboard');

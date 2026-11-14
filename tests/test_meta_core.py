@@ -42,18 +42,18 @@ def _core(tmp_path, *, exchange=None, enabled=True, alert=None):
 
 def test_ronda_torneo_crea_competidores_activos_con_snapshot_aislado(tmp_path):
     db, core = _core(tmp_path)
-    result = core.create_tournament_round(["v1", "v2", "cazador"], 50, 1.5,
+    result = core.create_tournament_round(["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5,
         "USDT", "RAPIDO", 20)
     assert result["iniciadas_juntas"] is True
-    assert len(result["goals"]) == 3
+    assert len(result["goals"]) == 6
     configs = [goal["config_snapshot"] for goal in result["goals"]]
-    assert {cfg["competidor"] for cfg in configs} == {"v1", "v2", "cazador"}
+    assert {cfg["competidor"] for cfg in configs} == {"v1", "v2", "cazador", "escalera", "seguidor", "control"}
     assert {cfg["ronda"] for cfg in configs} == {result["ronda"]}
     assert {goal["status"] for goal in result["goals"]} == {"ACTIVE"}
     assert next(cfg for cfg in configs if cfg["competidor"] == "v2")["decision_engine"] == "v2"
     assert next(cfg for cfg in configs if cfg["competidor"] == "cazador")["decision_engine"] == "v1"
     board = core.tournament_scoreboard(result["ronda"])
-    assert [row["competidor"] for row in board] == ["v1", "v2", "cazador"]
+    assert [row["competidor"] for row in board] == ["v1", "v2", "cazador", "escalera", "seguidor", "control"]
     assert all(row["equity_usdt"] is None for row in board)
 
 
