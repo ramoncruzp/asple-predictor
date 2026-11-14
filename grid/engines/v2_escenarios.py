@@ -877,7 +877,9 @@ class V2ScenarioEngine(DecisionEngine):
                         grid_id=row.get("grid_id"))
                 opened.append(operator._open_replacement(goal, alternative,
                     piece["capital_usdt"], on_opened=record_open, v2_action_id=action_id,
-                    seed_initial_inventory=True))
+                    seed_initial_inventory=True,
+                    initial_inventory_cap_usdt=(piece["capital_usdt"] * .40
+                        if piece.get("piece_type") == "grid" else None)))
             except Exception as exc:
                 failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
         details = {"review_at_s": review_at_s, "proposal": proposal,
@@ -937,7 +939,9 @@ class V2ScenarioEngine(DecisionEngine):
                 alt = {"symbol": symbol, "strategy": piece["strategy"], "pieces": [piece],
                     "reason": "redistribución por Cazador de volatilidad"}
                 opened.append(operator._open_replacement(goal, alt, piece["capital_usdt"],
-                    v2_action_id=action_id, seed_initial_inventory=True))
+                    v2_action_id=action_id, seed_initial_inventory=True,
+                    initial_inventory_cap_usdt=(piece["capital_usdt"] * .40
+                        if piece.get("piece_type") == "grid" else None)))
             except Exception as exc:
                 failures.append({"symbol": symbol, "reason": f"{type(exc).__name__}: {exc}"})
         detail = {"review_at_s": review_at_s, "proposal": proposal, "closed": closed,

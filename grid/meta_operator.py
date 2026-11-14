@@ -5213,7 +5213,8 @@ class MetaOperator:
         return None
 
     def _open_replacement(self, goal, alternative, capital, *, on_opened=None,
-            v2_action_id=None, seed_initial_inventory=False):
+            v2_action_id=None, seed_initial_inventory=False,
+            initial_inventory_cap_usdt=None):
         from grid.engines.shadow_guard import reject_shadow_side_effect
         reject_shadow_side_effect("open_replacement")
         piece = dict(alternative["pieces"][0])
@@ -5248,7 +5249,9 @@ class MetaOperator:
         if (seed_initial_inventory and piece.get("piece_type") == "grid"
                 and str(piece.get("strategy") or "").lower() in {"simple", "smart"}):
             seed = getattr(self.engine, "seed_initial_inventory", None)
-            initial_inventory = (seed(grid_id) if callable(seed) else {
+            seed_kwargs = ({"max_quote_usdt": initial_inventory_cap_usdt}
+                if initial_inventory_cap_usdt is not None else {})
+            initial_inventory = (seed(grid_id, **seed_kwargs) if callable(seed) else {
                 "status": "skipped", "reason": "engine sin soporte de inventario inicial"})
             if initial_inventory.get("selected_levels") or initial_inventory.get("skipped"):
                 self._ledger(goal["id"], "GRID_COMPRA_INICIAL", initial_inventory,
@@ -5280,6 +5283,139 @@ class MetaOperator:
         result["strategy"] = grid["strategy"]
         result["pieces"] = [piece]
         return result
+
+    def _plan_tournament_policy(self, goal, competitor, *, plan_kind,
+            allocation_free_cash=None, record=True):
+        """Prepara geometría de apertura o mantenimiento para una política torneo."""
+        from grid.engines.cazador import build_runtime_context
+        from grid.engines.torneo import (control_geometry, follower_geometry,
+            ladder_orders)
+        value = {"free_capital_usdt": allocation_free_cash}
+        context = build_runtime_context(self, goal, value)
+        markets = context.get("markets") or {}
+        links = self.core._owned_grids(int(goal["id"]))
+        if links:
+            return {"competitor": competitor, "markets": markets, "pieces": [],
+                "links": links, "plan_kind": plan_kind}
+        if not markets:
+            return {"competitor": competitor, "markets": {}, "pieces": [],
+                "reason": "sin mercado con libro y velas válidas", "plan_kind": plan_kind}
+        symbol, market = max(markets.items(), key=lambda item: float(item[1]["sigma_24h"]))
+        mid, sigma = float(market["mid"]), float(market["sigma_24h"])
+        cfg = goal.get("config_snapshot") or {}
+        capital = min(float(allocation_free_cash or goal["capital_initial"]),
+            float(goal["capital_initial"]) * float(cfg.get("capital_per_coin_pct", 70)) / 100)
+        pieces = []
+        if competitor == "escalera":
+            for order in ladder_orders(mid, sigma, capital=min(48.0, capital),
+                    min_margin_pct=float(cfg.get("min_margin_pct", .3))):
+                pieces.append({"symbol": symbol, "strategy": "simple",
+                    "piece_type": "individual_bot_grid", "floor": order["buy_price"],
+                    "ceiling": order["sell_price"], "n_levels": 1,
+                    "capital_usdt": order["capital"], "bot": order["bot"]})
+        elif competitor == "seguidor":
+            geometry = follower_geometry(mid, sigma)
+            pieces.append({"symbol": symbol, "strategy": "simple", "piece_type": "grid",
+                "floor": geometry["low"], "ceiling": geometry["high"],
+                "n_levels": 8, "capital_usdt": capital})
+        elif competitor == "control":
+            geometry = control_geometry(mid, sigma)
+            pieces.append({"symbol": symbol, "strategy": "simple", "piece_type": "grid",
+                "floor": geometry["low"], "ceiling": geometry["high"],
+                "n_levels": 8, "capital_usdt": capital})
+        return {"competitor": competitor, "markets": markets, "pieces": pieces,
+            "links": [], "plan_kind": plan_kind}
+
+    def _review_tournament_policy(self, goal, valuation, plan):
+        """Ejecuta aperturas iniciales verificadas de políticas nuevas."""
+        from datetime import datetime, timezone
+        from grid.engines.torneo import ladder_orders
+        competitor = str(plan.get("competitor") or "")
+        if plan.get("reason"):
+            return {"decision": "no_hacer_nada", "reason": plan["reason"]}
+        opened, failures = [], []
+        if plan.get("pieces"):
+            cash, _ = self.core._available_usdt(int(goal["id"]))
+            requested = sum(float(piece.get("capital_usdt") or 0) for piece in plan["pieces"])
+            if requested > float(cash) + 1e-8:
+                return {"decision": "no_hacer_nada", "reason": "efectivo atribuible insuficiente"}
+            self._validate_v2_plan_limits(goal, {"pieces": plan["pieces"]})
+            for piece in plan["pieces"]:
+                try:
+                    check = self._testnet_openability(piece, goal)
+                    if not check.get("allowed"):
+                        raise ValueError(check.get("reason") or "pieza no abrible")
+                    alternative = {"symbol": piece["symbol"], "strategy": piece["strategy"],
+                        "pieces": [piece], "reason": f"apertura inicial {competitor} del torneo"}
+                    grid = self._open_replacement(goal, alternative, piece["capital_usdt"],
+                        seed_initial_inventory=competitor == "seguidor",
+                        initial_inventory_cap_usdt=(float(piece["capital_usdt"]) * .40
+                            if competitor == "seguidor" else None))
+                    opened.append(grid)
+                    event = {"escalera": "META_ESCALERA_APERTURA",
+                        "seguidor": "META_SEGUIDOR_APERTURA",
+                        "control": "META_CONTROL_APERTURA"}[competitor]
+                    self._ledger(int(goal["id"]), event, {"opened": grid,
+                        "capital_usdt": piece["capital_usdt"]}, grid_id=grid["grid_id"])
+                except Exception as exc:
+                    failures.append({"symbol": piece.get("symbol"),
+                        "error": f"{type(exc).__name__}: {exc}"})
+            if failures:
+                from sqlalchemy import update
+                with self.db.engine.begin() as conn:
+                    conn.execute(update(self.db.meta_goals).where(
+                        self.db.meta_goals.c.id == int(goal["id"])).values(status="PIECES_BLOCKED"))
+                self._ledger(int(goal["id"]), "META_PIECES_BLOCKED", {
+                    "reason": "tournament_initial_open_failed", "failures": failures})
+            return {"decision": "abrir_pieza_torneo" if opened else "no_hacer_nada",
+                "competitor": competitor, "opened": opened, "failures": failures}
+        if competitor == "escalera":
+            events = self._meta_ledger_rows(int(goal["id"]))
+            now = float(self.clock())
+            bot_links = [link for link in plan.get("links", [])
+                if link.get("piece_type") == "individual_bot_grid"]
+            actions = []
+            for index, link in enumerate(bot_links[:4]):
+                grid = self.db.get_grid(int(link["grid_id"]))
+                if not grid or str(grid.get("status") or "").upper() != "ACTIVE":
+                    continue
+                market = (plan.get("markets") or {}).get(str(grid["symbol"]).upper())
+                if not market:
+                    continue
+                prior = [row for row in events if row.get("event_type") == "META_ESCALERA_REPRECIO"
+                    and int((row.get("details") or {}).get("grid_id") or 0) == int(grid["id"])]
+                def seconds(row):
+                    stamp = row.get("ts")
+                    if hasattr(stamp, "timestamp"):
+                        return float(stamp.timestamp())
+                    try:
+                        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).replace(
+                            tzinfo=timezone.utc).timestamp()
+                    except (TypeError, ValueError):
+                        return 0.0
+                last = max((seconds(row) for row in prior), default=seconds({"ts": grid.get("created_at")}))
+                today_count = sum(1 for row in prior if now - seconds(row) < 86400)
+                if now - last < 4 * 3600 or today_count >= 6:
+                    continue
+                sigma = float(market["sigma_24h"])
+                orders = ladder_orders(float(market["mid"]), sigma,
+                    capital=float(grid.get("capital_total") or 12))
+                order = orders[index]
+                changed = self.engine.reposition_meta_bot(int(grid["id"]),
+                    order["buy_price"], order["sell_price"], reason="escalera_reprecio_4h")
+                if changed.get("ok"):
+                    details = {"grid_id": int(grid["id"]), "bot": index,
+                        "review_at_s": now, "reprices_today": today_count + 1, **changed}
+                    self._ledger(int(goal["id"]), "META_ESCALERA_REPRECIO", details,
+                        grid_id=int(grid["id"]))
+                    actions.append(details)
+            return {"decision": "repricing_escalera" if actions else "no_hacer_nada",
+                "competitor": competitor, "actions": actions}
+        if competitor == "control":
+            return {"decision": "no_hacer_nada", "competitor": competitor,
+                "reason": "control fijo sin intervenciones"}
+        return {"decision": "no_hacer_nada", "competitor": competitor,
+            "reason": "mantenimiento de Grid seguidor aún no conectado"}
 
     def review_active(self):
         """Revisa metas activas por turno, respetando el presupuesto de diez minutos."""
