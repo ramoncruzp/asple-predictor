@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 import uuid
 import threading
 from collections import defaultdict
@@ -1084,105 +1086,244 @@ class MetaCore:
                 self.db.meta_goals.c.status.in_(["ACTIVE", "PIECES_BLOCKED", "SURPLUS_WAIT", "CLOSING", "TARGET_CLOSING"]))).mappings().all()
             results = []
             for raw in goals:
-                goal = dict(raw)
-                goal["config_snapshot"] = json.loads(goal.get("config_snapshot") or "{}")
-                if goal["status"] == "TARGET_CLOSING":
-                    self._target_met(goal)
-                    results.append({"meta_id": goal["id"], "status": "TARGET_CLOSING_RETRIED"})
-                    continue
-                if goal["status"] == "CLOSING":
-                    self._resume_close(goal)
-                    results.append({"meta_id": goal["id"], "status": "CLOSING_RETRIED"})
-                    continue
-                valuation = self.valuation(goal["id"])
-                self._update_binance_connectivity(valuation, int(goal["id"]))
-                if valuation["status"] == "DESCONOCIDO":
-                    with self.db.engine.begin() as conn:
-                        conn.execute(self.db.meta_runs.update().where(
-                            self.db.meta_runs.c.meta_id == goal["id"],
-                            self.db.meta_runs.c.status == "ACTIVE").values(loss_limit_breach_count=0))
-                    if goal["status"] == "ACTIVE":
-                        with self.db.engine.begin() as conn:
-                            conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
-                        self._ledger(goal["id"], None, "META_PIECES_BLOCKED", {
-                            "reason": "valuation_unknown",
-                            "symbols": valuation.get("symbol_valuations", {}),
-                        }, reason="valuation_unknown")
-                    results.append({"meta_id": goal["id"], "valuation": valuation, "new_pieces_allowed": False})
-                    continue
-                if goal["status"] == "PIECES_BLOCKED":
-                    last_unknown_block = next((row for row in reversed(self.ledger(goal["id"]))
-                        if row.get("event_type") == "META_PIECES_BLOCKED"
-                        and (row.get("reason") == "valuation_unknown"
-                             or (row.get("details") or {}).get("reason") == "valuation_unknown")), None)
-                    with self.db.engine.begin() as conn:
-                        conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="ACTIVE"))
-                    if last_unknown_block:
-                        blocked_at = last_unknown_block.get("ts")
-                        if isinstance(blocked_at, str):
-                            blocked_at = datetime.fromisoformat(blocked_at)
-                        if blocked_at is not None and blocked_at.tzinfo is None:
-                            blocked_at = blocked_at.replace(tzinfo=timezone.utc)
-                        duration = max(0.0, (self.clock() - blocked_at).total_seconds()) if blocked_at else None
-                        self._ledger(goal["id"], None, "META_PIECES_UNBLOCKED", {
-                            "reason": "valuation_known_again", "duration_s": duration,
-                            "duration_min": round(duration / 60, 2) if duration is not None else None,
-                        })
-                cfg = goal["config_snapshot"]
-                result_pct = _d(valuation["result_pct"])
-                with self.db.engine.begin() as conn:
-                    active_run = conn.execute(select(self.db.meta_runs).where(
-                        self.db.meta_runs.c.meta_id == goal["id"],
-                        self.db.meta_runs.c.status == "ACTIVE").order_by(self.db.meta_runs.c.id.desc())).mappings().first()
-                    if active_run:
-                        breached = result_pct <= -_d(cfg.get("max_loss_pct", 8))
-                        breach_count = int(active_run.get("loss_limit_breach_count") or 0) + 1 if breached else 0
-                        conn.execute(self.db.meta_runs.update().where(self.db.meta_runs.c.id == active_run["id"]).values(
-                            worst_result_pct=min(float(active_run.get("worst_result_pct") or 0), float(result_pct)),
-                            loss_limit_breach_count=breach_count))
-                    else:
-                        breach_count = 0
-                if goal["status"] == "SURPLUS_WAIT":
-                    self._ledger(goal["id"], None, "META_SURPLUS_VALUATION", {
-                        "value_usdt": valuation["value_usdt"], "result_pct": valuation["result_pct"],
-                        "value_best_bid": valuation["value_best_bid"],
-                        "value_executable": valuation["value_executable"],
-                        "cash_usdt": valuation["cash_usdt"], "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
-                        "decision": "mantener_ventas_vivas_sin_recomprar"})
-                    self._update_realized_extra(goal)
-                    if not self._surplus_inventory_remains(goal["id"]):
-                        with self.db.engine.begin() as conn:
-                            conn.execute(self.db.meta_goals.update().where(
-                                self.db.meta_goals.c.id == goal["id"]).values(status="CUMPLIDA", finished_at=self._now()))
-                        self._finalize_empty_piece_links(goal["id"])
-                        self._ledger(goal["id"], None, "META_SURPLUS_FINISHED", {})
-                    results.append({"meta_id": goal["id"], "valuation": valuation, "surplus_wait": True})
-                    continue
-                self._ledger(goal["id"], None, "META_VALUATION", {
-                    "status": valuation["status"], "value_usdt": valuation["value_usdt"],
-                    "value_best_bid": valuation["value_best_bid"],
-                    "value_executable": valuation["value_executable"],
-                    "result_pct": valuation["result_pct"], "cash_usdt": valuation["cash_usdt"],
-                    "cash_coherent": valuation.get("cash_coherent"),
-                    "cash_coherence": valuation.get("cash_coherence"),
-                    "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
-                    "profile": goal["profile"], "decision": "revisar_limites_y_objetivo"})
-                warn = -_d(cfg.get("max_loss_pct", 8)) * Decimal("0.75")
-                if goal["status"] == "ACTIVE" and result_pct <= warn:
-                    with self.db.engine.begin() as conn:
-                        conn.execute(self.db.meta_goals.update().where(self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
-                    self._ledger(goal["id"], None, "META_LOSS_WARNING", {"result_pct": str(result_pct), "threshold_pct": str(warn)})
-                limit = -_d(cfg.get("max_loss_pct", 8))
-                if goal["status"] == "TARGET_CLOSING":
-                    self._target_met(goal)
-                elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and result_pct <= limit and breach_count >= int(cfg.get("loss_confirm_minutes", 2)):
-                    self._close_owned(goal, "CORTADA_POR_PERDIDA")
-                elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and _d(valuation["cash_usdt"]) >= _d(goal["capital_initial"]) + _d(goal["target_usdt"]):
-                    self._target_met(goal)
-                elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and self._now() - goal["started_at"] >= timedelta(days=int(cfg.get("max_days", 45))):
-                    self._close_owned(goal, "VENCIDA")
-                results.append({"meta_id": goal["id"], "valuation": valuation})
+                goal_id = int(raw["id"])
+                try:
+                    goal = dict(raw)
+                    goal["config_snapshot"] = json.loads(goal.get("config_snapshot") or "{}")
+                    self._check_watchdog_health(goal)
+                    result = self._run_goal_once(goal)
+                    self._mark_watchdog_success(goal_id, valued="valuation" in result)
+                    results.append(result)
+                except Exception as exc:
+                    try:
+                        self._record_watchdog_error(goal_id, exc)
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "No se pudo registrar el error del vigilante de Meta %s", goal_id)
+                    results.append({"meta_id": goal_id, "status": "WATCHDOG_ERROR",
+                        "error": f"{type(exc).__name__}: {exc}"})
             return results
+
+    def _check_watchdog_health(self, goal):
+        if goal.get("status") not in {"ACTIVE", "PIECES_BLOCKED", "SURPLUS_WAIT"}:
+            return
+        meta_id = int(goal["id"])
+        key = f"meta_watchdog_health_{meta_id}"
+        state = self.db.get_alert_state(key) or {}
+        now = self._now().replace(tzinfo=timezone.utc)
+        last_value = state.get("last_valuation_at")
+        if last_value is None:
+            previous_valuation = next((row for row in reversed(self.ledger(meta_id))
+                if row.get("event_type") == "META_VALUATION"), None)
+            last_value = (previous_valuation or {}).get("ts") or goal.get("started_at") or goal.get("created_at")
+        if isinstance(last_value, str):
+            last_value = datetime.fromisoformat(last_value.replace("Z", "+00:00"))
+        if last_value is None:
+            return
+        if last_value.tzinfo is None:
+            last_value = last_value.replace(tzinfo=timezone.utc)
+        stale_s = (now - last_value.astimezone(timezone.utc)).total_seconds()
+        last_alert = state.get("last_stale_alert_at")
+        if isinstance(last_alert, str):
+            last_alert = datetime.fromisoformat(last_alert.replace("Z", "+00:00"))
+        if last_alert is not None and last_alert.tzinfo is None:
+            last_alert = last_alert.replace(tzinfo=timezone.utc)
+        if stale_s > 300 and (last_alert is None or (now - last_alert).total_seconds() >= 1800):
+            details = {"last_valuation_at": last_value.isoformat(),
+                "stale_minutes": round(stale_s / 60, 2), "threshold_minutes": 5}
+            self._ledger(meta_id, None, "META_SIN_VALUACION", details)
+            try:
+                self.alert("META_SIN_VALUACION", meta_id, details)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo alertar falta de valuación de Meta %s", meta_id)
+            state["last_stale_alert_at"] = now.isoformat()
+            state["stale_alerted"] = True
+        self.db.set_alert_state(key, state)
+
+    def _mark_watchdog_success(self, meta_id, *, valued):
+        key = f"meta_watchdog_health_{int(meta_id)}"
+        state = self.db.get_alert_state(key) or {}
+        now = self._now().replace(tzinfo=timezone.utc).isoformat()
+        state["last_completed_at"] = now
+        if valued:
+            state["last_valuation_at"] = now
+            state["last_stale_alert_at"] = None
+            state["stale_alerted"] = False
+        self.db.set_alert_state(key, state)
+        error_key = f"meta_watchdog_error_{int(meta_id)}"
+        error_state = self.db.get_alert_state(error_key) or {}
+        if error_state.get("signature") is not None:
+            error_state.update({"signature": None, "first_seen_at": None,
+                "last_seen_at": None, "consecutive": 0, "repeat_alerted": False})
+            self.db.set_alert_state(error_key, error_state)
+
+    def _record_watchdog_error(self, meta_id, exc):
+        meta_id = int(meta_id)
+        now = self._now().replace(tzinfo=timezone.utc)
+        error_type = type(exc).__name__
+        message = str(exc)
+        signature = f"{error_type}:{message}"
+        key = f"meta_watchdog_error_{meta_id}"
+        state = self.db.get_alert_state(key) or {}
+        first_seen = state.get("first_seen_at")
+        last_seen = state.get("last_seen_at")
+        for name, value in (("first_seen_at", first_seen), ("last_seen_at", last_seen)):
+            if isinstance(value, str):
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if name == "first_seen_at":
+                    first_seen = parsed
+                else:
+                    last_seen = parsed
+        same_streak = state.get("signature") == signature and last_seen is not None
+        if same_streak and last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        if not same_streak or (now - last_seen).total_seconds() > 120:
+            first_seen = now
+            consecutive = 1
+            repeat_alerted = False
+        else:
+            consecutive = int(state.get("consecutive") or 0) + 1
+            repeat_alerted = bool(state.get("repeat_alerted"))
+        short_traceback = "".join(traceback.format_exception(
+            type(exc), exc, exc.__traceback__, limit=4))[-1500:]
+        details = {"error_type": error_type, "error": message,
+            "traceback": short_traceback, "consecutive": consecutive,
+            "first_seen_at": first_seen.isoformat()}
+        self._ledger(meta_id, None, "META_WATCHDOG_ERROR", details, reason=signature)
+
+        last_alert = state.get("last_alert_at")
+        if isinstance(last_alert, str):
+            last_alert = datetime.fromisoformat(last_alert.replace("Z", "+00:00"))
+        if last_alert is not None and last_alert.tzinfo is None:
+            last_alert = last_alert.replace(tzinfo=timezone.utc)
+        if last_alert is None or (now - last_alert).total_seconds() >= 1800:
+            try:
+                self.alert("META_VIGILANTE_ERROR", meta_id, details)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo alertar error del vigilante de Meta %s", meta_id)
+            last_alert = now
+
+        first_for_duration = first_seen
+        if first_for_duration.tzinfo is None:
+            first_for_duration = first_for_duration.replace(tzinfo=timezone.utc)
+        if ((now - first_for_duration).total_seconds() >= 180 and not repeat_alerted):
+            repeat_details = {**details, "duration_minutes": round(
+                (now - first_for_duration).total_seconds() / 60, 2)}
+            self._ledger(meta_id, None, "META_WATCHDOG_ERROR_REPETIDO", repeat_details,
+                reason=signature)
+            try:
+                self.alert("META_VIGILANTE_ERROR_REPETIDO", meta_id, repeat_details)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo alertar error repetido del vigilante de Meta %s", meta_id)
+            repeat_alerted = True
+        self.db.set_alert_state(key, {"signature": signature,
+            "first_seen_at": first_seen.isoformat(), "last_seen_at": now.isoformat(),
+            "consecutive": consecutive, "last_alert_at": last_alert.isoformat()
+                if last_alert else None, "repeat_alerted": repeat_alerted})
+
+    def _run_goal_once(self, goal):
+        from sqlalchemy import select
+        if goal["status"] == "TARGET_CLOSING":
+            self._target_met(goal)
+            return {"meta_id": goal["id"], "status": "TARGET_CLOSING_RETRIED"}
+        if goal["status"] == "CLOSING":
+            self._resume_close(goal)
+            return {"meta_id": goal["id"], "status": "CLOSING_RETRIED"}
+        valuation = self.valuation(goal["id"])
+        self._update_binance_connectivity(valuation, int(goal["id"]))
+        if valuation["status"] == "DESCONOCIDO":
+            with self.db.engine.begin() as conn:
+                conn.execute(self.db.meta_runs.update().where(
+                    self.db.meta_runs.c.meta_id == goal["id"],
+                    self.db.meta_runs.c.status == "ACTIVE").values(loss_limit_breach_count=0))
+            if goal["status"] == "ACTIVE":
+                with self.db.engine.begin() as conn:
+                    conn.execute(self.db.meta_goals.update().where(
+                        self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
+                self._ledger(goal["id"], None, "META_PIECES_BLOCKED", {
+                    "reason": "valuation_unknown",
+                    "symbols": valuation.get("symbol_valuations", {}),
+                }, reason="valuation_unknown")
+            return {"meta_id": goal["id"], "valuation": valuation, "new_pieces_allowed": False}
+        if goal["status"] == "PIECES_BLOCKED":
+            last_unknown_block = next((row for row in reversed(self.ledger(goal["id"]))
+                if row.get("event_type") == "META_PIECES_BLOCKED"
+                and (row.get("reason") == "valuation_unknown"
+                     or (row.get("details") or {}).get("reason") == "valuation_unknown")), None)
+            with self.db.engine.begin() as conn:
+                conn.execute(self.db.meta_goals.update().where(
+                    self.db.meta_goals.c.id == goal["id"]).values(status="ACTIVE"))
+            if last_unknown_block:
+                blocked_at = last_unknown_block.get("ts")
+                if isinstance(blocked_at, str):
+                    blocked_at = datetime.fromisoformat(blocked_at)
+                if blocked_at is not None and blocked_at.tzinfo is None:
+                    blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+                duration = max(0.0, (self.clock() - blocked_at).total_seconds()) if blocked_at else None
+                self._ledger(goal["id"], None, "META_PIECES_UNBLOCKED", {
+                    "reason": "valuation_known_again", "duration_s": duration,
+                    "duration_min": round(duration / 60, 2) if duration is not None else None,
+                })
+        cfg = goal["config_snapshot"]
+        result_pct = _d(valuation["result_pct"])
+        with self.db.engine.begin() as conn:
+            active_run = conn.execute(select(self.db.meta_runs).where(
+                self.db.meta_runs.c.meta_id == goal["id"],
+                self.db.meta_runs.c.status == "ACTIVE").order_by(
+                    self.db.meta_runs.c.id.desc())).mappings().first()
+            if active_run:
+                breached = result_pct <= -_d(cfg.get("max_loss_pct", 8))
+                breach_count = int(active_run.get("loss_limit_breach_count") or 0) + 1 if breached else 0
+                conn.execute(self.db.meta_runs.update().where(
+                    self.db.meta_runs.c.id == active_run["id"]).values(
+                        worst_result_pct=min(float(active_run.get("worst_result_pct") or 0), float(result_pct)),
+                        loss_limit_breach_count=breach_count))
+            else:
+                breach_count = 0
+        if goal["status"] == "SURPLUS_WAIT":
+            self._ledger(goal["id"], None, "META_SURPLUS_VALUATION", {
+                "value_usdt": valuation["value_usdt"], "result_pct": valuation["result_pct"],
+                "value_best_bid": valuation["value_best_bid"],
+                "value_executable": valuation["value_executable"],
+                "cash_usdt": valuation["cash_usdt"],
+                "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
+                "decision": "mantener_ventas_vivas_sin_recomprar"})
+            self._update_realized_extra(goal)
+            if not self._surplus_inventory_remains(goal["id"]):
+                with self.db.engine.begin() as conn:
+                    conn.execute(self.db.meta_goals.update().where(
+                        self.db.meta_goals.c.id == goal["id"]).values(
+                            status="CUMPLIDA", finished_at=self._now()))
+                self._finalize_empty_piece_links(goal["id"])
+                self._ledger(goal["id"], None, "META_SURPLUS_FINISHED", {})
+            return {"meta_id": goal["id"], "valuation": valuation, "surplus_wait": True}
+        self._ledger(goal["id"], None, "META_VALUATION", {
+            "status": valuation["status"], "value_usdt": valuation["value_usdt"],
+            "value_best_bid": valuation["value_best_bid"],
+            "value_executable": valuation["value_executable"],
+            "result_pct": valuation["result_pct"], "cash_usdt": valuation["cash_usdt"],
+            "cash_coherent": valuation.get("cash_coherent"),
+            "cash_coherence": valuation.get("cash_coherence"),
+            "inventory_bid_gross_usdt": valuation["inventory_bid_gross_usdt"],
+            "profile": goal["profile"], "decision": "revisar_limites_y_objetivo"})
+        warn = -_d(cfg.get("max_loss_pct", 8)) * Decimal("0.75")
+        if goal["status"] == "ACTIVE" and result_pct <= warn:
+            with self.db.engine.begin() as conn:
+                conn.execute(self.db.meta_goals.update().where(
+                    self.db.meta_goals.c.id == goal["id"]).values(status="PIECES_BLOCKED"))
+            self._ledger(goal["id"], None, "META_LOSS_WARNING", {
+                "result_pct": str(result_pct), "threshold_pct": str(warn)})
+        limit = -_d(cfg.get("max_loss_pct", 8))
+        if goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and result_pct <= limit and breach_count >= int(cfg.get("loss_confirm_minutes", 2)):
+            self._close_owned(goal, "CORTADA_POR_PERDIDA")
+        elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and _d(valuation["cash_usdt"]) >= _d(goal["capital_initial"]) + _d(goal["target_usdt"]):
+            self._target_met(goal)
+        elif goal["status"] in {"ACTIVE", "PIECES_BLOCKED"} and self._now() - goal["started_at"] >= timedelta(days=int(cfg.get("max_days", 45))):
+            self._close_owned(goal, "VENCIDA")
+        return {"meta_id": goal["id"], "valuation": valuation}
 
     def _update_binance_connectivity(self, valuation, meta_id):
         """Persiste caída/restablecimiento del túnel y limita las alertas."""
@@ -1539,21 +1680,65 @@ class MetaCore:
         mode = goal.get("close_mode") or "liquidate"
         terminal = goal.get("close_result") or "CORTADA_POR_PERDIDA"
         pending = []
+        terminal_grid_states = {"CLOSED", "CANCELLED", "DONE"}
         lock = getattr(self.monitor, "ops_lock", self._lock)
-        with lock:
-            for link in self._owned_grids(goal["id"]):
-                if link.get("repository_grid_id") is not None:
-                    continue
-                outcome = self.engine.close_grid(int(link["grid_id"]), mode,
-                    close_reason="meta_resume_close", meta_id=int(goal["id"]) if mode == "repository" else None)
-                if outcome.get("status") != "CLOSED":
-                    pending.append({"grid_id": link["grid_id"], "status": outcome.get("status")})
-        if pending:
-            self._ledger(goal["id"], None, "META_CLOSE_PENDING", {"result": terminal, "grids": pending})
-        else:
+        try:
+            with lock:
+                for link in self._owned_grids(goal["id"]):
+                    if link.get("repository_grid_id") is not None:
+                        continue
+                    grid_id = int(link["grid_id"])
+                    try:
+                        grid = self.db.get_grid(grid_id)
+                        if grid is None:
+                            pending.append({"grid_id": grid_id, "reason": "grid_eliminado"})
+                            continue
+                        if self.engine is None:
+                            pending.append({"grid_id": grid_id, "reason": "engine_no_disponible"})
+                            continue
+                        grid_status = str(grid.get("status") or "").upper()
+                        if grid_status in terminal_grid_states:
+                            levels = self.db.get_grid_levels(grid_id)
+                            local_ids = {int(row["order_id"]) for row in levels
+                                if row.get("order_id") is not None}
+                            client_ids = {str(row[key]) for row in levels for key in
+                                ("client_order_id", "buy_client_order_id") if row.get(key)}
+                            open_orders = self.engine.exchange.get_open_orders(grid["symbol"])
+                            owned_open = [order for order in open_orders if
+                                (order.get("order_id") is not None and
+                                 int(order["order_id"]) in local_ids) or
+                                str(order.get("client_order_id") or
+                                    order.get("orig_client_order_id") or "") in client_ids]
+                            if owned_open:
+                                pending.append({"grid_id": grid_id,
+                                    "reason": "orden_exchange_viva",
+                                    "order_ids": [order.get("order_id") for order in owned_open]})
+                            continue
+                        outcome = self.engine.close_grid(grid_id, mode,
+                            close_reason="meta_resume_close",
+                            meta_id=int(goal["id"]) if mode == "repository" else None)
+                        status = str((outcome or {}).get("status") or "").upper()
+                        if status not in terminal_grid_states:
+                            pending.append({"grid_id": grid_id, "status": status or None})
+                    except Exception as exc:
+                        pending.append({"grid_id": grid_id,
+                            "reason": f"{type(exc).__name__}: {exc}"})
+            if pending:
+                self._ledger(goal["id"], None, "META_CLOSE_PENDING",
+                    {"result": terminal, "grids": pending})
+                return
             if terminal in {"CORTADA_POR_PERDIDA", "VENCIDA"}:
                 self._record_close_slippage(goal)
             self._finish(goal["id"], terminal)
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Error reanudando el cierre de Meta %s", goal.get("id"))
+            try:
+                self._ledger(goal["id"], None, "META_CLOSE_PENDING", {"result": terminal,
+                    "grids": [{"reason": f"{type(exc).__name__}: {exc}"}]})
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "No se pudo registrar cierre pendiente de Meta %s", goal.get("id"))
 
     def start(self):
         self.scheduler.add_job(self.run_once, "cron", minute="*", second=0, timezone="UTC", id="meta_watchdog",

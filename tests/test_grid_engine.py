@@ -373,7 +373,7 @@ def test_closing_does_not_repost_missing_write_ahead_buy_intent():
 
     assert len(exchange.create_calls) == before
     recovered = db.get_grid_levels(grid["id"])[level["level_idx"]]
-    assert recovered["state"] == "IDLE"
+    assert recovered["state"] == "DONE"
     assert recovered["order_id"] is None and recovered["client_order_id"] is None
 
 

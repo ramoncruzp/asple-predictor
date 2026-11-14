@@ -900,6 +900,160 @@ def test_loss_watch_closes_linked_grid_and_warns(tmp_path, profile, bid, close_p
     assert any(kind == "META_CORTADA_POR_PERDIDA" for kind, _meta_id, _data in alerts)
 
 
+def test_resume_close_acepta_grid_terminal_y_cierra_los_vivos(tmp_path):
+    from sqlalchemy import select
+
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        run_id = conn.execute(db.meta_runs.insert().values(meta_id=goal["id"],
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="CLOSING", started_at=now, close_mode="cancel",
+            close_result="CORTADA_POR_PERDIDA"))
+        grid_ids = {}
+        for name, status in (("already_closed", "CLOSED"), ("still_live", "ACTIVE")):
+            grid_id = conn.execute(db.grids.insert().values(symbol="XRPUSDT",
+                range_low=1, range_high=2, n_levels=1, capital_total=40, reserve=0,
+                status=status, created_at=now, environment="testnet", strategy="simple",
+                params="{}", dust_qty="0")).inserted_primary_key[0]
+            conn.execute(db.grid_levels.insert().values(grid_id=grid_id, level_idx=0,
+                price=1, sell_price=1.1, capital=40, state="DONE" if status == "CLOSED" else "IDLE",
+                held_qty=0, cycles_completed=0, pnl=0, fee_paid=0, updated_at=now))
+            conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+                run_id=run_id, grid_id=grid_id, piece_type="grid",
+                origin_grid_id=grid_id, created_at=now))
+            grid_ids[name] = grid_id
+
+    class Exchange:
+        def get_open_orders(self, _symbol):
+            return []
+    class Engine:
+        exchange = Exchange()
+        def __init__(self):
+            self.closed = []
+        def close_grid(self, grid_id, _mode, **_kwargs):
+            self.closed.append(grid_id)
+            db.update_grid(grid_id, status="CANCELLED")
+            return {"status": "CANCELLED"}
+    engine = Engine()
+    core.engine = engine
+
+    result = core.run_once()
+
+    assert result[0]["status"] == "CLOSING_RETRIED"
+    assert engine.closed == [grid_ids["still_live"]]
+    assert core.get_goal(goal["id"])["status"] == "CORTADA_POR_PERDIDA"
+    with db.engine.connect() as conn:
+        released = conn.execute(select(db.meta_piece_links.c.grid_id,
+            db.meta_piece_links.c.released_at).where(
+                db.meta_piece_links.c.meta_id == goal["id"])).all()
+    assert all(row.released_at is not None for row in released)
+
+
+def test_error_en_target_met_de_una_meta_no_impide_vigilar_la_siguiente(tmp_path):
+    from sqlalchemy import select
+
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    failing = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1)
+    with db.engine.begin() as conn:
+        failed_run = conn.execute(db.meta_runs.insert().values(meta_id=failing["id"],
+            status="ACTIVE", started_at=now, realized_extra_usdt=0)).inserted_primary_key[0]
+        failing_grid = conn.execute(db.grids.insert().values(symbol="XRPUSDT",
+            range_low=1, range_high=2, n_levels=1, capital_total=20, reserve=0,
+            status="ACTIVE", created_at=now, environment="testnet", strategy="simple",
+            params="{}", dust_qty="0")).inserted_primary_key[0]
+        conn.execute(db.grid_levels.insert().values(grid_id=failing_grid, level_idx=0,
+            price=1, sell_price=1.1, capital=20, state="IDLE", held_qty=0,
+            cycles_completed=0, pnl=0, fee_paid=0, updated_at=now))
+        conn.execute(db.meta_piece_links.insert().values(meta_id=failing["id"],
+            run_id=failed_run, grid_id=failing_grid, piece_type="grid",
+            origin_grid_id=failing_grid, created_at=now))
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == failing["id"]).values(
+            status="TARGET_CLOSING", started_at=now))
+        healthy_id = conn.execute(db.meta_goals.insert().values(capital_initial=100,
+            target_usdt=10, target_input_type="USDT", target_input_value=10,
+            profile="RAPIDO", status="ACTIVE", environment="testnet", created_at=now,
+            started_at=now, config_snapshot=json.dumps({"max_loss_pct": 8,
+                "loss_confirm_minutes": 1, "max_days": 45}))).inserted_primary_key[0]
+        healthy_run = conn.execute(db.meta_runs.insert().values(meta_id=healthy_id,
+            status="ACTIVE", started_at=now, realized_extra_usdt=0,
+            loss_limit_breach_count=0)).inserted_primary_key[0]
+
+    class Engine:
+        def cancel_grid_orders(self, *_args, **_kwargs):
+            raise RuntimeError("error simulado de cancelación")
+    core.engine = Engine()
+    valuations = []
+    def valuation(meta_id):
+        valuations.append(meta_id)
+        return {"status": "KNOWN", "result_pct": "-10", "cash_usdt": "90",
+            "value_usdt": "90", "value_best_bid": "90", "value_executable": "90",
+            "inventory_bid_gross_usdt": "0", "cash_coherent": True}
+    core.valuation = valuation
+    closed = []
+    core._close_owned = lambda goal, status: closed.append((int(goal["id"]), status))
+
+    results = core.run_once()
+
+    assert [row["meta_id"] for row in results] == [failing["id"], healthy_id]
+    assert results[0]["status"] == "WATCHDOG_ERROR"
+    assert valuations == [healthy_id]
+    assert closed == [(healthy_id, "CORTADA_POR_PERDIDA")]
+    error = next(row for row in core.ledger(failing["id"])
+        if row["event_type"] == "META_WATCHDOG_ERROR")
+    assert error["details"]["error_type"] == "RuntimeError"
+    assert any(alert[0] == "META_VIGILANTE_ERROR" and alert[1] == failing["id"]
+        for alert in alerts)
+
+
+def test_watchdog_alerta_meta_sin_valuacion_durante_mas_de_5_minutos(tmp_path):
+    alerts = []
+    db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
+    goal = core.create_goal(100, 10)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            status="ACTIVE", started_at=(now - timedelta(minutes=6)).replace(tzinfo=None)))
+    core.valuation = lambda _meta_id: {"status": "KNOWN", "result_pct": "0",
+        "cash_usdt": "100", "value_usdt": "100", "value_best_bid": "100",
+        "value_executable": "100", "inventory_bid_gross_usdt": "0",
+        "cash_coherent": True}
+
+    core.run_once()
+
+    assert any(row[0] == "META_SIN_VALUACION" and row[1] == goal["id"]
+        for row in alerts)
+    assert any(row["event_type"] == "META_SIN_VALUACION"
+        for row in core.ledger(goal["id"]))
+
+
+def test_watchdog_escala_si_el_mismo_error_dura_3_minutos(tmp_path):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    current = [start]
+    db = DBManager("sqlite:///:memory:")
+    db.add_or_reactivate_coin("XRPUSDT")
+    exchange = FakeTestnet()
+    core = MetaCore(db, exchange, settings=SimpleNamespace(meta_mode_enabled=True,
+        meta_max_active=1), clock=lambda: current[0])
+    goal = core.create_goal(100, 10)
+    alerts = []
+    core.alert = lambda *args: alerts.append(args)
+    for minute in range(4):
+        current[0] = start + timedelta(minutes=minute)
+        try:
+            raise RuntimeError("error persistente")
+        except RuntimeError as exc:
+            core._record_watchdog_error(goal["id"], exc)
+    assert sum(row[0] == "META_VIGILANTE_ERROR" for row in alerts) == 1
+    assert sum(row[0] == "META_VIGILANTE_ERROR_REPETIDO" for row in alerts) == 1
+    assert any(row["event_type"] == "META_WATCHDOG_ERROR_REPETIDO"
+        for row in core.ledger(goal["id"]))
+
+
 def test_slow_operator_review_does_not_block_monitor_loss_close(tmp_path):
     from grid.meta_operator import MetaOperator
 
@@ -1134,6 +1288,53 @@ def test_meta_telegram_unknown_alert_uses_30_minute_dispatcher_cooldown():
     now[0] += timedelta(minutes=1)
     assert dispatcher._process_meta_events(sender, config, now[0]) == 1
     assert len(sender.messages) == 2
+
+
+def test_meta_watchdog_alerts_are_translated_and_cooled_30_minutos():
+    class AlertDB:
+        def __init__(self):
+            self.state = {"meta_last_event_id": 0}
+            self.events = [
+                {"id": 1, "meta_id": 7, "event_type": "META_WATCHDOG_ERROR",
+                    "details": {"error_type": "RuntimeError", "error": "fallo"}},
+                {"id": 2, "meta_id": 7, "event_type": "META_WATCHDOG_ERROR_REPETIDO",
+                    "details": {"duration_minutes": 3}},
+                {"id": 3, "meta_id": 7, "event_type": "META_SIN_VALUACION",
+                    "details": {"stale_minutes": 6}},
+            ]
+            self.logs = []
+        def get_alert_state(self, key): return self.state.get(key)
+        def set_alert_state(self, key, value): self.state[key] = value
+        def list_meta_ledger_since(self, last_id, limit=5000):
+            return [row for row in self.events if row["id"] > last_id]
+        def get_last_alert_sent_at(self, key):
+            return next((row["ts"] for row in reversed(self.logs) if row["key"] == key), None)
+        def count_alert_log_since(self, kind, since): return len(self.logs)
+        def add_alert_log(self, **row): self.logs.append({**row, "key": row["alert_key"]})
+    class Sender:
+        def __init__(self): self.messages = []
+        def send(self, message): self.messages.append(message); return {"ok": True}
+
+    current = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    db, sender = AlertDB(), Sender()
+    dispatcher = AlertDispatcher(db, lambda: None, clock=lambda: current[0],
+        monotonic=lambda: current[0].timestamp())
+    sent = dispatcher._process_meta_events(sender,
+        SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30), current[0])
+
+    assert sent == 3
+    assert any("Error del vigilante de metas" in message for message in sender.messages)
+    assert any("Meta sin valuación reciente" in message for message in sender.messages)
+    db.events.append({"id": 4, "meta_id": 7, "event_type": "META_WATCHDOG_ERROR",
+        "details": {"error_type": "RuntimeError", "error": "fallo"}})
+    current[0] += timedelta(minutes=29)
+    assert dispatcher._process_meta_events(sender,
+        SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30), current[0]) == 0
+    db.events.append({"id": 5, "meta_id": 7, "event_type": "META_WATCHDOG_ERROR",
+        "details": {"error_type": "RuntimeError", "error": "fallo"}})
+    current[0] += timedelta(minutes=1)
+    assert dispatcher._process_meta_events(sender,
+        SimpleNamespace(alerts_cooldown_min=60, alerts_daily_cap=30), current[0]) == 1
 
 
 

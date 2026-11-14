@@ -259,6 +259,9 @@ class AlertDispatcher:
             "META_OPERATOR_REVIEW_REQUIRED": "La política del grid pide revisión de la pieza Meta",
             "META_ANALYSIS_COMPLETE": "Análisis de meta terminado",
             "META_ANALYSIS_FAILED": "Análisis de meta falló",
+            "META_WATCHDOG_ERROR": "Error del vigilante de metas",
+            "META_WATCHDOG_ERROR_REPETIDO": "Error del vigilante de metas persistente",
+            "META_SIN_VALUACION": "Meta sin valuación reciente",
         }
         for event in events:
             event_id = int(event["id"])
@@ -273,7 +276,9 @@ class AlertDispatcher:
                 # Cada corrida de análisis es un hecho distinto: no se enfría
                 # entre sí, solo evita reenviar el mismo job dos veces.
                 alert_key += f":{details['job_id']}"
-            cooldown = 30 if event_type == "META_UNKNOWN" else int(getattr(cfg, "alerts_cooldown_min", 60))
+            cooldown = (30 if event_type in {"META_UNKNOWN", "META_WATCHDOG_ERROR",
+                "META_WATCHDOG_ERROR_REPETIDO", "META_SIN_VALUACION"}
+                else int(getattr(cfg, "alerts_cooldown_min", 60)))
             if not self._cooldown_ok(alert_key, cooldown, now):
                 continue
             if self._daily_cap_remaining("operativa", int(getattr(cfg, "alerts_daily_cap", 30)), now) <= 0:
