@@ -407,6 +407,13 @@ class MetaCore:
                     "ronda": round_number, "competidores": selected, "capital_usdt": str(capital),
                     "saldo_libre_usdt": str(available), "exchange_free_usdt": str(exchange_free),
                     "reservado_usdt": str(reserved)}, sort_keys=True)))
+            for goal_row in goals:
+                conn.execute(self.db.meta_ledger.insert().values(meta_id=goal_row["meta_id"],
+                    run_id=goal_row["run_id"], ts=now, event_type="TORNEO_RONDA_INICIADA",
+                    details=json.dumps({"ronda": round_number,
+                        "competidor": goal_row["competidor"], "meta_id": goal_row["meta_id"],
+                        "capital_usdt": str(capital), "exchange_free_usdt": str(exchange_free),
+                        "reservado_usdt": str(reserved)}, sort_keys=True)))
         return {"ronda": round_number, "goals": [self.get_goal(row["meta_id"]) for row in goals],
             "saldo_libre_usdt": str(available), "exchange_free_usdt": str(exchange_free),
             "capital_total_usdt": str(capital * len(selected)), "iniciadas_juntas": True}

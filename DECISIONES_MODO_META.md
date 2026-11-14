@@ -11,6 +11,15 @@
 - Cazador descarta libros de menos de cinco niveles por lado, profundidad a 1 % inferior a dos veces el capital de la pieza y deriva ln(precio/precio_24h) inferior a −σ24h. Su compra inicial se limita a 40 % del capital de la pieza. La sombra permanece informativa.
 - Estado de implementación al cierre inicial: el endpoint crea y activa rondas atómicamente, y Laboratorio muestra saldo/marcador; las fórmulas de Escalera, Seguidor y Control están aisladas y probadas. La ejecución autónoma de estas tres políticas, informe de cierre con SVG y resumen semanal Telegram quedan pendientes de integración y no se consideran habilitados para competir.
 
+### Cierre de implementación 44g–44k (2026-11-14)
+
+- El despacho explícito respeta `competidor`: v1 fuerza v1; v2 usa v2 sin ejecutar Cazador; Cazador usa su revisión directa ignorando el interruptor global; Escalera/Seguidor/Control usan el adaptador de torneo. Las metas antiguas sin campo conservan la ruta anterior.
+- Escalera abre bots y re-precia compras abiertas con cancelación confirmada, cada cuatro horas y hasta seis veces por día. No rearma automáticamente un bot vendido en el escalón libre superior.
+- Seguidor abre el grid de ocho niveles y limita compra inicial al 40 %. Su recenter, sesgo 60/80 %, y re-espaciado diario todavía no están conectados. Cazador no tiene apertura inicial de pieza si no existe una pieza que revisar.
+- Control abre su grid fijo y luego mantiene la geometría. El inicio de ronda exige seis competidores, verifica saldo exchange y reservas y registra `TORNEO_RONDA_INICIADA` por meta. La creación activa las seis metas juntas; la apertura de las piezas se ejecuta luego por el ciclo vigilante, no dentro de la misma petición.
+- El marcador incluye equity disponible, ciclos, ganancia realizada desde PnL de niveles, pérdida máxima registrada, acciones y días al cierre. P(meta) de v2 al inicio no está disponible de forma fiable. El informe de cierre se genera al detectar seis estados terminales y el resumen semanal se agenda lunes 12:17 UTC.
+- No se considera torneo operativo completo: faltan las ramas indicadas arriba y la prueba E2E de fills con comisiones durante varios días para cada competidor. No iniciar en S1 hasta cerrar esos puntos.
+
 ---
 
 ## 1. La idea (lo que Ramón quiere, desde el principio)
