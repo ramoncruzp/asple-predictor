@@ -4186,7 +4186,8 @@ class MetaOperator:
     def _review_once_locked(self, meta_id):
         goal = self.core.get_goal(meta_id)
         engine = self._engine_for_goal(goal)
-        engine_meta = {"name": engine.name, "version": engine.version}
+        tournament_competitor = str((goal.get("config_snapshot") or {}).get("competidor") or "").lower()
+        engine_meta = {"name": tournament_competitor or engine.name, "version": engine.version}
         if goal["status"] != "ACTIVE":
             self._reset_rotation_streaks(meta_id, "meta no activa")
             result = {"decision": "no_hacer_nada", "reason": f"meta no activa: estado {goal['status']}"}
@@ -4226,6 +4227,29 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida"}
             self._record_review(meta_id, result, value, None, engine=engine)
             return result
+        if tournament_competitor == "cazador":
+            # El competidor Cazador no consulta caché v2 ni obedece su interruptor global.
+            from grid.engines import get_engine
+            cazador_engine = get_engine("v2")
+            try:
+                with self._operation_lock:
+                    current_goal = self.core.get_goal(meta_id)
+                    current_value, _ = self._valuation_with_retry(meta_id)
+                    review_at_s = float(self.clock())
+                    completion = cazador_engine._complete_cazador_initial_inventory(
+                        self, current_goal, current_value, review_at_s)
+                    result = completion if isinstance(completion, dict) and completion.get(
+                        "decision") == "completar_cazador" else cazador_engine._review_cazador(
+                            self, current_goal, current_value, review_at_s)
+                result = result or {"decision": "no_hacer_nada", "reason": "sin acción Cazador"}
+                shadow = self._record_cazador_shadow(current_goal, current_value, result)
+                self._record_review(meta_id, result, current_value, shadow,
+                    engine=type("CazadorLabel", (), {"name": "cazador", "version": "torneo-1"})())
+                return result
+            except Exception as exc:
+                self._ledger(meta_id, "META_CAZADOR_REVISION", {
+                    "decision": "error", "error": f"{type(exc).__name__}: {exc}"})
+                raise
         # El Cazador evalúa el libro local antes del plan costoso y de la caché.
         cazador_result = None
         if engine.name == "v2" and not value.get("connection_error"):
@@ -4395,6 +4419,12 @@ class MetaOperator:
     def _engine_for_goal(self, goal):
         from grid.engines import DEFAULT_ENGINE, get_engine
         config = goal.get("config_snapshot") or {}
+        competitor = str(config.get("competidor") or "").lower()
+        if competitor in {"v1", "v2"}:
+            return get_engine(competitor)
+        if competitor in {"cazador", "escalera", "seguidor", "control"}:
+            from grid.engines.torneo import TournamentDecisionEngine
+            return TournamentDecisionEngine(competitor)
         return get_engine(config.get("decision_engine") or DEFAULT_ENGINE)
 
     def _alert_engine_failure(self, meta_id, engine, error):

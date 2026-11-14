@@ -196,3 +196,14 @@ def test_sombra_v1_lenta_no_bloquea_y_persiste_al_terminar(monkeypatch):
     assert skipped_events[0][0][1] == "META_ENGINE_SHADOW_SKIPPED_RUNNING"
     assert finished.wait(1)
     assert persisted.wait(1)
+
+
+def test_seis_competidores_resuelven_su_politica_sin_caer_a_otro_motor():
+    from grid.meta_operator import MetaOperator
+    operator = object.__new__(MetaOperator)
+    names = ("v1", "v2", "cazador", "escalera", "seguidor", "control")
+    engines = {name: operator._engine_for_goal({"config_snapshot": {
+        "competidor": name, "decision_engine": "v1" if name != "v2" else "v2"}})
+        for name in names}
+    assert {name: engine.name for name, engine in engines.items()} == {
+        name: name for name in names}

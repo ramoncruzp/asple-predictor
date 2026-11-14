@@ -4,6 +4,31 @@ from __future__ import annotations
 from math import exp
 
 
+class TournamentDecisionEngine:
+    """Enruta cada competidor a métodos explícitos del operador de Meta."""
+    available = True
+    version = "torneo-1"
+
+    def __init__(self, name):
+        self.name = str(name)
+
+    def plan(self, operator, goal, *, plan_kind, allocation_free_cash=None, record=True):
+        planner = getattr(operator, "_plan_tournament_policy", None)
+        if not callable(planner):
+            raise RuntimeError(f"La política {self.name} todavía no tiene planificador conectado.")
+        return planner(goal, self.name, plan_kind=plan_kind,
+            allocation_free_cash=allocation_free_cash, record=record)
+
+    def review(self, operator, goal, valuation, plan):
+        reviewer = getattr(operator, "_review_tournament_policy", None)
+        if not callable(reviewer):
+            raise RuntimeError(f"La política {self.name} todavía no tiene revisor conectado.")
+        return reviewer(goal, valuation, plan)
+
+    def shadow_review(self, operator, goal, valuation, plan):
+        return {"decision": "solo_registro", "source": "torneo_policy_shadow"}
+
+
 def ladder_orders(mid, sigma_24h, capital=48.0, min_margin_pct=.3,
         reprices_today=0, bought=(), previous=()):
     """Construye cuatro órdenes de Escalera y respeta el límite de repricios."""
