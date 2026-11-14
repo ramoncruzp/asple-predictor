@@ -3,6 +3,14 @@
 **Para qué es este archivo:** tener en un solo lugar qué estamos construyendo, qué se decidió y por qué, para no perder el camino. Si algo de otro documento o prompt choca con esto, manda este archivo (y la especificación `ESPEC_FASE40_MODO_META.md`).
 **Última actualización:** 2026-10-27.
 
+## Decisión 44 — torneo de estrategias (2026-11-14)
+
+- La ronda compara seis metas aisladas de 50 USDT, perfil Rápido, objetivo 1,5 USDT y plazo 20 días: v1, v2, Cazador, Escalera, Grid seguidor y Control. Cada snapshot conserva `competidor` y `ronda`; cada meta mantiene su propio efectivo y límite de pérdida. No se redistribuye capital automáticamente al cierre: se informa una propuesta y Ramón decide.
+- Escalera usa pasos de −0,5σ, −1σ, −1,5σ y −2σ, conserva compras ya ejecutadas, vende con el mayor de 1σ y el margen mínimo y limita repricios a seis diarios sin elevar compras por encima de −0,3σ.
+- Grid seguidor usa ocho niveles espaciados a 0,9σ, sesga compras según efectivo/inventario y espera seis horas antes de otro recentrado; el inventario se conserva con ventas cuyo precio no cae bajo el costo más comisiones estimadas. Control es un Simple fijo de ocho niveles a ±2σ, sin intervenciones.
+- Cazador descarta libros de menos de cinco niveles por lado, profundidad a 1 % inferior a dos veces el capital de la pieza y deriva ln(precio/precio_24h) inferior a −σ24h. Su compra inicial se limita a 40 % del capital de la pieza. La sombra permanece informativa.
+- Estado de implementación al cierre inicial: el endpoint crea y activa rondas atómicamente, y Laboratorio muestra saldo/marcador; las fórmulas de Escalera, Seguidor y Control están aisladas y probadas. La ejecución autónoma de estas tres políticas, informe de cierre con SVG y resumen semanal Telegram quedan pendientes de integración y no se consideran habilitados para competir.
+
 ---
 
 ## 1. La idea (lo que Ramón quiere, desde el principio)

@@ -57,6 +57,19 @@ def test_ronda_torneo_crea_competidores_activos_con_snapshot_aislado(tmp_path):
     assert all(row["equity_usdt"] is None for row in board)
 
 
+def test_ronda_torneo_mantiene_efectivo_y_equity_aislados_por_meta(tmp_path):
+    _db, core = _core(tmp_path, exchange=FakeTestnet(free=1000))
+    result = core.create_tournament_round(
+        ["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5)
+    assert len(result["goals"]) == 6
+    assert sum(float(goal["capital_initial"]) for goal in result["goals"]) == 300
+    for goal in result["goals"]:
+        valuation = core.valuation(goal["id"])
+        assert Decimal(valuation["cash_usdt"]) == Decimal("50")
+        assert Decimal(valuation["value_executable"]) == Decimal("50")
+        assert valuation["cash_coherent"] is True
+
+
 def test_touch_observations_link_to_meta_decision_and_alternative(tmp_path):
     from sqlalchemy import select
 
