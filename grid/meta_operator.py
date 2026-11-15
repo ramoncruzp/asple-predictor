@@ -4252,7 +4252,8 @@ class MetaOperator:
                 raise
         # El Cazador evalúa el libro local antes del plan costoso y de la caché.
         cazador_result = None
-        if engine.name == "v2" and not value.get("connection_error"):
+        if (engine.name == "v2" and tournament_competitor != "v2"
+                and not value.get("connection_error")):
             try:
                 status = self.cazador_status()
                 if status.get("enabled"):
@@ -4304,7 +4305,8 @@ class MetaOperator:
         except Exception as exc:
             cazador_only = False
             try:
-                cazador_only = (engine.name == "v2" and self.cazador_status().get("enabled"))
+                cazador_only = (engine.name == "v2" and tournament_competitor != "v2"
+                    and self.cazador_status().get("enabled"))
             except Exception:
                 cazador_only = False
             if cazador_only:

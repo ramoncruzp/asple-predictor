@@ -579,3 +579,11 @@ El valor liquidable de una pieza incluye el inventario al bid neto de comisión 
 ### 43h-0w8d - métricas de cartera y reanclaje de caché en revisión
 
 Las filas de la caché guardan `metrics_pieza` y `metrics_cartera` explícitamente. El objetivo, el ranking y la comparación consumen las métricas de cartera; las propias de la pieza quedan como diagnóstico. Las geometrías reconvertidas usan multiplicadores de ancho ±1σ y ±2σ (antes se multiplicaba por σ dos veces) y dejan al menos una celda entre el precio de ancla y el borde tras el redondeo. En una revisión v2 se reancla la geometría al libro si el precio se movió hasta 6 % desde la caché; al iniciar un plan se conserva el límite de 3 %.
+
+### Avance 44l–44o
+
+- Ronda 1: cinco metas (v1, v2, Cazador, Escalera, Control), 250 USDT de capital total; Seguidor queda reservado para ronda 2.
+- Las revisiones de torneo tienen prueba con espías para las cinco políticas, incluida la exclusión de Cazador al competidor v2. Se mantiene el test v1 congelado contra `776eedf`.
+- Escalera ahora rearma después de venta confirmada: computa el neto del SELL, cierra el bot anterior, libera su enlace y abre otro en el escalón más alto libre sujeto a validaciones de Testnet/perfil. Falta certificar con un intercambio falso que cubra compra/venta con comisiones y estado de órdenes.
+- Cazador sin piezas puede proponer su primera cartera por la ruta agregar y la persistencia existente. La ejecución tiene filtros y tope inicial, pero su prueba aún sustituye la colocación real.
+- La E2E de tres días con subida, caída y oscilación para cinco competidores no se completó. No desplegar ni iniciar la ronda en S1 hasta completar los puntos parciales/no hechos de `reports/DISCREPANCIAS_FASE44.md`.
