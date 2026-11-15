@@ -24,6 +24,7 @@
 
 - La ronda 1 usa v1, v2, Cazador, Escalera y Control: cinco metas de 50 USDT, objetivo 1,5 USDT y 20 días; el capital total objetivo es 250 USDT más las reservas existentes.
 - Grid seguidor queda expresamente fuera de la ronda 1 y se etiqueta como no disponible en Laboratorio. Entra a la ronda 2 cuando su recentrado, sesgo de inventario/efectivo y re-espaciado estén conectados y probados.
+- Meta Cazador nueva: al no tener piezas, puede proponer `agregar` desde efectivo libre con destino filtrado por σ, deriva y profundidad; exige dos revisiones persistentes (14 min entre ellas) antes de abrir. La compra inicial de cada grid destino conserva el límite de 40 %. La cartera inicial real aún necesita prueba integrada con fills.
 
 ---
 

@@ -21,3 +21,4 @@
 ## Decisión de ronda 1 (44l)
 
 HECHO: Laboratorio/API ofrecen por defecto v1, v2, Cazador, Escalera y Control; Seguidor aparece deshabilitado como “no disponible (ronda 2)” y el backend rechaza incluirlo. El límite mínimo de creación para ronda 1 es 250 USDT más reservas existentes.
+| Meta Cazador nueva: primera cartera en segunda revisión persistente | PARCIAL | `decide_cazador` ya propone `agregar` sin piezas y la ruta del operador ejecuta `_execute_cazador_add` tras dos propuestas iguales; límites de caída/profundidad y compra inicial 40 % están aplicados. Pruebas cubren propuesta, persistencia y filtros, pero la prueba del segundo review sustituye la ejecución real; falta verificar órdenes MARKET/fills y contabilidad de la primera cartera. |

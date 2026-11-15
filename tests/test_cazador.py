@@ -77,6 +77,45 @@ def test_cazador_excluye_destino_con_caida_mayor_a_sigma(meta7_cazador_context):
     assert not any(row["symbol"] == "PEPEUSDT" for row in result["destino"])
 
 
+def test_cazador_meta_nueva_agrega_en_segunda_revision_persistente(monkeypatch):
+    from grid.engines.v2_escenarios import V2ScenarioEngine
+    rows, executions = [], []
+    proposal = {"accion": "agregar", "pieza": None, "destino": [{"symbol": "XRPUSDT"}],
+        "puntajes_piezas": [], "motivo": "efectivo libre"}
+    monkeypatch.setattr("grid.engines.cazador.build_runtime_context",
+        lambda *_args: {"free_cash": 50, "markets": {"XRPUSDT": {
+            "sigma_24h": .05, "drift_24h": 0, "bid_levels": 5, "ask_levels": 5,
+            "bid_depth_usdt_1pct": 200, "ask_depth_usdt_1pct": 200}}})
+    monkeypatch.setattr("grid.engines.cazador.decide_cazador", lambda _context: proposal)
+    operator = SimpleNamespace(
+        _meta_ledger_rows=lambda _meta_id: list(rows),
+        _ledger=lambda meta_id, event_type, details, **kwargs: rows.append({
+            "meta_id": meta_id, "event_type": event_type, "details": details}),
+        alert=lambda *_args: None)
+    engine = V2ScenarioEngine()
+    monkeypatch.setattr(engine, "_execute_cazador_add",
+        lambda _operator, _goal, _context, _proposal, _at: executions.append("add") or
+            {"decision": "agregar_cazador", "opened": ["grid"]})
+    goal = {"id": 61, "profile": "RAPIDO", "config_snapshot": {"max_loss_pct": 18}}
+    assert engine._review_cazador(operator, goal, {"result_pct": 0}, 1000)["decision"] == "mantener"
+    result = engine._review_cazador(operator, goal, {"result_pct": 0}, 1840)
+    assert result["decision"] == "agregar_cazador"
+    assert executions == ["add"]
+
+
+def test_cazador_sin_piezas_propone_cartera_inicial_y_respeta_libro(meta7_cazador_context):
+    context = copy.deepcopy(meta7_cazador_context)
+    context["pieces"] = []
+    context["free_cash"] = 50
+    result = decide_cazador(context)
+    assert result["accion"] == "agregar"
+    assert result["destino"]
+    assert len(result["destino"]) <= 3
+    context["markets"]["PEPEUSDT"]["drift_24h"] = -.101
+    falling = decide_cazador(context)
+    assert not any(item["symbol"] == "PEPEUSDT" for item in falling["destino"])
+
+
 def test_build_runtime_context_presupuesta_buy_open_por_capital_reservado(
         tmp_path, monkeypatch, meta7_cazador_context):
     import sqlite3
