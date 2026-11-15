@@ -407,6 +407,60 @@ def test_equity_incoherente_alerta_y_bloquea_cazador(tmp_path):
     assert db.get_alert_state(f"meta_equity_coherence_{goal['id']}")["blocked"] is True
 
 
+def test_bloqueo_de_coherencia_se_libera_tras_tres_valuaciones_consecutivas(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    db.set_alert_state(f"meta_equity_coherence_{goal['id']}", {
+        "blocked": True, "reason": "bloqueo anterior"})
+
+    values = [core.valuation(goal["id"]) for _ in range(3)]
+
+    assert [value["cash_coherent"] for value in values] == [False, False, True]
+    recovery = db.get_alert_state(f"meta_coherence_recovery_{goal['id']}")
+    assert recovery["blocked"] is False
+    assert any(row["event_type"] == "META_VALUACION_COHERENTE_OK"
+        and row["details"]["source"] == "three_consecutive_valuations"
+        for row in core.ledger(goal["id"]))
+
+
+def test_revalidacion_manual_no_libera_equity_incoherente(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    grid = db.create_grid_with_levels({"symbol": "XRPUSDT", "range_low": 1,
+        "range_high": 2, "n_levels": 1, "capital_total": 50,
+        "status": "ACTIVE", "environment": "testnet"}, [{"level_idx": 0,
+        "price": 1, "sell_price": 1.1, "capital": 50,
+        "state": "IDLE", "held_qty": 0}])
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_piece_links.insert().values(meta_id=goal["id"],
+            run_id=None, grid_id=grid["id"], piece_type="grid",
+            origin_grid_id=grid["id"], created_at=datetime(2026, 1, 1)))
+    db.add_grid_event(run_id=None, source="MONITOR", grid_id=grid["id"],
+        level_idx=0, event_type="BUY_FILLED", details={
+            "cummulative_quote_qty": "50", "executed_qty": "50", "fee_usdt": "0.05"})
+
+    result = core.revalidate_coherence(goal["id"])
+
+    assert result["coherent"] is False
+    assert db.get_alert_state(f"meta_coherence_recovery_{goal['id']}")["blocked"] is True
+    assert not any(row["event_type"] == "META_VALUACION_COHERENTE_OK"
+        for row in core.ledger(goal["id"]))
+
+
+def test_revalidacion_manual_libera_bloqueo_con_equity_coherente(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    db.set_alert_state(f"meta_coherence_recovery_{goal['id']}", {
+        "blocked": True, "consecutive_coherent": 0})
+
+    result = core.revalidate_coherence(goal["id"])
+
+    assert result["coherent"] is True
+    assert result["valuation"]["cash_coherent"] is True
+    assert db.get_alert_state(f"meta_coherence_recovery_{goal['id']}")["blocked"] is False
+    assert core.ledger(goal["id"])[-1]["event_type"] == "META_VALUACION_COHERENTE_OK"
+
+
 def test_detalle_meta_valuation_guarda_cash_coherent(tmp_path):
     db, core = _core(tmp_path)
     goal = core.create_goal(100, 10)

@@ -4227,6 +4227,8 @@ class MetaOperator:
             result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida"}
             self._record_review(meta_id, result, value, None, engine=engine)
             return result
+        if tournament_competitor == "v2" and not self.core._owned_grids(meta_id):
+            return self._review_v2_tournament_start(goal, value, engine)
         if tournament_competitor == "cazador":
             # El competidor Cazador no consulta caché v2 ni obedece su interruptor global.
             from grid.engines import get_engine
@@ -4349,7 +4351,7 @@ class MetaOperator:
             elif float(current_value["result_pct"]) <= -float((current_goal.get("config_snapshot") or {}).get("warning_loss_pct", 0)):
                 self._reset_rotation_streaks(meta_id, "bloqueo 75% durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "bloqueo 75% del límite de pérdida durante el análisis"}
-            elif self._plan_price_moved(plan, current_goal):
+            elif tournament_competitor not in {"escalera", "seguidor", "control"} and self._plan_price_moved(plan, current_goal):
                 self._reset_rotation_streaks(meta_id, "precio cambio durante analisis")
                 result = {"decision": "no_hacer_nada", "reason": "precio cambió durante el análisis; recalcular en la siguiente revisión"}
             else:
@@ -4428,6 +4430,67 @@ class MetaOperator:
             from grid.engines.torneo import TournamentDecisionEngine
             return TournamentDecisionEngine(competitor)
         return get_engine(config.get("decision_engine") or DEFAULT_ENGINE)
+
+    def _review_v2_tournament_start(self, goal, valuation, engine):
+        """Abre el primer plan v2 o deja la meta esperando la cache."""
+        meta_id = int(goal["id"])
+        cash = float(valuation.get("free_capital_usdt") or valuation.get("cash_usdt") or 0)
+        if cash < 10:
+            result = {"decision": "no_hacer_nada",
+                "reason": "efectivo atribuible inferior al minimo de pieza; esperando capital"}
+            self._record_review(meta_id, result, valuation, None, engine=engine)
+            return result
+        try:
+            plan = engine.plan(self, goal, plan_kind="start", allocation_free_cash=cash)
+        except Exception as exc:
+            result = {"decision": "no_hacer_nada", "reason": f"esperando cache: {exc}"}
+            self._record_review(meta_id, result, valuation, None,
+                diagnostics={"v2_start_waiting_cache": True}, engine=engine)
+            return result
+        pieces = list(plan.get("pieces") or [])
+        if not pieces:
+            result = {"decision": "no_hacer_nada",
+                "reason": "esperando cache: no hay pieza v2 factible para iniciar"}
+            self._record_review(meta_id, result, valuation, None, plan=plan, engine=engine)
+            return result
+        opened, failures = [], []
+        try:
+            self._validate_v2_plan_limits(goal, plan)
+            for piece in pieces:
+                symbol = str(piece["symbol"]).upper()
+                ticker = self._book_ticker(symbol)
+                from grid.market_book import book_is_two_sided, book_mid
+                mid = book_mid(ticker) if book_is_two_sided(ticker) else None
+                prior_mid = float(piece.get("mid_at_plan") or
+                    (float(piece["floor"]) + float(piece["ceiling"])) / 2)
+                if mid is None or prior_mid <= 0:
+                    raise RuntimeError(f"libro invalido para iniciar {symbol}")
+                ratio = float(mid) / prior_mid
+                piece["floor"] = float(piece["floor"]) * ratio
+                piece["ceiling"] = float(piece["ceiling"]) * ratio
+                piece["mid_at_plan"] = float(mid)
+                piece["price_source"] = "book_start"
+                checked = self._testnet_openability(piece, goal)
+                if not checked.get("allowed"):
+                    raise RuntimeError(checked.get("reason") or f"pieza v2 no abrible para {symbol}")
+                alternative = {"symbol": symbol, "strategy": piece["strategy"],
+                    "pieces": [piece], "reason": "plan inicial v2 re-anclado al libro"}
+                grid = self._open_replacement(goal, alternative, float(piece["capital_usdt"]))
+                self.core.link_grid(meta_id, int(grid["grid_id"]), piece.get("piece_type", "grid"))
+                opened.append({**piece, "grid_id": int(grid["grid_id"])})
+        except Exception as exc:
+            failures.append(f"{type(exc).__name__}: {exc}")
+        if opened:
+            self._ledger(meta_id, "META_V2_PLAN_INICIAL", {
+                "cache": plan.get("cache"), "opened": opened, "failures": failures})
+            result = {"decision": "abrir_pieza_torneo", "competitor": "v2",
+                "opened": opened, "failures": failures}
+        else:
+            result = {"decision": "no_hacer_nada",
+                "reason": f"esperando cache: {failures[0] if failures else 'plan sin piezas'}"}
+        self._record_review(meta_id, result, valuation, None, plan=plan, engine=engine,
+            diagnostics={"v2_start_waiting_cache": not bool(opened)})
+        return result
 
     def _alert_engine_failure(self, meta_id, engine, error):
         now = float(self.clock())
@@ -5302,19 +5365,31 @@ class MetaOperator:
         if not markets:
             return {"competitor": competitor, "markets": {}, "pieces": [],
                 "reason": "sin mercado con libro y velas válidas", "plan_kind": plan_kind}
-        symbol, market = max(markets.items(), key=lambda item: float(item[1]["sigma_24h"]))
+        ranked_markets = sorted(markets.items(),
+            key=lambda item: float(item[1]["sigma_24h"]), reverse=True)
+        symbol, market = ranked_markets[0]
         mid, sigma = float(market["mid"]), float(market["sigma_24h"])
         cfg = goal.get("config_snapshot") or {}
         capital = min(float(allocation_free_cash or goal["capital_initial"]),
             float(goal["capital_initial"]) * float(cfg.get("capital_per_coin_pct", 70)) / 100)
         pieces = []
         if competitor == "escalera":
-            for order in ladder_orders(mid, sigma, capital=min(48.0, capital),
-                    min_margin_pct=float(cfg.get("min_margin_pct", .3))):
-                pieces.append({"symbol": symbol, "strategy": "simple",
-                    "piece_type": "individual_bot_grid", "floor": order["buy_price"],
-                    "ceiling": order["sell_price"], "n_levels": 1,
-                    "capital_usdt": order["capital"], "bot": order["bot"]})
+            coin_cap = float(goal["capital_initial"]) * float(
+                cfg.get("capital_per_coin_pct", 70)) / 100
+            if coin_cap >= 24 and float(allocation_free_cash or goal["capital_initial"]) >= 24:
+                selected_markets = ranked_markets[:min(2,
+                    int(float(allocation_free_cash or goal["capital_initial"]) // 24))]
+                for market_index, (market_symbol, selected_market) in enumerate(selected_markets):
+                    orders = ladder_orders(float(selected_market["mid"]),
+                        float(selected_market["sigma_24h"]), capital=48.0,
+                        min_margin_pct=float(cfg.get("min_margin_pct", .3)))
+                    for order in orders[:2]:
+                        pieces.append({"symbol": market_symbol, "strategy": "simple",
+                            "piece_type": "individual_bot_grid", "floor": order["buy_price"],
+                            "ceiling": order["sell_price"], "n_levels": 1,
+                            "capital_usdt": 12.0, "bot": order["bot"],
+                            "sigma_24h": float(selected_market["sigma_24h"]),
+                            "ladder_market_index": market_index})
         elif competitor == "seguidor":
             geometry = follower_geometry(mid, sigma)
             pieces.append({"symbol": symbol, "strategy": "simple", "piece_type": "grid",
@@ -5322,9 +5397,15 @@ class MetaOperator:
                 "n_levels": 8, "capital_usdt": capital})
         elif competitor == "control":
             geometry = control_geometry(mid, sigma)
+            if capital < 24:
+                return {"competitor": competitor, "markets": markets, "pieces": [],
+                    "reason": "capital below 24 USDT for tournament control",
+                    "plan_kind": plan_kind}
+            n_levels = next(n for n in (8, 6, 5, 4) if capital / n >= 6)
             pieces.append({"symbol": symbol, "strategy": "simple", "piece_type": "grid",
                 "floor": geometry["low"], "ceiling": geometry["high"],
-                "n_levels": 8, "capital_usdt": capital})
+                "n_levels": n_levels, "capital_usdt": capital,
+                "capital_per_level_usdt": capital / n_levels})
         return {"competitor": competitor, "markets": markets, "pieces": pieces,
             "links": [], "plan_kind": plan_kind}
 
@@ -5333,6 +5414,10 @@ class MetaOperator:
         from datetime import datetime, timezone
         from grid.engines.torneo import ladder_orders
         competitor = str(plan.get("competitor") or "")
+        if competitor in {"escalera", "control"} and not self.core._owned_grids(int(goal["id"])):
+            plan = self._plan_tournament_policy(goal, competitor, plan_kind="revision",
+                allocation_free_cash=(valuation.get("free_capital_usdt") or
+                    valuation.get("cash_usdt")), record=False)
         if plan.get("reason"):
             return {"decision": "no_hacer_nada", "reason": plan["reason"]}
         opened, failures = [], []
@@ -5358,7 +5443,10 @@ class MetaOperator:
                         "seguidor": "META_SEGUIDOR_APERTURA",
                         "control": "META_CONTROL_APERTURA"}[competitor]
                     self._ledger(int(goal["id"]), event, {"opened": grid,
-                        "capital_usdt": piece["capital_usdt"]}, grid_id=grid["grid_id"])
+                        "capital_usdt": piece["capital_usdt"],
+                        "n_levels": piece.get("n_levels"),
+                        "capital_per_level_usdt": piece.get("capital_per_level_usdt")},
+                        grid_id=grid["grid_id"])
                 except Exception as exc:
                     failures.append({"symbol": piece.get("symbol"),
                         "error": f"{type(exc).__name__}: {exc}"})

@@ -469,6 +469,8 @@ class MetaCore:
                 if finished.tzinfo is None: finished = finished.replace(tzinfo=timezone.utc)
                 days_to_finish = round(max(0, (finished - started).total_seconds()) / 86400, 3)
             cycles = 0
+            control_open = next(((item.get("details") or {}) for item in reversed(events)
+                if item.get("event_type") == "META_CONTROL_APERTURA"), {})
             for link in self._all_piece_links(int(goal["id"])):
                 grid = self.db.get_grid(int(link["grid_id"]))
                 if grid:
@@ -487,6 +489,8 @@ class MetaCore:
                 "cycles": cycles,
                 "rotations_reprices": sum(1 for item in events if item.get("event_type") in {
                     "META_CAZADOR_ROTACION", "META_TOURNAMENT_REPRICE", "META_TOURNAMENT_RECENTER"}),
+                "control_n_levels": control_open.get("n_levels"),
+                "control_capital_per_level_usdt": control_open.get("capital_per_level_usdt"),
                 "target_reached": goal["status"] == "CUMPLIDA", "days_to_finish": days_to_finish,
                 "v2_predicted_probability": next((float((item.get("details") or {}).get("p_meta"))
                     for item in reversed(events) if item.get("event_type") == "META_OPERATOR_REVIEW_DECISION"
@@ -768,6 +772,12 @@ class MetaCore:
         links = self._owned_grids(meta_id)
         history_links = self._all_piece_links(meta_id)
         try:
+            recovery_key = f"meta_coherence_recovery_{int(meta_id)}"
+            prior_recovery = self.db.get_alert_state(recovery_key) or {}
+            prior_component_block = any(bool((self.db.get_alert_state(key) or {}).get("blocked"))
+                for key in (f"meta_cash_coherence_{int(meta_id)}",
+                    f"meta_equity_coherence_{int(meta_id)}"))
+            was_coherence_blocked = bool(prior_recovery.get("blocked") or prior_component_block)
             pieces = []
             quantities_by_symbol = defaultdict(Decimal)
             cash = self._goal_cash(meta_id)
@@ -888,7 +898,11 @@ class MetaCore:
             with self._equity_coherence_lock:
                 equity_coherence = self._check_equity_coherence(meta_id, goal, cash,
                     inventory_exec, history_links, pieces)
-            cash_coherent = cash_coherence["coherent"] and equity_coherence["coherent"]
+            recovery = self._update_meta_coherence_recovery(meta_id,
+                cash_coherence, equity_coherence,
+                valuation_known=status == "KNOWN", was_blocked=was_coherence_blocked)
+            cash_coherent = recovery["coherent"]
+            cash_coherence["recovery"] = recovery
             self._update_valuation_state(meta_id, state_rows, profile_cfg)
             value_best = cash + inventory_best * (Decimal(1) - FEE)
             value_exec = cash + inventory_exec
@@ -946,6 +960,77 @@ class MetaCore:
                     "connection_error": connection_error, "value_best_bid": None,
                     "value_executable": None, "result_pct": None, "pieces": [],
                     "cash_coherent": False}
+
+    def _update_meta_coherence_recovery(self, meta_id, cash_coherence,
+            equity_coherence, *, valuation_known, was_blocked):
+        """Mantiene bloqueada una meta hasta tres valuaciones dentro de 0,05 USDT."""
+        key = f"meta_coherence_recovery_{int(meta_id)}"
+        previous = self.db.get_alert_state(key) or {}
+        delta = _d(equity_coherence.get("delta_usdt"))
+        coherent = bool(valuation_known and cash_coherence.get("coherent")
+            and equity_coherence.get("coherent")
+            and delta <= Decimal("0.05"))
+        if not coherent:
+            state = {"blocked": True, "consecutive_coherent": 0,
+                "reason": (equity_coherence.get("reason") or cash_coherence.get("reason")
+                    or "valuacion no conocida o diferencia mayor de 0.05 USDT"),
+                "updated_at": self._now().isoformat()}
+            self.db.set_alert_state(key, state)
+            return {**state, "coherent": False, "equity_delta_usdt": str(delta)}
+        if not was_blocked and not previous.get("blocked"):
+            state = {"blocked": False, "consecutive_coherent": 0, "reason": None,
+                "updated_at": self._now().isoformat()}
+            self.db.set_alert_state(key, state)
+            return {**state, "coherent": True, "equity_delta_usdt": str(delta)}
+        consecutive = int(previous.get("consecutive_coherent") or 0) + 1
+        cleared = consecutive >= 3
+        state = {"blocked": not cleared,
+            "consecutive_coherent": 0 if cleared else consecutive,
+            "reason": None if cleared else "requiere tres valuaciones coherentes consecutivas",
+            "updated_at": self._now().isoformat()}
+        self.db.set_alert_state(key, state)
+        if cleared:
+            for component_key in (f"meta_cash_coherence_{int(meta_id)}",
+                    f"meta_equity_coherence_{int(meta_id)}"):
+                component = self.db.get_alert_state(component_key) or {}
+                self.db.set_alert_state(component_key, {**component, "blocked": False,
+                    "reason": None, "updated_at": self._now().isoformat()})
+            self._ledger(meta_id, None, "META_VALUACION_COHERENTE_OK", {
+                "source": "three_consecutive_valuations", "consecutive_coherent": consecutive,
+                "equity_delta_usdt": str(delta), "tolerance_usdt": "0.05"})
+        return {**state, "coherent": cleared, "equity_delta_usdt": str(delta)}
+
+    def revalidate_coherence(self, meta_id):
+        """Recalcula equity y libera el bloqueo solo si efectivo y equity cuadran."""
+        value = self.valuation(meta_id)
+        cash = value.get("cash_coherence") or {}
+        equity = cash.get("equity") or {}
+        delta = _d(equity.get("delta_usdt"))
+        coherent = bool(value.get("status") == "KNOWN" and cash.get("coherent")
+            and equity.get("coherent")
+            and delta <= Decimal("0.05"))
+        key = f"meta_coherence_recovery_{int(meta_id)}"
+        if not coherent:
+            prior = self.db.get_alert_state(key) or {}
+            self.db.set_alert_state(key, {**prior, "blocked": True,
+                "consecutive_coherent": 0,
+                "reason": "revalidacion manual fallida: diferencia mayor de 0.05 USDT o efectivo incoherente",
+                "updated_at": self._now().isoformat()})
+            return {"coherent": False, "valuation": value,
+                "reason": "la valuacion sigue incoherente; bloqueo conservado"}
+        for state_key in (f"meta_cash_coherence_{int(meta_id)}",
+                f"meta_equity_coherence_{int(meta_id)}"):
+            prior = self.db.get_alert_state(state_key) or {}
+            self.db.set_alert_state(state_key, {**prior, "blocked": False, "reason": None,
+                "updated_at": self._now().isoformat()})
+        self.db.set_alert_state(key, {"blocked": False, "consecutive_coherent": 0,
+            "reason": None, "updated_at": self._now().isoformat()})
+        self._ledger(meta_id, None, "META_VALUACION_COHERENTE_OK", {
+            "source": "manual_revalidation", "equity_delta_usdt": str(delta),
+            "tolerance_usdt": "0.05"})
+        value["cash_coherent"] = True
+        return {"coherent": True, "valuation": value,
+            "reason": "coherencia revalidada; bloqueo liberado"}
 
     def _check_cash_coherence(self, meta_id, cash, history_links, *, missing_released_grids=()):
         """Detecta saltos del efectivo que no coinciden con fills o cierres."""
@@ -1100,7 +1185,7 @@ class MetaCore:
                     open_fees += _d((buy.get("details") or {}).get("fee_usdt"))
         actual = _d(cash) + _d(inventory)
         expected = _d(goal["capital_initial"]) + realized + _d(inventory) - open_cost - open_fees
-        threshold = _d(goal["capital_initial"]) * Decimal("0.01")
+        threshold = Decimal("0.05")
         delta = abs(actual - expected)
         coherent = pnl_known and delta <= threshold
         key = f"meta_equity_coherence_{int(meta_id)}"

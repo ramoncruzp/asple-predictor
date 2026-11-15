@@ -84,8 +84,10 @@ def _v1_plan_stub(operator, exchange):
             raise AssertionError(f"stub v1 usado por {competitor}")
         ticker = exchange.get_book_ticker("CCCUSDT")
         mid = (float(ticker["bid_price"]) + float(ticker["ask_price"])) / 2
+        capital = min(50.0, float(goal["capital_initial"]) *
+            float((goal.get("config_snapshot") or {}).get("capital_per_coin_pct", 70)) / 100)
         piece = {"symbol": "CCCUSDT", "strategy": "simple", "piece_type": "grid",
-            "capital_usdt": 50, "n_levels": 4, "floor": mid * .85,
+            "capital_usdt": capital, "n_levels": 4, "floor": mid * .85,
             "ceiling": mid * 1.01, "mid_at_plan": mid, "margin_pct": .7}
         alternative = {"alternative_id": "e2e-v1-aaa", "symbol": "CCCUSDT",
             "strategy": "simple", "pieces": [piece],
@@ -259,3 +261,117 @@ def test_torneo_operativo_multidia_offline(tmp_path, monkeypatch, scenario):
     print("TORNEO_E2E_RESULTADO " + json.dumps({"guion": scenario,
         "result_pct": {name: value.get("result_pct") for name, value in final.items()},
         "segundos": round(time.perf_counter() - started_wall, 2)}, sort_keys=True))
+
+
+@pytest.mark.e2e
+def test_ronda_uno_abre_competidores_en_dos_revisiones_con_filtros_reales(
+        tmp_path, monkeypatch):
+    """Arranca los cinco competidores con 50 USDT y el perfil RAPIDO al 70 %."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import data.market_store
+
+    exchange = FakeExchange(initial_usdt=500)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    exchange.now = start
+    market_path = tmp_path / "market_data.db"
+    store = CandleStore(market_path)
+    monkeypatch.setattr(data.market_store, "market_db_path", lambda: market_path)
+    for symbol in exchange.symbols:
+        store.upsert(symbol, "5m", _historical_rows(symbol, start, 2 * 24 * 12,
+            exchange.scales[symbol]), "fixture_e2e", role="operar")
+        filters = exchange.get_symbol_info(symbol)
+        assert next(row for row in filters["filters"]
+            if row["filterType"] == "NOTIONAL")["minNotional"] == "5"
+        store.save_symbol_filters(symbol, filters, fetched_at=start.isoformat())
+
+    db = DBManager(f"sqlite:///{tmp_path / 'round1.sqlite'}")
+    for symbol in exchange.symbols:
+        db.add_or_reactivate_coin(symbol)
+    settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=7,
+        alerts_enabled=False, grid_api_token="e2e-local-token", max_grids_simultaneos=30,
+        usdt_por_grid=50, capital_max_por_nivel_pct=.3, grid_min_step_pct=.003,
+        same_coin_sell_tolerance_pct=.05, scanner_timeout_seconds=1,
+        scanner_fee_pct=.1, scanner_min_spacing_pct=.8,
+        grid_min_margin_after_fees_pct=.7, scanner_history_days=30,
+        grid_monitor_gap_minutes=20, grid_monitor_interval=900,
+        grid_policy_enabled=False)
+    clock = [start]
+    engine = GridEngine(db, exchange, settings)
+    core = MetaCore(db, exchange, engine, settings=settings, clock=lambda: clock[0])
+    monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: clock[0])
+    core.monitor = monitor
+
+    class Scanner:
+        client = exchange
+        def clock(self):
+            return clock[0].timestamp()
+        def scan(self, capital, with_sim=False):
+            return {"results": [{"symbol": symbol, "eligible": True, "score": .9,
+                "sigma_24h_open": .02} for symbol in exchange.symbols]}
+
+    operator = MetaOperator(core, db, Scanner(), engine, settings,
+        clock=lambda: clock[0].timestamp())
+    operator.review_cycle_budget_s = float("inf")
+    _v1_plan_stub(operator, exchange)
+    app = FastAPI()
+    app.include_router(metas.router, prefix="/api/metas")
+    app.state.meta_core, app.state.meta_operator = core, operator
+    app.state.settings, app.state.db = settings, db
+    app.state.grid_engine, app.state.testnet_client = engine, exchange
+    app.state.grid_scan_service, app.state.vol_provider = operator.scanner, None
+    with TestClient(app, headers={"X-API-Token": "e2e-local-token"}) as client:
+        response = client.post("/api/metas/tournament/rounds", json={
+            "competitors": ["v1", "v2", "cazador", "escalera", "control"],
+            "capital_usdt": 50, "target_value": 1.5, "target_type": "USDT",
+            "profile": "RAPIDO", "duration_days": 20})
+        assert response.status_code == 200, response.text
+        goals = response.json()["goals"]
+        ids = {row["config_snapshot"]["competidor"]: int(row["id"]) for row in goals}
+        assert all(float(row["capital_initial"]) == 50 for row in goals)
+        assert all(row["config_snapshot"]["capital_per_coin_pct"] == 70 for row in goals)
+        for review_index in range(2):
+            clock[0] = start + timedelta(minutes=15 * review_index)
+            exchange.now = clock[0]
+            cycle = operator.review_active()
+            assert cycle["status"] == "completed", cycle
+
+        histories = {name: core._owned_grids(meta_id) for name, meta_id in ids.items()}
+        for name in ("v1", "cazador", "escalera", "control"):
+            assert histories[name], (name, core.ledger(ids[name])[-10:])
+            assert all(float(db.get_grid(row["grid_id"])["capital_total"]) >= 10
+                for row in histories[name])
+        assert histories["v2"] == []
+        v2_reviews = [row for row in core.ledger(ids["v2"])
+            if row["event_type"] == "META_OPERATOR_NOOP"]
+        assert v2_reviews and all("esperando cach" in row["details"]["reason"].lower()
+            for row in v2_reviews)
+
+        ladder_grids = [db.get_grid(row["grid_id"]) for row in histories["escalera"]]
+        assert len(ladder_grids) == 4
+        assert {row["symbol"] for row in ladder_grids}.__len__() == 2
+        assert all(float(row["capital_total"]) == pytest.approx(12) for row in ladder_grids)
+        assert all(row["n_levels"] == 1 for row in ladder_grids)
+        assert all(sum(grid["symbol"] == row["symbol"] for grid in ladder_grids) == 2
+            for row in ladder_grids)
+
+        control_grid = db.get_grid(histories["control"][0]["grid_id"])
+        assert control_grid["n_levels"] >= 4
+        assert float(control_grid["capital_total"]) / control_grid["n_levels"] >= 6
+        board = core.tournament_scoreboard(1)
+        control_row = next(row for row in board if row["competidor"] == "control")
+        assert control_row["control_n_levels"] == control_grid["n_levels"]
+        assert control_row["control_capital_per_level_usdt"] >= 6
+
+        cazador_value = core.valuation(ids["cazador"])
+        assert cazador_value["cash_coherent"] is True
+        revalidated = client.post(
+            f"/api/metas/{ids['cazador']}/coherence/revalidate", json={})
+        assert revalidated.status_code == 200, revalidated.text
+        assert revalidated.json()["coherent"] is True
+        cazador_grid_ids = {int(row["grid_id"]) for row in histories["cazador"]}
+        assert any(event["event_type"] == "GRID_COMPRA_INICIAL"
+            for grid_id in cazador_grid_ids
+            for event in db.list_grid_events(grid_id=grid_id, limit=100000))
+        assert not any(row["event_type"] == "META_VALUACION_INCOHERENTE"
+            for row in core.ledger(ids["cazador"]))

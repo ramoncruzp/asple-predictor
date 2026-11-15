@@ -436,6 +436,11 @@ def valuation(request: Request, meta_id: int):
     return _call(_core(request).valuation, meta_id)
 
 
+@router.post("/{meta_id}/coherence/revalidate")
+def revalidate_coherence(request: Request, meta_id: int):
+    return _call(_core(request).revalidate_coherence, meta_id)
+
+
 @router.get("/{meta_id}/ledger")
 def ledger(request: Request, meta_id: int, page: int = 1, page_size: int = 50,
            include_valuation: bool = False, limit: int | None = None,
