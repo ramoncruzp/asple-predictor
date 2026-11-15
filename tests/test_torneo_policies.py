@@ -10,6 +10,8 @@ def test_escalera_respeta_escalones_tope_y_bot_comprado():
         [100 * __import__("math").exp(-.02), 100 * __import__("math").exp(-.03),
             100 * __import__("math").exp(-.04)])
     assert orders[0]["sell_price"] > 98
+    assert all(row["sell_price"] > 100 for row in orders[1:])
+    assert len({round(row["sell_price"], 8) for row in orders[1:]}) == 3
     assert all(row["buy_price"] <= 100 * __import__("math").exp(-.3 * .02) for row in orders)
     capped = ladder_orders(100, .02, reprices_today=6,
         previous=[{"buy_price": 90}] * 4)

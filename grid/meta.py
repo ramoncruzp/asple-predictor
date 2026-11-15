@@ -966,7 +966,8 @@ class MetaCore:
                     self.db.grid_events.c.grid_id.in_(grid_ids),
                     self.db.grid_events.c.id > prior_id,
                     self.db.grid_events.c.event_type.in_(("BUY_FILLED", "SELL_FILLED",
-                        "CELL_LIQUIDATED", "GRID_CLOSED", "CELL_MOVED_TO_REPOSITORY"))
+                        "CELL_LIQUIDATED", "GRID_COMPRA_INICIAL", "GRID_CLOSED",
+                        "CELL_MOVED_TO_REPOSITORY"))
                     ).limit(1)).first()
                 explained = activity is not None
         amount = _d(cash)
@@ -1055,7 +1056,9 @@ class MetaCore:
                 kind = event.get("event_type")
                 details = event.get("details") or {}
                 if kind == "BUY_FILLED":
-                    latest_buys[int(event.get("level_idx") or 0)] = event
+                    level_idx = int(event.get("level_idx") or 0)
+                    if level_idx not in latest_buys:
+                        latest_buys[level_idx] = event
                 elif kind == "SELL_FILLED":
                     pnl = details.get("cycle_pnl")
                     if pnl is None:

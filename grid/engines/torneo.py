@@ -51,8 +51,12 @@ def ladder_orders(mid, sigma_24h, capital=48.0, min_margin_pct=.3,
         allowed = int(reprices_today) < 6
         if not allowed and index < len(previous) and previous[index]:
             buy = float(previous[index]["buy_price"])
+        # El grid bot exige que el precio actual quede entre compra y venta.
+        # Coloca cada venta por encima del mid y separa los escalones para que
+        # la apertura simultánea de los cuatro bots no choque con sus propios sells.
+        sell = mid * exp((index + 1) * .5 * sigma)
         orders.append({"bot": index, "buy_price": buy,
-            "sell_price": buy * (1 + sell_move), "capital": unit,
+            "sell_price": sell, "capital": unit,
             "bought": False, "repriced": allowed})
     return orders
 

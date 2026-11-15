@@ -1,8 +1,8 @@
 """Exchange sintético determinista para recorridos E2E del modo Meta."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import math
 
 from data.exchange_filters import SymbolFilters
@@ -12,8 +12,8 @@ class FakeExchange:
     testnet = True
     fee_rate = Decimal("0.001")
     fee_asset = "USDT"
-    symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
-    scales = {"AAAUSDT": 1.0, "BBBUSDT": .72, "CCCUSDT": .48}
+    symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT")
+    scales = {"AAAUSDT": 1.0, "BBBUSDT": .72, "CCCUSDT": .48, "DDDUSDT": .36}
 
     def __init__(self, initial_usdt=350, *, slippage_pct=.001):
         self.free = {"USDT": Decimal(str(initial_usdt))}
@@ -29,6 +29,7 @@ class FakeExchange:
         self.step = 0
         self.scenario = "oscillation"
         self.market_frames = {}
+        self.unavailable_symbols = set()
         self.filters = {symbol: SymbolFilters.from_symbol_info(self.get_symbol_info(symbol))
             for symbol in self.symbols}
 
@@ -45,13 +46,17 @@ class FakeExchange:
     def get_book_ticker(self, symbol):
         mid = self.prices[symbol]
         spread = mid * Decimal("0.0002")
-        return {"bid_price": mid - spread, "ask_price": mid + spread,
+        bid = (mid - spread).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+        ask = (mid + spread).quantize(Decimal("0.0001"), rounding=ROUND_UP)
+        return {"bid_price": bid, "ask_price": ask,
             "bid_qty": Decimal("100000"), "ask_qty": Decimal("100000")}
 
     def get_book_ticker_depth(self, symbol, limit=100):
         return self.get_order_book_depth(symbol, limit)
 
     def get_order_book_depth(self, symbol, limit=100):
+        if symbol in self.unavailable_symbols:
+            return {"bids": [], "asks": [], "read_at": self.now}
         book = self.get_book_ticker(symbol)
         bids, asks = [], []
         for index in range(max(5, min(int(limit), 100))):
@@ -204,6 +209,47 @@ class FakeExchange:
                     px = min(order["price"], ticker["ask_price"]) if order["side"] == "BUY" else max(
                         order["price"], ticker["bid_price"])
                     self._fill(order, px, order["quantity"])
+        return {symbol: float(value) for symbol, value in self.prices.items()}
+
+    def advance_15m(self, scenario, step, duration_days=2):
+        """Avanza una vela de quince minutos y ejecuta cruces por su rango OHLC."""
+        self.scenario, self.step = str(scenario), int(step)
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.now = start + timedelta(minutes=15 * int(step))
+        total_bars = int(duration_days) * 24 * 12
+        end_bar = int(step) * 3
+        self.last_candles = {}
+        for index, symbol in enumerate(self.symbols):
+            initial = Decimal(str(100 * (index + 1)))
+            previous = self.prices[symbol]
+            prices = [previous]
+            for bar in range(end_bar - 2, end_bar + 1):
+                t = max(0, bar) / total_bars
+                noise = .0015 * math.sin(bar * .71) + .001 * math.sin(bar * .193)
+                if scenario == "subida":
+                    common = .08 * t + noise
+                elif scenario == "caida":
+                    common = -.25 * t + noise
+                else:
+                    common = .04 * math.sin(2 * math.pi * 2 * t) + noise
+                excursion = common * self.scales[symbol] + .0006 * math.sin(
+                    bar * (.11 + index * .037))
+                prices.append(initial * Decimal(str(1 + excursion)))
+            current = prices[-1]
+            candle = {"open": float(previous), "high": float(max(prices)),
+                "low": float(min(prices)), "close": float(current),
+                "start_bar": end_bar - 3}
+            self.last_candles[symbol] = candle
+            self.prices[symbol] = current
+            for order in list(self.orders.values()):
+                if order["symbol"] != symbol or order["status"] != "NEW" or order["type"] != "LIMIT":
+                    continue
+                crossed = ((order["side"] == "BUY" and
+                    Decimal(str(candle["low"])) <= order["price"])
+                    or (order["side"] == "SELL" and
+                    Decimal(str(candle["high"])) >= order["price"]))
+                if crossed:
+                    self._fill(order, order["price"], order["quantity"])
         return {symbol: float(value) for symbol, value in self.prices.items()}
 
     def get_historical_klines(self, symbol, interval="5m", limit=10000):

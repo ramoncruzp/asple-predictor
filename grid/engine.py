@@ -197,6 +197,10 @@ class GridEngine:
     @staticmethod
     def _actual_buy_client_order_id(grid_id: int, level: dict) -> str:
         explicit = level.get("buy_client_order_id")
+        initial_match = re.fullmatch(r"gI(\d+)L(\d+)", str(explicit or ""))
+        if (initial_match and int(initial_match.group(1)) == int(grid_id)
+                and int(initial_match.group(2)) == int(level["level_idx"])):
+            return str(explicit)
         match = re.fullmatch(r"g\d+L\d+B(\d+)", str(explicit or ""))
         if explicit and (match is None or int(match.group(1)) == int(level.get("cycles_completed", 0))):
             return str(explicit)
@@ -1371,10 +1375,14 @@ class GridEngine:
             sell_trades = self.exchange.get_my_trades(symbol, sell_order["order_id"])
             buy_fee = self._fee_value_usdt(buy_trades, symbol)
             sell_fee = self._fee_value_usdt(sell_trades, symbol)
+            buy_quote = sum((_d(trade.get("quoteQty") or
+                _d(trade.get("qty") or 0) * _d(trade.get("price") or 0))
+                for trade in buy_trades), Decimal(0))
+            sell_quote = sum((_d(trade.get("quoteQty") or
+                _d(trade.get("qty") or 0) * _d(trade.get("price") or 0))
+                for trade in sell_trades), Decimal(0))
             cycle_pnl = (
-                _d(sell_order["cummulative_quote_qty"])
-                - _d(buy_order["cummulative_quote_qty"])
-                - buy_fee - sell_fee
+                sell_quote - buy_quote - buy_fee - sell_fee
             )
         except (TestnetOrderError, RuntimeError, KeyError) as exc:
             pnl_estimated = True
@@ -2788,9 +2796,14 @@ class GridEngine:
         sell_trades = self.exchange.get_my_trades(symbol, market_order["order_id"])
         buy_fee = self._fee_value_usdt(buy_trades, symbol)
         sell_fee = self._fee_value_usdt(sell_trades, symbol)
+        buy_quote = sum((_d(trade.get("quoteQty") or
+            _d(trade.get("qty") or 0) * _d(trade.get("price") or 0))
+            for trade in buy_trades), Decimal(0))
+        sell_quote = sum((_d(trade.get("quoteQty") or
+            _d(trade.get("qty") or 0) * _d(trade.get("price") or 0))
+            for trade in sell_trades), Decimal(0))
         cycle_pnl = (
-            _d(market_order["cummulative_quote_qty"])
-            - _d(buy_order["cummulative_quote_qty"]) - buy_fee - sell_fee
+            sell_quote - buy_quote - buy_fee - sell_fee
         )
         completion_fields = {
             "state": "DONE", "cycles_completed": cycle,
@@ -2810,12 +2823,12 @@ class GridEngine:
             "level_idx": idx, "client_order_id": cid, "order_id": int(market_order["order_id"]),
             "qty": str(_d(market_order["executed_qty"])), "cycle_pnl": str(cycle_pnl),
             "pnl_realized": str(cycle_pnl), "cycles_completed": cycle, "status": "FILLED",
-            "price": str(_d(market_order["cummulative_quote_qty"]) / _d(market_order["executed_qty"])),
-            "cash_proceeds_net": str(_d(market_order["cummulative_quote_qty"]) - sell_fee),
+            "price": str(sell_quote / _d(market_order["executed_qty"])),
+            "cash_proceeds_net": str(sell_quote - sell_fee),
             "realized_pnl": str(cycle_pnl),
             "buy_fee_usdt": str(buy_fee), "sell_fee_usdt": str(sell_fee),
-            "buy_quote_gross_usdt": str(_d(buy_order["cummulative_quote_qty"])),
-            "sell_quote_gross_usdt": str(_d(market_order["cummulative_quote_qty"])),
+            "buy_quote_gross_usdt": str(buy_quote),
+            "sell_quote_gross_usdt": str(sell_quote),
         }
         if emit_event:
             self._close_event(

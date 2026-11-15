@@ -1,16 +1,22 @@
-"""Recorrido temporal del torneo con el API, el vigilante y el operador reales."""
+"""Pruebas de contrato y recorrido operativo del torneo, solo con datos sintéticos."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+import math
+import sqlite3
+import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from api.routes import metas
+from data.market_store import CandleStore
 from database.db_manager import DBManager
 from grid.engine import GridEngine
 from grid.meta import MetaCore
 from grid.meta_operator import MetaOperator
+from grid.monitor import GridMonitor
 from tests.e2e.fake_exchange import FakeExchange
 
 
@@ -28,98 +34,228 @@ def test_exchange_falso_market_publica_quote_cero_y_comision_real():
         float(trade["quoteQty"]) + float(trade["commission"]))
 
 
-def test_exchange_falso_llena_limit_al_cruzar_y_libera_reserva():
+def test_exchange_falso_llena_limit_por_minimo_maximo_de_vela_15m():
     exchange = FakeExchange(initial_usdt=100)
     order = exchange.place_order("AAAUSDT", "BUY", "1", price="99",
         client_order_id="e2e-limit-buy")
     assert order["status"] == "NEW"
     assert exchange.locked["USDT"] > 0
-    exchange.advance("caida", 864)
+    exchange.advance_15m("caida", 192, duration_days=2)
     assert exchange.get_order("AAAUSDT", order_id=order["order_id"])["status"] == "FILLED"
     assert exchange.get_my_trades("AAAUSDT", order["order_id"])[0]["quoteQty"]
 
 
+def _historical_rows(symbol, start, bars, scale):
+    initial = float(100 * (FakeExchange.symbols.index(symbol) + 1))
+    rows = []
+    previous = initial
+    for bar in range(-bars, 0):
+        value = initial * (1 + scale * (.04 * math.sin(2 * math.pi * bar / 288)
+            + .005 * math.sin(bar * .173)))
+        rows.append({"open_ts": int(start.timestamp()) + bar * 300,
+            "open": previous, "high": max(previous, value) * 1.0001,
+            "low": min(previous, value) * .9999, "close": value,
+            "volume": 10000, "quote_volume": 1000000, "trades": 20})
+        previous = value
+    return rows
+
+
+def _write_step_candles(store, exchange, start, step):
+    end = exchange.now
+    for symbol, candle in exchange.last_candles.items():
+        rows = []
+        opening, closing = float(candle["open"]), float(candle["close"])
+        for offset in range(3):
+            previous = opening + (closing - opening) * offset / 3
+            current = opening + (closing - opening) * (offset + 1) / 3
+            stamp = int((end - timedelta(minutes=15)).timestamp()) + offset * 300
+            rows.append({"open_ts": stamp, "open": previous,
+                "high": max(previous, current) * 1.0001,
+                "low": min(previous, current) * .9999, "close": current,
+                "volume": 10000, "quote_volume": 1000000, "trades": 20})
+        store.upsert(symbol, "5m", rows, "fixture_e2e", role="operar")
+
+
+def _v1_plan_stub(operator, exchange):
+    """Alternativa operable para el camino v1, como el stub de regresión v1."""
+    def build(goal, *, record=True, plan_kind="analisis", allocation_free_cash=None):
+        competitor = (goal.get("config_snapshot") or {}).get("competidor")
+        if competitor not in {None, "v1"}:
+            raise AssertionError(f"stub v1 usado por {competitor}")
+        ticker = exchange.get_book_ticker("CCCUSDT")
+        mid = (float(ticker["bid_price"]) + float(ticker["ask_price"])) / 2
+        piece = {"symbol": "CCCUSDT", "strategy": "simple", "piece_type": "grid",
+            "capital_usdt": 50, "n_levels": 4, "floor": mid * .85,
+            "ceiling": mid * 1.01, "mid_at_plan": mid, "margin_pct": .7}
+        alternative = {"alternative_id": "e2e-v1-aaa", "symbol": "CCCUSDT",
+            "strategy": "simple", "pieces": [piece],
+            "estimate": {"evidence_sufficient": True, "probability": .9,
+                "probability_replay": .9, "days_median": 1, "days_p90": 2},
+            "replay_probability": .9, "window_results": [{"pnl_usdt": 1.0}],
+            "reason": "scanner offline; alternativa determinista del fixture"}
+        return {"decision_id": "e2e-v1", "profile": goal["profile"],
+            "alternatives": [alternative], "pieces": [piece],
+            "candidates": [{"symbol": "CCCUSDT", "scanner_eligible": True,
+                "eligible": True, "price": mid, "current_price": mid,
+                "sigma_24h_open": .02, "score": .9, "excluded_reason": None}],
+            "current_pieces": {}, "allocation_shadow": {"decision": "no_agregar",
+                "selected": None, "reason": "candidato del fixture", "evaluated_top": []},
+            "decision_choices": {"comparison_version": 2}}
+    operator._build_plan = build
+
+
 @pytest.mark.e2e
 @pytest.mark.parametrize("scenario", ["subida", "caida", "oscilacion"])
-def test_torneo_multidia_recorridos_reales_offline(tmp_path, scenario):
-    """Tres días simulados por guion, con las rutas de vigilancia y revisión."""
+def test_torneo_operativo_multidia_offline(tmp_path, monkeypatch, scenario):
+    """Opera cinco metas con pasos de quince minutos y rutas reales de Meta/Grid."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    import data.market_store
 
+    started_wall = time.perf_counter()
+    duration_days = 2
     exchange = FakeExchange(initial_usdt=500)
+    exchange.unavailable_symbols.add("DDDUSDT")
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    exchange.now = start
+    market_path = tmp_path / "market_data.db"
+    store = CandleStore(market_path)
+    monkeypatch.setattr(data.market_store, "market_db_path", lambda: market_path)
+    for symbol in exchange.symbols:
+        index = exchange.symbols.index(symbol)
+        store.upsert(symbol, "5m", _historical_rows(symbol, start, 2 * 24 * 12,
+            exchange.scales[symbol]), "fixture_e2e", role="operar")
+        store.save_symbol_filters(symbol, exchange.get_symbol_info(symbol),
+            fetched_at=start.isoformat())
+
     db = DBManager(f"sqlite:///{tmp_path / (scenario + '.sqlite')}")
+    for symbol in exchange.symbols:
+        db.add_or_reactivate_coin(symbol)
     settings = SimpleNamespace(meta_mode_enabled=True, meta_max_active=7,
         alerts_enabled=False, grid_api_token="e2e-local-token", max_grids_simultaneos=30,
         usdt_por_grid=50, capital_max_por_nivel_pct=.3, grid_min_step_pct=.003,
         same_coin_sell_tolerance_pct=.05, scanner_timeout_seconds=1,
         scanner_fee_pct=.1, scanner_min_spacing_pct=.8,
-        grid_min_margin_after_fees_pct=.7, scanner_history_days=30)
-    clock = [exchange.now]
+        grid_min_margin_after_fees_pct=.7, scanner_history_days=30,
+        grid_monitor_gap_minutes=20, grid_monitor_interval=900,
+        grid_policy_enabled=False)
+    clock = [start]
     engine = GridEngine(db, exchange, settings)
     core = MetaCore(db, exchange, engine, settings=settings, clock=lambda: clock[0])
+    monitor = GridMonitor(db, exchange, engine, settings, clock=lambda: clock[0])
+    core.monitor = monitor
 
     class Scanner:
         client = exchange
         def clock(self):
             return clock[0].timestamp()
-        def scan(self, *_args, **_kwargs):
-            return {"results": []}
+        def scan(self, capital, with_sim=False):
+            return {"results": [{"symbol": symbol, "eligible": True, "score": .9,
+                "sigma_24h_open": .02} for symbol in exchange.symbols]}
 
     operator = MetaOperator(core, db, Scanner(), engine, settings,
         clock=lambda: clock[0].timestamp())
-    # Fuerza la ruta de presupuesto/pendientes que usa producción cuando el
-    # ciclo de revisión no alcanza a revisar todas las metas activas.
-    operator.review_cycle_budget_s = 0.0
+    # El ciclo lógico no vence por el reloj de pared; todas las metas se revisan.
+    operator.review_cycle_budget_s = float("inf")
+    _v1_plan_stub(operator, exchange)
     app = FastAPI()
     app.include_router(metas.router, prefix="/api/metas")
     app.state.meta_core, app.state.meta_operator = core, operator
     app.state.settings, app.state.db = settings, db
     app.state.grid_engine, app.state.testnet_client = engine, exchange
-    app.state.grid_scan_service = operator.scanner
-    app.state.vol_provider = None
+    app.state.grid_scan_service, app.state.vol_provider = operator.scanner, None
+
     with TestClient(app, headers={"X-API-Token": "e2e-local-token"}) as client:
-        legacy = core.create_goal(50, 1.5, profile="RAPIDO")
-        core.start_goal(legacy["id"])
         response = client.post("/api/metas/tournament/rounds", json={
             "competitors": ["v1", "v2", "cazador", "escalera", "control"],
             "capital_usdt": 50, "target_value": 1.5, "target_type": "USDT",
             "profile": "RAPIDO", "duration_days": 20})
         assert response.status_code == 200, response.text
-        round_goals = [row["id"] for row in response.json()["goals"]]
-        goal_ids = [legacy["id"], *round_goals]
-        assert [core.get_goal(meta_id)["config_snapshot"].get("competidor")
-            for meta_id in round_goals] == ["v1", "v2", "cazador", "escalera", "control"]
-        assert core.get_goal(legacy["id"])["config_snapshot"].get("competidor") is None
+        goals = response.json()["goals"]
+        meta_by_competitor = {row["config_snapshot"]["competidor"]: row["id"]
+            for row in goals}
+        assert set(meta_by_competitor) == {"v1", "v2", "cazador", "escalera", "control"}
+        with db.engine.begin() as conn:
+            for row in goals:
+                cfg = dict(row["config_snapshot"])
+                cfg.update({"capital_per_coin_pct": 100, "max_loss_pct": 18,
+                    "warning_loss_pct": 13.5, "loss_confirm_minutes": 2})
+                conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == row["id"])
+                    .values(config_snapshot=json.dumps(cfg, sort_keys=True)))
+        from grid.engines.cazador import build_runtime_context
+        cazador_id = meta_by_competitor["cazador"]
+        cazador_goal = core.get_goal(cazador_id)
+        cazador_value = core.valuation(cazador_id)
+        assert "DDDUSDT" not in build_runtime_context(
+            operator, cazador_goal, cazador_value)["markets"]
 
-        for step in range(1, 3 * 24 * 12 + 1):
-            exchange.advance(scenario, step)
+        latest_values = {}
+        for step in range(1, duration_days * 24 * 4 + 1):
+            exchange.advance_15m(scenario, step, duration_days=duration_days)
             clock[0] = exchange.now
-            # Sigue el ciclo de producción: el monitor procesa fills; MetaCore
-            # valúa, aplica límites de pérdida y cierra metas.
-            values = {row["meta_id"]: row.get("valuation") for row in core.run_once()}
-            if step % 3 == 0:
-                operator.review_active()
-            for meta_id in goal_ids:
-                value = values.get(meta_id)
-                if value is None:
-                    continue
-                assert float(value["cash_usdt"]) >= -0.01, (scenario, step, meta_id, value)
-                assert value.get("cash_coherent") is not False, (scenario, step, meta_id, value)
-                assert float(value["value_usdt"]) == pytest.approx(
-                    float(value["cash_usdt"]) + float(value["inventory_executable_usdt"]), abs=.01), (
-                        scenario, step, meta_id, value)
-            actual_usdt = exchange.get_balance("USDT")["USDT"]
-            attributable = sum(float(value["cash_usdt"]) for value in values.values()
-                if value is not None)
-            assert attributable <= actual_usdt["free"] + actual_usdt["locked"] + .01, (
-                scenario, step, attributable, actual_usdt)
+            _write_step_candles(store, exchange, start, step)
+            monitor.run_once()
+            watched = core.run_once()
+            latest_values = {row["meta_id"]: row.get("valuation") for row in watched
+                if row.get("valuation") is not None}
+            reviews = operator.review_active()
+            assert reviews.get("status") == "completed", (scenario, step, reviews)
 
-    # La secuencia termina en el día 3; se comprueba la salida registrada por
-    # cada participante para alimentar el informe de resultados.
-    for meta_id in goal_ids:
-        value = core.valuation(meta_id)
-        assert float(value["result_pct"]) == pytest.approx(0, abs=.01)
-        assert core._owned_grids(meta_id) == []
-    assert exchange.get_open_orders() == []
-    assert not any(row["event_type"] == "META_VALUACION_INCOHERENTE"
-        for meta_id in goal_ids for row in core.ledger(meta_id)), scenario
+            for meta_id, value in latest_values.items():
+                assert float(value["cash_usdt"]) >= -.01, (scenario, step, meta_id, value)
+                assert value.get("cash_coherent") is True, (scenario, step, meta_id, value)
+                assert float(value["value_usdt"]) == pytest.approx(
+                    float(value["cash_usdt"]) + float(value["inventory_executable_usdt"]), abs=.01)
+                equity = value.get("cash_coherence", {}).get("equity", {})
+                assert abs(float(equity["equity_usdt"]) - float(equity["expected_equity_usdt"])) <= .01, (
+                    scenario, step, meta_id, equity)
+            balance = exchange.get_balance("USDT")["USDT"]
+            attributable = sum(float(value["cash_usdt"]) for value in latest_values.values())
+            assert attributable <= balance["free"] + balance["locked"] + .01, (
+                scenario, step, attributable, balance)
+
+    # Resultado final y acciones observadas por competidor.
+    final = {name: core.valuation(meta_id) for name, meta_id in meta_by_competitor.items()}
+    owned = {name: core._owned_grids(meta_id)
+        for name, meta_id in meta_by_competitor.items()}
+    history = {name: core._all_piece_links(meta_id)
+        for name, meta_id in meta_by_competitor.items()}
+    assert history["v1"], (scenario, core.ledger(meta_by_competitor["v1"])[-10:])
+    assert history["control"], (scenario, core.ledger(meta_by_competitor["control"])[-10:])
+    assert history["escalera"], (scenario, core.ledger(meta_by_competitor["escalera"])[-10:])
+    assert history["cazador"] or any(row["event_type"] == "META_CAZADOR_AGREGADO"
+        for row in core.ledger(meta_by_competitor["cazador"])), scenario
+    assert not owned["v2"], "v2 se deja sin acción cuando no hay caché sintética compatible"
+    v2_ledger = core.ledger(meta_by_competitor["v2"])
+    assert any(row["event_type"] == "META_OPERATOR_NOOP" for row in v2_ledger), v2_ledger[-10:]
+
+    if scenario == "oscilacion":
+        ladder_ledger = core.ledger(meta_by_competitor["escalera"])
+        assert any(row.get("event_type") == "SELL_FILLED" for link in history["escalera"]
+            for row in db.list_grid_events(grid_id=int(link["grid_id"]), limit=100000))
+        assert any(row["event_type"] == "META_ESCALERA_REARME" for row in ladder_ledger)
+        assert any(row.get("event_type") == "SELL_FILLED" and
+            float((row.get("details") or {}).get("cycle_pnl") or 0) != 0
+            for link in history["escalera"] for row in
+                db.list_grid_events(grid_id=int(link["grid_id"]), limit=100000))
+    if scenario == "caida":
+        cut = [name for name, meta_id in meta_by_competitor.items()
+            if core.get_goal(meta_id)["status"] == "CORTADA_POR_PERDIDA"]
+        assert cut, {name: (core.get_goal(meta_id)["status"], final[name].get("result_pct"))
+            for name, meta_id in meta_by_competitor.items()}
+        for name in cut:
+            meta_id = meta_by_competitor[name]
+            owned_ids = {int(link["grid_id"]) for link in core._all_piece_links(meta_id)}
+            assert not [order for order in exchange.get_open_orders()
+                if any(str(order.get("client_order_id") or "").startswith(f"g{grid_id}")
+                    for grid_id in owned_ids)]
+
+    for meta_id in meta_by_competitor.values():
+        assert not any(row["event_type"] == "META_VALUACION_INCOHERENTE"
+            for row in core.ledger(meta_id)), scenario
+    with sqlite3.connect(market_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM candles WHERE interval='5m'").fetchone()[0] >= 4 * 2 * 24 * 12
+        assert conn.execute("SELECT COUNT(*) FROM symbol_filters").fetchone()[0] == 4
+    print("TORNEO_E2E_RESULTADO " + json.dumps({"guion": scenario,
+        "result_pct": {name: value.get("result_pct") for name, value in final.items()},
+        "segundos": round(time.perf_counter() - started_wall, 2)}, sort_keys=True))
