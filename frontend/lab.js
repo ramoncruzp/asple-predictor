@@ -20,14 +20,14 @@
     let host = document.getElementById('lab-tournament');
     if (!host) {
       host = document.createElement('section'); host.id = 'lab-tournament'; host.className = 'card lab-section';
-      host.innerHTML = '<h2>Torneo de estrategias</h2><p>Saldo libre: <b data-free>consultando…</b></p><form data-round><label>Capital por competidor <input name="capital" type="number" min="10" value="50" required></label> <label>Objetivo USDT <input name="target" type="number" min="0.01" step="0.01" value="1.5" required></label> <label>Plazo días <input name="days" type="number" min="1" value="20" required></label><fieldset><legend>Competidores</legend>' + ['v1','v2','cazador','escalera','seguidor','control'].map(x => `<label><input type="checkbox" name="competitor" value="${x}" checked> ${x}</label> `).join('') + '</fieldset><button type="submit">Crear ronda y activar metas</button></form><p data-status role="status"></p><div data-rounds></div>';
+      host.innerHTML = '<h2>Torneo de estrategias</h2><p>Saldo libre: <b data-free>consultando…</b></p><form data-round><label>Capital por competidor <input name="capital" type="number" min="10" value="50" required></label> <label>Objetivo USDT <input name="target" type="number" min="0.01" step="0.01" value="1.5" required></label> <label>Plazo días <input name="days" type="number" min="1" value="20" required></label><fieldset><legend>Competidores · ronda 1</legend>' + ['v1','v2','cazador','escalera','control'].map(x => `<label><input type="checkbox" name="competitor" value="${x}" checked> ${x}</label> `).join('') + '<label class="muted"><input type="checkbox" disabled> seguidor — no disponible (ronda 2)</label></fieldset><button type="submit">Crear ronda y activar metas</button></form><p data-status role="status"></p><div data-rounds></div>';
       screen.insertBefore(host, screen.children[2] || null);
       host.querySelector('[data-round]').addEventListener('submit', async event => {
         event.preventDefault(); const form = event.currentTarget, status = host.querySelector('[data-status]');
         const competitors = [...form.querySelectorAll('[name="competitor"]:checked')].map(x => x.value);
-        if (competitors.length !== 6) { status.textContent = 'La ronda requiere los seis competidores.'; return; }
-        const capital = Number(form.capital.value), total = capital * 6;
-        if (!window.confirm(`Crear ronda con saldo libre del exchange ${host.querySelector('[data-free]').textContent}, capital total ${total.toFixed(2)} USDT y seis metas: ${competitors.join(', ')}. ¿Continuar?`)) return;
+        if (competitors.length !== 5) { status.textContent = 'La ronda 1 requiere v1, v2, Cazador, Escalera y Control.'; return; }
+        const capital = Number(form.capital.value), total = capital * 5;
+        if (!window.confirm(`Crear ronda 1 con saldo libre del exchange ${host.querySelector('[data-free]').textContent}, capital total ${total.toFixed(2)} USDT y cinco metas: ${competitors.join(', ')}. ¿Continuar?`)) return;
         try { const result = await createRound({competitors, capital_usdt:capital, target_value:Number(form.target.value), target_type:'USDT', profile:'RAPIDO', duration_days:Number(form.days.value)}); status.textContent = `Ronda ${result.ronda} creada y activada: ${result.goals.map(x => `Meta #${x.id} (${x.config_snapshot.competidor})`).join(', ')}. Libre exchange: ${Number(result.exchange_free_usdt).toFixed(2)} USDT; capital reservado por la ronda: ${Number(result.capital_total_usdt).toFixed(2)} USDT.`; }
         catch (error) { status.textContent = `No se creó la ronda: ${error.message}`; }
       });

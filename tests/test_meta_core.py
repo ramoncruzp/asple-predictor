@@ -42,27 +42,27 @@ def _core(tmp_path, *, exchange=None, enabled=True, alert=None):
 
 def test_ronda_torneo_crea_competidores_activos_con_snapshot_aislado(tmp_path):
     db, core = _core(tmp_path)
-    result = core.create_tournament_round(["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5,
+    result = core.create_tournament_round(["v1", "v2", "cazador", "escalera", "control"], 50, 1.5,
         "USDT", "RAPIDO", 20)
     assert result["iniciadas_juntas"] is True
-    assert len(result["goals"]) == 6
+    assert len(result["goals"]) == 5
     configs = [goal["config_snapshot"] for goal in result["goals"]]
-    assert {cfg["competidor"] for cfg in configs} == {"v1", "v2", "cazador", "escalera", "seguidor", "control"}
+    assert {cfg["competidor"] for cfg in configs} == {"v1", "v2", "cazador", "escalera", "control"}
     assert {cfg["ronda"] for cfg in configs} == {result["ronda"]}
     assert {goal["status"] for goal in result["goals"]} == {"ACTIVE"}
     assert next(cfg for cfg in configs if cfg["competidor"] == "v2")["decision_engine"] == "v2"
     assert next(cfg for cfg in configs if cfg["competidor"] == "cazador")["decision_engine"] == "v1"
     board = core.tournament_scoreboard(result["ronda"])
-    assert [row["competidor"] for row in board] == ["v1", "v2", "cazador", "escalera", "seguidor", "control"]
+    assert [row["competidor"] for row in board] == ["v1", "v2", "cazador", "escalera", "control"]
     assert all(row["equity_usdt"] is None for row in board)
 
 
 def test_ronda_torneo_mantiene_efectivo_y_equity_aislados_por_meta(tmp_path):
     _db, core = _core(tmp_path, exchange=FakeTestnet(free=1000))
     result = core.create_tournament_round(
-        ["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5)
-    assert len(result["goals"]) == 6
-    assert sum(float(goal["capital_initial"]) for goal in result["goals"]) == 300
+        ["v1", "v2", "cazador", "escalera", "control"], 50, 1.5)
+    assert len(result["goals"]) == 5
+    assert sum(float(goal["capital_initial"]) for goal in result["goals"]) == 250
     for goal in result["goals"]:
         valuation = core.valuation(goal["id"])
         assert Decimal(valuation["cash_usdt"]) == Decimal("50")
@@ -75,7 +75,7 @@ def test_reporte_de_ronda_cerrada_y_resumen_semanal(tmp_path):
     alerts = []
     db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
     result = core.create_tournament_round(
-        ["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5)
+        ["v1", "v2", "cazador", "escalera", "control"], 50, 1.5)
     with db.engine.begin() as conn:
         conn.execute(update(db.meta_goals).values(status="CUMPLIDA", finished_at=core._now()))
     report = core.generate_tournament_round_report(result["ronda"], tmp_path / "reports")
@@ -494,6 +494,14 @@ def test_fixture_meta7_recupera_compras_iniciales_y_resulta_menos_13_pct(tmp_pat
     assert Decimal(valuation["cash_usdt"]) == Decimal("70.715117")
     assert Decimal(valuation["result_pct"]) == pytest.approx(Decimal("-12.90"), abs=Decimal("0.02"))
     assert valuation["cash_coherent"] is True
+
+
+def test_ronda_uno_excluye_seguidor_y_valida_minimo_de_250_mas_reservas(tmp_path):
+    _db, core = _core(tmp_path, exchange=FakeTestnet(free=249))
+    with pytest.raises(ValueError, match="USDT libre insuficiente"):
+        core.create_tournament_round(["v1", "v2", "cazador", "escalera", "control"], 50, 1.5)
+    with pytest.raises(ValueError, match="seguidor entra en la ronda 2"):
+        core.create_tournament_round(["v1", "v2", "cazador", "escalera", "seguidor", "control"], 50, 1.5)
 
 
 def test_enlace_vigente_a_grid_ausente_mantiene_error_controlado(tmp_path):

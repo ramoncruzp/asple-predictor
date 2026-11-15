@@ -20,6 +20,11 @@
 - El marcador incluye equity disponible, ciclos, ganancia realizada desde PnL de niveles, pérdida máxima registrada, acciones y días al cierre. P(meta) de v2 al inicio no está disponible de forma fiable. El informe de cierre se genera al detectar seis estados terminales y el resumen semanal se agenda lunes 12:17 UTC.
 - No se considera torneo operativo completo: faltan las ramas indicadas arriba y la prueba E2E de fills con comisiones durante varios días para cada competidor. No iniciar en S1 hasta cerrar esos puntos.
 
+### Ronda 1 — cinco competidores (decisión 2026-11-15)
+
+- La ronda 1 usa v1, v2, Cazador, Escalera y Control: cinco metas de 50 USDT, objetivo 1,5 USDT y 20 días; el capital total objetivo es 250 USDT más las reservas existentes.
+- Grid seguidor queda expresamente fuera de la ronda 1 y se etiqueta como no disponible en Laboratorio. Entra a la ronda 2 cuando su recentrado, sesgo de inventario/efectivo y re-espaciado estén conectados y probados.
+
 ---
 
 ## 1. La idea (lo que Ramón quiere, desde el principio)

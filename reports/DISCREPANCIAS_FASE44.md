@@ -17,3 +17,7 @@
 | Informe de cierre de Fase 43 | HECHO | Localizado y leído desde `Claude outputs/REPORTE_CIERRE_FASE43.md`. |
 
 **No iniciar la ronda en S1 todavía.** La prueba integral por competidor está pendiente y Seguidor carece de mantenimiento operativo; Escalera carece de rearme. La ausencia de E2E es una limitación de evidencia, no una prueba de que la contabilidad sea incorrecta.
+
+## Decisión de ronda 1 (44l)
+
+HECHO: Laboratorio/API ofrecen por defecto v1, v2, Cazador, Escalera y Control; Seguidor aparece deshabilitado como “no disponible (ronda 2)” y el backend rechaza incluirlo. El límite mínimo de creación para ronda 1 es 250 USDT más reservas existentes.

@@ -38,7 +38,7 @@ class GoalCreate(BaseModel):
 
 class TournamentRoundCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    competitors: list[str] = Field(default_factory=lambda: ["v1", "v2", "cazador", "escalera", "seguidor", "control"])
+    competitors: list[str] = Field(default_factory=lambda: ["v1", "v2", "cazador", "escalera", "control"])
     capital_usdt: float = Field(default=50, gt=0)
     target_value: float = Field(default=1.5, gt=0)
     target_type: str = "USDT"

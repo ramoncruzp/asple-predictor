@@ -365,10 +365,10 @@ class MetaCore:
             target_type="USDT", profile="RAPIDO", duration_days=20):
         """Crea y activa en una transacción las metas de una ronda completa."""
         from sqlalchemy import func, select
-        allowed = {"v1", "v2", "cazador", "escalera", "seguidor", "control"}
+        allowed = {"v1", "v2", "cazador", "escalera", "control"}
         selected = list(dict.fromkeys(str(item).lower() for item in competitors))
         if set(selected) != allowed or len(selected) != len(allowed):
-            raise ValueError("La ronda debe incluir exactamente una meta por cada uno de los seis competidores.")
+            raise ValueError("La ronda 1 debe incluir v1, v2, cazador, escalera y control; seguidor entra en la ronda 2.")
         self._enabled_testnet()
         capital, target_value = _d(capital), _d(target_value)
         profile, target_type = str(profile).upper(), str(target_type).upper()
@@ -385,7 +385,7 @@ class MetaCore:
                 raise ValueError("La ronda excede el máximo de siete metas activas.")
             exchange_free = _d(self.exchange.get_balance("USDT").get("USDT", {}).get("free"))
             available, reserved = self._available_usdt()
-            required = max(Decimal("300"), capital * len(selected))
+            required = max(Decimal("250"), capital * len(selected))
             if exchange_free < required + reserved or available < required:
                 raise ValueError(f"USDT libre insuficiente para la ronda: saldo exchange {exchange_free}, saldo atribuible {available}, reservas {reserved}; requerido {required} más reservas.")
             round_number = int(conn.execute(select(func.count()).select_from(self.db.meta_ledger).where(
@@ -503,7 +503,8 @@ class MetaCore:
             if int(cfg.get("ronda", 0)) == int(round_number):
                 goals.append(goal)
         terminal = {"CUMPLIDA", "VENCIDA", "CORTADA_POR_PERDIDA", "CANCELLED", "DESCARTADA"}
-        if len(goals) != 6 or any(goal["status"] not in terminal for goal in goals):
+        expected_count = 5 if int(round_number) == 1 else 6
+        if len(goals) != expected_count or any(goal["status"] not in terminal for goal in goals):
             return {"generated": False, "reason": "la ronda todavía tiene metas activas"}
         board = self.tournament_scoreboard(round_number)
         labels = [str(row["competidor"]) for row in board]
