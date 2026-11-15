@@ -1,7 +1,7 @@
 import pytest
 
 from grid.engines.torneo import (control_geometry, follower_geometry,
-    follower_recenter, ladder_orders)
+    follower_recenter, highest_free_ladder_step, ladder_orders)
 
 
 def test_escalera_respeta_escalones_tope_y_bot_comprado():
@@ -14,6 +14,13 @@ def test_escalera_respeta_escalones_tope_y_bot_comprado():
     capped = ladder_orders(100, .02, reprices_today=6,
         previous=[{"buy_price": 90}] * 4)
     assert all(not row["repriced"] and row["buy_price"] == 90 for row in capped)
+
+
+def test_escalera_elige_escalon_libre_mas_alto():
+    orders = ladder_orders(100, .02, capital=12)
+    selected = highest_free_ladder_step(100, .02, 12,
+        [orders[0]["buy_price"], orders[1]["buy_price"]])
+    assert selected["buy_price"] == pytest.approx(orders[2]["buy_price"])
 
 
 def test_seguidor_aplica_sesgo_y_geometria_de_ocho_niveles():

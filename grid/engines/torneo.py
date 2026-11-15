@@ -57,6 +57,18 @@ def ladder_orders(mid, sigma_24h, capital=48.0, min_margin_pct=.3,
     return orders
 
 
+def highest_free_ladder_step(mid, sigma_24h, capital, occupied_buy_prices, *,
+        min_margin_pct=.3):
+    """Elige el escalón sin orden/inventario más cercano al precio actual."""
+    occupied = [float(value) for value in occupied_buy_prices if float(value) > 0]
+    orders = ladder_orders(mid, sigma_24h, capital=capital,
+        min_margin_pct=min_margin_pct)
+    for order in orders:
+        if all(abs(float(order["buy_price"]) / value - 1) > .002 for value in occupied):
+            return order
+    return None
+
+
 def follower_geometry(mid, sigma_24h, *, levels=8, inventory_pct=0, cash_pct=0):
     """Calcula rango simétrico de seguidor y sesgo del siguiente paso."""
     mid, sigma = float(mid), float(sigma_24h)

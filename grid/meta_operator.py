@@ -5375,6 +5375,84 @@ class MetaOperator:
             bot_links = [link for link in plan.get("links", [])
                 if link.get("piece_type") == "individual_bot_grid"]
             actions = []
+            from grid.engines.torneo import highest_free_ladder_step
+            handled_sells = {int((row.get("details") or {}).get("source_sell_event_id") or 0)
+                for row in events if row.get("event_type") == "META_ESCALERA_REARME"}
+            for link in bot_links:
+                grid_id = int(link["grid_id"])
+                grid = self.db.get_grid(grid_id)
+                if not grid:
+                    continue
+                sold_events = [row for row in self.db.list_grid_events(
+                    grid_id=grid_id, limit=100000) if row.get("event_type") == "SELL_FILLED"
+                    and int(row.get("id") or 0) not in handled_sells]
+                if not sold_events:
+                    continue
+                sold = max(sold_events, key=lambda row: int(row.get("id") or 0))
+                levels = self.db.get_grid_levels(grid_id)
+                if any(float(row.get("held_qty") or 0) > 0 for row in levels):
+                    continue
+                market = (plan.get("markets") or {}).get(str(grid["symbol"]).upper())
+                if not market:
+                    continue
+                quote, fee = self.core._fill_cash(grid, sold, sold.get("details") or {})
+                proceeds = max(0.0, float(quote - fee))
+                occupied = []
+                for other in bot_links:
+                    other_id = int(other["grid_id"])
+                    if other_id == grid_id:
+                        continue
+                    other_grid = self.db.get_grid(other_id)
+                    if not other_grid or str(other_grid.get("status") or "").upper() != "ACTIVE":
+                        continue
+                    for level in self.db.get_grid_levels(other_id):
+                        if (str(level.get("state") or "").upper() in {"BUY_OPEN", "SELL_OPEN"}
+                                or float(level.get("held_qty") or 0) > 0):
+                            occupied.append(float(level.get("price") or
+                                level.get("entry_price") or other_grid.get("range_low") or 0))
+                order = highest_free_ladder_step(float(market["mid"]),
+                    float(market["sigma_24h"]), proceeds, occupied,
+                    min_margin_pct=float((goal.get("config_snapshot") or {}).get("min_margin_pct", .3)))
+                if order is None or proceeds < 5.5:
+                    continue
+                closed = self.engine.close_grid(grid_id, "cancel",
+                    close_reason="META_ESCALERA_REARME")
+                if str((closed or {}).get("status") or "").upper() not in {"CANCELLED", "CLOSED", "DONE"}:
+                    continue
+                from sqlalchemy import update
+                with self.db.engine.begin() as conn:
+                    conn.execute(update(self.db.meta_piece_links).where(
+                        self.db.meta_piece_links.c.meta_id == int(goal["id"]),
+                        self.db.meta_piece_links.c.grid_id == grid_id,
+                        self.db.meta_piece_links.c.released_at.is_(None)).values(
+                            released_at=self.core._now()))
+                piece = {"symbol": grid["symbol"], "strategy": "simple",
+                    "piece_type": "individual_bot_grid", "floor": order["buy_price"],
+                    "ceiling": order["sell_price"], "n_levels": 1,
+                    "capital_usdt": proceeds}
+                try:
+                    self._validate_v2_plan_limits(goal, {"pieces": [piece]},
+                        replacing_grid_id=grid_id)
+                    checked = self._testnet_openability(piece, goal)
+                    if not checked.get("allowed"):
+                        raise ValueError(checked.get("reason") or "rearme no abrible")
+                    alternative = {"symbol": piece["symbol"], "strategy": "simple",
+                        "pieces": [piece], "reason": "rearme en escalón libre tras venta"}
+                    reopened = self._open_replacement(goal, alternative, proceeds)
+                    detail = {"source_grid_id": grid_id,
+                        "source_sell_event_id": int(sold.get("id") or 0),
+                        "quote_usdt": str(quote), "fee_usdt": str(fee),
+                        "proceeds_net_usdt": proceeds, "step": order,
+                        "reopened": reopened, "review_at_s": now}
+                    self._ledger(int(goal["id"]), "META_ESCALERA_REARME", detail,
+                        grid_id=reopened["grid_id"])
+                    handled_sells.add(int(sold.get("id") or 0))
+                    actions.append(detail)
+                except Exception as exc:
+                    self._ledger(int(goal["id"]), "META_ESCALERA_REARME_FALLIDO", {
+                        "source_grid_id": grid_id, "source_sell_event_id": int(sold.get("id") or 0),
+                        "proceeds_net_usdt": proceeds, "error": f"{type(exc).__name__}: {exc}"},
+                        grid_id=grid_id)
             for index, link in enumerate(bot_links[:4]):
                 grid = self.db.get_grid(int(link["grid_id"]))
                 if not grid or str(grid.get("status") or "").upper() != "ACTIVE":
