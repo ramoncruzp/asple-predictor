@@ -52,6 +52,11 @@ class PieceLink(BaseModel):
     piece_type: str = "grid"
 
 
+class CoherenceRevalidation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    actor: str = Field(min_length=1, max_length=80)
+
+
 class CancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: str
@@ -437,8 +442,8 @@ def valuation(request: Request, meta_id: int):
 
 
 @router.post("/{meta_id}/coherence/revalidate")
-def revalidate_coherence(request: Request, meta_id: int):
-    return _call(_core(request).revalidate_coherence, meta_id)
+def revalidate_coherence(request: Request, meta_id: int, body: CoherenceRevalidation):
+    return _call(_core(request).revalidate_coherence, meta_id, actor=body.actor)
 
 
 @router.get("/{meta_id}/ledger")

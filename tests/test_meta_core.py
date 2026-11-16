@@ -382,6 +382,45 @@ def test_salto_de_efectivo_sin_fills_alerta_y_bloquea(tmp_path):
     assert core.valuation(goal["id"])["cash_coherent"] is False
 
 
+def test_salto_antiguo_de_efectivo_se_libera_tras_tres_valuaciones_coherentes(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core.valuation(goal["id"])
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            capital_initial=80))
+
+    assert core.valuation(goal["id"])["cash_coherent"] is False
+    recovered = [core.valuation(goal["id"]) for _ in range(3)]
+
+    assert [row["cash_coherent"] for row in recovered] == [False, False, True]
+    cash_state = db.get_alert_state(f"meta_cash_coherence_{goal['id']}")
+    assert cash_state["blocked"] is False
+    assert cash_state["reason"] is None
+    assert cash_state["cash_usdt"] == "80.0"
+    assert any(row["event_type"] == "META_VALUACION_COHERENTE_OK"
+        and row["details"]["manual"] is False for row in core.ledger(goal["id"]))
+
+
+def test_salto_nuevo_vuelve_a_bloquear_tras_recuperacion_de_efectivo(tmp_path):
+    db, core = _core(tmp_path)
+    goal = core.create_goal(100, 10)
+    core.valuation(goal["id"])
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            capital_initial=80))
+    core.valuation(goal["id"])
+    [core.valuation(goal["id"]) for _ in range(3)]
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            capital_initial=60))
+
+    value = core.valuation(goal["id"])
+
+    assert value["cash_coherent"] is False
+    assert value["cash_coherence"]["reason"] == "salto de efectivo sin fill o cierre"
+
+
 def test_equity_incoherente_alerta_y_bloquea_cazador(tmp_path):
     alerts = []
     db, core = _core(tmp_path, alert=lambda *args: alerts.append(args))
@@ -442,6 +481,10 @@ def test_revalidacion_manual_no_libera_equity_incoherente(tmp_path):
     result = core.revalidate_coherence(goal["id"])
 
     assert result["coherent"] is False
+    assert result["equity"] is not None
+    assert result["esperado"] is not None
+    assert result["delta"] is not None
+    assert result["reason"] == "equity no cuadra con PnL de piezas"
     assert db.get_alert_state(f"meta_coherence_recovery_{goal['id']}")["blocked"] is True
     assert not any(row["event_type"] == "META_VALUACION_COHERENTE_OK"
         for row in core.ledger(goal["id"]))
@@ -450,15 +493,40 @@ def test_revalidacion_manual_no_libera_equity_incoherente(tmp_path):
 def test_revalidacion_manual_libera_bloqueo_con_equity_coherente(tmp_path):
     db, core = _core(tmp_path)
     goal = core.create_goal(100, 10)
-    db.set_alert_state(f"meta_coherence_recovery_{goal['id']}", {
-        "blocked": True, "consecutive_coherent": 0})
+    core.valuation(goal["id"])
+    with db.engine.begin() as conn:
+        conn.execute(db.meta_goals.update().where(db.meta_goals.c.id == goal["id"]).values(
+            capital_initial=80))
+    assert core.valuation(goal["id"])["cash_coherent"] is False
 
-    result = core.revalidate_coherence(goal["id"])
+    result = core.revalidate_coherence(goal["id"], actor="operador-qa")
 
     assert result["coherent"] is True
     assert result["valuation"]["cash_coherent"] is True
     assert db.get_alert_state(f"meta_coherence_recovery_{goal['id']}")["blocked"] is False
     assert core.ledger(goal["id"])[-1]["event_type"] == "META_VALUACION_COHERENTE_OK"
+    assert core.ledger(goal["id"])[-1]["details"]["manual"] is True
+    assert core.ledger(goal["id"])[-1]["details"]["user"] == "operador-qa"
+
+
+def test_marcador_cuenta_acciones_y_probabilidad_v2_del_plan_inicial(tmp_path):
+    db, core = _core(tmp_path)
+    result = core.create_tournament_round(
+        ["v1", "v2", "cazador", "escalera", "control"], 50, 1.5)
+    goals = {row["config_snapshot"]["competidor"]: row for row in result["goals"]}
+    core._ledger(goals["v2"]["id"], None, "META_V2_PLAN_INICIAL", {"p_meta": .42})
+    core._ledger(goals["v2"]["id"], None, "META_V2_ACTION", {})
+    core._ledger(goals["v2"]["id"], None, "META_V2_ACTION", {})
+    core._ledger(goals["escalera"]["id"], None, "META_ESCALERA_APERTURA", {})
+    core._ledger(goals["escalera"]["id"], None, "META_ESCALERA_REARME", {})
+    core._ledger(goals["v1"]["id"], None, "META_PIECE_LINKED", {})
+
+    board = {row["competidor"]: row for row in core.tournament_scoreboard(result["ronda"])}
+
+    assert board["v2"]["v2_predicted_probability"] == pytest.approx(.42)
+    assert board["v2"]["rotations_reprices"] == 3
+    assert board["escalera"]["rotations_reprices"] == 2
+    assert board["v1"]["actions_count"] == 1
 
 
 def test_detalle_meta_valuation_guarda_cash_coherent(tmp_path):

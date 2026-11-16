@@ -366,7 +366,8 @@ def test_ronda_uno_abre_competidores_en_dos_revisiones_con_filtros_reales(
         cazador_value = core.valuation(ids["cazador"])
         assert cazador_value["cash_coherent"] is True
         revalidated = client.post(
-            f"/api/metas/{ids['cazador']}/coherence/revalidate", json={})
+            f"/api/metas/{ids['cazador']}/coherence/revalidate",
+            json={"actor": "e2e-operador"})
         assert revalidated.status_code == 200, revalidated.text
         assert revalidated.json()["coherent"] is True
         cazador_grid_ids = {int(row["grid_id"]) for row in histories["cazador"]}

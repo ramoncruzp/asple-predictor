@@ -4437,21 +4437,23 @@ class MetaOperator:
         cash = float(valuation.get("free_capital_usdt") or valuation.get("cash_usdt") or 0)
         if cash < 10:
             result = {"decision": "no_hacer_nada",
-                "reason": "efectivo atribuible inferior al minimo de pieza; esperando capital"}
+                "reason": "efectivo atribuible inferior al mínimo de pieza; esperando capital"}
             self._record_review(meta_id, result, valuation, None, engine=engine)
             return result
         try:
             plan = engine.plan(self, goal, plan_kind="start", allocation_free_cash=cash)
         except Exception as exc:
-            result = {"decision": "no_hacer_nada", "reason": f"esperando cache: {exc}"}
+            result = {"decision": "no_hacer_nada", "reason": f"esperando caché: {exc}"}
             self._record_review(meta_id, result, valuation, None,
                 diagnostics={"v2_start_waiting_cache": True}, engine=engine)
             return result
         pieces = list(plan.get("pieces") or [])
         if not pieces:
             result = {"decision": "no_hacer_nada",
-                "reason": "esperando cache: no hay pieza v2 factible para iniciar"}
-            self._record_review(meta_id, result, valuation, None, plan=plan, engine=engine)
+                "reason": "esperando caché: no hay pieza v2 factible para iniciar"}
+            self._record_review(meta_id, result, valuation, None, plan=plan,
+                diagnostics={"p_meta": (plan.get("v2") or {}).get("p_target")},
+                engine=engine)
             return result
         opened, failures = [], []
         try:
@@ -4464,7 +4466,7 @@ class MetaOperator:
                 prior_mid = float(piece.get("mid_at_plan") or
                     (float(piece["floor"]) + float(piece["ceiling"])) / 2)
                 if mid is None or prior_mid <= 0:
-                    raise RuntimeError(f"libro invalido para iniciar {symbol}")
+                    raise RuntimeError(f"libro inválido para iniciar {symbol}")
                 ratio = float(mid) / prior_mid
                 piece["floor"] = float(piece["floor"]) * ratio
                 piece["ceiling"] = float(piece["ceiling"]) * ratio
@@ -4482,14 +4484,16 @@ class MetaOperator:
             failures.append(f"{type(exc).__name__}: {exc}")
         if opened:
             self._ledger(meta_id, "META_V2_PLAN_INICIAL", {
-                "cache": plan.get("cache"), "opened": opened, "failures": failures})
+                "cache": plan.get("cache"), "opened": opened, "failures": failures,
+                "p_meta": (plan.get("v2") or {}).get("p_target")})
             result = {"decision": "abrir_pieza_torneo", "competitor": "v2",
                 "opened": opened, "failures": failures}
         else:
             result = {"decision": "no_hacer_nada",
-                "reason": f"esperando cache: {failures[0] if failures else 'plan sin piezas'}"}
+                "reason": f"esperando caché: {failures[0] if failures else 'plan sin piezas'}"}
         self._record_review(meta_id, result, valuation, None, plan=plan, engine=engine,
-            diagnostics={"v2_start_waiting_cache": not bool(opened)})
+            diagnostics={"v2_start_waiting_cache": not bool(opened),
+                "p_meta": (plan.get("v2") or {}).get("p_target")})
         return result
 
     def _alert_engine_failure(self, meta_id, engine, error):
