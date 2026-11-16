@@ -363,12 +363,16 @@
         <div><span>USDT libre (Testnet)</span><b>${totals.free_usdt_unavailable_reason ? '—' : fmtMoney(totals.free_usdt, 2)}</b>
           ${totals.free_usdt_unavailable_reason ? `<small class="muted">${esc(totals.free_usdt_unavailable_reason)}</small>` : ''}</div>
       </div>
-      <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3>${loanSummary ? `<div class="loan-cohort-grid">${['loans','loans_v2','control','manual','sin_grupo'].map(key => { const group = (loanSummary.groups || []).find(item => item.group === key); return group ? `<article><b>${esc(key)}</b><span>${group.grid_count} grids</span><span>P&amp;L ${fmtMoney(group.realized_pnl_usdt,2)} USDT</span><span>${group.cycles_completed} ciclos</span></article>` : ''; }).join('')}</div><p>${loanSummary.conclusive ? 'concluyente' : 'no concluyente: muestra insuficiente'}</p><details><summary>Ver detalle y metodología</summary><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></details>` : `<p>${loanSummaryText}</p>`}</div>
-      ${pairPanel}
-      ${levelPanel}
       <h2 class="grids-section-title">Grids abiertos</h2>
       <div class="grids-list">${openRows.map(grid => gridRowHtml(grid, switchLine, metaLinks)).join('') || '<p class="muted">Sin grids abiertos. Crea uno desde <a href="#scanner">Scanner</a> o <a href="#grid">Grid Advisor</a>.</p>'}</div>
       ${repoRows.length ? `<h2 class="grids-section-title">Repositorio</h2><div class="grids-list">${repositoryCardHtml(repoRows, metaLinks)}</div>` : ''}
+      <details class="grids-secondary-info"><summary>Más información (préstamos y vigilancia de niveles)</summary>
+        <div class="grids-secondary-panels">
+          <div class="card loans-summary-line"><h3>Préstamos entre niveles</h3>${loanSummary ? `<div class="loan-cohort-grid">${['loans','loans_v2','control','manual','sin_grupo'].map(key => { const group = (loanSummary.groups || []).find(item => item.group === key); return group ? `<article><b>${esc(key)}</b><span>${group.grid_count} grids</span><span>P&amp;L ${fmtMoney(group.realized_pnl_usdt,2)} USDT</span><span>${group.cycles_completed} ciclos</span></article>` : ''; }).join('')}</div><p>${loanSummary.conclusive ? 'concluyente' : 'no concluyente: muestra insuficiente'}</p><details><summary>Ver detalle y metodología</summary><p>${loanSummaryText} ${cohortComparisonText}${comparisonNote}</p><p class="muted">Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.</p></details>` : `<p>${loanSummaryText}</p>`}</div>
+          ${pairPanel}
+          ${levelPanel}
+        </div>
+      </details>
     `;
   }
 

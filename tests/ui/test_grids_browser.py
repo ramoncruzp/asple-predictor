@@ -124,6 +124,7 @@ def test_grid_loan_summary_and_disable_action_use_preview_then_confirmation(live
             route.fulfill(json={"dry_run": False, "result": {"ok": True, "loans_transferred": 1}})
     ui_page.route(f"**/api/grids/{grid_id}/loans/disable", disable)
     ui_page.goto(f"{live_server.url}/#grids")
+    ui_page.locator(".grids-secondary-info > summary").click()
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("Muestra pequeña")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("3 préstamos creados/2 devueltos")
     expect(ui_page.locator(".loans-summary-line")).to_contain_text("2.50% del capital")
@@ -164,6 +165,7 @@ def test_level_adjust_panel_shows_switch_legend_and_three_verdicts(live_server, 
             "capital_shrink": {"n_pairs": 20, "excluded_pairs": [{"pair_id": "p1", "reason": "brazos no cerrados"}]}}
     }))
     ui_page.goto(f"{live_server.url}/#grids")
+    ui_page.locator(".grids-secondary-info > summary").click()
     panel = ui_page.locator(".level-adjust-panel")
     expect(panel).to_contain_text("Vigilancia de niveles")
     expect(panel).to_contain_text("apagado por defecto; sin evidencia de mejora en simulación")
@@ -188,6 +190,7 @@ def test_loan_pairs_panel_renders_conclusive_and_nonconclusive_without_verdict_c
     ui_page.route("**/api/grids/loans/pairs/summary",
                   lambda route: route.fulfill(json=summary))
     ui_page.goto(f"{live_server.url}/#grids")
+    ui_page.locator(".grids-secondary-info > summary").click()
     panel = ui_page.locator(".loan-pairs-panel")
     expect(panel).to_contain_text("Préstamos — pares")
     expect(panel).to_contain_text("ADAUSDT")
@@ -199,11 +202,41 @@ def test_loan_pairs_panel_renders_conclusive_and_nonconclusive_without_verdict_c
     summary.update({"n_pairs": 4, "conclusive": False,
                     "reason": ["muestra insuficiente (n<15)"], "orphan_pairs": 2})
     ui_page.reload()
+    ui_page.locator(".grids-secondary-info > summary").click()
     expect(panel).to_contain_text("no concluyente (muestra insuficiente (n<15))")
     expect(panel).to_contain_text("pares huérfanos: 2")
     assert panel.locator(".pnl-positive, .pnl-negative").count() == 0
     expect(ui_page.locator(".loans-summary-line")).to_contain_text(
         "Histórico: sin préstamos reales (grid_loans=0); no usar para decidir.")
+    assert_no_js_errors(ui_page)
+
+
+def test_grids_abiertos_antes_de_informacion_secundaria_plegada(live_server, ui_page):
+    live_server.db.update_grid(live_server.secondary_grid_id, status="HOLDING")
+    ui_page.goto(f"{live_server.url}/#grids")
+    content = ui_page.locator("#grids-content")
+    open_heading = content.get_by_role("heading", name="Grids abiertos")
+    repo_heading = content.get_by_role("heading", name="Repositorio")
+    details = content.locator(".grids-secondary-info")
+    loans = content.locator(".loans-summary-line")
+
+    expect(open_heading).to_be_visible()
+    expect(details.locator("summary").first).to_have_text(
+        "Más información (préstamos y vigilancia de niveles)")
+    assert details.evaluate("element => element.open") is False
+    open_handle = open_heading.element_handle()
+    repo_handle = repo_heading.element_handle()
+    details_handle = details.element_handle()
+    loans_handle = loans.element_handle()
+    assert open_handle.evaluate(
+        "(element, target) => Boolean(element.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)",
+        repo_handle)
+    assert repo_handle.evaluate(
+        "(element, target) => Boolean(element.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)",
+        details_handle)
+    assert open_handle.evaluate(
+        "(element, target) => Boolean(element.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING)",
+        loans_handle)
     assert_no_js_errors(ui_page)
 
 
